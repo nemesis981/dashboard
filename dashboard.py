@@ -1,0 +1,629 @@
+from flask import Flask, jsonify, request
+import requests
+import subprocess
+import sqlite3
+import json
+import html
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+
+PIHOLE_IP = "192.168.4.69"
+PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
+DB_PATH = "/home/paul/alert_manager/alerts.db"
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+
+pihole_session = {"sid": None}
+
+def get_pihole_token():
+    try:
+        if pihole_session["sid"]:
+            headers = {"sid": pihole_session["sid"]}
+            test = requests.get(f"http://{PIHOLE_IP}/api/auth", headers=headers, timeout=3)
+            if test.json().get("session", {}).get("valid"):
+                return pihole_session["sid"]
+        r = requests.post(f"http://{PIHOLE_IP}/api/auth", json={"password": PIHOLE_PASSWORD}, timeout=3)
+        sid = r.json().get("session", {}).get("sid")
+        pihole_session["sid"] = sid
+        return sid
+    except:
+        return None
+
+def get_pihole_stats():
+    try:
+        token = get_pihole_token()
+        if not token:
+            return None
+        headers = {"sid": token}
+        response = requests.get(f"http://{PIHOLE_IP}/api/stats/summary", headers=headers, timeout=3)
+        return response.json()
+    except:
+        return None
+
+def get_clamav_status():
+    try:
+        result = subprocess.run(
+            ["sudo", "systemctl", "status", "clamav-daemon"],
+            capture_output=True, text=True
+        )
+        return "Running" if "active (running)" in result.stdout else "Stopped"
+    except:
+        return "Unknown"
+
+def get_system_status():
+    try:
+        cpu = subprocess.run(["top", "-bn1"], capture_output=True, text=True)
+        memory = subprocess.run(["free", "-h"], capture_output=True, text=True)
+        disk = subprocess.run(["df", "-h", "/"], capture_output=True, text=True)
+        return {
+            "cpu": cpu.stdout.split("\n")[2],
+            "memory": memory.stdout.split("\n")[1],
+            "disk": disk.stdout.split("\n")[1]
+        }
+    except:
+        return {"cpu": "Unknown", "memory": "Unknown", "disk": "Unknown"}
+
+def get_suricata_alerts():
+    try:
+        result = subprocess.run(
+            ["sudo", "tail", "-n", "100", "/var/log/suricata/fast.log"],
+            capture_output=True, text=True
+        )
+        lines = result.stdout.strip().split("\n")
+        return [l for l in lines if l]
+    except:
+        return []
+
+def parse_alert(alert_line):
+    try:
+        priority = 3
+        if "Priority: 1" in alert_line:
+            priority = 1
+        elif "Priority: 2" in alert_line:
+            priority = 2
+        rule_id = ""
+        rule_name = ""
+        classification = ""
+        src_ip = ""
+        dst_ip = ""
+        protocol = ""
+        if "[**] [" in alert_line:
+            rule_part = alert_line.split("[**] [")[1].split("]")[0]
+            rule_id = rule_part.split(":")[1] if ":" in rule_part else rule_part
+        if "[**]" in alert_line:
+            parts = alert_line.split("[**]")
+            if len(parts) > 2:
+                rule_name = parts[2].strip()
+        if "[Classification:" in alert_line:
+            classification = alert_line.split("[Classification:")[1].split("]")[0].strip()
+        if "{" in alert_line and "}" in alert_line:
+            protocol = alert_line.split("{")[1].split("}")[0]
+        if "->" in alert_line and "} " in alert_line:
+            flow = alert_line.split("} ")[1]
+            if "->" in flow:
+                parts = flow.split("->")
+                src_ip = parts[0].strip().split(":")[0]
+                dst_ip = parts[1].strip().split(":")[0]
+        return {
+            "rule_id": rule_id,
+            "rule_name": rule_name,
+            "classification": classification,
+            "priority": priority,
+            "src_ip": src_ip,
+            "dst_ip": dst_ip,
+            "protocol": protocol,
+            "raw": alert_line
+        }
+    except:
+        return None
+
+def get_db_alert(rule_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
+        result = c.fetchone()
+        conn.close()
+        return result
+    except:
+        return None
+
+def get_alert_counts():
+    try:
+        alerts = get_suricata_alerts()
+        today = datetime.now().strftime("%m/%d/%Y")
+        p1 = sum(1 for a in alerts if "Priority: 1" in a and today in a)
+        p2 = sum(1 for a in alerts if "Priority: 2" in a and today in a)
+        p3 = sum(1 for a in alerts if "Priority: 3" in a and today in a)
+        return {"total": p1+p2+p3, "p1": p1, "p2": p2, "p3": p3}
+    except:
+        return {"total": 0, "p1": 0, "p2": 0, "p3": 0}
+
+def get_active_alerts():
+    try:
+        alerts = get_suricata_alerts()
+        today = datetime.now().strftime("%m/%d/%Y")
+        active = []
+        seen_rules = set()
+        for alert in reversed(alerts):
+            if today not in alert:
+                continue
+            if "Priority: 1" not in alert and "Priority: 2" not in alert:
+                continue
+            parsed = parse_alert(alert)
+            if not parsed or parsed["rule_id"] in seen_rules:
+                continue
+            seen_rules.add(parsed["rule_id"])
+            db_alert = get_db_alert(parsed["rule_id"])
+            if db_alert and db_alert[7] == "ignore":
+                continue
+            active.append(parsed)
+        return active[:10]
+    except:
+        return []
+
+def get_device_name(mac, ip):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT friendly_name, device_type, trusted FROM devices WHERE mac = ?", (mac.lower(),))
+        result = c.fetchone()
+        conn.close()
+        if result:
+            return result
+        return (ip, "Unknown", 0)
+    except:
+        return (ip, "Unknown", 0)
+
+def get_network_devices():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT mac, ip, friendly_name, device_type, trusted FROM devices ORDER BY ip")
+        db_devices = c.fetchall()
+        conn.close()
+        devices = []
+        for d in db_devices:
+            devices.append({
+                "ip": d[1],
+                "mac": d[0],
+                "vendor": d[3],
+                "friendly_name": d[2],
+                "device_type": d[3],
+                "trusted": d[4],
+                "offline": False
+            })
+        return sorted(devices, key=lambda x: x["ip"])
+    except Exception as e:
+        return []
+
+@app.route("/api/update-device", methods=["POST"])
+def update_device():
+    try:
+        data = request.json
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""UPDATE devices SET friendly_name=?, device_type=?, notes=?, trusted=? 
+                     WHERE mac=?""",
+                  (data["friendly_name"], data["device_type"], 
+                   data.get("notes", ""), data.get("trusted", 1), data["mac"]))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/analyze/<rule_id>")
+def analyze_alert(rule_id):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
+        existing = c.fetchone()
+        if existing and existing[4]:
+            conn.close()
+            return jsonify({
+                "explanation": existing[4],
+                "risk_level": existing[5],
+                "action": existing[7],
+                "recommended_action": "See previous decision",
+                "reason": "Retrieved from local database",
+                "cached": True
+            })
+        raw_alert = request.args.get("raw", "")
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=500,
+            messages=[{
+                "role": "user",
+                "content": f"""You are Nemesis, an AI security assistant for a home network firewall.
+Analyze this Suricata alert and respond in JSON only, no markdown:
+
+Alert: {raw_alert}
+
+{{
+    "explanation": "Plain English explanation for home user",
+    "risk_level": "LOW/MEDIUM/HIGH",
+    "is_threat": true/false,
+    "recommended_action": "Block/Ignore/Monitor",
+    "reason": "Brief reason"
+}}"""
+            }]
+        )
+        response_text = message.content[0].text
+        try:
+            analysis = json.loads(response_text)
+        except:
+            analysis = {
+                "explanation": response_text,
+                "risk_level": "UNKNOWN",
+                "is_threat": False,
+                "recommended_action": "Monitor",
+                "reason": "Could not parse response"
+            }
+        now = datetime.now().isoformat()
+        if existing:
+            c.execute("UPDATE alerts SET explanation=?, risk_level=? WHERE rule_id=?",
+                     (analysis["explanation"], analysis["risk_level"], rule_id))
+        else:
+            c.execute("""INSERT INTO alerts 
+                (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, "pending", 1, ?, ?)""",
+                (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], now, now))
+        conn.commit()
+        conn.close()
+        return jsonify({**analysis, "cached": False})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/action/<rule_id>/<action>")
+def set_action(rule_id, action):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE alerts SET action=? WHERE rule_id=?", (action, rule_id))
+        if c.rowcount == 0:
+            now = datetime.now().isoformat()
+            c.execute("""INSERT INTO alerts 
+                (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (rule_id, "", "", 1, "", "UNKNOWN", action, now, now))
+        if action == "block":
+            src_ip = request.args.get("ip", "")
+            if src_ip:
+                subprocess.run(["sudo", "ufw", "deny", "from", src_ip], capture_output=True)
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "action": action})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/firewall-db")
+def firewall_db():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT * FROM alerts ORDER BY last_seen DESC")
+        alerts = c.fetchall()
+        conn.close()
+        rows = ""
+        for a in alerts:
+            rows += f"""<tr>
+                <td>{a[1]}</td>
+                <td>{a[2][:40] if a[2] else ""}</td>
+                <td>{a[5] or ""}</td>
+                <td>{a[7]}</td>
+                <td>{a[8]}</td>
+                <td>{a[10] or ""}</td>
+                <td>
+                    <select onchange="changeAction({a[0]}, this.value)">
+                        <option {"selected" if a[7]=="pending" else ""}>pending</option>
+                        <option {"selected" if a[7]=="ignore" else ""}>ignore</option>
+                        <option {"selected" if a[7]=="block" else ""}>block</option>
+                        <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
+                    </select>
+                </td>
+            </tr>"""
+        return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis - Alert Database</title>
+    <style>
+        body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }}
+        h1 {{ color: #00d4ff; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th {{ background: #16213e; color: #00d4ff; padding: 10px; text-align: left; }}
+        td {{ padding: 8px; border-bottom: 1px solid #333; font-size: 0.85em; }}
+        select {{ background: #16213e; color: #eee; border: 1px solid #00d4ff; padding: 3px; }}
+        a {{ color: #00d4ff; }}
+    </style>
+    <script>
+        function changeAction(id, action) {{
+            fetch("/api/db-action/" + id + "/" + action)
+                .then(r => r.json()).then(d => console.log(d));
+        }}
+    </script>
+</head>
+<body>
+    <h1>🛡️ Nemesis - Alert Database</h1>
+    <p><a href="/">← Back to Dashboard</a></p>
+    <table>
+        <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Action</th><th>Times Seen</th><th>Last Seen</th><th>Change</th></tr>
+        {rows}
+    </table>
+</body>
+</html>"""
+    except Exception as e:
+        return str(e)
+
+@app.route("/api/db-action/<int:alert_id>/<action>")
+def db_action(alert_id, action):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("UPDATE alerts SET action=? WHERE id=?", (action, alert_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/")
+def dashboard():
+    pihole_stats = get_pihole_stats()
+    clamav_status = get_clamav_status()
+    system_status = get_system_status()
+    alert_counts = get_alert_counts()
+    active_alerts = get_active_alerts()
+    devices = get_network_devices()
+
+    blocked = pihole_stats.get("queries", {}).get("blocked", "N/A") if pihole_stats else "N/A"
+    total = pihole_stats.get("queries", {}).get("total", "N/A") if pihole_stats else "N/A"
+    percent = pihole_stats.get("queries", {}).get("percent_blocked", "N/A") if pihole_stats else "N/A"
+
+    alerts_html = ""
+    for alert in active_alerts:
+        priority = alert["priority"]
+        color = "#ff4444" if priority == 1 else "#ffaa00"
+        label = "P1 CRITICAL" if priority == 1 else "P2 HIGH"
+        rule_name = alert["rule_name"][:50] if alert["rule_name"] else "Unknown"
+        onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
+        alerts_html += f"""<tr>
+            <td><span style="color:{color}">{label}</span></td>
+            <td style="font-size:0.8em">{html.escape(rule_name)}</td>
+            <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
+            <td><button onclick="{onclick}"
+                style="background:#00d4ff;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px">
+                View</button></td>
+        </tr>"""
+
+    devices_html = ""
+    for d in devices:
+        trusted = d.get("trusted", 0)
+        offline = d.get("offline", False)
+        trust_icon = "✅" if trusted else "❓"
+        status_color = "#888" if offline else "#eee"
+        status = " (offline)" if offline else ""
+        onclick = html.escape(f"editDevice({json.dumps(d['mac'])}, {json.dumps(d['friendly_name'])}, {json.dumps(d['device_type'])})")
+        devices_html += f"""<tr style="color:{status_color}">
+            <td>{html.escape(d["ip"])}{status}</td>
+            <td>
+                <span id="name-{d["mac"].replace(":","")}">{html.escape(d["friendly_name"])}</span>
+                <button onclick="{onclick}"
+                    style="background:none;border:1px solid #00d4ff;color:#00d4ff;padding:2px 6px;cursor:pointer;border-radius:3px;margin-left:5px;font-size:0.75em">
+                    ✏️</button>
+            </td>
+            <td style="font-size:0.8em">{html.escape(d["device_type"])}</td>
+            <td style="font-size:0.8em">{html.escape(d["mac"])}</td>
+            <td>{trust_icon}</td>
+        </tr>"""
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis Firewall</title>
+    <meta http-equiv="refresh" content="60">
+    <style>
+        body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; margin: 0; }}
+        h1 {{ color: #00d4ff; margin-bottom: 5px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+        .card {{ background: #16213e; padding: 15px; border-radius: 10px; border: 1px solid #00d4ff; }}
+        .card h2 {{ color: #00d4ff; margin-top: 0; font-size: 1em; }}
+        .stat {{ font-size: 1.8em; color: #00ff88; }}
+        .full-width {{ grid-column: span 2; }}
+        .running {{ color: #00ff88; }}
+        .stopped {{ color: #ff4444; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th {{ text-align: left; padding: 5px; border-bottom: 1px solid #00d4ff; font-size: 0.85em; color: #00d4ff; }}
+        td {{ padding: 5px; border-bottom: 1px solid #222; font-size: 0.85em; }}
+        .counter-box {{ display: inline-block; background: #0d1117; border-radius: 8px; padding: 10px 15px; margin: 5px; text-align: center; }}
+        .counter-num {{ font-size: 1.8em; font-weight: bold; }}
+        .p1 {{ color: #ff4444; }}
+        .p2 {{ color: #ffaa00; }}
+        .p3 {{ color: #aaaaaa; }}
+        .total {{ color: #00d4ff; }}
+        .modal {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }}
+        .modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:600px; margin:80px auto; }}
+        .modal h3 {{ color:#00d4ff; }}
+        .btn {{ padding:8px 16px; border:none; border-radius:5px; cursor:pointer; margin:5px; font-weight:bold; }}
+        .btn-block {{ background:#ff4444; color:white; }}
+        .btn-ignore {{ background:#aaaaaa; color:#1a1a2e; }}
+        .btn-monitor {{ background:#ffaa00; color:#1a1a2e; }}
+        .btn-close {{ background:#333; color:#eee; }}
+        .btn-save {{ background:#00ff88; color:#1a1a2e; }}
+        input, select {{ background:#0d1117; color:#eee; border:1px solid #00d4ff; padding:5px; border-radius:3px; width:100%; margin:3px 0; }}
+        a {{ color: #00d4ff; }}
+    </style>
+</head>
+<body>
+    <h1>🛡️ Nemesis Firewall</h1>
+    <p style="color:#888;margin-top:0">Last updated: {now} | Auto-refreshes every 60 seconds</p>
+
+    <div class="grid">
+        <div class="card">
+            <h2>Pi-hole DNS Protection</h2>
+            <p>Queries Today: <span class="stat">{total}</span></p>
+            <p>Blocked: <span class="stat">{blocked}</span></p>
+            <p>Percent Blocked: <span class="stat">{percent}%</span></p>
+        </div>
+
+        <div class="card">
+            <h2>System Status</h2>
+            <p>ClamAV: <span class="{"running" if clamav_status == "Running" else "stopped"}">{clamav_status}</span></p>
+            <p style="font-size:0.8em">CPU: {system_status.get("cpu", "N/A")}</p>
+            <p style="font-size:0.8em">Memory: {system_status.get("memory", "N/A")}</p>
+            <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>
+        </div>
+
+        <div class="card full-width">
+            <h2>🔥 AI Firewall — Today's Activity
+                <a href="/firewall-db" style="float:right;color:#00d4ff;font-size:0.85em;text-decoration:none">📋 Alert Database</a>
+            </h2>
+            <div>
+                <div class="counter-box"><div class="counter-num total">{alert_counts["total"]}</div><div>Total</div></div>
+                <div class="counter-box"><div class="counter-num p1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
+                <div class="counter-box"><div class="counter-num p2">{alert_counts["p2"]}</div><div>High P2</div></div>
+                <div class="counter-box"><div class="counter-num p3">{alert_counts["p3"]}</div><div>Info P3</div></div>
+            </div>
+            <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
+            <table>
+                <tr><th>Priority</th><th>Alert</th><th>Source IP</th><th>Action</th></tr>
+                {alerts_html if alerts_html else "<tr><td colspan=4 style=\'color:#00ff88\'>✓ No active P1/P2 alerts requiring attention</td></tr>"}
+            </table>
+        </div>
+
+        <div class="card full-width">
+            <h2>🖥️ Network Devices
+                <span style="float:right;font-size:0.8em;color:#888">✅ Trusted &nbsp; ❓ Unverified</span>
+            </h2>
+            <table>
+                <tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr>
+                {devices_html}
+            </table>
+        </div>
+    </div>
+
+    <!-- Alert Modal -->
+    <div class="modal" id="alertModal">
+        <div class="modal-content">
+            <h3>🔍 Nemesis AI Analysis</h3>
+            <div id="modalContent">Analyzing...</div>
+            <div style="margin-top:15px">
+                <button class="btn btn-block" onclick="takeAction('block')">🚫 Block IP</button>
+                <button class="btn btn-ignore" onclick="takeAction('ignore')">✓ Ignore Rule</button>
+                <button class="btn btn-monitor" onclick="takeAction('monitor')">👁 Monitor</button>
+                <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Device Edit Modal -->
+    <div class="modal" id="deviceModal">
+        <div class="modal-content">
+            <h3>✏️ Edit Device</h3>
+            <input type="hidden" id="editMac">
+            <label>Friendly Name</label>
+            <input type="text" id="editName">
+            <label>Device Type</label>
+            <select id="editType">
+                <option>Router</option>
+                <option>Switch</option>
+                <option>Desktop</option>
+                <option>Laptop</option>
+                <option>Phone</option>
+                <option>Tablet</option>
+                <option>Smart Home</option>
+                <option>Entertainment</option>
+                <option>Security Camera</option>
+                <option>Printer</option>
+                <option>Unknown</option>
+            </select>
+            <label>Notes</label>
+            <input type="text" id="editNotes">
+            <label>
+                <input type="checkbox" id="editTrusted" style="width:auto"> Trusted Device
+            </label>
+            <div style="margin-top:15px">
+                <button class="btn btn-save" onclick="saveDevice()">💾 Save</button>
+                <button class="btn btn-close" onclick="closeDeviceModal()">✕ Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        var currentRuleId = "";
+        var currentSrcIp = "";
+
+        function viewAlert(ruleId, rawAlert) {{
+            currentRuleId = ruleId;
+            document.getElementById("alertModal").style.display = "block";
+            document.getElementById("modalContent").innerHTML = "<p>🤖 Nemesis AI analyzing...</p>";
+            fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
+                .then(r => r.json())
+                .then(data => {{
+                    var cached = data.cached ? " <span style=\'color:#888\'>(cached)</span>" : " <span style=\'color:#00ff88\'>(AI analyzed)</span>";
+                    var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
+                    document.getElementById("modalContent").innerHTML = `
+                        <p><strong>Risk Level:</strong> <span style="color:${{riskColor}}">${{data.risk_level || "UNKNOWN"}}</span>${{cached}}</p>
+                        <p><strong>Explanation:</strong> ${{data.explanation || "No explanation available"}}</p>
+                        <p><strong>Recommended Action:</strong> ${{data.recommended_action || "Monitor"}}</p>
+                        <p><strong>Reason:</strong> ${{data.reason || ""}}</p>
+                    `;
+                }})
+                .catch(e => {{
+                    document.getElementById("modalContent").innerHTML = "<p style=\'color:#ff4444\'>Error: " + e + "</p>";
+                }});
+        }}
+
+        function takeAction(action) {{
+            var url = "/api/action/" + currentRuleId + "/" + action;
+            if (action === "block" && currentSrcIp) url += "?ip=" + currentSrcIp;
+            fetch(url).then(r => r.json()).then(data => {{
+                closeModal();
+                location.reload();
+            }});
+        }}
+
+        function closeModal() {{
+            document.getElementById("alertModal").style.display = "none";
+        }}
+
+        function editDevice(mac, name, type) {{
+            document.getElementById("editMac").value = mac;
+            document.getElementById("editName").value = name;
+            document.getElementById("editType").value = type;
+            document.getElementById("deviceModal").style.display = "block";
+        }}
+
+        function saveDevice() {{
+            var data = {{
+                mac: document.getElementById("editMac").value,
+                friendly_name: document.getElementById("editName").value,
+                device_type: document.getElementById("editType").value,
+                notes: document.getElementById("editNotes").value,
+                trusted: document.getElementById("editTrusted").checked ? 1 : 0
+            }};
+            fetch("/api/update-device", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify(data)
+            }}).then(r => r.json()).then(d => {{
+                closeDeviceModal();
+                location.reload();
+            }});
+        }}
+
+        function closeDeviceModal() {{
+            document.getElementById("deviceModal").style.display = "none";
+        }}
+    </script>
+</body>
+</html>"""
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
