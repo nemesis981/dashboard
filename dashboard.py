@@ -10,6 +10,7 @@ from datetime import datetime
 
 sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
+from firewall import parse_alert, ufw_delete, ufw_deny_append
 
 app = Flask(__name__)
 
@@ -79,58 +80,6 @@ def get_suricata_alerts():
         return [l for l in lines if l]
     except:
         return []
-
-def parse_alert(alert_line):
-    try:
-        timestamp = ""
-        ts_token = alert_line.split(" ", 1)[0] if alert_line else ""
-        if "/" in ts_token and "-" in ts_token:
-            try:
-                dt = datetime.strptime(ts_token, "%m/%d/%Y-%H:%M:%S.%f")
-                timestamp = dt.strftime("%H:%M:%S")
-            except ValueError:
-                timestamp = ""
-        priority = 3
-        if "Priority: 1" in alert_line:
-            priority = 1
-        elif "Priority: 2" in alert_line:
-            priority = 2
-        rule_id = ""
-        rule_name = ""
-        classification = ""
-        src_ip = ""
-        dst_ip = ""
-        protocol = ""
-        if "[**] [" in alert_line:
-            rule_part = alert_line.split("[**] [")[1].split("]")[0]
-            rule_id = rule_part.split(":")[1] if ":" in rule_part else rule_part
-        if "[**]" in alert_line:
-            parts = alert_line.split("[**]")
-            if len(parts) > 2:
-                rule_name = parts[2].strip()
-        if "[Classification:" in alert_line:
-            classification = alert_line.split("[Classification:")[1].split("]")[0].strip()
-        if "{" in alert_line and "}" in alert_line:
-            protocol = alert_line.split("{")[1].split("}")[0]
-        if "->" in alert_line and "} " in alert_line:
-            flow = alert_line.split("} ")[1]
-            if "->" in flow:
-                parts = flow.split("->")
-                src_ip = parts[0].strip().split(":")[0]
-                dst_ip = parts[1].strip().split(":")[0]
-        return {
-            "rule_id": rule_id,
-            "rule_name": rule_name,
-            "classification": classification,
-            "priority": priority,
-            "timestamp": timestamp,
-            "src_ip": src_ip,
-            "dst_ip": dst_ip,
-            "protocol": protocol,
-            "raw": alert_line
-        }
-    except:
-        return None
 
 def get_db_alert(rule_id):
     try:
@@ -420,15 +369,12 @@ def api_quarantine_lift(q_id):
         if status != "active":
             conn.close()
             return jsonify({"error": f"quarantine status is {status}, cannot lift"}), 409
-        ufw_rc = subprocess.run(
-            ["sudo", "ufw", "delete", "deny", "from", ip],
-            capture_output=True, text=True, timeout=10,
-        ).returncode
+        ufw_ok = ufw_delete(ip)
         c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
         c.execute("UPDATE quarantines SET status='lifted' WHERE id=?", (q_id,))
         conn.commit()
         conn.close()
-        return jsonify({"success": True, "ip": ip, "rule_id": rule_id, "ufw_rc": ufw_rc})
+        return jsonify({"success": True, "ip": ip, "rule_id": rule_id, "ufw_ok": ufw_ok})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -581,7 +527,7 @@ def set_action(rule_id, action):
         if action == "block":
             src_ip = request.args.get("ip", "")
             if src_ip:
-                subprocess.run(["sudo", "ufw", "deny", "from", src_ip], capture_output=True)
+                ufw_deny_append(src_ip)
         conn.commit()
         conn.close()
         return jsonify({"success": True, "action": action})
