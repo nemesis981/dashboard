@@ -6,7 +6,14 @@ import json
 import html
 import os
 import sys
+import time
+import logging
 from datetime import datetime
+
+log = logging.getLogger(__name__)
+
+_suricata_cache = {"ts": 0.0, "lines": []}
+_SURICATA_CACHE_TTL = 5.0
 
 sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
@@ -33,7 +40,8 @@ def get_pihole_token():
         sid = r.json().get("session", {}).get("sid")
         pihole_session["sid"] = sid
         return sid
-    except:
+    except Exception as e:
+        log.exception("get_pihole_token failed: %s", e)
         return None
 
 def get_pihole_stats():
@@ -44,7 +52,8 @@ def get_pihole_stats():
         headers = {"sid": token}
         response = requests.get(f"http://{PIHOLE_IP}/api/stats/summary", headers=headers, timeout=3)
         return response.json()
-    except:
+    except Exception as e:
+        log.exception("get_pihole_stats failed: %s", e)
         return None
 
 def get_clamav_status():
@@ -54,7 +63,8 @@ def get_clamav_status():
             capture_output=True, text=True
         )
         return "Running" if "active (running)" in result.stdout else "Stopped"
-    except:
+    except Exception as e:
+        log.exception("get_clamav_status failed: %s", e)
         return "Unknown"
 
 def get_system_status():
@@ -67,18 +77,25 @@ def get_system_status():
             "memory": memory.stdout.split("\n")[1],
             "disk": disk.stdout.split("\n")[1]
         }
-    except:
+    except Exception as e:
+        log.exception("get_system_status failed: %s", e)
         return {"cpu": "Unknown", "memory": "Unknown", "disk": "Unknown"}
 
 def get_suricata_alerts():
+    now = time.monotonic()
+    if now - _suricata_cache["ts"] < _SURICATA_CACHE_TTL:
+        return _suricata_cache["lines"]
     try:
         result = subprocess.run(
             ["sudo", "tail", "-n", "100", "/var/log/suricata/fast.log"],
             capture_output=True, text=True
         )
-        lines = result.stdout.strip().split("\n")
-        return [l for l in lines if l]
-    except:
+        lines = [l for l in result.stdout.strip().split("\n") if l]
+        _suricata_cache["lines"] = lines
+        _suricata_cache["ts"] = now
+        return lines
+    except Exception as e:
+        log.exception("get_suricata_alerts failed: %s", e)
         return []
 
 def get_db_alert(rule_id):
@@ -89,7 +106,8 @@ def get_db_alert(rule_id):
         result = c.fetchone()
         conn.close()
         return result
-    except:
+    except Exception as e:
+        log.exception("get_db_alert failed for rule_id=%s: %s", rule_id, e)
         return None
 
 def get_alert_counts():
@@ -100,7 +118,8 @@ def get_alert_counts():
         p2 = sum(1 for a in alerts if "Priority: 2" in a and today in a)
         p3 = sum(1 for a in alerts if "Priority: 3" in a and today in a)
         return {"total": p1+p2+p3, "p1": p1, "p2": p2, "p3": p3}
-    except:
+    except Exception as e:
+        log.exception("get_alert_counts failed: %s", e)
         return {"total": 0, "p1": 0, "p2": 0, "p3": 0}
 
 def get_active_alerts():
@@ -123,7 +142,8 @@ def get_active_alerts():
                 continue
             active.append(parsed)
         return active[:10]
-    except:
+    except Exception as e:
+        log.exception("get_active_alerts failed: %s", e)
         return []
 
 def get_device_name(mac, ip):
@@ -136,7 +156,8 @@ def get_device_name(mac, ip):
         if result:
             return result
         return (ip, "Unknown", 0)
-    except:
+    except Exception as e:
+        log.exception("get_device_name failed for mac=%s ip=%s: %s", mac, ip, e)
         return (ip, "Unknown", 0)
 
 def get_network_devices():
@@ -160,6 +181,49 @@ def get_network_devices():
         return sorted(devices, key=lambda x: x["ip"])
     except Exception as e:
         return []
+
+def _ensure_audit_log_table():
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP NOT NULL,
+                rule_id TEXT,
+                ip TEXT,
+                action TEXT NOT NULL,
+                user TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _audit(action, rule_id=None, ip=None):
+    """Record a state-changing decision. `user` is derived from request.remote_addr."""
+    try:
+        _ensure_audit_log_table()
+        try:
+            user = request.remote_addr or "unknown"
+        except RuntimeError:
+            user = "system"
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO audit_log (ts, rule_id, ip, action, user) VALUES (?, ?, ?, ?, ?)",
+                (datetime.now().isoformat(), rule_id, ip, action, user),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.exception("audit log insert failed (action=%s rule_id=%s ip=%s): %s",
+                      action, rule_id, ip, e)
+
 
 def _ensure_quarantines_table():
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
@@ -350,6 +414,7 @@ def api_quarantine_confirm(q_id):
         c.execute("UPDATE quarantines SET status='confirmed' WHERE id=?", (q_id,))
         conn.commit()
         conn.close()
+        _audit(action="confirm", rule_id=rule_id, ip=ip)
         return jsonify({"success": True, "ip": ip, "rule_id": rule_id})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -374,6 +439,7 @@ def api_quarantine_lift(q_id):
         c.execute("UPDATE quarantines SET status='lifted' WHERE id=?", (q_id,))
         conn.commit()
         conn.close()
+        _audit(action="lift", rule_id=rule_id, ip=ip)
         return jsonify({"success": True, "ip": ip, "rule_id": rule_id, "ufw_ok": ufw_ok})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -446,7 +512,8 @@ Alert: {raw_alert}
         response_text = message.content[0].text
         try:
             analysis = json.loads(response_text)
-        except:
+        except Exception as e:
+            log.warning("analyze_alert: failed to parse Claude response as JSON: %s", e)
             analysis = {
                 "explanation": response_text,
                 "risk_level": "UNKNOWN",
@@ -515,21 +582,21 @@ def test_enrichment(ip):
 @app.route("/api/action/<rule_id>/<action>")
 def set_action(rule_id, action):
     try:
+        src_ip = request.args.get("ip", "")
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE alerts SET action=? WHERE rule_id=?", (action, rule_id))
         if c.rowcount == 0:
             now = datetime.now().isoformat()
-            c.execute("""INSERT INTO alerts 
+            c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                 (rule_id, "", "", 1, "", "UNKNOWN", action, now, now))
-        if action == "block":
-            src_ip = request.args.get("ip", "")
-            if src_ip:
-                ufw_deny_append(src_ip)
+        if action == "block" and src_ip:
+            ufw_deny_append(src_ip)
         conn.commit()
         conn.close()
+        _audit(action=action, rule_id=rule_id, ip=(src_ip or None))
         return jsonify({"success": True, "action": action})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -544,15 +611,22 @@ def firewall_db():
         conn.close()
         rows = ""
         for a in alerts:
+            aid = int(a[0])
+            rule_id = html.escape(str(a[1] or ""))
+            rule_name = html.escape((a[2] or "")[:40])
+            risk_level = html.escape(str(a[5] or ""))
+            action_val = html.escape(str(a[7] or ""))
+            times_seen = html.escape(str(a[8] or ""))
+            last_seen = html.escape(str(a[10] or ""))
             rows += f"""<tr>
-                <td>{a[1]}</td>
-                <td>{a[2][:40] if a[2] else ""}</td>
-                <td>{a[5] or ""}</td>
-                <td>{a[7]}</td>
-                <td>{a[8]}</td>
-                <td>{a[10] or ""}</td>
+                <td>{rule_id}</td>
+                <td>{rule_name}</td>
+                <td>{risk_level}</td>
+                <td>{action_val}</td>
+                <td>{times_seen}</td>
+                <td>{last_seen}</td>
                 <td>
-                    <select onchange="changeAction({a[0]}, this.value)">
+                    <select onchange="changeAction({aid}, this.value)">
                         <option {"selected" if a[7]=="pending" else ""}>pending</option>
                         <option {"selected" if a[7]=="ignore" else ""}>ignore</option>
                         <option {"selected" if a[7]=="block" else ""}>block</option>
@@ -597,9 +671,14 @@ def db_action(alert_id, action):
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
+        c.execute("SELECT rule_id, src_ip FROM alerts WHERE id=?", (alert_id,))
+        row = c.fetchone()
+        rule_id = row[0] if row else None
+        src_ip = row[1] if row else None
         c.execute("UPDATE alerts SET action=? WHERE id=?", (action, alert_id))
         conn.commit()
         conn.close()
+        _audit(action=action, rule_id=rule_id, ip=src_ip)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -669,6 +748,7 @@ def dashboard():
         .q-row:last-child {{ border-bottom:none; }}
         .q-info {{ flex:1; min-width:200px; }}
         .q-actions {{ display:flex; gap:5px; }}
+        .devices-table td {{ border-bottom: 1px solid #1e3a5f; }}
     </style>
 </head>
 <body>
@@ -719,7 +799,7 @@ def dashboard():
             <h2>🖥️ Network Devices
                 <span style="float:right;font-size:0.8em;color:#888">✅ Trusted &nbsp; ❓ Unverified</span>
             </h2>
-            <table>
+            <table class="devices-table">
                 <thead><tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr></thead>
                 <tbody id="devicesRows">
                 {devices_html}
