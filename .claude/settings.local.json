@@ -9,7 +9,10 @@
       "Bash(git --version)",
       "Bash(gh --version)",
       "Bash(git config *)",
-      "Bash(python -c \"import ip_enrichment; ip_enrichment.init_db\\(\\); print\\('ok'\\)\")"
+      "Bash(python -c \"import ip_enrichment; ip_enrichment.init_db\\(\\); print\\('ok'\\)\")",
+      "Bash(sudo -n head -1 /var/log/suricata/fast.log)",
+      "Read(//etc/**)",
+      "Read(//etc/systemd/system/**)"
     ]
   }
 }

@@ -212,6 +212,99 @@ def get_network_devices():
     except Exception as e:
         return []
 
+def _ensure_quarantines_table():
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS quarantines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                rule_id TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_quarantines_active ON quarantines(status, expires_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_active_quarantines():
+    _ensure_quarantines_table()
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT q.id, q.ip, q.rule_id, q.expires_at, q.created_at,
+                   a.rule_name, a.priority, a.risk_level
+            FROM quarantines q
+            LEFT JOIN alerts a ON q.rule_id = a.rule_id
+            WHERE q.status = 'active'
+            ORDER BY q.created_at DESC
+        """)
+        rows = c.fetchall()
+        # enrichment is in a separate table; query individually to keep the join simple
+        enrich = {}
+        if rows:
+            ips = list({r[1] for r in rows})
+            placeholders = ",".join("?" * len(ips))
+            c.execute(
+                f"SELECT ip, country, city, threat_level FROM ip_enrichment WHERE ip IN ({placeholders})",
+                ips,
+            )
+            for ip, country, city, threat in c.fetchall():
+                enrich[ip] = {"country": country, "city": city, "threat_level": threat}
+    finally:
+        conn.close()
+    out = []
+    now = datetime.now()
+    for q_id, ip, rule_id, expires_at, created_at, rule_name, priority, risk_level in rows:
+        try:
+            exp_dt = datetime.fromisoformat(expires_at)
+            minutes_remaining = max(0, int((exp_dt - now).total_seconds() / 60))
+        except ValueError:
+            minutes_remaining = 0
+        e = enrich.get(ip, {})
+        out.append({
+            "id": q_id,
+            "ip": ip,
+            "rule_id": rule_id,
+            "rule_name": rule_name or "",
+            "priority": priority,
+            "risk_level": risk_level or e.get("threat_level") or "",
+            "country": e.get("country"),
+            "city": e.get("city"),
+            "expires_at": expires_at,
+            "created_at": created_at,
+            "minutes_remaining": minutes_remaining,
+        })
+    return out
+
+
+def render_quarantine_banner_html(quarantines):
+    if not quarantines:
+        return ""
+    rows = []
+    for q in quarantines:
+        loc_parts = [p for p in (q.get("city"), q.get("country")) if p]
+        loc = f" ({html.escape(', '.join(loc_parts))})" if loc_parts else ""
+        rows.append(f"""<div class="q-row">
+            <div class="q-info">
+                <strong style="color:#ff4444">{html.escape(q['ip'])}</strong>{loc}
+                &mdash; rule {html.escape(str(q['rule_id']))} {html.escape(q['rule_name'][:60])}
+                <br><span style="color:#aaa;font-size:0.85em">Expires in {q['minutes_remaining']} min</span>
+            </div>
+            <div class="q-actions">
+                <button class="btn btn-block" onclick="confirmQuarantine({q['id']})">✓ Confirm</button>
+                <button class="btn btn-ignore" onclick="liftQuarantine({q['id']}, {json.dumps(q['ip'])})">↻ Lift</button>
+            </div>
+        </div>""")
+    return "".join(rows)
+
+
 def render_alerts_html(active_alerts):
     if not active_alerts:
         return "<tr><td colspan=5 style='color:#00ff88'>✓ No active P1/P2 alerts requiring attention</td></tr>"
@@ -273,13 +366,71 @@ def get_pihole_summary():
 
 @app.route("/api/stats")
 def api_stats():
+    quarantines = get_active_quarantines()
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
         "alert_counts": get_alert_counts(),
         "alerts_html": render_alerts_html(get_active_alerts()),
         "devices_html": render_devices_html(get_network_devices()),
+        "quarantines": quarantines,
+        "quarantine_banner_html": render_quarantine_banner_html(quarantines),
     })
+
+
+@app.route("/api/quarantines")
+def api_quarantines():
+    return jsonify({"quarantines": get_active_quarantines()})
+
+
+@app.route("/api/quarantine/<int:q_id>/confirm")
+def api_quarantine_confirm(q_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        c = conn.cursor()
+        c.execute("SELECT ip, rule_id, status FROM quarantines WHERE id = ?", (q_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "quarantine not found"}), 404
+        ip, rule_id, status = row
+        if status != "active":
+            conn.close()
+            return jsonify({"error": f"quarantine status is {status}, cannot confirm"}), 409
+        c.execute("UPDATE alerts SET action='block' WHERE rule_id=?", (rule_id,))
+        c.execute("UPDATE quarantines SET status='confirmed' WHERE id=?", (q_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "ip": ip, "rule_id": rule_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/quarantine/<int:q_id>/lift")
+def api_quarantine_lift(q_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        c = conn.cursor()
+        c.execute("SELECT ip, rule_id, status FROM quarantines WHERE id = ?", (q_id,))
+        row = c.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "quarantine not found"}), 404
+        ip, rule_id, status = row
+        if status != "active":
+            conn.close()
+            return jsonify({"error": f"quarantine status is {status}, cannot lift"}), 409
+        ufw_rc = subprocess.run(
+            ["sudo", "ufw", "delete", "deny", "from", ip],
+            capture_output=True, text=True, timeout=10,
+        ).returncode
+        c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
+        c.execute("UPDATE quarantines SET status='lifted' WHERE id=?", (q_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({"success": True, "ip": ip, "rule_id": rule_id, "ufw_rc": ufw_rc})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/update-device", methods=["POST"])
 def update_device():
@@ -519,6 +670,9 @@ def dashboard():
 
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
+    quarantines = get_active_quarantines()
+    quarantine_banner_html = render_quarantine_banner_html(quarantines)
+    quarantine_banner_display = "block" if quarantines else "none"
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -563,11 +717,22 @@ def dashboard():
         .flag {{ font-size:1.3em; vertical-align:middle; }}
         .warn-tor {{ color:#ff4444; font-weight:bold; }}
         .warn-vpn {{ color:#ffaa00; font-weight:bold; }}
+        .quarantine-banner {{ background:#2a0d0d; border:2px solid #ff4444; border-radius:10px; padding:15px; margin-bottom:15px; }}
+        .quarantine-banner h2 {{ color:#ff4444; margin-top:0; }}
+        .q-row {{ display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid #4a1010; flex-wrap:wrap; gap:8px; }}
+        .q-row:last-child {{ border-bottom:none; }}
+        .q-info {{ flex:1; min-width:200px; }}
+        .q-actions {{ display:flex; gap:5px; }}
     </style>
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall</h1>
     <p style="color:#888;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
+
+    <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
+        <h2>🚨 Auto-Quarantined IPs</h2>
+        <div id="quarantineList">{quarantine_banner_html}</div>
+    </div>
 
     <div class="grid">
         <div class="card">
@@ -814,6 +979,15 @@ def dashboard():
                     document.getElementById("cntP1").textContent = d.alert_counts.p1;
                     document.getElementById("cntP2").textContent = d.alert_counts.p2;
                     document.getElementById("cntP3").textContent = d.alert_counts.p3;
+                    var banner = document.getElementById("quarantineBanner");
+                    var list = document.getElementById("quarantineList");
+                    if (d.quarantines && d.quarantines.length) {{
+                        banner.style.display = "block";
+                        list.innerHTML = d.quarantine_banner_html;
+                    }} else {{
+                        banner.style.display = "none";
+                        list.innerHTML = "";
+                    }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
@@ -823,6 +997,28 @@ def dashboard():
                 .catch(e => console.error("refresh failed", e));
         }}
         setInterval(refreshDashboard, 60000);
+
+        function confirmQuarantine(id) {{
+            if (!confirm("Confirm this block permanently? The ufw rule will be kept and the alert marked 'block'.")) return;
+            fetch("/api/quarantine/" + id + "/confirm")
+                .then(r => r.json())
+                .then(d => {{
+                    if (d.success) {{ refreshDashboard(); }}
+                    else {{ alert("Confirm failed: " + (d.error || "unknown")); }}
+                }})
+                .catch(e => alert("Error: " + e));
+        }}
+
+        function liftQuarantine(id, ip) {{
+            if (!confirm("Lift this quarantine for " + ip + "? The ufw rule will be removed.")) return;
+            fetch("/api/quarantine/" + id + "/lift")
+                .then(r => r.json())
+                .then(d => {{
+                    if (d.success) {{ refreshDashboard(); }}
+                    else {{ alert("Lift failed: " + (d.error || "unknown")); }}
+                }})
+                .catch(e => alert("Error: " + e));
+        }}
     </script>
 </body>
 </html>"""
