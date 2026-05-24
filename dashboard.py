@@ -397,6 +397,13 @@ def report_abuse(rule_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/test-enrichment/<ip>")
+def test_enrichment(ip):
+    try:
+        return jsonify(enrich_ip(ip))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route("/api/action/<rule_id>/<action>")
 def set_action(rule_id, action):
     try:
