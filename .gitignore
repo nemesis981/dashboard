@@ -1,10 +1,8 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-env/
-.env
+alert_manager/alerts.db
+alert_manager/watchdog.log
+alert_manager/nemesis.log
 *.log
-.DS_Store
-.claude/settings.local.json
+*.db
+__pycache__/
+*.pyc
+.env

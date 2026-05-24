@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(systemctl status *)",
+      "Bash(curl -s -m 10 -o /tmp/dash_test.html -w \"HTTP %{http_code} in %{time_total}s, size=%{size_download}\\\\n\" http://localhost:5000/)",
+      "Bash(sqlite3 *)",
+      "Bash(python3 *)",
+      "Read(//etc/pihole/**)",
+      "Bash(git --version)",
+      "Bash(gh --version)",
+      "Bash(git config *)"
+    ]
+  }
+}
