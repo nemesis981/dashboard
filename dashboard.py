@@ -82,6 +82,14 @@ def get_suricata_alerts():
 
 def parse_alert(alert_line):
     try:
+        timestamp = ""
+        ts_token = alert_line.split(" ", 1)[0] if alert_line else ""
+        if "/" in ts_token and "-" in ts_token:
+            try:
+                dt = datetime.strptime(ts_token, "%m/%d/%Y-%H:%M:%S.%f")
+                timestamp = dt.strftime("%H:%M:%S")
+            except ValueError:
+                timestamp = ""
         priority = 3
         if "Priority: 1" in alert_line:
             priority = 1
@@ -115,6 +123,7 @@ def parse_alert(alert_line):
             "rule_name": rule_name,
             "classification": classification,
             "priority": priority,
+            "timestamp": timestamp,
             "src_ip": src_ip,
             "dst_ip": dst_ip,
             "protocol": protocol,
@@ -205,16 +214,18 @@ def get_network_devices():
 
 def render_alerts_html(active_alerts):
     if not active_alerts:
-        return "<tr><td colspan=4 style='color:#00ff88'>✓ No active P1/P2 alerts requiring attention</td></tr>"
+        return "<tr><td colspan=5 style='color:#00ff88'>✓ No active P1/P2 alerts requiring attention</td></tr>"
     parts = []
     for alert in active_alerts:
         priority = alert["priority"]
         color = "#ff4444" if priority == 1 else "#ffaa00"
         label = "P1 CRITICAL" if priority == 1 else "P2 HIGH"
         rule_name = alert["rule_name"][:50] if alert["rule_name"] else "Unknown"
+        timestamp = alert.get("timestamp", "") or "—"
         onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
         parts.append(f"""<tr>
             <td><span style="color:{color}">{label}</span></td>
+            <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(timestamp)}</td>
             <td style="font-size:0.8em">{html.escape(rule_name)}</td>
             <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
             <td><button onclick="{onclick}"
@@ -586,7 +597,7 @@ def dashboard():
             </div>
             <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
             <table>
-                <thead><tr><th>Priority</th><th>Alert</th><th>Source IP</th><th>Action</th></tr></thead>
+                <thead><tr><th>Priority</th><th>Time</th><th>Alert</th><th>Source IP</th><th>Action</th></tr></thead>
                 <tbody id="alertsRows">
                 {alerts_html}
                 </tbody>
