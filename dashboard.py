@@ -5,7 +5,11 @@ import sqlite3
 import json
 import html
 import os
+import sys
 from datetime import datetime
+
+sys.path.insert(0, "/home/paul/alert_manager")
+from ip_enrichment import enrich_ip
 
 app = Flask(__name__)
 
@@ -13,6 +17,7 @@ PIHOLE_IP = "192.168.4.69"
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = "/home/paul/alert_manager/alerts.db"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 
 pihole_session = {"sid": None}
 
@@ -198,6 +203,73 @@ def get_network_devices():
     except Exception as e:
         return []
 
+def render_alerts_html(active_alerts):
+    if not active_alerts:
+        return "<tr><td colspan=4 style='color:#00ff88'>✓ No active P1/P2 alerts requiring attention</td></tr>"
+    parts = []
+    for alert in active_alerts:
+        priority = alert["priority"]
+        color = "#ff4444" if priority == 1 else "#ffaa00"
+        label = "P1 CRITICAL" if priority == 1 else "P2 HIGH"
+        rule_name = alert["rule_name"][:50] if alert["rule_name"] else "Unknown"
+        onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
+        parts.append(f"""<tr>
+            <td><span style="color:{color}">{label}</span></td>
+            <td style="font-size:0.8em">{html.escape(rule_name)}</td>
+            <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
+            <td><button onclick="{onclick}"
+                style="background:#00d4ff;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px">
+                View</button></td>
+        </tr>""")
+    return "".join(parts)
+
+def render_devices_html(devices):
+    parts = []
+    for d in devices:
+        trusted = d.get("trusted", 0)
+        offline = d.get("offline", False)
+        trust_icon = "✅" if trusted else "❓"
+        status_color = "#888" if offline else "#eee"
+        status = " (offline)" if offline else ""
+        onclick = html.escape(f"editDevice({json.dumps(d['mac'])}, {json.dumps(d['friendly_name'])}, {json.dumps(d['device_type'])})")
+        parts.append(f"""<tr style="color:{status_color}">
+            <td>{html.escape(d["ip"])}{status}</td>
+            <td>
+                <span id="name-{d["mac"].replace(":","")}">{html.escape(d["friendly_name"])}</span>
+                <button onclick="{onclick}"
+                    style="background:none;border:1px solid #00d4ff;color:#00d4ff;padding:2px 6px;cursor:pointer;border-radius:3px;margin-left:5px;font-size:0.75em">
+                    ✏️</button>
+            </td>
+            <td style="font-size:0.8em">{html.escape(d["device_type"])}</td>
+            <td style="font-size:0.8em">{html.escape(d["mac"])}</td>
+            <td>{trust_icon}</td>
+        </tr>""")
+    return "".join(parts)
+
+def get_pihole_summary():
+    stats = get_pihole_stats()
+    if not stats:
+        return {"total": "N/A", "blocked": "N/A", "percent": "N/A"}
+    q = stats.get("queries", {})
+    percent = q.get("percent_blocked", "N/A")
+    if isinstance(percent, (int, float)):
+        percent = f"{round(percent, 1):g}"
+    return {
+        "total": q.get("total", "N/A"),
+        "blocked": q.get("blocked", "N/A"),
+        "percent": percent,
+    }
+
+@app.route("/api/stats")
+def api_stats():
+    return jsonify({
+        "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pihole": get_pihole_summary(),
+        "alert_counts": get_alert_counts(),
+        "alerts_html": render_alerts_html(get_active_alerts()),
+        "devices_html": render_devices_html(get_network_devices()),
+    })
+
 @app.route("/api/update-device", methods=["POST"])
 def update_device():
     try:
@@ -217,6 +289,15 @@ def update_device():
 @app.route("/api/analyze/<rule_id>")
 def analyze_alert(rule_id):
     try:
+        raw_alert = request.args.get("raw", "")
+        parsed = parse_alert(raw_alert) if raw_alert else None
+        src_ip = parsed["src_ip"] if parsed else ""
+        enrichment = None
+        if src_ip:
+            try:
+                enrichment = enrich_ip(src_ip)
+            except Exception:
+                enrichment = None
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
@@ -229,9 +310,10 @@ def analyze_alert(rule_id):
                 "action": existing[7],
                 "recommended_action": "See previous decision",
                 "reason": "Retrieved from local database",
-                "cached": True
+                "cached": True,
+                "src_ip": src_ip,
+                "enrichment": enrichment
             })
-        raw_alert = request.args.get("raw", "")
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
@@ -275,7 +357,43 @@ Alert: {raw_alert}
                 (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], now, now))
         conn.commit()
         conn.close()
-        return jsonify({**analysis, "cached": False})
+        return jsonify({**analysis, "cached": False, "src_ip": src_ip, "enrichment": enrichment})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/report/<rule_id>")
+def report_abuse(rule_id):
+    try:
+        ip = request.args.get("ip", "").strip()
+        if not ip:
+            return jsonify({"error": "IP required"}), 400
+        if not ABUSEIPDB_KEY:
+            return jsonify({"error": "ABUSEIPDB_KEY not configured"}), 500
+        categories = request.args.get("categories", "14,15")
+        comment = request.args.get(
+            "comment",
+            f"Reported from Nemesis Firewall - Suricata rule {rule_id}"
+        )
+        resp = requests.post(
+            "https://api.abuseipdb.com/api/v2/report",
+            data={"ip": ip, "categories": categories, "comment": comment},
+            headers={"Key": ABUSEIPDB_KEY, "Accept": "application/json"},
+            timeout=10,
+        )
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        if resp.status_code >= 400:
+            errors = payload.get("errors") or [{"detail": "Unknown error"}]
+            detail = errors[0].get("detail") if isinstance(errors, list) and errors else str(errors)
+            return jsonify({"error": detail, "status": resp.status_code}), resp.status_code
+        data = payload.get("data", {})
+        return jsonify({
+            "success": True,
+            "ip": ip,
+            "abuse_confidence_score": data.get("abuseConfidenceScore"),
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -373,53 +491,16 @@ def db_action(alert_id, action):
 
 @app.route("/")
 def dashboard():
-    pihole_stats = get_pihole_stats()
     clamav_status = get_clamav_status()
     system_status = get_system_status()
     alert_counts = get_alert_counts()
-    active_alerts = get_active_alerts()
-    devices = get_network_devices()
+    pihole = get_pihole_summary()
+    total = pihole["total"]
+    blocked = pihole["blocked"]
+    percent = pihole["percent"]
 
-    blocked = pihole_stats.get("queries", {}).get("blocked", "N/A") if pihole_stats else "N/A"
-    total = pihole_stats.get("queries", {}).get("total", "N/A") if pihole_stats else "N/A"
-    percent = pihole_stats.get("queries", {}).get("percent_blocked", "N/A") if pihole_stats else "N/A"
-
-    alerts_html = ""
-    for alert in active_alerts:
-        priority = alert["priority"]
-        color = "#ff4444" if priority == 1 else "#ffaa00"
-        label = "P1 CRITICAL" if priority == 1 else "P2 HIGH"
-        rule_name = alert["rule_name"][:50] if alert["rule_name"] else "Unknown"
-        onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
-        alerts_html += f"""<tr>
-            <td><span style="color:{color}">{label}</span></td>
-            <td style="font-size:0.8em">{html.escape(rule_name)}</td>
-            <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
-            <td><button onclick="{onclick}"
-                style="background:#00d4ff;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px">
-                View</button></td>
-        </tr>"""
-
-    devices_html = ""
-    for d in devices:
-        trusted = d.get("trusted", 0)
-        offline = d.get("offline", False)
-        trust_icon = "✅" if trusted else "❓"
-        status_color = "#888" if offline else "#eee"
-        status = " (offline)" if offline else ""
-        onclick = html.escape(f"editDevice({json.dumps(d['mac'])}, {json.dumps(d['friendly_name'])}, {json.dumps(d['device_type'])})")
-        devices_html += f"""<tr style="color:{status_color}">
-            <td>{html.escape(d["ip"])}{status}</td>
-            <td>
-                <span id="name-{d["mac"].replace(":","")}">{html.escape(d["friendly_name"])}</span>
-                <button onclick="{onclick}"
-                    style="background:none;border:1px solid #00d4ff;color:#00d4ff;padding:2px 6px;cursor:pointer;border-radius:3px;margin-left:5px;font-size:0.75em">
-                    ✏️</button>
-            </td>
-            <td style="font-size:0.8em">{html.escape(d["device_type"])}</td>
-            <td style="font-size:0.8em">{html.escape(d["mac"])}</td>
-            <td>{trust_icon}</td>
-        </tr>"""
+    alerts_html = render_alerts_html(get_active_alerts())
+    devices_html = render_devices_html(get_network_devices())
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -427,7 +508,6 @@ def dashboard():
 <html>
 <head>
     <title>Nemesis Firewall</title>
-    <meta http-equiv="refresh" content="60">
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; margin: 0; }}
         h1 {{ color: #00d4ff; margin-bottom: 5px; }}
@@ -456,20 +536,27 @@ def dashboard():
         .btn-monitor {{ background:#ffaa00; color:#1a1a2e; }}
         .btn-close {{ background:#333; color:#eee; }}
         .btn-save {{ background:#00ff88; color:#1a1a2e; }}
+        .btn-report {{ background:#8800ff; color:white; }}
         input, select {{ background:#0d1117; color:#eee; border:1px solid #00d4ff; padding:5px; border-radius:3px; width:100%; margin:3px 0; }}
         a {{ color: #00d4ff; }}
+        .enrichment-card {{ background:#0d1117; border:1px solid #333; border-radius:6px; padding:10px; margin:10px 0; }}
+        .enrichment-card h4 {{ color:#00d4ff; margin:0 0 8px 0; font-size:0.95em; }}
+        .enrichment-card p {{ margin:4px 0; font-size:0.9em; }}
+        .flag {{ font-size:1.3em; vertical-align:middle; }}
+        .warn-tor {{ color:#ff4444; font-weight:bold; }}
+        .warn-vpn {{ color:#ffaa00; font-weight:bold; }}
     </style>
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall</h1>
-    <p style="color:#888;margin-top:0">Last updated: {now} | Auto-refreshes every 60 seconds</p>
+    <p style="color:#888;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
     <div class="grid">
         <div class="card">
             <h2>Pi-hole DNS Protection</h2>
-            <p>Queries Today: <span class="stat">{total}</span></p>
-            <p>Blocked: <span class="stat">{blocked}</span></p>
-            <p>Percent Blocked: <span class="stat">{percent}%</span></p>
+            <p>Queries Today: <span class="stat" id="phTotal">{total}</span></p>
+            <p>Blocked: <span class="stat" id="phBlocked">{blocked}</span></p>
+            <p>Percent Blocked: <span class="stat" id="phPercent">{percent}%</span></p>
         </div>
 
         <div class="card">
@@ -485,15 +572,17 @@ def dashboard():
                 <a href="/firewall-db" style="float:right;color:#00d4ff;font-size:0.85em;text-decoration:none">📋 Alert Database</a>
             </h2>
             <div>
-                <div class="counter-box"><div class="counter-num total">{alert_counts["total"]}</div><div>Total</div></div>
-                <div class="counter-box"><div class="counter-num p1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
-                <div class="counter-box"><div class="counter-num p2">{alert_counts["p2"]}</div><div>High P2</div></div>
-                <div class="counter-box"><div class="counter-num p3">{alert_counts["p3"]}</div><div>Info P3</div></div>
+                <div class="counter-box"><div class="counter-num total" id="cntTotal">{alert_counts["total"]}</div><div>Total</div></div>
+                <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
+                <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div><div>High P2</div></div>
+                <div class="counter-box"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
             </div>
             <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
             <table>
-                <tr><th>Priority</th><th>Alert</th><th>Source IP</th><th>Action</th></tr>
-                {alerts_html if alerts_html else "<tr><td colspan=4 style=\'color:#00ff88\'>✓ No active P1/P2 alerts requiring attention</td></tr>"}
+                <thead><tr><th>Priority</th><th>Alert</th><th>Source IP</th><th>Action</th></tr></thead>
+                <tbody id="alertsRows">
+                {alerts_html}
+                </tbody>
             </table>
         </div>
 
@@ -502,8 +591,10 @@ def dashboard():
                 <span style="float:right;font-size:0.8em;color:#888">✅ Trusted &nbsp; ❓ Unverified</span>
             </h2>
             <table>
-                <tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr>
+                <thead><tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr></thead>
+                <tbody id="devicesRows">
                 {devices_html}
+                </tbody>
             </table>
         </div>
     </div>
@@ -517,6 +608,7 @@ def dashboard():
                 <button class="btn btn-block" onclick="takeAction('block')">🚫 Block IP</button>
                 <button class="btn btn-ignore" onclick="takeAction('ignore')">✓ Ignore Rule</button>
                 <button class="btn btn-monitor" onclick="takeAction('monitor')">👁 Monitor</button>
+                <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
             </div>
         </div>
@@ -559,38 +651,107 @@ def dashboard():
         var currentRuleId = "";
         var currentSrcIp = "";
 
+        function escapeHtml(s) {{
+            if (s === null || s === undefined) return "";
+            return String(s).replace(/[&<>"']/g, function(c) {{
+                return {{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c];
+            }});
+        }}
+
+        function countryFlag(cc) {{
+            if (!cc || cc.length !== 2) return "";
+            return cc.toUpperCase().replace(/./g, function(c) {{
+                return String.fromCodePoint(127397 + c.charCodeAt(0));
+            }});
+        }}
+
+        function threatColor(level) {{
+            if (level === "CRITICAL") return "#ff0000";
+            if (level === "HIGH") return "#ff4444";
+            if (level === "MEDIUM") return "#ffaa00";
+            return "#00ff88";
+        }}
+
+        function renderEnrichment(enr) {{
+            if (!enr) return "";
+            var flag = countryFlag(enr.country);
+            var loc = [enr.city, enr.country].filter(Boolean).map(escapeHtml).join(", ") || "Unknown location";
+            var isp = escapeHtml(enr.isp || enr.org || "Unknown ISP");
+            var level = enr.threat_level || "LOW";
+            var color = threatColor(level);
+            var score = (enr.abuse_confidence_score == null) ? "n/a" : enr.abuse_confidence_score;
+            var reports = (enr.total_reports == null) ? 0 : enr.total_reports;
+            var lastRep = enr.last_reported ? escapeHtml(enr.last_reported) : "never";
+            var warnings = "";
+            if (enr.is_tor) warnings += '<p class="warn-tor">⚠ TOR exit node</p>';
+            if (enr.is_vpn) warnings += '<p class="warn-vpn">⚠ VPN / Proxy / Hosting</p>';
+            return `
+                <div class="enrichment-card">
+                    <h4>🌍 IP Intelligence — ${{escapeHtml(enr.ip)}}</h4>
+                    <p><span class="flag">${{flag}}</span> <strong>${{loc}}</strong></p>
+                    <p><strong>ISP:</strong> ${{isp}}</p>
+                    <p><strong>Threat Level:</strong> <span style="color:${{color}};font-weight:bold">${{escapeHtml(level)}}</span></p>
+                    <p><strong>Abuse Score:</strong> ${{escapeHtml(score)}}/100 &nbsp; <strong>Reports:</strong> ${{escapeHtml(reports)}} &nbsp; <strong>Last:</strong> ${{lastRep}}</p>
+                    ${{warnings}}
+                </div>
+            `;
+        }}
+
         function viewAlert(ruleId, rawAlert) {{
             currentRuleId = ruleId;
+            currentSrcIp = "";
+            document.getElementById("btnReport").style.display = "none";
             document.getElementById("alertModal").style.display = "block";
             document.getElementById("modalContent").innerHTML = "<p>🤖 Nemesis AI analyzing...</p>";
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{
+                    currentSrcIp = data.src_ip || "";
                     var cached = data.cached ? " <span style=\'color:#888\'>(cached)</span>" : " <span style=\'color:#00ff88\'>(AI analyzed)</span>";
                     var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
                     document.getElementById("modalContent").innerHTML = `
-                        <p><strong>Risk Level:</strong> <span style="color:${{riskColor}}">${{data.risk_level || "UNKNOWN"}}</span>${{cached}}</p>
-                        <p><strong>Explanation:</strong> ${{data.explanation || "No explanation available"}}</p>
-                        <p><strong>Recommended Action:</strong> ${{data.recommended_action || "Monitor"}}</p>
-                        <p><strong>Reason:</strong> ${{data.reason || ""}}</p>
+                        <p><strong>Risk Level:</strong> <span style="color:${{riskColor}}">${{escapeHtml(data.risk_level || "UNKNOWN")}}</span>${{cached}}</p>
+                        <p><strong>Explanation:</strong> ${{escapeHtml(data.explanation || "No explanation available")}}</p>
+                        <p><strong>Recommended Action:</strong> ${{escapeHtml(data.recommended_action || "Monitor")}}</p>
+                        <p><strong>Reason:</strong> ${{escapeHtml(data.reason || "")}}</p>
+                        ${{renderEnrichment(data.enrichment)}}
                     `;
+                    if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {{
+                        document.getElementById("btnReport").style.display = "inline-block";
+                    }}
                 }})
                 .catch(e => {{
-                    document.getElementById("modalContent").innerHTML = "<p style=\'color:#ff4444\'>Error: " + e + "</p>";
+                    document.getElementById("modalContent").innerHTML = "<p style=\'color:#ff4444\'>Error: " + escapeHtml(e) + "</p>";
                 }});
         }}
 
         function takeAction(action) {{
             var url = "/api/action/" + currentRuleId + "/" + action;
-            if (action === "block" && currentSrcIp) url += "?ip=" + currentSrcIp;
+            if (action === "block" && currentSrcIp) url += "?ip=" + encodeURIComponent(currentSrcIp);
             fetch(url).then(r => r.json()).then(data => {{
                 closeModal();
                 location.reload();
             }});
         }}
 
+        function reportAbuse() {{
+            if (!currentSrcIp) {{ alert("No source IP to report"); return; }}
+            if (!confirm("Report " + currentSrcIp + " to AbuseIPDB?")) return;
+            fetch("/api/report/" + currentRuleId + "?ip=" + encodeURIComponent(currentSrcIp))
+                .then(r => r.json())
+                .then(d => {{
+                    if (d.success) {{
+                        alert("Reported to AbuseIPDB. Current confidence score: " + (d.abuse_confidence_score == null ? "unknown" : d.abuse_confidence_score));
+                    }} else {{
+                        alert("Report failed: " + (d.error || "unknown error"));
+                    }}
+                }})
+                .catch(e => alert("Error: " + e));
+        }}
+
         function closeModal() {{
             document.getElementById("alertModal").style.display = "none";
+            document.getElementById("btnReport").style.display = "none";
         }}
 
         function editDevice(mac, name, type) {{
@@ -621,6 +782,29 @@ def dashboard():
         function closeDeviceModal() {{
             document.getElementById("deviceModal").style.display = "none";
         }}
+
+        var refreshTick = 0;
+        function refreshDashboard() {{
+            fetch("/api/stats", {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(d => {{
+                    document.getElementById("lastUpdated").textContent = d.now;
+                    document.getElementById("phTotal").textContent = d.pihole.total;
+                    document.getElementById("phBlocked").textContent = d.pihole.blocked;
+                    document.getElementById("phPercent").textContent = d.pihole.percent + "%";
+                    document.getElementById("cntTotal").textContent = d.alert_counts.total;
+                    document.getElementById("cntP1").textContent = d.alert_counts.p1;
+                    document.getElementById("cntP2").textContent = d.alert_counts.p2;
+                    document.getElementById("cntP3").textContent = d.alert_counts.p3;
+                    refreshTick++;
+                    if (refreshTick % 5 === 0) {{
+                        document.getElementById("alertsRows").innerHTML = d.alerts_html;
+                        document.getElementById("devicesRows").innerHTML = d.devices_html;
+                    }}
+                }})
+                .catch(e => console.error("refresh failed", e));
+        }}
+        setInterval(refreshDashboard, 60000);
     </script>
 </body>
 </html>"""

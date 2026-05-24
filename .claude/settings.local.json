@@ -8,7 +8,8 @@
       "Read(//etc/pihole/**)",
       "Bash(git --version)",
       "Bash(gh --version)",
-      "Bash(git config *)"
+      "Bash(git config *)",
+      "Bash(python -c \"import ip_enrichment; ip_enrichment.init_db\\(\\); print\\('ok'\\)\")"
     ]
   }
 }
