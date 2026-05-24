@@ -18,6 +18,13 @@
 - Alert database (SQLite)
 - Alert Database web view (/firewall-db)
 - View button with AI explanation modal
+- IP enrichment module (AbuseIPDB + ipinfo, 24h SQLite cache)
+- Automatic threat reporting to AbuseIPDB (one-click from alert modal)
+- Auto-quarantine system for CRITICAL threats (1-hour UFW block, human confirm/lift)
+- Timestamp column in alerts table
+- Device row borders for readability
+- JavaScript live stats refresh (60s, no page reload)
+- Modal stays open during background refresh
 
 ### Network Intelligence
 - Device scanner (auto-discovery every 5 min)
@@ -27,6 +34,10 @@
 
 ### System Services
 - Watchdog service with email alerts
+- Alert watcher background service (tails Suricata fast.log in real time)
+- Unified Nemesis error log
+- Shared firewall.py module (single source of truth for UFW operations)
+- End-to-end quarantine test suite (59 passing checks)
 - All services auto-start on boot
 - Private GitHub repository
 
@@ -43,8 +54,6 @@
 
 ## IN PROGRESS 🔨
 
-- IP enrichment module (geolocation, threat score, WHOIS)
-- AbuseIPDB threat reporting
 - Incident report generation (PDF)
 
 ---
@@ -58,12 +67,9 @@
 - [ ] OpenVPN or WireGuard for remote access when traveling
 
 ### AI Firewall Features
-- [ ] IP enrichment module (AbuseIPDB, ip-api, Shodan, ipinfo)
-- [ ] Automatic threat reporting to AbuseIPDB
 - [ ] PDF incident report generation
 - [ ] Report submission to CISA/ISP abuse email
-- [ ] Alert watcher background service
-- [ ] Unified Nemesis error log
+- [ ] Shodan / additional enrichment sources
 
 ### Dashboard Improvements
 - [ ] Nemesis Firewall logo/branding
