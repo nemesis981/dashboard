@@ -27,6 +27,7 @@
 - Modal stays open during background refresh
 - Hardware monitoring card (live CPU/ambient/NVMe temps, fan RPMs, CPU%/RAM%)
 - Hardware history modal with Chart.js 24h graphs (temps, fans, CPU/RAM, disk & network IO)
+- Hardware modal sticky close button + Esc / backdrop-click to dismiss (no page reload)
 
 ### Network Intelligence
 - Device scanner (auto-discovery every 5 min)
@@ -38,6 +39,7 @@
 - Watchdog service with email alerts
 - Alert watcher background service (tails Suricata fast.log in real time)
 - Hardware monitor service (samples sensors + psutil every 5 min into hw_metrics table)
+- Thermal & fan-failure email alerts via watchdog (CPU/ambient/NVMe temp, CPU-fan failure, chassis-fan stall under load, sustained CPU >90% for 15 min; 30-min cooldown per alert type)
 - Unified Nemesis error log
 - Shared firewall.py module (single source of truth for UFW operations)
 - End-to-end quarantine test suite (59 passing checks)
