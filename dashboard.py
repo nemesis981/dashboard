@@ -18,6 +18,9 @@ _SURICATA_CACHE_TTL = 5.0
 sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
+import hw_monitor
+
+hw_monitor.init_db()
 
 app = Flask(__name__)
 
@@ -380,6 +383,11 @@ def get_pihole_summary():
 @app.route("/api/stats")
 def api_stats():
     quarantines = get_active_quarantines()
+    try:
+        hw_live = hw_monitor.get_live_metrics()
+    except Exception as e:
+        log.exception("hw_monitor.get_live_metrics failed: %s", e)
+        hw_live = None
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
@@ -388,7 +396,20 @@ def api_stats():
         "devices_html": render_devices_html(get_network_devices()),
         "quarantines": quarantines,
         "quarantine_banner_html": render_quarantine_banner_html(quarantines),
+        "hw": hw_live,
     })
+
+
+@app.route("/api/hw-metrics")
+def api_hw_metrics():
+    try:
+        return jsonify({
+            "live": hw_monitor.get_live_metrics(),
+            "samples": hw_monitor.get_recent_samples(288),
+        })
+    except Exception as e:
+        log.exception("api_hw_metrics failed: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/quarantines")
@@ -692,6 +713,20 @@ def dashboard():
     total = pihole["total"]
     blocked = pihole["blocked"]
     percent = pihole["percent"]
+    try:
+        hw_live = hw_monitor.get_live_metrics()
+    except Exception:
+        hw_live = {}
+    hw_cpu = hw_live.get("cpu_temp")
+    hw_ambient = hw_live.get("ambient_temp")
+    hw_nvme = hw_live.get("nvme_temp")
+    hw_f1 = hw_live.get("fan1_rpm")
+    hw_f2 = hw_live.get("fan2_rpm")
+    hw_f3 = hw_live.get("fan3_rpm")
+    hw_cpu_pct = hw_live.get("cpu_percent")
+    hw_ram_pct = hw_live.get("ram_percent")
+    def _fmt(v, suffix=""):
+        return "—" if v is None else f"{v}{suffix}"
 
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
@@ -749,7 +784,16 @@ def dashboard():
         .q-info {{ flex:1; min-width:200px; }}
         .q-actions {{ display:flex; gap:5px; }}
         .devices-table td {{ border-bottom: 1px solid #1e3a5f; }}
+        .hw-card:hover {{ background:#1a2950; }}
+        .hw-grid {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:8px; }}
+        .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
+        .hw-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-value {{ color:#00ff88; font-size:1.4em; font-weight:bold; margin-top:2px; }}
+        .hw-modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:900px; width:90%; max-height:90vh; overflow-y:auto; margin:40px auto; }}
+        .chart-box {{ background:#0d1117; border-radius:6px; padding:10px; margin-bottom:12px; }}
+        .chart-box h4 {{ color:#00d4ff; margin:0 0 6px 0; font-size:0.9em; }}
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall</h1>
@@ -774,6 +818,22 @@ def dashboard():
             <p style="font-size:0.8em">CPU: {system_status.get("cpu", "N/A")}</p>
             <p style="font-size:0.8em">Memory: {system_status.get("memory", "N/A")}</p>
             <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>
+        </div>
+
+        <div class="card full-width hw-card" onclick="openHwModal()" style="cursor:pointer">
+            <h2>🌡️ Hardware Stats
+                <span style="float:right;font-size:0.75em;color:#888">click for 24h graphs ▸</span>
+            </h2>
+            <div class="hw-grid">
+                <div class="hw-stat"><div class="hw-label">CPU Temp</div><div class="hw-value" id="hwCpuTemp">{_fmt(hw_cpu, "°C")}</div></div>
+                <div class="hw-stat"><div class="hw-label">Ambient</div><div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div></div>
+                <div class="hw-stat"><div class="hw-label">NVMe</div><div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div></div>
+                <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
+                <div class="hw-stat"><div class="hw-label">RAM</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div></div>
+                <div class="hw-stat"><div class="hw-label">Fan 1</div><div class="hw-value" id="hwFan1">{_fmt(hw_f1, " rpm")}</div></div>
+                <div class="hw-stat"><div class="hw-label">Fan 2</div><div class="hw-value" id="hwFan2">{_fmt(hw_f2, " rpm")}</div></div>
+                <div class="hw-stat"><div class="hw-label">Fan 3</div><div class="hw-value" id="hwFan3">{_fmt(hw_f3, " rpm")}</div></div>
+            </div>
         </div>
 
         <div class="card full-width">
@@ -819,6 +879,21 @@ def dashboard():
                 <button class="btn btn-monitor" onclick="takeAction('monitor')">👁 Monitor</button>
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hardware Stats Modal -->
+    <div class="modal" id="hwModal">
+        <div class="hw-modal-content">
+            <h3 style="color:#00d4ff;margin-top:0">🌡️ Hardware — last 24 hours</h3>
+            <div id="hwModalStatus" style="color:#888;font-size:0.85em">Loading…</div>
+            <div class="chart-box"><h4>Temperatures (°C)</h4><canvas id="chartTemp" height="120"></canvas></div>
+            <div class="chart-box"><h4>Fan Speeds (RPM)</h4><canvas id="chartFans" height="120"></canvas></div>
+            <div class="chart-box"><h4>CPU & RAM (%)</h4><canvas id="chartUsage" height="120"></canvas></div>
+            <div class="chart-box"><h4>Disk &amp; Network (MB / 5 min)</h4><canvas id="chartIo" height="120"></canvas></div>
+            <div style="text-align:right">
+                <button class="btn btn-close" onclick="closeHwModal()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -992,6 +1067,107 @@ def dashboard():
             document.getElementById("deviceModal").style.display = "none";
         }}
 
+        var hwCharts = {{}};
+
+        function fmtHw(v, suffix) {{
+            return (v === null || v === undefined) ? "—" : v + suffix;
+        }}
+
+        function applyHwLive(hw) {{
+            if (!hw) return;
+            document.getElementById("hwCpuTemp").textContent = fmtHw(hw.cpu_temp, "°C");
+            document.getElementById("hwAmbient").textContent = fmtHw(hw.ambient_temp, "°C");
+            document.getElementById("hwNvme").textContent = fmtHw(hw.nvme_temp, "°C");
+            document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
+            document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
+            document.getElementById("hwFan1").textContent = fmtHw(hw.fan1_rpm, " rpm");
+            document.getElementById("hwFan2").textContent = fmtHw(hw.fan2_rpm, " rpm");
+            document.getElementById("hwFan3").textContent = fmtHw(hw.fan3_rpm, " rpm");
+        }}
+
+        function openHwModal() {{
+            document.getElementById("hwModal").style.display = "block";
+            document.getElementById("hwModalStatus").textContent = "Loading…";
+            fetch("/api/hw-metrics", {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(d => {{
+                    if (d.error) {{
+                        document.getElementById("hwModalStatus").textContent = "Error: " + d.error;
+                        return;
+                    }}
+                    applyHwLive(d.live);
+                    renderHwCharts(d.samples || []);
+                    var n = (d.samples || []).length;
+                    document.getElementById("hwModalStatus").textContent =
+                        n ? n + " samples (5 min each, oldest → newest)"
+                          : "No samples yet — the monitor records one every 5 minutes.";
+                }})
+                .catch(e => {{
+                    document.getElementById("hwModalStatus").textContent = "Error: " + e;
+                }});
+        }}
+
+        function closeHwModal() {{
+            document.getElementById("hwModal").style.display = "none";
+        }}
+
+        function shortTs(ts) {{
+            if (!ts) return "";
+            var t = ts.replace("T", " ");
+            return t.length > 16 ? t.slice(5, 16) : t;
+        }}
+
+        function makeChart(canvasId, labels, datasets, yLabel) {{
+            var ctx = document.getElementById(canvasId).getContext("2d");
+            if (hwCharts[canvasId]) hwCharts[canvasId].destroy();
+            hwCharts[canvasId] = new Chart(ctx, {{
+                type: "line",
+                data: {{labels: labels, datasets: datasets}},
+                options: {{
+                    responsive: true,
+                    interaction: {{mode: "index", intersect: false}},
+                    plugins: {{
+                        legend: {{labels: {{color: "#ccc", boxWidth: 12}}}},
+                        tooltip: {{enabled: true}}
+                    }},
+                    scales: {{
+                        x: {{ticks: {{color: "#888", maxTicksLimit: 8, autoSkip: true}},
+                             grid: {{color: "#222"}}}},
+                        y: {{ticks: {{color: "#888"}},
+                             grid: {{color: "#222"}},
+                             title: {{display: !!yLabel, text: yLabel || "", color: "#888"}}}}
+                    }},
+                    elements: {{point: {{radius: 0}}, line: {{tension: 0.25, borderWidth: 1.5}}}}
+                }}
+            }});
+        }}
+
+        function pick(samples, key) {{ return samples.map(s => s[key]); }}
+
+        function renderHwCharts(samples) {{
+            var labels = samples.map(s => shortTs(s.timestamp));
+            makeChart("chartTemp", labels, [
+                {{label: "CPU",     data: pick(samples, "cpu_temp"),     borderColor: "#ff4444", backgroundColor: "rgba(255,68,68,0.1)"}},
+                {{label: "Ambient", data: pick(samples, "ambient_temp"), borderColor: "#ffaa00", backgroundColor: "rgba(255,170,0,0.1)"}},
+                {{label: "NVMe",    data: pick(samples, "nvme_temp"),    borderColor: "#00d4ff", backgroundColor: "rgba(0,212,255,0.1)"}}
+            ], "°C");
+            makeChart("chartFans", labels, [
+                {{label: "Fan 1", data: pick(samples, "fan1_rpm"), borderColor: "#00ff88"}},
+                {{label: "Fan 2", data: pick(samples, "fan2_rpm"), borderColor: "#00d4ff"}},
+                {{label: "Fan 3", data: pick(samples, "fan3_rpm"), borderColor: "#8800ff"}}
+            ], "RPM");
+            makeChart("chartUsage", labels, [
+                {{label: "CPU %",      data: pick(samples, "cpu_percent"), borderColor: "#ff4444"}},
+                {{label: "RAM (GB)",   data: pick(samples, "ram_used_gb"), borderColor: "#00ff88", yAxisID: "y"}}
+            ], "%");
+            makeChart("chartIo", labels, [
+                {{label: "Disk Read",  data: pick(samples, "disk_read_mb"),  borderColor: "#00d4ff"}},
+                {{label: "Disk Write", data: pick(samples, "disk_write_mb"), borderColor: "#8800ff"}},
+                {{label: "Net In",     data: pick(samples, "net_in_mb"),     borderColor: "#00ff88"}},
+                {{label: "Net Out",    data: pick(samples, "net_out_mb"),    borderColor: "#ffaa00"}}
+            ], "MB");
+        }}
+
         var refreshTick = 0;
         function refreshDashboard() {{
             fetch("/api/stats", {{cache: "no-store"}})
@@ -1014,6 +1190,7 @@ def dashboard():
                         banner.style.display = "none";
                         list.innerHTML = "";
                     }}
+                    if (d.hw) applyHwLive(d.hw);
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
