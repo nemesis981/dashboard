@@ -5,15 +5,33 @@ import sqlite3
 import json
 import html
 import os
+import re
 import sys
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
 
 _suricata_cache = {"ts": 0.0, "lines": []}
 _SURICATA_CACHE_TTL = 5.0
+
+_alert_24h_cache = {"ts": 0.0, "data": None}
+_ALERT_24H_CACHE_TTL = 60.0
+_alert_counts_cache = {"ts": 0.0, "data": None, "date": None}
+_ALERT_COUNTS_CACHE_TTL = 60.0
+_svc_cache = {"ts": 0.0, "data": None}
+_SVC_CACHE_TTL = 30.0
+
+HEALTH_SERVICES = [
+    "pihole-FTL", "clamav-daemon", "suricata",
+    "dashboard", "device-scanner",
+    "alert-watcher", "hw-monitor", "watchdog",
+]
+
+WATCHDOG_LOG_PATH = "/home/paul/alert_manager/watchdog.log"
+_HW_ALERT_RE = re.compile(r"HW alert (?:sent|email failed): (\w+)")
+_SVC_ALERT_RE = re.compile(r"(?:Sent|Failed to send) alert email for (\S+)")
 
 sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
@@ -114,13 +132,42 @@ def get_db_alert(rule_id):
         return None
 
 def get_alert_counts():
+    """Count today's Suricata fast.log P1/P2/P3 alerts.
+
+    Reads a deep tail of fast.log and filters by the today date prefix.
+    The previous version only sampled the last 100 lines, so a burst of P3 noise
+    would push P1/P2 entries off the window and report counts as 0.
+    """
     try:
-        alerts = get_suricata_alerts()
         today = datetime.now().strftime("%m/%d/%Y")
-        p1 = sum(1 for a in alerts if "Priority: 1" in a and today in a)
-        p2 = sum(1 for a in alerts if "Priority: 2" in a and today in a)
-        p3 = sum(1 for a in alerts if "Priority: 3" in a and today in a)
-        return {"total": p1+p2+p3, "p1": p1, "p2": p2, "p3": p3}
+        now_mono = time.monotonic()
+        cached = _alert_counts_cache.get("data")
+        if (cached
+                and _alert_counts_cache.get("date") == today
+                and now_mono - _alert_counts_cache["ts"] < _ALERT_COUNTS_CACHE_TTL):
+            return cached
+        result = subprocess.run(
+            ["sudo", "tail", "-n", "200000", "/var/log/suricata/fast.log"],
+            capture_output=True, text=True, timeout=30,
+        )
+        prefix = today + "-"
+        p1 = p2 = p3 = 0
+        for line in result.stdout.splitlines():
+            if not line.startswith(prefix):
+                continue
+            if "Priority: 1" in line:
+                p1 += 1
+            elif "Priority: 2" in line:
+                p2 += 1
+            elif "Priority: 3" in line:
+                p3 += 1
+        data = {"total": p1 + p2 + p3, "p1": p1, "p2": p2, "p3": p3}
+        _alert_counts_cache["data"] = data
+        _alert_counts_cache["ts"] = now_mono
+        _alert_counts_cache["date"] = today
+        log.info("get_alert_counts: today=%s p1=%d p2=%d p3=%d total=%d",
+                 today, p1, p2, p3, data["total"])
+        return data
     except Exception as e:
         log.exception("get_alert_counts failed: %s", e)
         return {"total": 0, "p1": 0, "p2": 0, "p3": 0}
@@ -388,6 +435,9 @@ def api_stats():
     except Exception as e:
         log.exception("hw_monitor.get_live_metrics failed: %s", e)
         hw_live = None
+    alerts_24h = get_24h_alert_stats()
+    svc_status = get_services_status()
+    health = compute_health_score(hw_live, alerts_24h, svc_status)
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
@@ -397,15 +447,212 @@ def api_stats():
         "quarantines": quarantines,
         "quarantine_banner_html": render_quarantine_banner_html(quarantines),
         "hw": hw_live,
+        "alert_24h": {"total": alerts_24h["total"], "color": alert_color(alerts_24h["total"])},
+        "health": {"score": health["score"], "color": health["color"]},
     })
+
+
+def get_24h_alert_stats():
+    """Count hardware/system alerts emitted by the watchdog in the last 24h.
+
+    Sources: thermal/fan threshold breaches ("HW alert sent: <key>" or
+    "HW alert email failed: <key>") and service-down escalations
+    ("Sent alert email for <svc>" or "Failed to send alert email for <svc>").
+    Suricata network alerts are intentionally excluded — those are surfaced
+    by the AI Firewall section's get_alert_counts().
+    """
+    now = time.monotonic()
+    cached = _alert_24h_cache["data"]
+    if cached and now - _alert_24h_cache["ts"] < _ALERT_24H_CACHE_TTL:
+        return cached
+    cutoff = datetime.now() - timedelta(days=1)
+    thermal_fan = service_down = 0
+    breakdown = {}
+    try:
+        with open(WATCHDOG_LOG_PATH) as f:
+            for line in f:
+                try:
+                    ts = datetime.strptime(line[:19], "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                if ts < cutoff:
+                    continue
+                m = _HW_ALERT_RE.search(line)
+                if m:
+                    thermal_fan += 1
+                    key = f"thermal/fan: {m.group(1)}"
+                    breakdown[key] = breakdown.get(key, 0) + 1
+                    continue
+                m = _SVC_ALERT_RE.search(line)
+                if m:
+                    service_down += 1
+                    key = f"service down: {m.group(1)}"
+                    breakdown[key] = breakdown.get(key, 0) + 1
+    except FileNotFoundError:
+        log.warning("get_24h_alert_stats: %s not found", WATCHDOG_LOG_PATH)
+    except Exception as e:
+        log.exception("get_24h_alert_stats failed: %s", e)
+    bd_list = sorted(
+        ({"type": k, "count": v} for k, v in breakdown.items()),
+        key=lambda x: -x["count"],
+    )
+    data = {
+        "total": thermal_fan + service_down,
+        "thermal_fan": thermal_fan,
+        "service_down": service_down,
+        "breakdown": bd_list,
+    }
+    _alert_24h_cache["data"] = data
+    _alert_24h_cache["ts"] = now
+    return data
+
+
+def alert_color(total):
+    if total == 0:
+        return "green"
+    if total <= 5:
+        return "yellow"
+    return "red"
+
+
+def get_services_status():
+    now = time.monotonic()
+    cached = _svc_cache["data"]
+    if cached and now - _svc_cache["ts"] < _SVC_CACHE_TTL:
+        return cached
+    results = []
+    for svc in HEALTH_SERVICES:
+        try:
+            r = subprocess.run(
+                ["systemctl", "is-active", "--quiet", svc],
+                timeout=5,
+            )
+            results.append({"name": svc, "active": r.returncode == 0})
+        except Exception:
+            results.append({"name": svc, "active": False})
+    data = {
+        "active": sum(1 for r in results if r["active"]),
+        "total": len(results),
+        "services": results,
+    }
+    _svc_cache["data"] = data
+    _svc_cache["ts"] = now
+    return data
+
+
+def _temp_score(temp, threshold, healthy_max):
+    """100 when temp <= healthy_max, 0 when temp >= threshold, linear between."""
+    if temp is None:
+        return 100.0
+    if temp <= healthy_max:
+        return 100.0
+    if temp >= threshold:
+        return 0.0
+    return 100.0 * (threshold - temp) / (threshold - healthy_max)
+
+
+def _fan_score(sample):
+    """100% when all 3 chassis fans spinning > 200 RPM; scaled down otherwise."""
+    fans = [sample.get("fan1_rpm"), sample.get("fan2_rpm"), sample.get("fan3_rpm")]
+    if all(f is None for f in fans):
+        return 100.0
+    spinning = sum(1 for f in fans if f and f > 200)
+    return 100.0 * spinning / 3.0
+
+
+def _alert_score(total):
+    if total == 0:
+        return 100.0
+    if total <= 5:
+        # 1 -> 90, 5 -> 50
+        return 100.0 - (total / 5.0) * 50.0
+    if total <= 20:
+        # 6 -> ~47, 20 -> 0
+        return max(0.0, 50.0 - ((total - 5) / 15.0) * 50.0)
+    return 0.0
+
+
+def _score_color(score):
+    if score >= 80:
+        return "green"
+    if score >= 50:
+        return "yellow"
+    return "red"
+
+
+def compute_health_score(hw_live, alerts_24h, svc_status):
+    hw = hw_live or {}
+    cpu_t = hw.get("cpu_temp")
+    gpu_t = hw.get("gpu_temp")
+    cpu_score = _temp_score(cpu_t, 85, 70)
+    gpu_score = _temp_score(gpu_t, 85, 75)
+    fan_score = _fan_score(hw)
+    svc_active = svc_status.get("active", 0)
+    svc_total = max(1, svc_status.get("total", 1))
+    svc_score = 100.0 * svc_active / svc_total
+    alert_total = alerts_24h.get("total", 0)
+    alrt_score = _alert_score(alert_total)
+    spinning = int(round(fan_score / 100.0 * 3))
+
+    components = [
+        {"name": "CPU temperature", "weight": 25, "score": round(cpu_score, 1),
+         "detail": f"{cpu_t if cpu_t is not None else '—'}°C / threshold 85°C (healthy ≤70°C)"},
+        {"name": "GPU temperature", "weight": 25, "score": round(gpu_score, 1),
+         "detail": f"{gpu_t if gpu_t is not None else '—'}°C / threshold 85°C (healthy ≤75°C)"},
+        {"name": "Fan speeds", "weight": 20, "score": round(fan_score, 1),
+         "detail": f"{spinning}/3 chassis fans above 200 RPM"},
+        {"name": "Services running", "weight": 20, "score": round(svc_score, 1),
+         "detail": f"{svc_active}/{svc_status.get('total', 0)} monitored services active"},
+        {"name": "System alerts (24h)", "weight": 10, "score": round(alrt_score, 1),
+         "detail": f"{alert_total} thermal/fan/service alerts in last 24h"},
+    ]
+    for c in components:
+        c["contribution"] = round(c["score"] * c["weight"] / 100.0, 1)
+    total = sum(c["contribution"] for c in components)
+    return {
+        "score": round(total, 1),
+        "color": _score_color(total),
+        "components": components,
+        "services": svc_status.get("services", []),
+    }
+
+
+def compute_health_sparkline(samples):
+    """Per-sample simplified score (CPU 40, GPU 40, fans 20) for the trend line."""
+    out = []
+    for s in samples:
+        cpu = _temp_score(s.get("cpu_temp"), 85, 70)
+        gpu = _temp_score(s.get("gpu_temp"), 85, 75)
+        fans = _fan_score(s)
+        out.append(round(cpu * 0.4 + gpu * 0.4 + fans * 0.2, 1))
+    return out
+
+
+@app.route("/api/alert-breakdown-24h")
+def api_alert_breakdown_24h():
+    return jsonify(get_24h_alert_stats())
+
+
+@app.route("/api/health-score")
+def api_health_score():
+    try:
+        hw_live = hw_monitor.get_live_metrics()
+    except Exception:
+        hw_live = {}
+    return jsonify(compute_health_score(hw_live, get_24h_alert_stats(), get_services_status()))
 
 
 @app.route("/api/hw-metrics")
 def api_hw_metrics():
     try:
+        samples = hw_monitor.get_recent_samples(288)
         return jsonify({
             "live": hw_monitor.get_live_metrics(),
-            "samples": hw_monitor.get_recent_samples(288),
+            "samples": samples,
+            "health_sparkline": {
+                "labels": [s.get("timestamp") for s in samples],
+                "scores": compute_health_sparkline(samples),
+            },
         })
     except Exception as e:
         log.exception("api_hw_metrics failed: %s", e)
@@ -709,6 +956,9 @@ def dashboard():
     clamav_status = get_clamav_status()
     system_status = get_system_status()
     alert_counts = get_alert_counts()
+    # Server-rendered default: P3 hidden (Total = P1 + P2). JS adjusts on load
+    # if the user has previously toggled "Show P3" via localStorage.
+    initial_total = alert_counts["p1"] + alert_counts["p2"]
     pihole = get_pihole_summary()
     total = pihole["total"]
     blocked = pihole["blocked"]
@@ -720,13 +970,28 @@ def dashboard():
     hw_cpu = hw_live.get("cpu_temp")
     hw_ambient = hw_live.get("ambient_temp")
     hw_nvme = hw_live.get("nvme_temp")
+    hw_gpu = hw_live.get("gpu_temp")
     hw_f1 = hw_live.get("fan1_rpm")
     hw_f2 = hw_live.get("fan2_rpm")
     hw_f3 = hw_live.get("fan3_rpm")
+    hw_gpu_fan = hw_live.get("gpu_fan_percent")
     hw_cpu_pct = hw_live.get("cpu_percent")
     hw_ram_pct = hw_live.get("ram_percent")
     def _fmt(v, suffix=""):
         return "—" if v is None else f"{v}{suffix}"
+
+    try:
+        alerts_24h_init = get_24h_alert_stats()
+        svc_status_init = get_services_status()
+        health_init = compute_health_score(hw_live, alerts_24h_init, svc_status_init)
+    except Exception:
+        alerts_24h_init = {"total": 0}
+        health_init = {"score": 0.0, "color": "red"}
+    color_map = {"green": "#00ff88", "yellow": "#ffaa00", "red": "#ff4444"}
+    alert_24h_total = alerts_24h_init.get("total", 0)
+    alert_24h_color = color_map[alert_color(alert_24h_total)]
+    health_score = health_init["score"]
+    health_color = color_map[health_init["color"]]
 
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
@@ -789,6 +1054,13 @@ def dashboard():
         .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
         .hw-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-value {{ color:#00ff88; font-size:1.4em; font-weight:bold; margin-top:2px; }}
+        .hw-clickable {{ cursor:pointer; transition:background 0.15s; }}
+        .hw-clickable:hover {{ background:#1a2950; outline:1px solid #00d4ff; }}
+        .breakdown-table {{ width:100%; border-collapse:collapse; margin-top:10px; }}
+        .breakdown-table th, .breakdown-table td {{ padding:6px 10px; border-bottom:1px solid #2a3a5a; text-align:left; font-size:0.85em; }}
+        .breakdown-table th {{ color:#00d4ff; background:#0d1117; }}
+        .health-bar {{ height:8px; background:#0d1117; border-radius:4px; overflow:hidden; }}
+        .health-bar-fill {{ height:100%; background:#00ff88; }}
         .hw-modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:900px; width:90%; max-height:90vh; overflow-y:auto; margin:40px auto; position:relative; }}
         .hw-close-x {{ position:sticky; top:0; float:right; background:#16213e; color:#00d4ff; border:1px solid #00d4ff; border-radius:50%; width:32px; height:32px; font-size:1.1em; line-height:1; cursor:pointer; z-index:10; }}
         .hw-close-x:hover {{ background:#ff4444; color:#fff; border-color:#ff4444; }}
@@ -828,25 +1100,45 @@ def dashboard():
             </h2>
             <div class="hw-grid">
                 <div class="hw-stat"><div class="hw-label">CPU Temp</div><div class="hw-value" id="hwCpuTemp">{_fmt(hw_cpu, "°C")}</div></div>
+                <div class="hw-stat"><div class="hw-label">GPU Temp</div><div class="hw-value" id="hwGpuTemp">{_fmt(hw_gpu, "°C")}</div></div>
                 <div class="hw-stat"><div class="hw-label">Ambient</div><div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div></div>
                 <div class="hw-stat"><div class="hw-label">NVMe</div><div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div></div>
                 <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">RAM</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div></div>
+                <div class="hw-stat"><div class="hw-label">GPU Fan</div><div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">Fan 1</div><div class="hw-value" id="hwFan1">{_fmt(hw_f1, " rpm")}</div></div>
                 <div class="hw-stat"><div class="hw-label">Fan 2</div><div class="hw-value" id="hwFan2">{_fmt(hw_f2, " rpm")}</div></div>
                 <div class="hw-stat"><div class="hw-label">Fan 3</div><div class="hw-value" id="hwFan3">{_fmt(hw_f3, " rpm")}</div></div>
+                <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
+                    <div class="hw-label">24h System Alerts</div>
+                    <div class="hw-value" id="hwAlert24h" style="color:{alert_24h_color}">{alert_24h_total}</div>
+                </div>
+                <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openHealthModal()">
+                    <div class="hw-label">System Health</div>
+                    <div class="hw-value" id="hwHealthScore" style="color:{health_color}">{health_score}%</div>
+                </div>
             </div>
         </div>
 
         <div class="card full-width">
             <h2>🔥 AI Firewall — Today's Activity
-                <a href="/firewall-db" style="float:right;color:#00d4ff;font-size:0.85em;text-decoration:none">📋 Alert Database</a>
+                <span style="float:right;font-size:0.8em">
+                    <label style="color:#888;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
+                        <input type="checkbox" id="showP3Toggle" onchange="toggleP3()" style="width:auto;margin-right:5px;vertical-align:middle">
+                        Show P3 (info)
+                    </label>
+                    <a href="/firewall-db" style="color:#00d4ff;text-decoration:none">📋 Alert Database</a>
+                </span>
             </h2>
             <div>
-                <div class="counter-box"><div class="counter-num total" id="cntTotal">{alert_counts["total"]}</div><div>Total</div></div>
+                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div><div>Total</div></div>
                 <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
                 <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div><div>High P2</div></div>
-                <div class="counter-box"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
+                <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
+            </div>
+            <div id="p3Note" style="display:none;color:#aaa;font-size:0.85em;margin-top:8px;padding:10px;background:#0d1117;border-radius:4px;border-left:3px solid #00d4ff">
+                <strong style="color:#00d4ff">ℹ️ P3 alerts are informational only — not an issue.</strong>
+                These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3.
             </div>
             <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
             <table>
@@ -895,8 +1187,33 @@ def dashboard():
             <div class="chart-box"><h4>Fan Speeds (RPM)</h4><canvas id="chartFans" height="120"></canvas></div>
             <div class="chart-box"><h4>CPU & RAM (%)</h4><canvas id="chartUsage" height="120"></canvas></div>
             <div class="chart-box"><h4>Disk &amp; Network (MB / 5 min)</h4><canvas id="chartIo" height="120"></canvas></div>
+            <div class="chart-box"><h4>System Health Score (24h)</h4><canvas id="chartHealth" height="120"></canvas></div>
             <div style="text-align:right">
                 <button class="btn btn-close" onclick="closeHwModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 24h Alert Breakdown Modal -->
+    <div class="modal" id="alertBreakdownModal">
+        <div class="hw-modal-content">
+            <button class="hw-close-x" onclick="closeAlertBreakdownModal()" title="Close (Esc)">✕</button>
+            <h3 style="color:#00d4ff;margin-top:0">🛠️ 24h System Alert Breakdown</h3>
+            <div id="alertBreakdownBody" style="color:#888;font-size:0.9em">Loading…</div>
+            <div style="text-align:right;margin-top:10px">
+                <button class="btn btn-close" onclick="closeAlertBreakdownModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Health Score Breakdown Modal -->
+    <div class="modal" id="healthModal">
+        <div class="hw-modal-content">
+            <button class="hw-close-x" onclick="closeHealthModal()" title="Close (Esc)">✕</button>
+            <h3 style="color:#00d4ff;margin-top:0">💚 System Health Score</h3>
+            <div id="healthModalBody" style="color:#888;font-size:0.9em">Loading…</div>
+            <div style="text-align:right;margin-top:10px">
+                <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -1072,6 +1389,34 @@ def dashboard():
 
         var hwCharts = {{}};
 
+        function isP3Shown() {{
+            var el = document.getElementById("showP3Toggle");
+            return !!(el && el.checked);
+        }}
+
+        function applyP3Visibility(show) {{
+            document.getElementById("p3Box").style.display = show ? "" : "none";
+            document.getElementById("p3Note").style.display = show ? "" : "none";
+            var p1 = parseInt(document.getElementById("cntP1").textContent, 10) || 0;
+            var p2 = parseInt(document.getElementById("cntP2").textContent, 10) || 0;
+            var p3 = parseInt(document.getElementById("cntP3").textContent, 10) || 0;
+            document.getElementById("cntTotal").textContent = show ? (p1 + p2 + p3) : (p1 + p2);
+        }}
+
+        function toggleP3() {{
+            var show = isP3Shown();
+            try {{ localStorage.setItem("showP3", show ? "1" : "0"); }} catch (e) {{}}
+            applyP3Visibility(show);
+        }}
+
+        (function initP3Toggle() {{
+            var stored = null;
+            try {{ stored = localStorage.getItem("showP3"); }} catch (e) {{}}
+            var show = stored === "1";
+            document.getElementById("showP3Toggle").checked = show;
+            applyP3Visibility(show);
+        }})();
+
         function fmtHw(v, suffix) {{
             return (v === null || v === undefined) ? "—" : v + suffix;
         }}
@@ -1079,10 +1424,12 @@ def dashboard():
         function applyHwLive(hw) {{
             if (!hw) return;
             document.getElementById("hwCpuTemp").textContent = fmtHw(hw.cpu_temp, "°C");
+            document.getElementById("hwGpuTemp").textContent = fmtHw(hw.gpu_temp, "°C");
             document.getElementById("hwAmbient").textContent = fmtHw(hw.ambient_temp, "°C");
             document.getElementById("hwNvme").textContent = fmtHw(hw.nvme_temp, "°C");
             document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
             document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
+            document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
             document.getElementById("hwFan1").textContent = fmtHw(hw.fan1_rpm, " rpm");
             document.getElementById("hwFan2").textContent = fmtHw(hw.fan2_rpm, " rpm");
             document.getElementById("hwFan3").textContent = fmtHw(hw.fan3_rpm, " rpm");
@@ -1099,7 +1446,7 @@ def dashboard():
                         return;
                     }}
                     applyHwLive(d.live);
-                    renderHwCharts(d.samples || []);
+                    renderHwCharts(d.samples || [], (d.health_sparkline || {{}}).scores || []);
                     var n = (d.samples || []).length;
                     document.getElementById("hwModalStatus").textContent =
                         n ? n + " samples (5 min each, oldest → newest)"
@@ -1114,13 +1461,105 @@ def dashboard():
             document.getElementById("hwModal").style.display = "none";
         }}
 
+        function colorForCount(n) {{
+            if (n === 0) return "#00ff88";
+            if (n <= 5) return "#ffaa00";
+            return "#ff4444";
+        }}
+
+        function colorForScore(s) {{
+            if (s >= 80) return "#00ff88";
+            if (s >= 50) return "#ffaa00";
+            return "#ff4444";
+        }}
+
+        function openAlertBreakdownModal() {{
+            document.getElementById("alertBreakdownModal").style.display = "block";
+            document.getElementById("alertBreakdownBody").innerHTML = "Loading…";
+            fetch("/api/alert-breakdown-24h", {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(d => {{
+                    var rows = (d.breakdown || []).map(b =>
+                        `<tr><td>${{escapeHtml(b.type)}}</td><td style="text-align:right">${{b.count}}</td></tr>`
+                    ).join("");
+                    if (!rows) rows = `<tr><td colspan=2 style="color:#00ff88">No system alerts in the last 24 hours.</td></tr>`;
+                    var ct = d.thermal_fan || 0, cs = d.service_down || 0;
+                    document.getElementById("alertBreakdownBody").innerHTML = `
+                        <p style="color:#888;font-size:0.85em;margin:0 0 10px 0">Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.</p>
+                        <div style="display:flex;gap:20px;margin:10px 0">
+                            <div><span style="color:#888">Total:</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
+                            <div><span style="color:#888">Thermal/Fan:</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
+                            <div><span style="color:#888">Service down:</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
+                        </div>
+                        <table class="breakdown-table">
+                            <thead><tr><th>Alert type</th><th style="text-align:right">Count</th></tr></thead>
+                            <tbody>${{rows}}</tbody>
+                        </table>
+                    `;
+                }})
+                .catch(e => {{
+                    document.getElementById("alertBreakdownBody").innerHTML = `<p style="color:#ff4444">Error: ${{escapeHtml(e)}}</p>`;
+                }});
+        }}
+
+        function closeAlertBreakdownModal() {{
+            document.getElementById("alertBreakdownModal").style.display = "none";
+        }}
+
+        function openHealthModal() {{
+            document.getElementById("healthModal").style.display = "block";
+            document.getElementById("healthModalBody").innerHTML = "Loading…";
+            fetch("/api/health-score", {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(d => {{
+                    var totalColor = colorForScore(d.score);
+                    var rows = (d.components || []).map(c => {{
+                        var barColor = colorForScore(c.score);
+                        return `<tr>
+                            <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#888;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
+                            <td style="width:100px"><div class="health-bar"><div class="health-bar-fill" style="width:${{c.score}}%;background:${{barColor}}"></div></div><div style="text-align:right;color:#aaa;font-size:0.8em">${{c.score}}%</div></td>
+                            <td style="text-align:right;width:60px">${{c.weight}}%</td>
+                            <td style="text-align:right;width:80px;color:${{barColor}};font-weight:bold">${{c.contribution}}</td>
+                        </tr>`;
+                    }}).join("");
+                    var svcList = (d.services || []).map(s =>
+                        `<span style="color:${{s.active ? '#00ff88' : '#ff4444'}};margin-right:12px">${{s.active ? '●' : '○'}} ${{escapeHtml(s.name)}}</span>`
+                    ).join("");
+                    document.getElementById("healthModalBody").innerHTML = `
+                        <div style="margin:10px 0">
+                            <div style="font-size:0.85em;color:#888">Overall</div>
+                            <div style="font-size:2.5em;font-weight:bold;color:${{totalColor}}">${{d.score}}%</div>
+                        </div>
+                        <table class="breakdown-table">
+                            <thead><tr><th>Component</th><th style="text-align:right">Score</th><th style="text-align:right">Weight</th><th style="text-align:right">Points</th></tr></thead>
+                            <tbody>${{rows}}</tbody>
+                        </table>
+                        <div style="margin-top:15px"><div style="color:#888;font-size:0.85em;margin-bottom:4px">Services</div>${{svcList}}</div>
+                    `;
+                }})
+                .catch(e => {{
+                    document.getElementById("healthModalBody").innerHTML = `<p style="color:#ff4444">Error: ${{escapeHtml(e)}}</p>`;
+                }});
+        }}
+
+        function closeHealthModal() {{
+            document.getElementById("healthModal").style.display = "none";
+        }}
+
         document.addEventListener("keydown", function(e) {{
-            if (e.key === "Escape" && document.getElementById("hwModal").style.display === "block") {{
-                closeHwModal();
-            }}
+            if (e.key !== "Escape") return;
+            if (document.getElementById("hwModal").style.display === "block") closeHwModal();
+            if (document.getElementById("alertBreakdownModal").style.display === "block") closeAlertBreakdownModal();
+            if (document.getElementById("healthModal").style.display === "block") closeHealthModal();
         }});
         document.getElementById("hwModal").addEventListener("click", function(e) {{
             if (e.target.id === "hwModal") closeHwModal();
+        }});
+        document.getElementById("alertBreakdownModal").addEventListener("click", function(e) {{
+            if (e.target.id === "alertBreakdownModal") closeAlertBreakdownModal();
+        }});
+        document.getElementById("healthModal").addEventListener("click", function(e) {{
+            if (e.target.id === "healthModal") closeHealthModal();
         }});
 
         function shortTs(ts) {{
@@ -1156,10 +1595,11 @@ def dashboard():
 
         function pick(samples, key) {{ return samples.map(s => s[key]); }}
 
-        function renderHwCharts(samples) {{
+        function renderHwCharts(samples, healthScores) {{
             var labels = samples.map(s => shortTs(s.timestamp));
             makeChart("chartTemp", labels, [
                 {{label: "CPU",     data: pick(samples, "cpu_temp"),     borderColor: "#ff4444", backgroundColor: "rgba(255,68,68,0.1)"}},
+                {{label: "GPU",     data: pick(samples, "gpu_temp"),     borderColor: "#00ff88", backgroundColor: "rgba(0,255,136,0.1)"}},
                 {{label: "Ambient", data: pick(samples, "ambient_temp"), borderColor: "#ffaa00", backgroundColor: "rgba(255,170,0,0.1)"}},
                 {{label: "NVMe",    data: pick(samples, "nvme_temp"),    borderColor: "#00d4ff", backgroundColor: "rgba(0,212,255,0.1)"}}
             ], "°C");
@@ -1178,6 +1618,12 @@ def dashboard():
                 {{label: "Net In",     data: pick(samples, "net_in_mb"),     borderColor: "#00ff88"}},
                 {{label: "Net Out",    data: pick(samples, "net_out_mb"),    borderColor: "#ffaa00"}}
             ], "MB");
+            makeChart("chartHealth", labels, [
+                {{label: "Health", data: healthScores || [],
+                  borderColor: "#00d4ff",
+                  backgroundColor: "rgba(0,212,255,0.15)",
+                  fill: true}}
+            ], "%");
         }}
 
         var refreshTick = 0;
@@ -1189,10 +1635,10 @@ def dashboard():
                     document.getElementById("phTotal").textContent = d.pihole.total;
                     document.getElementById("phBlocked").textContent = d.pihole.blocked;
                     document.getElementById("phPercent").textContent = d.pihole.percent + "%";
-                    document.getElementById("cntTotal").textContent = d.alert_counts.total;
                     document.getElementById("cntP1").textContent = d.alert_counts.p1;
                     document.getElementById("cntP2").textContent = d.alert_counts.p2;
                     document.getElementById("cntP3").textContent = d.alert_counts.p3;
+                    applyP3Visibility(isP3Shown());
                     var banner = document.getElementById("quarantineBanner");
                     var list = document.getElementById("quarantineList");
                     if (d.quarantines && d.quarantines.length) {{
@@ -1203,6 +1649,16 @@ def dashboard():
                         list.innerHTML = "";
                     }}
                     if (d.hw) applyHwLive(d.hw);
+                    if (d.alert_24h) {{
+                        var ael = document.getElementById("hwAlert24h");
+                        ael.textContent = d.alert_24h.total;
+                        ael.style.color = colorForCount(d.alert_24h.total);
+                    }}
+                    if (d.health) {{
+                        var hel = document.getElementById("hwHealthScore");
+                        hel.textContent = d.health.score + "%";
+                        hel.style.color = colorForScore(d.health.score);
+                    }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
