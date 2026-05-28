@@ -25,6 +25,8 @@
 - Device row borders for readability
 - JavaScript live stats refresh (60s, no page reload)
 - Modal stays open during background refresh
+- Hardware monitoring card (live CPU/ambient/NVMe temps, fan RPMs, CPU%/RAM%)
+- Hardware history modal with Chart.js 24h graphs (temps, fans, CPU/RAM, disk & network IO)
 
 ### Network Intelligence
 - Device scanner (auto-discovery every 5 min)
@@ -35,6 +37,7 @@
 ### System Services
 - Watchdog service with email alerts
 - Alert watcher background service (tails Suricata fast.log in real time)
+- Hardware monitor service (samples sensors + psutil every 5 min into hw_metrics table)
 - Unified Nemesis error log
 - Shared firewall.py module (single source of truth for UFW operations)
 - End-to-end quarantine test suite (59 passing checks)
@@ -75,7 +78,7 @@
 - [ ] Nemesis Firewall logo/branding
 - [ ] Mobile responsive layout
 - [ ] Historical alert graphs
-- [ ] Bandwidth monitoring
+- [x] Bandwidth monitoring (enp131s0 throughput in hw-monitor 24h chart)
 - [ ] VPN status indicator
 - [ ] Service uptime display
 
@@ -123,6 +126,8 @@
 - /etc/systemd/system/dashboard.service
 - /etc/systemd/system/device-scanner.service
 - /etc/systemd/system/watchdog.service
+- /etc/systemd/system/alert-watcher.service
+- /etc/systemd/system/hw-monitor.service
 
 ### Key Paths
 - Dashboard: /home/paul/dashboard/dashboard.py

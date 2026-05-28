@@ -789,7 +789,9 @@ def dashboard():
         .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
         .hw-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-value {{ color:#00ff88; font-size:1.4em; font-weight:bold; margin-top:2px; }}
-        .hw-modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:900px; width:90%; max-height:90vh; overflow-y:auto; margin:40px auto; }}
+        .hw-modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:900px; width:90%; max-height:90vh; overflow-y:auto; margin:40px auto; position:relative; }}
+        .hw-close-x {{ position:sticky; top:0; float:right; background:#16213e; color:#00d4ff; border:1px solid #00d4ff; border-radius:50%; width:32px; height:32px; font-size:1.1em; line-height:1; cursor:pointer; z-index:10; }}
+        .hw-close-x:hover {{ background:#ff4444; color:#fff; border-color:#ff4444; }}
         .chart-box {{ background:#0d1117; border-radius:6px; padding:10px; margin-bottom:12px; }}
         .chart-box h4 {{ color:#00d4ff; margin:0 0 6px 0; font-size:0.9em; }}
     </style>
@@ -886,6 +888,7 @@ def dashboard():
     <!-- Hardware Stats Modal -->
     <div class="modal" id="hwModal">
         <div class="hw-modal-content">
+            <button class="hw-close-x" onclick="closeHwModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0">🌡️ Hardware — last 24 hours</h3>
             <div id="hwModalStatus" style="color:#888;font-size:0.85em">Loading…</div>
             <div class="chart-box"><h4>Temperatures (°C)</h4><canvas id="chartTemp" height="120"></canvas></div>
@@ -1110,6 +1113,15 @@ def dashboard():
         function closeHwModal() {{
             document.getElementById("hwModal").style.display = "none";
         }}
+
+        document.addEventListener("keydown", function(e) {{
+            if (e.key === "Escape" && document.getElementById("hwModal").style.display === "block") {{
+                closeHwModal();
+            }}
+        }});
+        document.getElementById("hwModal").addEventListener("click", function(e) {{
+            if (e.target.id === "hwModal") closeHwModal();
+        }});
 
         function shortTs(ts) {{
             if (!ts) return "";
