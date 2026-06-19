@@ -22,6 +22,8 @@ _alert_counts_cache = {"ts": 0.0, "data": None, "date": None}
 _ALERT_COUNTS_CACHE_TTL = 60.0
 _svc_cache = {"ts": 0.0, "data": None}
 _SVC_CACHE_TTL = 30.0
+_vpn_cache = {"ts": 0.0, "data": None}
+_VPN_CACHE_TTL = 30.0
 
 HEALTH_SERVICES = [
     "pihole-FTL", "clamav-daemon", "suricata",
@@ -489,6 +491,8 @@ def api_stats():
     svc_status = get_services_status()
     health = compute_health_score(hw_live, alerts_24h, svc_status)
     review_queue = get_review_queue()
+    vpn = get_vpn_status()
+    vpn_status_str = vpn.get("status", "Disconnected")
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
@@ -502,6 +506,11 @@ def api_stats():
         "health": {"score": health["score"], "color": health["color"]},
         "review_queue_count": len(review_queue),
         "review_queue_html": render_review_queue_html(review_queue),
+        "vpn": {
+            "provider": vpn.get("provider"),
+            "status": vpn_status_str,
+            "vpn_ip": vpn.get("vpn_ip"),
+        },
     })
 
 
@@ -591,6 +600,123 @@ def get_services_status():
     _svc_cache["data"] = data
     _svc_cache["ts"] = now
     return data
+
+
+_TUNNEL_IFACES = ["tun0", "tun1", "wg0", "wg1", "nordlynx", "proton0"]
+
+def get_vpn_status():
+    now = time.monotonic()
+    if _vpn_cache["data"] and now - _vpn_cache["ts"] < _VPN_CACHE_TTL:
+        return _vpn_cache["data"]
+
+    result = {"provider": None, "status": "Disconnected", "vpn_ip": None, "protocol": None, "server_location": None}
+
+    def _cache(r):
+        _vpn_cache["data"] = r
+        _vpn_cache["ts"] = time.monotonic()
+        return r
+
+    # PIA VPN
+    try:
+        r = subprocess.run(["piactl", "get", "connectionstate"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            state = r.stdout.strip()
+            result["provider"] = "PIA VPN"
+            result["status"] = state.capitalize() if state else "Unknown"
+            if state.lower() == "connected":
+                for flag, cmd in [("vpn_ip", ["piactl", "get", "vpnip"]),
+                                   ("server_location", ["piactl", "get", "region"]),
+                                   ("protocol", ["piactl", "get", "protocol"])]:
+                    try:
+                        cr = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+                        if cr.returncode == 0:
+                            result[flag] = cr.stdout.strip()
+                    except Exception:
+                        pass
+            return _cache(result)
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+
+    # Mullvad
+    try:
+        r = subprocess.run(["mullvad", "status"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            out = r.stdout.strip()
+            result["provider"] = "Mullvad"
+            if "Connected" in out:
+                result["status"] = "Connected"
+                for line in out.splitlines():
+                    if "Tunnel type:" in line:
+                        result["protocol"] = line.split(":", 1)[1].strip()
+                    elif "Location:" in line:
+                        result["server_location"] = line.split(":", 1)[1].strip()
+                    elif "IP:" in line:
+                        result["vpn_ip"] = line.split(":", 1)[1].strip()
+            elif "Connecting" in out:
+                result["status"] = "Connecting"
+            return _cache(result)
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+
+    # ProtonVPN
+    try:
+        r = subprocess.run(["protonvpn-cli", "status"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            out = r.stdout.strip()
+            result["provider"] = "ProtonVPN"
+            if "Connected" in out:
+                result["status"] = "Connected"
+                for line in out.splitlines():
+                    if "IP:" in line:
+                        result["vpn_ip"] = line.split(":", 1)[1].strip()
+                    elif "Server:" in line:
+                        result["server_location"] = line.split(":", 1)[1].strip()
+                    elif "Protocol:" in line:
+                        result["protocol"] = line.split(":", 1)[1].strip()
+            return _cache(result)
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+        pass
+
+    # Fallback: check tunnel interfaces via `ip addr show`
+    try:
+        ip_r = subprocess.run(["ip", "addr", "show"], capture_output=True, text=True, timeout=5)
+        if ip_r.returncode == 0:
+            for iface in _TUNNEL_IFACES:
+                if re.search(rf'^\d+: {re.escape(iface)}:', ip_r.stdout, re.MULTILINE):
+                    vpn_ip = None
+                    for line in ip_r.stdout.splitlines():
+                        if f" {iface} " in line or f" {iface}:" in line:
+                            pass
+                        if "inet " in line:
+                            m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
+                            if m:
+                                vpn_ip = m.group(1)
+                    if iface == "nordlynx":
+                        provider, proto = "NordVPN", "WireGuard"
+                    elif iface.startswith("wg"):
+                        provider, proto = "WireGuard VPN", "WireGuard"
+                    elif iface == "proton0":
+                        provider, proto = "ProtonVPN", "WireGuard"
+                    else:
+                        provider, proto = "Unknown Provider", "OpenVPN"
+                    result.update({"provider": provider, "status": "Connected",
+                                   "vpn_ip": vpn_ip, "protocol": proto,
+                                   "server_location": f"via {iface}"})
+                    return _cache(result)
+    except Exception:
+        pass
+
+    return _cache(result)
+
+
+def get_vpn_split_tunnel_apps():
+    try:
+        r = subprocess.run(["piactl", "get", "splittunnelapps"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            return [a for a in r.stdout.strip().splitlines() if a.strip()]
+    except Exception:
+        pass
+    return []
 
 
 def _temp_score(temp, threshold, healthy_max):
@@ -709,6 +835,42 @@ def api_hw_metrics():
         })
     except Exception as e:
         log.exception("api_hw_metrics failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/vpn-status")
+def api_vpn_status():
+    vpn = get_vpn_status()
+    split_tunnel = []
+    if vpn.get("provider") and "pia" in vpn["provider"].lower():
+        split_tunnel = get_vpn_split_tunnel_apps()
+    return jsonify({**vpn, "split_tunnel_apps": split_tunnel})
+
+
+@app.route("/api/vpn/<action>")
+def api_vpn_action(action):
+    if action not in ("connect", "disconnect"):
+        return jsonify({"error": "invalid action"}), 400
+    vpn = get_vpn_status()
+    provider = (vpn.get("provider") or "").lower()
+    try:
+        if "pia" in provider:
+            cmd = ["piactl", action]
+        elif "mullvad" in provider:
+            cmd = ["mullvad", action]
+        elif "proton" in provider:
+            cmd = ["protonvpn-cli", "c" if action == "connect" else "disconnect"]
+        else:
+            return jsonify({"error": "No supported VPN CLI detected"}), 400
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        _vpn_cache["ts"] = 0.0
+        _vpn_cache["data"] = None
+        if r.returncode == 0:
+            return jsonify({"success": True, "output": r.stdout.strip()})
+        return jsonify({"error": r.stderr.strip() or "Command failed"})
+    except FileNotFoundError:
+        return jsonify({"error": "VPN CLI not found"}), 500
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -1060,6 +1222,13 @@ def dashboard():
     health_score = health_init["score"]
     health_color = color_map[health_init["color"]]
 
+    vpn = get_vpn_status()
+    vpn_status_str = vpn.get("status", "Disconnected")
+    vpn_provider = vpn.get("provider") or "VPN"
+    _vpn_color_map = {"connected": "#00ff88", "connecting": "#ffaa00", "reconnecting": "#ffaa00"}
+    vpn_color = _vpn_color_map.get(vpn_status_str.lower(), "#ff4444")
+    vpn_label = f"{vpn_provider} — {vpn_status_str}" if vpn.get("provider") else f"VPN — {vpn_status_str}"
+
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
     review_queue = get_review_queue()
@@ -1159,6 +1328,9 @@ def dashboard():
         <div class="card">
             <h2>System Status</h2>
             <p>ClamAV: <span class="{"running" if clamav_status == "Running" else "stopped"}">{clamav_status}</span></p>
+            <p>VPN: <span id="vpnStatusText" onclick="openVpnModal()"
+                style="color:{vpn_color};cursor:pointer;text-decoration:underline dotted"
+                title="Click for details">{html.escape(vpn_label)}</span></p>
             <p style="font-size:0.8em">CPU: {system_status.get("cpu", "N/A")}</p>
             <p style="font-size:0.8em">Memory: {system_status.get("memory", "N/A")}</p>
             <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>
@@ -1301,6 +1473,19 @@ def dashboard():
             <div id="healthModalBody" style="color:#888;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- VPN Status Modal -->
+    <div class="modal" id="vpnModal" onclick="if(event.target.id==='vpnModal')closeVpnModal()">
+        <div class="modal-content">
+            <h3>🔒 VPN Status</h3>
+            <div id="vpnModalContent" style="min-height:80px">Loading…</div>
+            <div style="margin-top:15px" id="vpnModalActions">
+                <button class="btn btn-monitor" onclick="vpnAction('connect')">🔄 Reconnect</button>
+                <button class="btn btn-ignore" onclick="vpnAction('disconnect')">⏹ Disconnect</button>
+                <button class="btn btn-close" onclick="closeVpnModal()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -1633,11 +1818,78 @@ def dashboard():
             document.getElementById("healthModal").style.display = "none";
         }}
 
+        function vpnStatusColor(status) {{
+            if (!status) return "#ff4444";
+            var s = status.toLowerCase();
+            if (s === "connected") return "#00ff88";
+            if (s === "connecting" || s === "reconnecting") return "#ffaa00";
+            return "#ff4444";
+        }}
+
+        function openVpnModal() {{
+            document.getElementById("vpnModal").style.display = "block";
+            document.getElementById("vpnModalContent").innerHTML = "Loading…";
+            document.getElementById("vpnModalActions").style.display = "block";
+            fetch("/api/vpn-status", {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(d => {{
+                    var color = vpnStatusColor(d.status);
+                    var html = `
+                        <p><strong>Provider:</strong> ${{escapeHtml(d.provider || "Unknown")}}</p>
+                        <p><strong>Status:</strong> <span style="color:${{color}};font-weight:bold">${{escapeHtml(d.status || "Unknown")}}</span></p>
+                        <p><strong>VPN IP:</strong> ${{escapeHtml(d.vpn_ip || "—")}}</p>
+                        <p><strong>Server / Location:</strong> ${{escapeHtml(d.server_location || "—")}}</p>
+                        <p><strong>Protocol:</strong> ${{escapeHtml(d.protocol || "—")}}</p>
+                    `;
+                    if (d.split_tunnel_apps && d.split_tunnel_apps.length) {{
+                        html += `<p style="margin-bottom:2px"><strong>Split Tunnel Apps:</strong></p><ul style="font-size:0.85em;color:#aaa;margin:4px 0 0 18px">`;
+                        d.split_tunnel_apps.forEach(function(app) {{ html += `<li>${{escapeHtml(app)}}</li>`; }});
+                        html += `</ul>`;
+                    }} else if (d.provider && d.provider.toLowerCase().includes("pia")) {{
+                        html += `<p style="color:#888;font-size:0.85em">Split tunnel: none configured</p>`;
+                    }}
+                    document.getElementById("vpnModalContent").innerHTML = html;
+                    // Hide action buttons if no supported CLI
+                    if (!d.provider) {{
+                        document.getElementById("vpnModalActions").style.display = "none";
+                    }}
+                }})
+                .catch(function(e) {{
+                    document.getElementById("vpnModalContent").innerHTML = `<p style="color:#ff4444">Error: ${{escapeHtml(String(e))}}</p>`;
+                }});
+        }}
+
+        function closeVpnModal() {{
+            document.getElementById("vpnModal").style.display = "none";
+        }}
+
+        function vpnAction(action) {{
+            var btn = event.target;
+            btn.disabled = true;
+            btn.textContent = action === "connect" ? "Connecting…" : "Disconnecting…";
+            fetch("/api/vpn/" + action, {{cache: "no-store"}})
+                .then(r => r.json())
+                .then(function(d) {{
+                    if (d.error) {{
+                        alert("VPN error: " + d.error);
+                        btn.disabled = false;
+                        btn.textContent = action === "connect" ? "🔄 Reconnect" : "⏹ Disconnect";
+                    }} else {{
+                        setTimeout(openVpnModal, 2500);
+                    }}
+                }})
+                .catch(function(e) {{
+                    alert("Error: " + e);
+                    btn.disabled = false;
+                }});
+        }}
+
         document.addEventListener("keydown", function(e) {{
             if (e.key !== "Escape") return;
             if (document.getElementById("hwModal").style.display === "block") closeHwModal();
             if (document.getElementById("alertBreakdownModal").style.display === "block") closeAlertBreakdownModal();
             if (document.getElementById("healthModal").style.display === "block") closeHealthModal();
+            if (document.getElementById("vpnModal").style.display === "block") closeVpnModal();
         }});
         document.getElementById("hwModal").addEventListener("click", function(e) {{
             if (e.target.id === "hwModal") closeHwModal();
@@ -1748,6 +2000,14 @@ def dashboard():
                     }}
                     if (d.review_queue_count !== undefined) {{
                         document.getElementById("cntReviewQueue").textContent = d.review_queue_count;
+                    }}
+                    if (d.vpn) {{
+                        var vpnEl = document.getElementById("vpnStatusText");
+                        var vpnLabel = d.vpn.provider
+                            ? d.vpn.provider + " — " + d.vpn.status
+                            : "VPN — " + d.vpn.status;
+                        vpnEl.textContent = vpnLabel;
+                        vpnEl.style.color = vpnStatusColor(d.vpn.status);
                     }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{
