@@ -28,6 +28,10 @@
 - Hardware monitoring card (live CPU/ambient/NVMe temps, fan RPMs, CPU%/RAM%)
 - Hardware history modal with Chart.js 24h graphs (temps, fans, CPU/RAM, disk & network IO)
 - Hardware modal sticky close button + Esc / backdrop-click to dismiss (no page reload)
+- HIGH risk Review Queue section with orange/amber styling and counter tile
+- nginx reverse proxy with HTTP basic auth on port 80 (Flask stays on 5000)
+- Pi-hole moved to port 8080 (port 80 freed for nginx)
+- Claude Code switched to claude.ai Pro subscription billing
 
 ### Network Intelligence
 - Device scanner (auto-discovery every 5 min)
@@ -115,11 +119,12 @@
 ### Current Stack
 | Component | Tool | Port |
 |---|---|---|
-| DNS Protection | Pi-hole | 53, 80 |
+| DNS Protection | Pi-hole | 53, 8080 |
+| Reverse Proxy + Auth | nginx | 80 |
 | Antivirus | ClamAV | - |
 | Network IDS | Suricata | - |
 | Brute Force Protection | Fail2ban | - |
-| Dashboard | Flask | 5000 |
+| Dashboard | Flask | 5000 (proxied via nginx) |
 | Device Scanner | Python service | - |
 | Watchdog | Python service | - |
 | Database | SQLite | - |
