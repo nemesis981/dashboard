@@ -196,6 +196,34 @@ def get_active_alerts():
         log.exception("get_active_alerts failed: %s", e)
         return []
 
+def get_review_queue():
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("""
+            SELECT rule_id, rule_name, classification, times_seen, last_seen, src_ip
+            FROM alerts
+            WHERE risk_level = 'HIGH' AND action = 'pending'
+            ORDER BY last_seen DESC
+            LIMIT 20
+        """)
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "rule_id": r[0] or "",
+                "rule_name": r[1] or "",
+                "classification": r[2] or "",
+                "times_seen": r[3] or 1,
+                "last_seen": r[4] or "",
+                "src_ip": r[5] or "",
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.exception("get_review_queue failed: %s", e)
+        return []
+
 def get_device_name(mac, ip):
     try:
         conn = sqlite3.connect(DB_PATH)
@@ -390,6 +418,28 @@ def render_alerts_html(active_alerts):
         </tr>""")
     return "".join(parts)
 
+def render_review_queue_html(items):
+    if not items:
+        return "<tr><td colspan=6 style='color:#00ff88;padding:10px'>✓ Review queue is clear — no HIGH risk alerts pending</td></tr>"
+    parts = []
+    for item in items:
+        ts = item["last_seen"][:16].replace("T", " ") if item["last_seen"] else "—"
+        rule_name = item["rule_name"][:50] if item["rule_name"] else "Unknown"
+        classification = item["classification"][:35] if item["classification"] else "—"
+        src_ip = item["src_ip"] or "—"
+        onclick = html.escape(f"viewAlert({json.dumps(str(item['rule_id']))}, {json.dumps('')})")
+        parts.append(f"""<tr>
+            <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(ts)}</td>
+            <td style="font-size:0.8em">{html.escape(rule_name)}</td>
+            <td style="font-size:0.8em">{html.escape(src_ip)}</td>
+            <td style="font-size:0.8em;color:#aaa">{html.escape(classification)}</td>
+            <td style="font-size:0.8em;text-align:center">{html.escape(str(item['times_seen']))}</td>
+            <td><button onclick="{onclick}"
+                style="background:#ff8800;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px;font-weight:bold">
+                View</button></td>
+        </tr>""")
+    return "".join(parts)
+
 def render_devices_html(devices):
     parts = []
     for d in devices:
@@ -438,6 +488,7 @@ def api_stats():
     alerts_24h = get_24h_alert_stats()
     svc_status = get_services_status()
     health = compute_health_score(hw_live, alerts_24h, svc_status)
+    review_queue = get_review_queue()
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
@@ -449,6 +500,8 @@ def api_stats():
         "hw": hw_live,
         "alert_24h": {"total": alerts_24h["total"], "color": alert_color(alerts_24h["total"])},
         "health": {"score": health["score"], "color": health["color"]},
+        "review_queue_count": len(review_queue),
+        "review_queue_html": render_review_queue_html(review_queue),
     })
 
 
@@ -659,6 +712,12 @@ def api_hw_metrics():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/review-queue")
+def api_review_queue():
+    items = get_review_queue()
+    return jsonify({"count": len(items), "html": render_review_queue_html(items)})
+
+
 @app.route("/api/quarantines")
 def api_quarantines():
     return jsonify({"quarantines": get_active_quarantines()})
@@ -745,6 +804,14 @@ def analyze_alert(rule_id):
         c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
         existing = c.fetchone()
         if existing and existing[4]:
+            # Fall back to DB-stored src_ip when raw alert had no parseable IP
+            if not src_ip and len(existing) > 11 and existing[11]:
+                src_ip = existing[11]
+                if enrichment is None:
+                    try:
+                        enrichment = enrich_ip(src_ip)
+                    except Exception:
+                        enrichment = None
             conn.close()
             return jsonify({
                 "explanation": existing[4],
@@ -995,6 +1062,9 @@ def dashboard():
 
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
+    review_queue = get_review_queue()
+    review_queue_html = render_review_queue_html(review_queue)
+    review_queue_count = len(review_queue)
     quarantines = get_active_quarantines()
     quarantine_banner_html = render_quarantine_banner_html(quarantines)
     quarantine_banner_display = "block" if quarantines else "none"
@@ -1135,10 +1205,27 @@ def dashboard():
                 <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
                 <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div><div>High P2</div></div>
                 <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
+                <div class="counter-box"><div class="counter-num" id="cntReviewQueue" style="color:#ff8800">{review_queue_count}</div><div style="color:#ff8800">Review Queue</div></div>
             </div>
             <div id="p3Note" style="display:none;color:#aaa;font-size:0.85em;margin-top:8px;padding:10px;background:#0d1117;border-radius:4px;border-left:3px solid #00d4ff">
                 <strong style="color:#00d4ff">ℹ️ P3 alerts are informational only — not an issue.</strong>
                 These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3.
+            </div>
+            <div style="margin-top:15px;background:#1a0d00;border:1px solid #ff8800;border-radius:8px;padding:12px">
+                <h3 style="color:#ff8800;margin:0 0 10px 0;font-size:1em">🔎 Review Queue — HIGH Risk Pending</h3>
+                <table>
+                    <thead><tr>
+                        <th style="color:#ff8800">Time</th>
+                        <th style="color:#ff8800">Rule</th>
+                        <th style="color:#ff8800">Source IP</th>
+                        <th style="color:#ff8800">Classification</th>
+                        <th style="color:#ff8800;text-align:center">Seen</th>
+                        <th style="color:#ff8800">Action</th>
+                    </tr></thead>
+                    <tbody id="reviewQueueRows">
+                    {review_queue_html}
+                    </tbody>
+                </table>
             </div>
             <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
             <table>
@@ -1659,10 +1746,14 @@ def dashboard():
                         hel.textContent = d.health.score + "%";
                         hel.style.color = colorForScore(d.health.score);
                     }}
+                    if (d.review_queue_count !== undefined) {{
+                        document.getElementById("cntReviewQueue").textContent = d.review_queue_count;
+                    }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
                         document.getElementById("devicesRows").innerHTML = d.devices_html;
+                        document.getElementById("reviewQueueRows").innerHTML = d.review_queue_html;
                     }}
                 }})
                 .catch(e => console.error("refresh failed", e));
