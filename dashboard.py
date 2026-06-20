@@ -1233,6 +1233,13 @@ def dashboard():
     hw_gpu_fan = hw_live.get("gpu_fan_percent")
     hw_cpu_pct = hw_live.get("cpu_percent")
     hw_ram_pct = hw_live.get("ram_percent")
+    hw_ram_used_gb = hw_live.get("ram_used_gb")
+    hw_ram_total_gb = hw_live.get("ram_total_gb")
+    hw_ram_free_gb = (
+        round(hw_ram_total_gb - hw_ram_used_gb, 1)
+        if hw_ram_total_gb is not None and hw_ram_used_gb is not None
+        else None
+    )
     hw_fans_js = json.dumps(hw_fans)
     hw_cpu_pct_js = "null" if hw_cpu_pct is None else str(hw_cpu_pct)
     fan_status_js = json.dumps(hw_live.get("fan_status", {}))
@@ -1413,7 +1420,7 @@ def dashboard():
                 <div class="hw-stat"><div class="hw-label">Ambient</div><div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div></div>
                 <div class="hw-stat"><div class="hw-label">NVMe</div><div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div></div>
                 <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
-                <div class="hw-stat"><div class="hw-label">RAM</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div></div>
+                <div class="hw-stat"><div class="hw-label">RAM Used</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div><div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div></div>
                 <div class="hw-stat"><div class="hw-label">GPU Fan</div><div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div></div>
                 <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
                     <div class="hw-label">24h System Alerts</div>
@@ -1948,6 +1955,13 @@ def dashboard():
             document.getElementById("hwNvme").textContent = fmtHw(hw.nvme_temp, "°C");
             document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
             document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
+            var ramFreeEl = document.getElementById("hwRamFree");
+            if (ramFreeEl) {{
+                var freeGb = (hw.ram_total_gb != null && hw.ram_used_gb != null)
+                    ? Math.round((hw.ram_total_gb - hw.ram_used_gb) * 10) / 10
+                    : null;
+                ramFreeEl.textContent = freeGb != null ? freeGb + " GB free" : "";
+            }}
             document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
             renderFanSection(hw.fans, hw.cpu_percent, hw.fan_status);
         }}
