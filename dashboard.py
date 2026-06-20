@@ -1345,8 +1345,8 @@ def firewall_db():
             aid = int(a[0])
             rule_id_raw = str(a[1] or "")
             rule_id = html.escape(rule_id_raw)
-            rule_name = html.escape((a[2] or "")[:40])
-            risk_level = html.escape(str(a[5] or ""))
+            rule_name = html.escape((a[3] or a[2] or "")[:50])
+            risk_level = html.escape(str(a[6] or ""))
             action_val = html.escape(str(a[7] or ""))
             times_seen = html.escape(str(a[8] or ""))
             last_seen = html.escape(str(a[10] or ""))
@@ -1376,7 +1376,7 @@ def firewall_db():
             rows += f"""<tr style="{row_style}">
                 <td style="color:#888">{rule_id}</td>
                 <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" style="cursor:help" title="{tip_m}">{rule_name}</td>
-                <td style="color:{'#00ff88' if a[5]=='LOW' else '#ffaa00' if a[5]=='MEDIUM' else '#ff4444'}">{risk_level}</td>
+                <td style="color:{'#00ff88' if a[6]=='LOW' else '#ffaa00' if a[6]=='MEDIUM' else '#ff4444'}">{risk_level}</td>
                 <td style="{action_color}">{action_val}</td>
                 <td style="color:#aaa;text-align:right">{times_seen}</td>
                 <td style="color:#aaa">{last_seen}</td>
@@ -1428,7 +1428,7 @@ def firewall_db():
 </head>
 <body>
     <h1>🛡️ Nemesis - Alert Database</h1>
-    <p><a href="/">← Back to Dashboard</a></p>
+    <p><a href="javascript:window.close()" style="color:#888">✕ Close this tab</a></p>
     <p style="background:#0d1117;border-left:3px solid #00d4ff;padding:10px 14px;font-size:0.85em;color:#aaa;border-radius:0 4px 4px 0;margin-bottom:16px">
         ℹ️ <strong style="color:#00d4ff">This database shows P1/P2 alerts that required review or action.</strong>
         Routine informational (P3) traffic — DNS lookups, ET POLICY notices, protocol scans — is not individually logged here,
@@ -1633,7 +1633,7 @@ def dashboard():
     <script src="/static/tier.js"></script>
 </head>
 <body>
-    <h1>🛡️ Nemesis Firewall <a href="/settings" style="float:right;font-size:0.45em;color:#888;text-decoration:none;font-weight:normal;margin-top:8px" title="Settings">⚙️ Settings</a></h1>
+    <h1>🛡️ Nemesis Firewall <a href="/settings" target="_blank" rel="noopener" style="float:right;font-size:0.45em;color:#888;text-decoration:none;font-weight:normal;margin-top:8px" title="Settings">⚙️ Settings</a></h1>
     <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
@@ -1730,7 +1730,7 @@ def dashboard():
                               data-intermediate="Show P3 (info)"
                               data-pro="P3">Show P3 (info)</span>
                     </label>
-                    <a href="/firewall-db" style="color:#00d4ff;text-decoration:none">📋 Alert Database</a>
+                    <a href="/firewall-db" target="_blank" rel="noopener" style="color:#00d4ff;text-decoration:none">📋 Alert Database</a>
                 </span>
             </h2>
             <div>
