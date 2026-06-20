@@ -1180,6 +1180,11 @@ def firewall_db():
 <body>
     <h1>🛡️ Nemesis - Alert Database</h1>
     <p><a href="/">← Back to Dashboard</a></p>
+    <p style="background:#0d1117;border-left:3px solid #00d4ff;padding:10px 14px;font-size:0.85em;color:#aaa;border-radius:0 4px 4px 0;margin-bottom:16px">
+        ℹ️ <strong style="color:#00d4ff">This database shows P1/P2 alerts that required review or action.</strong>
+        Routine informational (P3) traffic — DNS lookups, ET POLICY notices, protocol scans — is not individually logged here,
+        but is counted in the dashboard's Total and can be inspected in Suricata's fast.log directly.
+    </p>
     <table>
         <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Action</th><th>Times Seen</th><th>Last Seen</th><th>Change</th></tr>
         {rows}
@@ -1211,9 +1216,7 @@ def dashboard():
     clamav_status = get_clamav_status()
     system_status = get_system_status()
     alert_counts = get_alert_counts()
-    # Server-rendered default: P3 hidden (Total = P1 + P2). JS adjusts on load
-    # if the user has previously toggled "Show P3" via localStorage.
-    initial_total = alert_counts["p1"] + alert_counts["p2"]
+    initial_total = alert_counts["total"]
     pihole = get_pihole_summary()
     total = pihole["total"]
     blocked = pihole["blocked"]
@@ -1446,7 +1449,7 @@ def dashboard():
                 </span>
             </h2>
             <div>
-                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div><div>Total</div></div>
+                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div><div>Total</div><div style="color:#555;font-size:0.65em;margin-top:2px">incl. P3 info</div></div>
                 <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
                 <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div><div>High P2</div></div>
                 <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
@@ -1754,10 +1757,6 @@ def dashboard():
         function applyP3Visibility(show) {{
             document.getElementById("p3Box").style.display = show ? "" : "none";
             document.getElementById("p3Note").style.display = show ? "" : "none";
-            var p1 = parseInt(document.getElementById("cntP1").textContent, 10) || 0;
-            var p2 = parseInt(document.getElementById("cntP2").textContent, 10) || 0;
-            var p3 = parseInt(document.getElementById("cntP3").textContent, 10) || 0;
-            document.getElementById("cntTotal").textContent = show ? (p1 + p2 + p3) : (p1 + p2);
         }}
 
         function toggleP3() {{
@@ -2250,6 +2249,7 @@ def dashboard():
                     document.getElementById("phTotal").textContent = d.pihole.total;
                     document.getElementById("phBlocked").textContent = d.pihole.blocked;
                     document.getElementById("phPercent").textContent = d.pihole.percent + "%";
+                    document.getElementById("cntTotal").textContent = d.alert_counts.total;
                     document.getElementById("cntP1").textContent = d.alert_counts.p1;
                     document.getElementById("cntP2").textContent = d.alert_counts.p2;
                     document.getElementById("cntP3").textContent = d.alert_counts.p3;
