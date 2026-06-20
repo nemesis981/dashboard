@@ -730,13 +730,27 @@ def _temp_score(temp, threshold, healthy_max):
     return 100.0 * (threshold - temp) / (threshold - healthy_max)
 
 
-def _fan_score(sample):
-    """100% when all configured fans spin > 200 RPM; scaled proportionally. 100% if none configured."""
+def _fan_score(sample, fan_status=None):
+    """100% when all ever-active fans spin > 200 RPM; 100% if none are tracked.
+
+    fan_status: {unique_key: {"ever_active": bool, ...}} from get_fan_status().
+    When provided, fans whose unique_key has ever_active=False are excluded so
+    empty motherboard headers at 0 RPM don't penalise the health score.
+    Fans missing from fan_status default to included (safe fallback for old
+    historical samples that don't carry a unique_key field).
+    """
     fans = sample.get("fans", [])
     if not fans:
         return 100.0
-    spinning = sum(1 for f in fans if f.get("rpm") and f["rpm"] > 200)
-    return 100.0 * spinning / len(fans)
+    if fan_status:
+        relevant = [f for f in fans
+                    if fan_status.get(f.get("unique_key"), {}).get("ever_active", True)]
+    else:
+        relevant = fans
+    if not relevant:
+        return 100.0
+    spinning = sum(1 for f in relevant if f.get("rpm") and f["rpm"] > 200)
+    return 100.0 * spinning / len(relevant)
 
 
 def _alert_score(total):
@@ -765,16 +779,19 @@ def compute_health_score(hw_live, alerts_24h, svc_status):
     gpu_t = hw.get("gpu_temp")
     cpu_score = _temp_score(cpu_t, 85, 70)
     gpu_score = _temp_score(gpu_t, 85, 75)
+    fan_status = hw.get("fan_status", {})
     fans_list = hw.get("fans", [])
-    fan_score = _fan_score(hw)
+    fan_score = _fan_score(hw, fan_status)
     svc_active = svc_status.get("active", 0)
     svc_total = max(1, svc_status.get("total", 1))
     svc_score = 100.0 * svc_active / svc_total
     alert_total = alerts_24h.get("total", 0)
     alrt_score = _alert_score(alert_total)
-    spinning = sum(1 for f in fans_list if f.get("rpm") and f["rpm"] > 200)
-    fan_detail = (f"{spinning}/{len(fans_list)} fans above 200 RPM"
-                  if fans_list else "no fans configured")
+    relevant_fans = [f for f in fans_list
+                     if fan_status.get(f.get("unique_key"), {}).get("ever_active", True)]
+    spinning = sum(1 for f in relevant_fans if f.get("rpm") and f["rpm"] > 200)
+    fan_detail = (f"{spinning}/{len(relevant_fans)} tracked fans above 200 RPM"
+                  if relevant_fans else "no fans tracked")
 
     components = [
         {"name": "CPU temperature", "weight": 25, "score": round(cpu_score, 1),
@@ -799,13 +816,13 @@ def compute_health_score(hw_live, alerts_24h, svc_status):
     }
 
 
-def compute_health_sparkline(samples):
+def compute_health_sparkline(samples, fan_status=None):
     """Per-sample simplified score (CPU 40, GPU 40, fans 20) for the trend line."""
     out = []
     for s in samples:
         cpu = _temp_score(s.get("cpu_temp"), 85, 70)
         gpu = _temp_score(s.get("gpu_temp"), 85, 75)
-        fans = _fan_score(s)
+        fans = _fan_score(s, fan_status)
         out.append(round(cpu * 0.4 + gpu * 0.4 + fans * 0.2, 1))
     return out
 
@@ -828,12 +845,13 @@ def api_health_score():
 def api_hw_metrics():
     try:
         samples = hw_monitor.get_recent_samples(288)
+        fan_status = hw_monitor.get_fan_status()
         return jsonify({
             "live": hw_monitor.get_live_metrics(),
             "samples": samples,
             "health_sparkline": {
                 "labels": [s.get("timestamp") for s in samples],
-                "scores": compute_health_sparkline(samples),
+                "scores": compute_health_sparkline(samples, fan_status),
             },
         })
     except Exception as e:
@@ -1310,8 +1328,10 @@ def dashboard():
         .chart-box {{ background:#0d1117; border-radius:6px; padding:10px; margin-bottom:12px; }}
         .chart-box h4 {{ color:#00d4ff; margin:0 0 6px 0; font-size:0.9em; }}
         .fan-section {{ margin-top:10px; border-top:1px solid #1e2d4e; padding-top:6px; }}
-        .fan-summary {{ display:flex; align-items:center; cursor:pointer; padding:6px 4px; border-radius:4px; user-select:none; gap:8px; }}
+        .fan-summary {{ display:flex; align-items:center; cursor:pointer; padding:6px 4px; border-radius:4px; user-select:none; gap:8px; border:1px solid transparent; }}
         .fan-summary:hover {{ background:rgba(0,212,255,0.06); }}
+        .fan-summary.fan-alert {{ background:rgba(255,68,68,0.12); border-color:rgba(255,68,68,0.5); }}
+        .fan-summary.fan-alert:hover {{ background:rgba(255,68,68,0.18); }}
         .fan-toggle {{ color:#00d4ff; font-size:0.75em; display:inline-block; width:10px; flex-shrink:0; }}
         .fan-dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; }}
         .fan-summary-text {{ color:#ccc; font-size:0.85em; }}
@@ -1375,7 +1395,7 @@ def dashboard():
                 </div>
             </div>
             <div class="fan-section" onclick="event.stopPropagation()">
-                <div class="fan-summary" onclick="toggleFanSection()">
+                <div class="fan-summary" id="fanSummaryRow" onclick="toggleFanSection()">
                     <span class="fan-toggle" id="fanToggleIcon">▶</span>
                     <span class="fan-dot" id="fanStatusDot" style="background:#444"></span>
                     <span class="fan-summary-text" id="fanSummaryText">Fans: loading…</span>
@@ -1762,18 +1782,32 @@ def dashboard():
             }});
             var grid = document.getElementById("fanDetailGrid");
             if (grid) grid.innerHTML = tiles.join("");
-            var parts = [];
-            if (nActive  > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
-            if (nIdle    > 0) parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
-            if (nConcern > 0) parts.push('<span style="color:#ff4444;font-weight:bold">' + nConcern + ' stopped!</span>');
+
+            var visibleCount = nActive + nIdle + nConcern;
             var hiddenNote = nHidden > 0
                 ? ' <span style="color:#333;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
                 : '';
-            var visibleCount = nActive + nIdle + nConcern;
             var el = document.getElementById("fanSummaryText");
-            if (el) el.innerHTML = 'Fans (' + visibleCount + '):&ensp;' +
-                (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>') +
-                hiddenNote;
+            var summaryRow = document.getElementById("fanSummaryRow");
+
+            if (nConcern > 0) {{
+                // Alert state: row background turns red, text changes to urgent message
+                if (summaryRow) summaryRow.classList.add("fan-alert");
+                if (el) el.innerHTML =
+                    '<span style="color:#ff4444;font-weight:bold">&#9888; ' + nConcern +
+                    ' fan' + (nConcern > 1 ? 's' : '') + ' stopped under load</span>' +
+                    ' <span style="color:#ff9999">— click to expand</span>' + hiddenNote;
+            }} else {{
+                // Normal state
+                if (summaryRow) summaryRow.classList.remove("fan-alert");
+                var parts = [];
+                if (nActive > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
+                if (nIdle   > 0) parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
+                if (el) el.innerHTML = 'Fans (' + visibleCount + '):&ensp;' +
+                    (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>') +
+                    hiddenNote;
+            }}
+
             var dot = document.getElementById("fanStatusDot");
             if (dot) dot.style.background = nConcern > 0 ? "#ff4444"
                 : nActive > 0 ? "#00ff88"
