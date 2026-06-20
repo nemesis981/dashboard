@@ -37,55 +37,84 @@ CLAUDE_URL   = "https://api.anthropic.com/v1/messages"
 
 # ── Sensor I/O ────────────────────────────────────────────────────────────────
 
+def _parse_sensors_u(text):
+    """
+    Parse 'sensors -u' plain-text output into:
+      {adapter_name: {unique_key: {"label": str, "value": float}}}
+
+    unique_key is the lm-sensors internal key, e.g. "fan10_input" or
+    "temp2_input".  Unlike 'sensors -j', duplicate human-readable labels
+    (e.g. multiple "Chassis Motherboard Fan" entries) are all preserved here
+    because each maps to a distinct unique_key.
+    """
+    result = {}
+    current_adapter = None
+    current_label   = None
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        n_spaces = len(line) - len(line.lstrip())
+        stripped  = line.strip()
+
+        if n_spaces == 0:
+            if stripped.startswith("Adapter:"):
+                continue
+            if stripped.endswith(":"):
+                current_label = stripped[:-1]
+            else:
+                current_adapter = stripped
+                current_label   = None
+                if current_adapter not in result:
+                    result[current_adapter] = {}
+        elif n_spaces >= 2 and current_adapter and current_label:
+            if ":" in stripped:
+                key, _, val_str = stripped.partition(":")
+                key = key.strip()
+                if key.endswith("_input"):
+                    try:
+                        result[current_adapter][key] = {
+                            "label": current_label,
+                            "value": float(val_str.strip()),
+                        }
+                    except ValueError:
+                        pass
+
+    return result
+
+
 def run_sensors():
-    """Return parsed sensors -j dict, or exit with a helpful message."""
+    """Run 'sensors -u', parse, and return structured dict. Exits on failure."""
     try:
         result = subprocess.run(
-            ["sensors", "-j"], capture_output=True, text=True, timeout=5
+            ["sensors", "-u"], capture_output=True, text=True, timeout=5
         )
-        text = result.stdout
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            cleaned = text.replace(",\n  }", "\n  }").replace(",\n}", "\n}")
-            return json.loads(cleaned)
+        return _parse_sensors_u(result.stdout)
     except FileNotFoundError:
         print(f"\n{R}Error: 'sensors' not found.{X}")
         print("  Install:  sudo apt install lm-sensors")
         print("  Detect:   sudo sensors-detect")
         sys.exit(1)
     except Exception as e:
-        print(f"\n{R}Error running 'sensors -j': {e}{X}")
+        print(f"\n{R}Error running 'sensors -u': {e}{X}")
         sys.exit(1)
 
 
-def extract_sensors(s):
+def extract_sensors(parsed):
     """
-    Parse a sensors dict into two ordered lists (preserving adapter order):
-      temp_sensors : [(adapter, label, float_celsius), ...]
-      fan_sensors  : [(adapter, label, int_rpm),       ...]
+    Categorise parsed sensor data into two ordered lists:
+      temp_sensors : [(adapter, unique_key, label, float_celsius), ...]
+      fan_sensors  : [(adapter, unique_key, label, int_rpm),       ...]
     """
     temps, fans = [], []
-    for adapter, adapter_data in s.items():
-        if not isinstance(adapter_data, dict):
-            continue
-        for label, sensor_data in adapter_data.items():
-            if not isinstance(sensor_data, dict):
-                continue
-            for k, v in sensor_data.items():
-                if "temp" in k and k.endswith("_input"):
-                    try:
-                        temps.append((adapter, label, float(v)))
-                    except (TypeError, ValueError):
-                        pass
-                    break
-            for k, v in sensor_data.items():
-                if "fan" in k and k.endswith("_input"):
-                    try:
-                        fans.append((adapter, label, int(float(v))))
-                    except (TypeError, ValueError):
-                        pass
-                    break
+    for adapter, readings in parsed.items():
+        for ukey, info in readings.items():
+            label = info["label"]
+            value = info["value"]
+            if ukey.startswith("temp"):
+                temps.append((adapter, ukey, label, float(value)))
+            elif ukey.startswith("fan"):
+                fans.append((adapter, ukey, label, int(float(value))))
     return temps, fans
 
 
@@ -101,30 +130,33 @@ def hdr(title):
 def print_all_sensors(temp_sensors, fan_sensors):
     """Print the full discovery dump grouped by adapter."""
     all_sensors = (
-        [(a, l, f"{v:.1f} °C") for a, l, v in temp_sensors]
-        + [(a, l, f"{v} RPM")  for a, l, v in fan_sensors]
+        [(a, ukey, lbl, f"{v:.1f} °C") for a, ukey, lbl, v in temp_sensors]
+        + [(a, ukey, lbl, f"{v} RPM")  for a, ukey, lbl, v in fan_sensors]
     )
     current_adapter = None
     n = 1
-    for adapter, label, value in all_sensors:
+    for adapter, ukey, label, value in all_sensors:
         if adapter != current_adapter:
             current_adapter = adapter
             print(f"  {D}{adapter}{X}")
-        print(f"  {B}[{n:>2}]{X}  {label:<34}  {G}{value}{X}")
+        print(f"  {B}[{n:>2}]{X}  {label:<30}  {D}({ukey}){X:<22}  {G}{value}{X}")
         n += 1
     print()
 
 
 def print_temp_list(temp_sensors):
-    """Print numbered temp list grouped by adapter. Returns idx_map {n: (adapter,label)}."""
+    """
+    Print numbered temp list grouped by adapter.
+    Returns idx_map {n: (adapter, unique_key, label)}.
+    """
     current_adapter = None
     idx_map = {}
-    for i, (adapter, label, val) in enumerate(temp_sensors, start=1):
+    for i, (adapter, ukey, label, val) in enumerate(temp_sensors, start=1):
         if adapter != current_adapter:
             current_adapter = adapter
             print(f"  {D}{adapter}{X}")
-        print(f"  {B}[{i}]{X}  {label:<34}  {G}{val:>6.1f} °C{X}")
-        idx_map[i] = (adapter, label)
+        print(f"  {B}[{i}]{X}  {label:<30}  {D}({ukey}){X:<22}  {G}{val:>6.1f} °C{X}")
+        idx_map[i] = (adapter, ukey, label)
     print()
     return idx_map
 
@@ -132,29 +164,29 @@ def print_temp_list(temp_sensors):
 def print_fan_list(fan_data, selected=None):
     """
     Print numbered fan list grouped by adapter.
-    fan_data : [(adapter, label, rpm), ...]
+    fan_data : [(adapter, unique_key, label, rpm), ...]
     selected : set of already-chosen 1-based indices (shown with ✓)
-    Returns idx_map.
+    Returns idx_map {n: (adapter, unique_key, label)}.
     """
     current_adapter = None
     idx_map = {}
-    for i, (adapter, label, rpm) in enumerate(fan_data, start=1):
+    for i, (adapter, ukey, label, rpm) in enumerate(fan_data, start=1):
         if adapter != current_adapter:
             current_adapter = adapter
             print(f"  {D}{adapter}{X}")
-        check = f"{G}✓{X} " if (selected and i in selected) else "  "
+        check  = f"{G}✓{X} " if (selected and i in selected) else "  "
         colour = G if rpm > 0 else D
-        print(f"  {check}{B}[{i}]{X}  {label:<34}  {colour}{rpm:>6} RPM{X}")
-        idx_map[i] = (adapter, label)
+        print(f"  {check}{B}[{i}]{X}  {label:<30}  {D}({ukey}){X:<22}  {colour}{rpm:>6} RPM{X}")
+        idx_map[i] = (adapter, ukey, label)
     print()
     return idx_map
 
 
 def suggest_temp(temp_sensors, test):
-    """Print a suggestion hint if any sensor passes test(adapter, label)."""
-    for i, (adapter, label, _) in enumerate(temp_sensors, start=1):
-        if test(adapter, label):
-            print(f"  {D}Suggested: [{i}]  {adapter} / {label}{X}")
+    """Print a suggestion hint if any sensor passes test(adapter, unique_key, label)."""
+    for i, (adapter, ukey, label, _) in enumerate(temp_sensors, start=1):
+        if test(adapter, ukey, label):
+            print(f"  {D}Suggested: [{i}]  {adapter} / {label} ({ukey}){X}")
             return True
     return False
 
@@ -164,7 +196,7 @@ def suggest_temp(temp_sensors, test):
 def ask(prompt, idx_map, required=True, skip_text="skip"):
     """
     Prompt for a numbered choice from idx_map.
-    Returns (adapter, label) or None if the user skips.
+    Returns the value stored in idx_map (a 3-tuple), or None if the user skips.
     """
     valid   = set(idx_map.keys())
     max_n   = max(valid) if valid else 0
@@ -202,24 +234,24 @@ def _load_api_key():
 
 
 def _build_sensor_text(temp_sensors, fan_sensors):
-    """Format all sensors as compact text for the Claude prompt."""
+    """Format all sensors as compact text for the Claude prompt, including unique_key."""
     lines = ["Temperature sensors:"]
     current_adapter = None
     n = 1
-    for adapter, label, val in temp_sensors:
+    for adapter, ukey, label, val in temp_sensors:
         if adapter != current_adapter:
             current_adapter = adapter
             lines.append(f"  [{adapter}]")
-        lines.append(f"    {n:>2}. {label} = {val:.1f}°C")
+        lines.append(f"    {n:>2}. {label}  ({ukey}) = {val:.1f}°C")
         n += 1
     if fan_sensors:
         lines.append("\nFan sensors:")
         current_adapter = None
-        for adapter, label, rpm in fan_sensors:
+        for adapter, ukey, label, rpm in fan_sensors:
             if adapter != current_adapter:
                 current_adapter = adapter
                 lines.append(f"  [{adapter}]")
-            lines.append(f"    {n:>2}. {label} = {rpm} RPM")
+            lines.append(f"    {n:>2}. {label}  ({ukey}) = {rpm} RPM")
             n += 1
     return "\n".join(lines)
 
@@ -230,13 +262,17 @@ def _ask_claude(api_key, sensor_text):
 
 {sensor_text}
 
+Each sensor is identified by its unique_key (e.g. fan10_input, temp2_input) shown in
+parentheses after the label.  Use unique_key — not label — in your response, because
+labels may be duplicated across sensors while unique_keys are always distinct.
+
 Respond with ONLY this JSON (no explanation, no markdown fences):
 {{
-  "cpu_temp": {{"adapter": "...", "label": "..."}},
-  "ambient_temp": {{"adapter": "...", "label": "..."}} or null,
-  "nvme_temp": {{"adapter": "...", "label": "..."}} or null,
+  "cpu_temp": {{"adapter": "...", "unique_key": "temp1_input"}},
+  "ambient_temp": {{"adapter": "...", "unique_key": "temp2_input"}} or null,
+  "nvme_temp": {{"adapter": "...", "unique_key": "temp1_input"}} or null,
   "fans": [
-    {{"adapter": "...", "label": "...", "confidence": "high|medium|low", "reason": "..."}}
+    {{"adapter": "...", "unique_key": "fan1_input", "confidence": "high|medium|low", "reason": "..."}}
   ]
 }}
 
@@ -277,52 +313,73 @@ Rules:
         return None
 
 
-def _sensor_live_value(s, adapter, label):
-    """Return (value, unit_str) for an adapter+label, or (None, '') if missing."""
+def _sensor_live_value(parsed, adapter, unique_key):
+    """Return (value, unit_str) for an adapter+unique_key, or (None, '') if missing."""
     try:
-        sensor_data = s[adapter][label]
-        for k, v in sensor_data.items():
-            if "temp" in k and k.endswith("_input"):
-                return float(v), "°C"
-            if "fan" in k and k.endswith("_input"):
-                return int(float(v)), " RPM"
-    except (KeyError, TypeError, AttributeError):
-        pass
-    return None, ""
+        info = parsed[adapter][unique_key]
+        val  = info["value"]
+        if unique_key.startswith("temp"):
+            return float(val), "°C"
+        if unique_key.startswith("fan"):
+            return int(float(val)), " RPM"
+        return float(val), ""
+    except (KeyError, TypeError):
+        return None, ""
 
 
-def _entry_exists(s, entry):
-    """Return True if the adapter+label from Claude exists in the live sensor data."""
+def _entry_exists(parsed, entry):
+    """Return True if the adapter+unique_key from Claude exists in the live sensor data."""
     if not entry:
         return True
     try:
-        return isinstance(s[entry["adapter"]][entry["label"]], dict)
+        return entry["unique_key"] in parsed.get(entry["adapter"], {})
     except (KeyError, TypeError):
         return False
 
 
-def _show_proposal(proposal, s):
+def _entry_with_label(parsed, adapter, unique_key):
+    """Build a hw_map entry dict with adapter, unique_key, and label looked up from parsed."""
+    try:
+        label = parsed[adapter][unique_key]["label"]
+    except (KeyError, TypeError):
+        label = unique_key
+    return {"adapter": adapter, "unique_key": unique_key, "label": label}
+
+
+def _show_proposal(proposal, parsed):
     """Print Claude's proposed mapping with live sensor values."""
     hdr("CLAUDE'S PROPOSED SENSOR MAPPING")
 
     def fmt(entry):
         if not entry:
             return f"{Y}not configured{X}"
-        val, unit = _sensor_live_value(s, entry["adapter"], entry["label"])
+        adapter    = entry["adapter"]
+        unique_key = entry["unique_key"]
+        try:
+            label = parsed[adapter][unique_key]["label"]
+        except (KeyError, TypeError):
+            label = unique_key
+        val, unit = _sensor_live_value(parsed, adapter, unique_key)
         val_s = f"  {G}= {val}{unit}{X}" if val is not None else ""
-        return f"{G}{entry['adapter']} / {entry['label']}{X}{val_s}"
+        return f"{G}{adapter} / {label} ({unique_key}){X}{val_s}"
 
     print(f"  {'CPU temp':<18} {fmt(proposal.get('cpu_temp'))}")
     print(f"  {'Ambient temp':<18} {fmt(proposal.get('ambient_temp'))}")
 
     for i, fan in enumerate(proposal.get("fans", []), start=1):
-        val, unit = _sensor_live_value(s, fan["adapter"], fan["label"])
+        adapter    = fan["adapter"]
+        unique_key = fan["unique_key"]
+        try:
+            label = parsed[adapter][unique_key]["label"]
+        except (KeyError, TypeError):
+            label = unique_key
+        val, unit  = _sensor_live_value(parsed, adapter, unique_key)
         val_s  = f"  {G}= {val}{unit}{X}" if val is not None else ""
         conf   = fan.get("confidence", "")
         conf_s = f"  {Y}[{conf} confidence]{X}" if conf in ("medium", "low") else ""
         rsn    = fan.get("reason", "")
         rsn_s  = f"\n    {D}{rsn}{X}" if rsn and conf == "low" else ""
-        print(f"  {f'Fan {i}':<18} {G}{fan['adapter']} / {fan['label']}{X}{val_s}{conf_s}{rsn_s}")
+        print(f"  {f'Fan {i}':<18} {G}{adapter} / {label} ({unique_key}){X}{val_s}{conf_s}{rsn_s}")
 
     if not proposal.get("fans"):
         print(f"  {'Fans':<18} {Y}not configured{X}")
@@ -331,10 +388,12 @@ def _show_proposal(proposal, s):
     print()
 
 
-def _claude_discovery(api_key, s, temp_sensors, fan_sensors):
+def _claude_discovery(api_key, parsed, temp_sensors, fan_sensors):
     """
     Run Claude-assisted sensor classification.
     Returns (cpu_map, ambient_map, fans_map, nvme_map) or None to fall back to manual.
+    Each map is a {adapter, unique_key, label} dict (or None for optional fields).
+    fans_map is a list of such dicts.
     """
     print(f"\n  Consulting {B}Claude{X} ({CLAUDE_MODEL}) to classify sensors …")
     proposal = _ask_claude(api_key, _build_sensor_text(temp_sensors, fan_sensors))
@@ -344,17 +403,17 @@ def _claude_discovery(api_key, s, temp_sensors, fan_sensors):
         return None
 
     # Validate every proposed entry actually exists in the live data
-    bad = [f for f in (["cpu_temp", "ambient_temp", "nvme_temp"]
-                       if True else [])
-           if not _entry_exists(s, proposal.get(f))]
-    bad += [fan["label"] for fan in proposal.get("fans", [])
-            if not _entry_exists(s, fan)]
-    if bad:
-        print(f"  {Y}Claude proposed sensors not found in data: {', '.join(bad)}{X}")
+    bad_fields = [f for f in ("cpu_temp", "ambient_temp", "nvme_temp")
+                  if not _entry_exists(parsed, proposal.get(f))]
+    bad_fans   = [f.get("unique_key", "?") for f in proposal.get("fans", [])
+                  if not _entry_exists(parsed, f)]
+    if bad_fields or bad_fans:
+        bad_all = bad_fields + bad_fans
+        print(f"  {Y}Claude proposed sensors not found in data: {', '.join(bad_all)}{X}")
         print(f"  {Y}Falling back to manual discovery.{X}")
         return None
 
-    _show_proposal(proposal, s)
+    _show_proposal(proposal, parsed)
 
     print(f"  {B}[Enter]{X} Accept all     {B}[c]{X} Override CPU     {B}[a]{X} Override ambient")
     print(f"  {B}[n]{X}     Override NVMe   {B}[f]{X} Override fans    {B}[m]{X} Full manual mode")
@@ -363,55 +422,67 @@ def _claude_discovery(api_key, s, temp_sensors, fan_sensors):
     if raw == "m":
         return None
 
-    cpu_map     = proposal.get("cpu_temp")
-    ambient_map = proposal.get("ambient_temp")
-    nvme_map    = proposal.get("nvme_temp")
-    fans_map    = [{"adapter": f["adapter"], "label": f["label"]}
+    # Attach labels (looked up from parsed) to all entries before returning
+    cpu_map     = (_entry_with_label(parsed, proposal["cpu_temp"]["adapter"],
+                                     proposal["cpu_temp"]["unique_key"])
+                   if proposal.get("cpu_temp") else None)
+    ambient_map = (_entry_with_label(parsed, proposal["ambient_temp"]["adapter"],
+                                     proposal["ambient_temp"]["unique_key"])
+                   if proposal.get("ambient_temp") else None)
+    nvme_map    = (_entry_with_label(parsed, proposal["nvme_temp"]["adapter"],
+                                     proposal["nvme_temp"]["unique_key"])
+                   if proposal.get("nvme_temp") else None)
+    fans_map    = [_entry_with_label(parsed, f["adapter"], f["unique_key"])
                    for f in proposal.get("fans", [])]
 
     if raw == "c" or cpu_map is None:
         hdr("OVERRIDE — CPU TEMPERATURE")
         idx = print_temp_list(temp_sensors)
         suggest_temp(temp_sensors,
-                     lambda a, l: any(k in l.lower() for k in ("package", "tdie", "tctl")))
+                     lambda a, k, l: any(x in l.lower() for x in ("package", "tdie", "tctl")))
         ch = ask("Select CPU temperature sensor", idx, required=True)
-        cpu_map = {"adapter": ch[0], "label": ch[1]}
-        print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[1]}{X}")
+        cpu_map = {"adapter": ch[0], "unique_key": ch[1], "label": ch[2]}
+        print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
 
     if raw == "a":
         hdr(f"OVERRIDE — AMBIENT TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
-        suggest_temp(temp_sensors, lambda a, l: "ambient" in l.lower())
+        suggest_temp(temp_sensors, lambda a, k, l: "ambient" in l.lower())
         ch = ask("Select ambient sensor", idx, required=False, skip_text="not present")
-        ambient_map = ({"adapter": ch[0], "label": ch[1]} if ch else None)
-        label_s = f"{ambient_map['adapter']} / {ambient_map['label']}" if ambient_map else "not configured"
-        icon = G + "✓" if ambient_map else Y + "⊘"
-        print(f"\n  {icon}  Ambient  →  {label_s}{X}")
+        ambient_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
+        if ambient_map:
+            label_s = f"{ambient_map['adapter']} / {ambient_map['label']} ({ambient_map['unique_key']})"
+            print(f"\n  {G}✓  Ambient  →  {label_s}{X}")
+        else:
+            print(f"\n  {Y}⊘  Ambient  →  not configured{X}")
 
     if raw == "f":
-        fans_map = _select_fans_manual(fan_sensors, s)
+        fans_map = _select_fans_manual(fan_sensors, parsed)
 
     if raw == "n":
         hdr(f"OVERRIDE — NVME TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
         if not suggest_temp(temp_sensors,
-                            lambda a, l: "nvme" in a.lower() and l.lower() == "composite"):
-            suggest_temp(temp_sensors, lambda a, l: "nvme" in a.lower())
+                            lambda a, k, l: "nvme" in a.lower() and l.lower() == "composite"):
+            suggest_temp(temp_sensors, lambda a, k, l: "nvme" in a.lower())
         ch = ask("Select NVMe sensor", idx, required=False, skip_text="not present")
-        nvme_map = ({"adapter": ch[0], "label": ch[1]} if ch else None)
-        label_s = f"{nvme_map['adapter']} / {nvme_map['label']}" if nvme_map else "not configured"
-        icon = G + "✓" if nvme_map else Y + "⊘"
-        print(f"\n  {icon}  NVMe  →  {label_s}{X}")
+        nvme_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
+        if nvme_map:
+            label_s = f"{nvme_map['adapter']} / {nvme_map['label']} ({nvme_map['unique_key']})"
+            print(f"\n  {G}✓  NVMe  →  {label_s}{X}")
+        else:
+            print(f"\n  {Y}⊘  NVMe  →  not configured{X}")
 
     return cpu_map, ambient_map, fans_map, nvme_map
 
 
 # ── Manual fan selection (shared by both paths) ───────────────────────────────
 
-def _select_fans_manual(fan_sensors, s):
+def _select_fans_manual(fan_sensors, parsed):
     """
     Live-updating fan selection — any number of fans, no cap.
-    Returns list of {adapter, label} dicts.
+    fan_sensors: [(adapter, unique_key, label, rpm), ...]
+    Returns list of {adapter, unique_key, label} dicts.
     """
     if not fan_sensors:
         return []
@@ -426,15 +497,17 @@ def _select_fans_manual(fan_sensors, s):
 
     for n in range(1, 4):
         time.sleep(2)
-        fresh_s = run_sensors()
-        _, fresh_fans = extract_sensors(fresh_s)
-        rpm_map = {(a, l): r for a, l, r in fresh_fans}
-        fan_data = [(a, l, rpm_map.get((a, l), r)) for a, l, r in fan_data]
+        fresh_parsed = run_sensors()
+        fan_data = [
+            (a, ukey, lbl,
+             int(float(fresh_parsed.get(a, {}).get(ukey, {}).get("value", rpm))))
+            for a, ukey, lbl, rpm in fan_data
+        ]
         print(f"  {D}Update {n}/3:{X}")
         print_fan_list(fan_data)
 
     print(f"  {D}Select fans one at a time. Press [s] to stop when done.{X}")
-    fan_idx = {i: (a, l) for i, (a, l, _) in enumerate(fan_data, start=1)}
+    fan_idx = {i: (a, ukey, lbl) for i, (a, ukey, lbl, _) in enumerate(fan_data, start=1)}
     selected_idxs, fans_map = set(), []
 
     slot = 1
@@ -450,13 +523,13 @@ def _select_fans_manual(fan_sensors, s):
             msg   = "No fans configured" if count == 0 else f"Done — {count} fan(s) configured"
             print(f"\n  {Y}⊘  {msg}{X}")
             break
-        adapter, lbl = ch
-        fans_map.append({"adapter": adapter, "label": lbl})
+        adapter, ukey, lbl = ch
+        fans_map.append({"adapter": adapter, "unique_key": ukey, "label": lbl})
         for k, v in fan_idx.items():
-            if v == (adapter, lbl):
+            if v == (adapter, ukey, lbl):
                 selected_idxs.add(k)
                 break
-        print(f"\n  {G}✓  Fan {slot}  →  {adapter} / {lbl}{X}")
+        print(f"\n  {G}✓  Fan {slot}  →  {adapter} / {lbl} ({ukey}){X}")
         slot += 1
 
     return fans_map
@@ -470,10 +543,10 @@ def main():
     print(f"{C}{B}║       Nemesis Firewall — Hardware Sensor Discovery           ║{X}")
     print(f"{C}{B}╚══════════════════════════════════════════════════════════════╝{X}")
     print()
-    print(f"  Scanning via {B}sensors -j{X} …")
+    print(f"  Scanning via {B}sensors -u{X} …")
 
-    s = run_sensors()
-    temp_sensors, fan_sensors = extract_sensors(s)
+    parsed = run_sensors()
+    temp_sensors, fan_sensors = extract_sensors(parsed)
 
     if not temp_sensors and not fan_sensors:
         print(f"\n{R}  No sensors found. Run: sudo sensors-detect{X}")
@@ -492,7 +565,7 @@ def main():
     fans_map = []
 
     if api_key:
-        result = _claude_discovery(api_key, s, temp_sensors, fan_sensors)
+        result = _claude_discovery(api_key, parsed, temp_sensors, fan_sensors)
         if result is not None:
             cpu_map, ambient_map, fans_map, nvme_map = result
     else:
@@ -503,19 +576,19 @@ def main():
         hdr("CPU TEMPERATURE  (required)")
         idx = print_temp_list(temp_sensors)
         suggest_temp(temp_sensors,
-                     lambda a, l: any(k in l.lower() for k in ("package", "tdie", "tctl")))
+                     lambda a, k, l: any(x in l.lower() for x in ("package", "tdie", "tctl")))
         ch = ask("Select CPU temperature sensor", idx, required=True)
-        cpu_map = {"adapter": ch[0], "label": ch[1]}
-        print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[1]}{X}")
+        cpu_map = {"adapter": ch[0], "unique_key": ch[1], "label": ch[2]}
+        print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
 
         hdr(f"AMBIENT / CHASSIS TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
-        suggest_temp(temp_sensors, lambda a, l: "ambient" in l.lower())
+        suggest_temp(temp_sensors, lambda a, k, l: "ambient" in l.lower())
         ch = ask("Select ambient temperature sensor", idx,
                  required=False, skip_text="not present on this hardware")
-        ambient_map = ({"adapter": ch[0], "label": ch[1]} if ch else None)
+        ambient_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
         if ambient_map:
-            print(f"\n  {G}✓  Ambient temp  →  {ch[0]} / {ch[1]}{X}")
+            print(f"\n  {G}✓  Ambient temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
         else:
             print(f"\n  {Y}⊘  Ambient temp — not configured{X}")
 
@@ -523,18 +596,18 @@ def main():
             hdr(f"FAN SENSORS  {Y}(none detected){X}")
             print(f"  {Y}No fan sensors found.{X}  {D}Normal for laptops and some prebuilts.{X}")
         else:
-            fans_map = _select_fans_manual(fan_sensors, s)
+            fans_map = _select_fans_manual(fan_sensors, parsed)
 
         hdr(f"NVME TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
         if not suggest_temp(temp_sensors,
-                            lambda a, l: "nvme" in a.lower() and l.lower() == "composite"):
-            suggest_temp(temp_sensors, lambda a, l: "nvme" in a.lower())
+                            lambda a, k, l: "nvme" in a.lower() and l.lower() == "composite"):
+            suggest_temp(temp_sensors, lambda a, k, l: "nvme" in a.lower())
         ch = ask("Select NVMe temperature sensor", idx,
                  required=False, skip_text="not present on this hardware")
-        nvme_map = ({"adapter": ch[0], "label": ch[1]} if ch else None)
+        nvme_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
         if nvme_map:
-            print(f"\n  {G}✓  NVMe temp  →  {ch[0]} / {ch[1]}{X}")
+            print(f"\n  {G}✓  NVMe temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
         else:
             print(f"\n  {Y}⊘  NVMe temp — not configured{X}")
 
@@ -562,7 +635,7 @@ def main():
 
     def row(name, entry):
         if entry:
-            print(f"  {name:<18} {G}{entry['adapter']} / {entry['label']}{X}")
+            print(f"  {name:<18} {G}{entry['adapter']} / {entry['label']} ({entry['unique_key']}){X}")
         else:
             print(f"  {name:<18} {Y}not configured{X}")
 

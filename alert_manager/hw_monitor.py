@@ -170,24 +170,67 @@ def _read_gpu_metrics():
         return _read_gpu_thermal_zone(), None, None
 
 
-def _read_sensors():
-    """Return parsed sensors -j output, or {} on failure."""
+def _run_sensors_u():
+    """Run 'sensors -u' and return raw text, or '' on failure."""
     try:
         result = subprocess.run(
-            ["sensors", "-j"], capture_output=True, text=True, timeout=5
+            ["sensors", "-u"], capture_output=True, text=True, timeout=5
         )
-        # sensors emits invalid JSON when adapters report duplicate keys;
-        # tolerate by stripping trailing commas and using a permissive load.
-        text = result.stdout
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            # fall back: strip ",\n  }" patterns that some adapters produce
-            cleaned = text.replace(",\n  }", "\n  }").replace(",\n}", "\n}")
-            return json.loads(cleaned)
+        return result.stdout
     except Exception as e:
-        log.warning("sensors read failed: %s", e)
-        return {}
+        log.warning("sensors -u failed: %s", e)
+        return ""
+
+
+def _parse_sensors_u(text):
+    """
+    Parse 'sensors -u' plain-text output into:
+      {adapter_name: {unique_key: {"label": str, "value": float}}}
+
+    unique_key is the lm-sensors internal key, e.g. "fan10_input" or
+    "temp2_input".  Unlike 'sensors -j', duplicate human-readable labels
+    (e.g. multiple "Chassis Motherboard Fan" entries) are all preserved here
+    because each maps to a distinct unique_key.
+    """
+    result = {}
+    current_adapter = None
+    current_label   = None
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        n_spaces = len(line) - len(line.lstrip())
+        stripped  = line.strip()
+
+        if n_spaces == 0:
+            if stripped.startswith("Adapter:"):
+                continue
+            if stripped.endswith(":"):
+                current_label = stripped[:-1]
+            else:
+                current_adapter = stripped
+                current_label   = None
+                if current_adapter not in result:
+                    result[current_adapter] = {}
+        elif n_spaces >= 2 and current_adapter and current_label:
+            if ":" in stripped:
+                key, _, val_str = stripped.partition(":")
+                key = key.strip()
+                if key.endswith("_input"):
+                    try:
+                        result[current_adapter][key] = {
+                            "label": current_label,
+                            "value": float(val_str.strip()),
+                        }
+                    except ValueError:
+                        pass
+
+    return result
+
+
+def _read_sensors():
+    """Return parsed sensor data dict, or {} on failure."""
+    return _parse_sensors_u(_run_sensors_u())
 
 
 _hw_map        = None
@@ -203,7 +246,22 @@ def _load_hw_map():
     _hw_map_loaded = True
     try:
         with open(HW_MAP_PATH) as f:
-            _hw_map = json.load(f)
+            data = json.load(f)
+        # Require unique_key in every non-None entry (new format from hw_discover.py).
+        # Old files only carry adapter+label; reject them so we fall back to
+        # auto-discovery rather than silently looking up the wrong sensor.
+        def _missing_key(entry):
+            return entry is not None and "unique_key" not in entry
+        if (    _missing_key(data.get("cpu_temp"))
+             or _missing_key(data.get("ambient_temp"))
+             or _missing_key(data.get("nvme_temp"))
+             or any(_missing_key(f) for f in data.get("fans", []))):
+            log.warning(
+                "hw_map: %s uses old format (no unique_key) — run hw_discover.py to regenerate",
+                HW_MAP_PATH,
+            )
+            return _hw_map   # stays None
+        _hw_map = data
         log.info("hw_map: loaded from %s", HW_MAP_PATH)
     except FileNotFoundError:
         log.info("hw_map: %s not found — using auto-discovery", HW_MAP_PATH)
@@ -212,36 +270,20 @@ def _load_hw_map():
     return _hw_map
 
 
-def _lookup_temp(s, adapter, label):
-    """Read a temp*_input value from sensors dict by exact adapter+label."""
+def _lookup_by_key(parsed, adapter, unique_key):
+    """Read a sensor value by adapter + unique_key from parsed sensors data."""
     try:
-        sensor_data = s[adapter][label]
-        for k, v in sensor_data.items():
-            if "temp" in k and k.endswith("_input"):
-                return float(v)
-    except (KeyError, TypeError, AttributeError):
-        pass
-    return None
-
-
-def _lookup_fan(s, adapter, label):
-    """Read a fan*_input value from sensors dict by exact adapter+label."""
-    try:
-        sensor_data = s[adapter][label]
-        for k, v in sensor_data.items():
-            if "fan" in k and k.endswith("_input"):
-                return int(float(v))
-    except (KeyError, TypeError, AttributeError, ValueError):
-        pass
-    return None
+        return float(parsed[adapter][unique_key]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _extract_temps_and_fans(s):
-    """Extract sensor readings from sensors -j output.
+    """Extract sensor readings from parsed sensors -u output.
 
-    If hw_map.json exists, looks up each role by the exact adapter/label the
+    If hw_map.json exists, looks up each role by the adapter+unique_key the
     user chose during hw_discover.py.  Falls back to vendor-agnostic heuristic
-    discovery when the file is absent.
+    discovery when the file is absent or uses the old format.
     """
     global _sensor_map_logged
 
@@ -255,34 +297,41 @@ def _extract_temps_and_fans(s):
     hw_map = _load_hw_map()
 
     if hw_map is not None:
-        # ── Mapped path: explicit adapter/label from hw_map.json ─────────────
+        # ── Mapped path: explicit adapter/unique_key from hw_map.json ─────────
         if hw_map.get("cpu_temp"):
             m = hw_map["cpu_temp"]
-            out["cpu_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+            out["cpu_temp"] = _lookup_by_key(s, m["adapter"], m["unique_key"])
         if hw_map.get("ambient_temp"):
             m = hw_map["ambient_temp"]
-            out["ambient_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+            out["ambient_temp"] = _lookup_by_key(s, m["adapter"], m["unique_key"])
         if hw_map.get("nvme_temp"):
             m = hw_map["nvme_temp"]
-            out["nvme_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+            out["nvme_temp"] = _lookup_by_key(s, m["adapter"], m["unique_key"])
         for fan in hw_map.get("fans", []):
-            rpm = _lookup_fan(s, fan["adapter"], fan["label"])
-            out["fans"].append({"label": fan["label"], "rpm": rpm})
+            rpm = _lookup_by_key(s, fan["adapter"], fan["unique_key"])
+            out["fans"].append({
+                "label": fan["label"],
+                "rpm":   int(rpm) if rpm is not None else None,
+            })
 
         if not _sensor_map_logged:
             _sensor_map_logged = True
             log.info("Sensor map (from hw_map.json):")
             if hw_map.get("cpu_temp"):
                 m = hw_map["cpu_temp"]
-                log.info("  %-16s -> %s / %s", "cpu_temp", m["adapter"], m["label"])
+                log.info("  %-16s -> %s / %s (%s)",
+                         "cpu_temp", m["adapter"], m["label"], m["unique_key"])
             if hw_map.get("ambient_temp"):
                 m = hw_map["ambient_temp"]
-                log.info("  %-16s -> %s / %s", "ambient_temp", m["adapter"], m["label"])
+                log.info("  %-16s -> %s / %s (%s)",
+                         "ambient_temp", m["adapter"], m["label"], m["unique_key"])
             for i, fan in enumerate(hw_map.get("fans", []), start=1):
-                log.info("  fan%-13d -> %s / %s", i, fan["adapter"], fan["label"])
+                log.info("  fan%-13d -> %s / %s (%s)",
+                         i, fan["adapter"], fan["label"], fan["unique_key"])
             if hw_map.get("nvme_temp"):
                 m = hw_map["nvme_temp"]
-                log.info("  %-16s -> %s / %s", "nvme_temp", m["adapter"], m["label"])
+                log.info("  %-16s -> %s / %s (%s)",
+                         "nvme_temp", m["adapter"], m["label"], m["unique_key"])
 
         return out
 
@@ -291,85 +340,61 @@ def _extract_temps_and_fans(s):
     fan_hits = []
     available_adapters = list(s.keys())
 
-    for adapter_name, adapter_data in s.items():
-        if not isinstance(adapter_data, dict):
-            continue
+    for adapter_name, readings in s.items():
         adapter_lower = adapter_name.lower()
 
-        for label, sensor_data in adapter_data.items():
-            if not isinstance(sensor_data, dict):
-                continue
+        for unique_key, info in readings.items():
+            label       = info["label"]
+            value       = info["value"]
             label_lower = label.lower()
 
             # CPU temp: Package (Intel), Tdie / Tctl (AMD)
-            if out["cpu_temp"] is None and (
+            if out["cpu_temp"] is None and unique_key.startswith("temp") and (
                 "package" in label_lower or "tdie" in label_lower or "tctl" in label_lower
             ):
-                for k, v in sensor_data.items():
-                    if "temp" in k and k.endswith("_input"):
-                        try:
-                            out["cpu_temp"] = float(v)
-                            matched["cpu_temp"] = f"{adapter_name}/{label}"
-                            break
-                        except (TypeError, ValueError):
-                            pass
+                out["cpu_temp"]     = float(value)
+                matched["cpu_temp"] = f"{adapter_name}/{label} ({unique_key})"
 
-            # Ambient temp: any label containing "ambient" (case-insensitive)
-            if out["ambient_temp"] is None and "ambient" in label_lower:
-                for k, v in sensor_data.items():
-                    if "temp" in k and k.endswith("_input"):
-                        try:
-                            out["ambient_temp"] = float(v)
-                            matched["ambient_temp"] = f"{adapter_name}/{label}"
-                            break
-                        except (TypeError, ValueError):
-                            pass
+            # Ambient temp: any label containing "ambient"
+            if out["ambient_temp"] is None and unique_key.startswith("temp") and "ambient" in label_lower:
+                out["ambient_temp"]     = float(value)
+                matched["ambient_temp"] = f"{adapter_name}/{label} ({unique_key})"
 
             # NVMe temp: adapter containing "nvme", label "Composite"
-            if out["nvme_temp"] is None and "nvme" in adapter_lower and label_lower == "composite":
-                for k, v in sensor_data.items():
-                    if "temp" in k and k.endswith("_input"):
-                        try:
-                            out["nvme_temp"] = float(v)
-                            matched["nvme_temp"] = f"{adapter_name}/{label}"
-                            break
-                        except (TypeError, ValueError):
-                            pass
+            if (out["nvme_temp"] is None and "nvme" in adapter_lower
+                    and unique_key.startswith("temp") and label_lower == "composite"):
+                out["nvme_temp"]     = float(value)
+                matched["nvme_temp"] = f"{adapter_name}/{label} ({unique_key})"
 
-            # Fan RPMs: any label containing "fan" with a fan*_input value
-            if "fan" in label_lower:
-                for k, v in sensor_data.items():
-                    if "fan" in k and k.endswith("_input"):
-                        try:
-                            fan_hits.append((adapter_name, label, int(float(v))))
-                            break
-                        except (TypeError, ValueError):
-                            pass
+            # Fan RPMs: unique_key starting with "fan"
+            if unique_key.startswith("fan"):
+                try:
+                    fan_hits.append((adapter_name, unique_key, label, int(float(value))))
+                except (TypeError, ValueError):
+                    pass
 
-    # CPU fallback: highest individual core reading from any coretemp adapter
+    # CPU fallback: highest reading from any coretemp adapter
     if out["cpu_temp"] is None:
         best_temp, best_loc = None, None
-        for adapter_name, adapter_data in s.items():
-            if not isinstance(adapter_data, dict) or "coretemp" not in adapter_name.lower():
+        for adapter_name, readings in s.items():
+            if "coretemp" not in adapter_name.lower():
                 continue
-            for label, sensor_data in adapter_data.items():
-                if not isinstance(sensor_data, dict):
+            for unique_key, info in readings.items():
+                if not unique_key.startswith("temp"):
                     continue
-                for k, v in sensor_data.items():
-                    if "temp" in k and k.endswith("_input"):
-                        try:
-                            t = float(v)
-                            if best_temp is None or t > best_temp:
-                                best_temp = t
-                                best_loc = f"{adapter_name}/{label}"
-                        except (TypeError, ValueError):
-                            pass
+                try:
+                    t = float(info["value"])
+                    if best_temp is None or t > best_temp:
+                        best_temp = t
+                        best_loc  = f"{adapter_name}/{info['label']} ({unique_key})"
+                except (TypeError, ValueError):
+                    pass
         if best_temp is not None:
-            out["cpu_temp"] = best_temp
+            out["cpu_temp"]     = best_temp
             matched["cpu_temp"] = f"{best_loc} (coretemp max)"
 
     # All fan hits become the fans list — no limit
-    out["fans"] = [{"label": lbl, "rpm": rpm} for _, lbl, rpm in fan_hits]
+    out["fans"] = [{"label": lbl, "rpm": rpm} for _, _, lbl, rpm in fan_hits]
 
     # Log auto-discovery results once on startup
     if not _sensor_map_logged:
@@ -378,8 +403,8 @@ def _extract_temps_and_fans(s):
                  ", ".join(available_adapters) or "(none)")
         for field, loc in matched.items():
             log.info("  Mapped %-16s -> %s", field, loc)
-        for i, (_, lbl, _rpm) in enumerate(fan_hits, start=1):
-            log.info("  fan%-13d -> %s", i, lbl)
+        for i, (_, ukey, lbl, _rpm) in enumerate(fan_hits, start=1):
+            log.info("  fan%-13d -> %s (%s)", i, lbl, ukey)
         if "ambient_temp" not in matched:
             log.warning(
                 "No ambient temperature sensor found (no label containing 'Ambient'); "
@@ -387,7 +412,7 @@ def _extract_temps_and_fans(s):
             )
         if not fan_hits:
             log.warning(
-                "No fan speed sensors found (no label containing 'fan'); "
+                "No fan speed sensors found; "
                 "available adapters: %s", ", ".join(available_adapters) or "(none)"
             )
 
