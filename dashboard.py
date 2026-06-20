@@ -400,7 +400,12 @@ def render_quarantine_banner_html(quarantines):
 
 def render_alerts_html(active_alerts):
     if not active_alerts:
-        return "<tr><td colspan=5 style='color:#00ff88'>✓ No active P1/P2 alerts requiring attention</td></tr>"
+        return ("<tr><td colspan=5 style='color:#00ff88'>"
+                "<span class='tier-text'"
+                " data-beginner='✓ All clear — no threats need your attention right now'"
+                " data-intermediate='✓ No active P1/P2 alerts requiring attention'"
+                " data-pro='✓ No active P1/P2'"
+                ">✓ No active P1/P2 alerts requiring attention</span></td></tr>")
     parts = []
     for alert in active_alerts:
         priority = alert["priority"]
@@ -422,7 +427,12 @@ def render_alerts_html(active_alerts):
 
 def render_review_queue_html(items):
     if not items:
-        return "<tr><td colspan=6 style='color:#00ff88;padding:10px'>✓ Review queue is clear — no HIGH risk alerts pending</td></tr>"
+        return ("<tr><td colspan=6 style='color:#00ff88;padding:10px'>"
+                "<span class='tier-text'"
+                " data-beginner='✓ Nothing suspicious needs your review right now'"
+                " data-intermediate='✓ Review queue is clear — no HIGH risk alerts pending'"
+                " data-pro='✓ Queue empty'"
+                ">✓ Review queue is clear — no HIGH risk alerts pending</span></td></tr>")
     parts = []
     for item in items:
         ts = item["last_seen"][:16].replace("T", " ") if item["last_seen"] else "—"
@@ -1124,6 +1134,114 @@ def set_action(rule_id, action):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/settings")
+def settings_page():
+    return """<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis — Settings</title>
+    <script src="/static/tier.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
+               padding: 24px; max-width: 700px; margin: 0 auto; }
+        h1 { color: #00d4ff; margin-bottom: 4px; }
+        h2 { color: #00d4ff; font-size: 1.05em; margin: 28px 0 8px 0;
+             border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }
+        .back { color: #00d4ff; text-decoration: none; font-size: 0.9em; }
+        .back:hover { text-decoration: underline; }
+        .settings-section { margin-bottom: 32px; }
+        .tier-option { display: flex; align-items: flex-start; gap: 12px;
+                       padding: 12px 14px; border-radius: 6px; cursor: pointer;
+                       border: 1px solid transparent; margin-bottom: 8px;
+                       transition: background 0.15s, border-color 0.15s; }
+        .tier-option:hover { background: rgba(0,212,255,0.06); }
+        .tier-option.selected { background: rgba(0,212,255,0.1);
+                                border-color: rgba(0,212,255,0.4); }
+        .tier-option input[type=radio] { margin-top: 3px; flex-shrink: 0;
+                                          accent-color: #00d4ff; width: 16px; height: 16px; }
+        .tier-label { flex: 1; }
+        .tier-label strong { color: #eee; font-size: 1em; }
+        .tier-label em { color: #888; font-size: 0.85em; margin-left: 6px; }
+        .tier-label p { color: #aaa; font-size: 0.85em; margin: 4px 0 0 0; line-height: 1.5; }
+        .save-note { color: #00ff88; font-size: 0.82em; margin-top: 6px;
+                     display: none; }
+        .settings-intro { color: #aaa; font-size: 0.9em; margin: 0 0 18px 0; line-height: 1.6; }
+        .other-section-placeholder { color: #555; font-size: 0.85em;
+                                      font-style: italic; padding: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>⚙️ Settings</h1>
+    <p><a class="back" href="/">← Back to Dashboard</a></p>
+
+    <div class="settings-section">
+        <h2>Explanation Detail Level</h2>
+        <p class="settings-intro">
+            Controls how labels, descriptions, and explanatory text are displayed across
+            the dashboard. Your preference is saved per browser and takes effect immediately.
+        </p>
+
+        <div class="tier-option" id="optBeginner" onclick="chooseTier('beginner')">
+            <input type="radio" name="tier" id="radioBeginner" value="beginner">
+            <div class="tier-label">
+                <strong>Beginner</strong>
+                <p>Full plain-English explanations with context. Best for users new to
+                   network security — explains what each alert means, whether to worry,
+                   and what to do. Nothing is assumed.</p>
+            </div>
+        </div>
+
+        <div class="tier-option" id="optIntermediate" onclick="chooseTier('intermediate')">
+            <input type="radio" name="tier" id="radioIntermediate" value="intermediate">
+            <div class="tier-label">
+                <strong>Intermediate</strong> <em>(default)</em>
+                <p>Balanced detail — clear labels with enough context to act, without
+                   over-explaining fundamentals. Good for users comfortable with the
+                   basics of networking and security.</p>
+            </div>
+        </div>
+
+        <div class="tier-option" id="optPro" onclick="chooseTier('pro')">
+            <input type="radio" name="tier" id="radioPro" value="pro">
+            <div class="tier-label">
+                <strong>Pro</strong>
+                <p>Concise technical language for experienced users. Abbreviations,
+                   protocol names, and security terminology used without explanation.
+                   Maximum signal, minimum prose.</p>
+            </div>
+        </div>
+
+        <p class="save-note" id="saveNote">✓ Saved — takes effect immediately on all pages</p>
+    </div>
+
+    <script>
+        function chooseTier(tier) {
+            setTier(tier);
+            document.getElementById('radioBeginner').checked    = (tier === 'beginner');
+            document.getElementById('radioIntermediate').checked = (tier === 'intermediate');
+            document.getElementById('radioPro').checked         = (tier === 'pro');
+            ['Beginner','Intermediate','Pro'].forEach(function(t) {
+                document.getElementById('opt' + t).classList.toggle(
+                    'selected', t.toLowerCase() === tier);
+            });
+            var note = document.getElementById('saveNote');
+            note.style.display = 'block';
+            clearTimeout(note._t);
+            note._t = setTimeout(function() { note.style.display = 'none'; }, 3000);
+        }
+
+        // Init from stored tier
+        (function() {
+            var t = getTier();
+            document.getElementById('radio' + t.charAt(0).toUpperCase() + t.slice(1)).checked = true;
+            document.getElementById('opt'   + t.charAt(0).toUpperCase() + t.slice(1))
+                .classList.add('selected');
+        })();
+    </script>
+</body>
+</html>"""
+
+
 @app.route("/firewall-db")
 def firewall_db():
     try:
@@ -1161,6 +1279,7 @@ def firewall_db():
 <html>
 <head>
     <title>Nemesis - Alert Database</title>
+    <script src="/static/tier.js"></script>
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; }}
@@ -1333,7 +1452,7 @@ def dashboard():
         .hw-card:hover {{ background:#1a2950; }}
         .hw-grid {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:8px; }}
         .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
-        .hw-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-label {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-value {{ color:#00ff88; font-size:1.4em; font-weight:bold; margin-top:2px; }}
         .hw-clickable {{ cursor:pointer; transition:background 0.15s; }}
         .hw-clickable:hover {{ background:#1a2950; outline:1px solid #00d4ff; }}
@@ -1357,34 +1476,35 @@ def dashboard():
         .fan-summary-text {{ color:#ccc; font-size:0.85em; }}
         .fan-detail-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; margin-top:8px; }}
         .fan-tile {{ background:#0d1117; border-radius:6px; padding:8px 6px; text-align:center; }}
-        .fan-tile-lbl {{ color:#888; font-size:0.65em; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+        .fan-tile-lbl {{ color:#aaa; font-size:0.65em; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
         .fan-tile-rpm {{ font-size:1.15em; font-weight:bold; margin-top:3px; }}
         .fan-rpm-active {{ color:#00ff88; }}
-        .fan-rpm-idle {{ color:#555; }}
+        .fan-rpm-idle {{ color:#777; }}
         .fan-rpm-concern {{ color:#ff4444; }}
         .hw-alerts-section {{ margin-top:10px; border-top:1px solid #1e2d4e; padding-top:8px; }}
-        .hw-alerts-header {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }}
+        .hw-alerts-header {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }}
         .hw-alert-row {{ display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:5px; cursor:pointer; background:rgba(255,68,68,0.08); border:1px solid rgba(255,68,68,0.3); margin-bottom:4px; }}
         .hw-alert-row:hover {{ background:rgba(255,68,68,0.16); border-color:rgba(255,68,68,0.5); }}
         .hw-alert-icon {{ font-size:1.1em; flex-shrink:0; }}
         .hw-alert-body {{ flex:1; min-width:0; }}
         .hw-alert-msg {{ color:#ff9999; font-size:0.85em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-        .hw-alert-meta {{ color:#666; font-size:0.72em; margin-top:2px; }}
+        .hw-alert-meta {{ color:#999; font-size:0.72em; margin-top:2px; }}
         .hw-alert-sev-CRITICAL {{ color:#ff4444; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
         .hw-alert-sev-HIGH {{ color:#ff8800; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
         .hw-alert-sev-MEDIUM {{ color:#ffcc00; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
-        .hw-alert-empty {{ color:#555; font-size:0.82em; padding:5px 2px; }}
+        .hw-alert-empty {{ color:#888; font-size:0.82em; padding:5px 2px; }}
         .hw-alert-detail-modal {{ background:#16213e; border:1px solid #ff4444; border-radius:10px; padding:20px; max-width:600px; width:90%; max-height:85vh; overflow-y:auto; margin:60px auto; position:relative; }}
         .hw-alert-detail-modal h3 {{ color:#ff6666; margin-top:0; }}
         .hw-alert-detail-field {{ margin-bottom:12px; }}
-        .hw-alert-detail-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-alert-detail-label {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-alert-detail-value {{ color:#ddd; font-size:0.9em; margin-top:3px; white-space:pre-wrap; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="/static/tier.js"></script>
 </head>
 <body>
-    <h1>🛡️ Nemesis Firewall</h1>
-    <p style="color:#888;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
+    <h1>🛡️ Nemesis Firewall <a href="/settings" style="float:right;font-size:0.45em;color:#888;text-decoration:none;font-weight:normal;margin-top:8px" title="Settings">⚙️ Settings</a></h1>
+    <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
         <h2>🚨 Auto-Quarantined IPs</h2>
@@ -1440,7 +1560,10 @@ def dashboard():
                 <div id="fanDetailGrid" class="fan-detail-grid" style="display:none"></div>
             </div>
             <div class="hw-alerts-section" onclick="event.stopPropagation()">
-                <div class="hw-alerts-header">Hardware Alerts</div>
+                <div class="hw-alerts-header"><span class="tier-text"
+                    data-beginner="Hardware Problems"
+                    data-intermediate="Hardware Alerts"
+                    data-pro="HW Alerts">Hardware Alerts</span></div>
                 <div id="hwAlertsList"></div>
             </div>
         </div>
@@ -1448,26 +1571,45 @@ def dashboard():
         <div class="card full-width">
             <h2>🔥 AI Firewall — Today's Activity
                 <span style="float:right;font-size:0.8em">
-                    <label style="color:#888;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
+                    <label style="color:#aaa;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
                         <input type="checkbox" id="showP3Toggle" onchange="toggleP3()" style="width:auto;margin-right:5px;vertical-align:middle">
-                        Show P3 (info)
+                        <span class="tier-text"
+                              data-beginner="Show background/informational traffic (P3)"
+                              data-intermediate="Show P3 (info)"
+                              data-pro="P3">Show P3 (info)</span>
                     </label>
                     <a href="/firewall-db" style="color:#00d4ff;text-decoration:none">📋 Alert Database</a>
                 </span>
             </h2>
             <div>
-                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div><div>Total</div><div style="color:#555;font-size:0.65em;margin-top:2px">incl. P3 info</div></div>
-                <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div><div>Critical P1</div></div>
-                <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div><div>High P2</div></div>
-                <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div><div>Info P3</div></div>
-                <div class="counter-box"><div class="counter-num" id="cntReviewQueue" style="color:#ff8800">{review_queue_count}</div><div style="color:#ff8800">Review Queue</div></div>
+                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div>
+                    <div><span class="tier-text" data-beginner="All Alerts Today" data-intermediate="Total" data-pro="Total">Total</span></div>
+                    <div style="color:#888;font-size:0.65em;margin-top:2px"><span class="tier-text" data-beginner="includes routine traffic" data-intermediate="incl. P3 info" data-pro="P1+P2+P3">incl. P3 info</span></div>
+                </div>
+                <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div>
+                    <div><span class="tier-text" data-beginner="Critical Threats" data-intermediate="Critical P1" data-pro="P1">Critical P1</span></div>
+                </div>
+                <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div>
+                    <div><span class="tier-text" data-beginner="High Risk" data-intermediate="High P2" data-pro="P2">High P2</span></div>
+                </div>
+                <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div>
+                    <div><span class="tier-text" data-beginner="Background Traffic" data-intermediate="Info P3" data-pro="P3">Info P3</span></div>
+                </div>
+                <div class="counter-box"><div class="counter-num" id="cntReviewQueue" style="color:#ff8800">{review_queue_count}</div>
+                    <div style="color:#ff8800"><span class="tier-text" data-beginner="Needs Your Review" data-intermediate="Review Queue" data-pro="Queue">Review Queue</span></div>
+                </div>
             </div>
             <div id="p3Note" style="display:none;color:#aaa;font-size:0.85em;margin-top:8px;padding:10px;background:#0d1117;border-radius:4px;border-left:3px solid #00d4ff">
-                <strong style="color:#00d4ff">ℹ️ P3 alerts are informational only — not an issue.</strong>
-                These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3.
+                <span class="tier-text"
+                    data-beginner="ℹ️ These are not threats. P3 alerts are routine background traffic your firewall notices but automatically ignores — things like DNS queries (when your devices look up website names), software checking for updates, or standard protocol handshakes. Your network is safe. Nothing here needs action; these events are filtered out of all security checks and email alerts."
+                    data-intermediate="ℹ️ P3 alerts are informational only — not an issue. These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3."
+                    data-pro="P3: informational. ET POLICY, DNS queries, protocol-scan signatures. Not actionable; excluded from watchdog, AI analysis, and quarantine pipelines.">ℹ️ P3 alerts are informational only — not an issue. These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3.</span>
             </div>
             <div style="margin-top:15px;background:#1a0d00;border:1px solid #ff8800;border-radius:8px;padding:12px">
-                <h3 style="color:#ff8800;margin:0 0 10px 0;font-size:1em">🔎 Review Queue — HIGH Risk Pending</h3>
+                <h3 style="color:#ff8800;margin:0 0 10px 0;font-size:1em"><span class="tier-text"
+                    data-beginner="🔎 Suspicious Activity — Needs Your Decision"
+                    data-intermediate="🔎 Review Queue — HIGH Risk Pending"
+                    data-pro="🔎 Review Queue (HIGH, unresolved)">🔎 Review Queue — HIGH Risk Pending</span></h3>
                 <table>
                     <thead><tr>
                         <th style="color:#ff8800">Time</th>
@@ -1482,7 +1624,10 @@ def dashboard():
                     </tbody>
                 </table>
             </div>
-            <h3 style="color:#ffaa00;margin-top:15px">⚠️ Alerts Requiring Attention</h3>
+            <h3 style="color:#ffaa00;margin-top:15px"><span class="tier-text"
+                data-beginner="⚠️ Active Threats — These Need Your Attention"
+                data-intermediate="⚠️ Alerts Requiring Attention"
+                data-pro="⚠️ Active P1/P2">⚠️ Alerts Requiring Attention</span></h3>
             <table>
                 <thead><tr><th>Priority</th><th>Time</th><th>Alert</th><th>Source IP</th><th>Action</th></tr></thead>
                 <tbody id="alertsRows">
@@ -1524,7 +1669,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHwModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0">🌡️ Hardware — last 24 hours</h3>
-            <div id="hwModalStatus" style="color:#888;font-size:0.85em">Loading…</div>
+            <div id="hwModalStatus" style="color:#aaa;font-size:0.85em">Loading…</div>
             <div class="chart-box"><h4>Temperatures (°C)</h4><canvas id="chartTemp" height="120"></canvas></div>
             <div class="chart-box"><h4>Fan Speeds (RPM)</h4><canvas id="chartFans" height="120"></canvas></div>
             <div class="chart-box"><h4>CPU & RAM (%)</h4><canvas id="chartUsage" height="120"></canvas></div>
@@ -1541,7 +1686,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeAlertBreakdownModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0">🛠️ 24h System Alert Breakdown</h3>
-            <div id="alertBreakdownBody" style="color:#888;font-size:0.9em">Loading…</div>
+            <div id="alertBreakdownBody" style="color:#aaa;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeAlertBreakdownModal()">✕ Close</button>
             </div>
@@ -1553,7 +1698,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHealthModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0">💚 System Health Score</h3>
-            <div id="healthModalBody" style="color:#888;font-size:0.9em">Loading…</div>
+            <div id="healthModalBody" style="color:#aaa;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
             </div>
@@ -1834,7 +1979,7 @@ def dashboard():
 
             var visibleCount = nActive + nIdle + nConcern;
             var hiddenNote = nHidden > 0
-                ? ' <span style="color:#333;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
+                ? ' <span style="color:#666;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
                 : '';
             var el = document.getElementById("fanSummaryText");
             var summaryRow = document.getElementById("fanSummaryRow");
@@ -1851,9 +1996,9 @@ def dashboard():
                 if (summaryRow) summaryRow.classList.remove("fan-alert");
                 var parts = [];
                 if (nActive > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
-                if (nIdle   > 0) parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
+                if (nIdle   > 0) parts.push('<span style="color:#777">' + nIdle + ' idle</span>');
                 if (el) el.innerHTML = 'Fans (' + visibleCount + '):&ensp;' +
-                    (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>') +
+                    (parts.length ? parts.join('&ensp;') : '<span style="color:#aaa">none configured</span>') +
                     hiddenNote;
             }}
 
@@ -1890,7 +2035,11 @@ def dashboard():
             var el = document.getElementById("hwAlertsList");
             if (!el) return;
             if (!_currentHwAlerts.length) {{
-                el.innerHTML = '<div class="hw-alert-empty">✓ No active hardware alerts</div>';
+                el.innerHTML = '<div class="hw-alert-empty">' + tierText(
+                    '✓ All hardware operating normally — no problems detected',
+                    '✓ No active hardware alerts',
+                    '✓ No active HW alerts'
+                ) + '</div>';
                 return;
             }}
             el.innerHTML = _currentHwAlerts.map(function(a, i) {{
@@ -1904,7 +2053,7 @@ def dashboard():
                         '<div class="hw-alert-msg">' + (a.breach || "") + '</div>' +
                         '<div class="hw-alert-meta">Since ' + since + '</div>' +
                     '</span>' +
-                    '<span style="color:#555;font-size:0.8em">▸</span>' +
+                    '<span style="color:#888;font-size:0.8em">▸</span>' +
                 '</div>';
             }}).join("");
         }}
@@ -1934,7 +2083,7 @@ def dashboard():
                 '</div>' +
                 '<div class="hw-alert-detail-field">' +
                     '<div class="hw-alert-detail-label">Alert key</div>' +
-                    '<div class="hw-alert-detail-value" style="color:#555;font-size:0.85em">' +
+                    '<div class="hw-alert-detail-value" style="color:#999;font-size:0.85em">' +
                         (a.alert_key || "—") +
                     '</div>' +
                 '</div>';
@@ -2016,11 +2165,11 @@ def dashboard():
                     if (!rows) rows = `<tr><td colspan=2 style="color:#00ff88">No system alerts in the last 24 hours.</td></tr>`;
                     var ct = d.thermal_fan || 0, cs = d.service_down || 0;
                     document.getElementById("alertBreakdownBody").innerHTML = `
-                        <p style="color:#888;font-size:0.85em;margin:0 0 10px 0">Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.</p>
+                        <p style="color:#aaa;font-size:0.85em;margin:0 0 10px 0">Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.</p>
                         <div style="display:flex;gap:20px;margin:10px 0">
-                            <div><span style="color:#888">Total:</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
-                            <div><span style="color:#888">Thermal/Fan:</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
-                            <div><span style="color:#888">Service down:</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
+                            <div><span style="color:#aaa">Total:</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
+                            <div><span style="color:#aaa">Thermal/Fan:</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
+                            <div><span style="color:#aaa">Service down:</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
                         </div>
                         <table class="breakdown-table">
                             <thead><tr><th>Alert type</th><th style="text-align:right">Count</th></tr></thead>
@@ -2047,7 +2196,7 @@ def dashboard():
                     var rows = (d.components || []).map(c => {{
                         var barColor = colorForScore(c.score);
                         return `<tr>
-                            <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#888;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
+                            <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#aaa;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
                             <td style="width:100px"><div class="health-bar"><div class="health-bar-fill" style="width:${{c.score}}%;background:${{barColor}}"></div></div><div style="text-align:right;color:#aaa;font-size:0.8em">${{c.score}}%</div></td>
                             <td style="text-align:right;width:60px">${{c.weight}}%</td>
                             <td style="text-align:right;width:80px;color:${{barColor}};font-weight:bold">${{c.contribution}}</td>
@@ -2058,14 +2207,14 @@ def dashboard():
                     ).join("");
                     document.getElementById("healthModalBody").innerHTML = `
                         <div style="margin:10px 0">
-                            <div style="font-size:0.85em;color:#888">Overall</div>
+                            <div style="font-size:0.85em;color:#aaa">Overall</div>
                             <div style="font-size:2.5em;font-weight:bold;color:${{totalColor}}">${{d.score}}%</div>
                         </div>
                         <table class="breakdown-table">
                             <thead><tr><th>Component</th><th style="text-align:right">Score</th><th style="text-align:right">Weight</th><th style="text-align:right">Points</th></tr></thead>
                             <tbody>${{rows}}</tbody>
                         </table>
-                        <div style="margin-top:15px"><div style="color:#888;font-size:0.85em;margin-bottom:4px">Services</div>${{svcList}}</div>
+                        <div style="margin-top:15px"><div style="color:#aaa;font-size:0.85em;margin-bottom:4px">Services</div>${{svcList}}</div>
                     `;
                 }})
                 .catch(e => {{
@@ -2105,7 +2254,7 @@ def dashboard():
                         d.split_tunnel_apps.forEach(function(app) {{ html += `<li>${{escapeHtml(app)}}</li>`; }});
                         html += `</ul>`;
                     }} else if (d.provider && d.provider.toLowerCase().includes("pia")) {{
-                        html += `<p style="color:#888;font-size:0.85em">Split tunnel: none configured</p>`;
+                        html += `<p style="color:#aaa;font-size:0.85em">Split tunnel: none configured</p>`;
                     }}
                     document.getElementById("vpnModalContent").innerHTML = html;
                     // Hide action buttons if no supported CLI
@@ -2305,6 +2454,7 @@ def dashboard():
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
                         document.getElementById("devicesRows").innerHTML = d.devices_html;
                         document.getElementById("reviewQueueRows").innerHTML = d.review_queue_html;
+                        applyTierText();
                     }}
                 }})
                 .catch(e => console.error("refresh failed", e));
