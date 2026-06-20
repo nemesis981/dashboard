@@ -18,9 +18,10 @@ from logging.handlers import RotatingFileHandler
 
 import psutil
 
-DB_PATH = "/home/paul/alert_manager/alerts.db"
-LOG_FILE = "/home/paul/alert_manager/hw_monitor.log"
-NET_IFACE = "enp131s0"
+DB_PATH      = "/home/paul/alert_manager/alerts.db"
+LOG_FILE     = "/home/paul/alert_manager/hw_monitor.log"
+HW_MAP_PATH  = "/home/paul/alert_manager/hw_map.json"
+NET_IFACE    = "enp131s0"
 SAMPLE_INTERVAL = 300
 
 log = logging.getLogger("hw_monitor")
@@ -159,27 +160,105 @@ def _read_sensors():
         return {}
 
 
+_hw_map        = None
+_hw_map_loaded = False
 _sensor_map_logged = False
 
 
-def _extract_temps_and_fans(s):
-    """Vendor-agnostic sensor extraction from sensors -j output.
+def _load_hw_map():
+    """Load hw_map.json once and cache the result. Returns the dict or None."""
+    global _hw_map, _hw_map_loaded
+    if _hw_map_loaded:
+        return _hw_map
+    _hw_map_loaded = True
+    try:
+        with open(HW_MAP_PATH) as f:
+            _hw_map = json.load(f)
+        log.info("hw_map: loaded from %s", HW_MAP_PATH)
+    except FileNotFoundError:
+        log.info("hw_map: %s not found — using auto-discovery", HW_MAP_PATH)
+    except Exception as e:
+        log.warning("hw_map: failed to load %s (%s) — using auto-discovery", HW_MAP_PATH, e)
+    return _hw_map
 
-    Discovers CPU temp, ambient temp, NVMe temp, and up to 4 fan RPMs
-    from any adapter reported by lm-sensors without hardcoded adapter names.
-    Missing sensors (ambient, fans) return None rather than raising.
+
+def _lookup_temp(s, adapter, label):
+    """Read a temp*_input value from sensors dict by exact adapter+label."""
+    try:
+        sensor_data = s[adapter][label]
+        for k, v in sensor_data.items():
+            if "temp" in k and k.endswith("_input"):
+                return float(v)
+    except (KeyError, TypeError, AttributeError):
+        pass
+    return None
+
+
+def _lookup_fan(s, adapter, label):
+    """Read a fan*_input value from sensors dict by exact adapter+label."""
+    try:
+        sensor_data = s[adapter][label]
+        for k, v in sensor_data.items():
+            if "fan" in k and k.endswith("_input"):
+                return int(float(v))
+    except (KeyError, TypeError, AttributeError, ValueError):
+        pass
+    return None
+
+
+def _extract_temps_and_fans(s):
+    """Extract sensor readings from sensors -j output.
+
+    If hw_map.json exists, looks up each role by the exact adapter/label the
+    user chose during hw_discover.py.  Falls back to vendor-agnostic heuristic
+    discovery when the file is absent.
     """
     global _sensor_map_logged
 
     out = {
-        "cpu_temp": None,
+        "cpu_temp":    None,
         "ambient_temp": None,
-        "nvme_temp": None,
-        "fan1_rpm": None,
-        "fan2_rpm": None,
-        "fan3_rpm": None,
-        "fan4_rpm": None,
+        "nvme_temp":   None,
+        "fan1_rpm":    None,
+        "fan2_rpm":    None,
+        "fan3_rpm":    None,
+        "fan4_rpm":    None,
     }
+
+    hw_map = _load_hw_map()
+
+    if hw_map is not None:
+        # ── Mapped path: explicit adapter/label from hw_map.json ─────────────
+        if hw_map.get("cpu_temp"):
+            m = hw_map["cpu_temp"]
+            out["cpu_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+        if hw_map.get("ambient_temp"):
+            m = hw_map["ambient_temp"]
+            out["ambient_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+        if hw_map.get("nvme_temp"):
+            m = hw_map["nvme_temp"]
+            out["nvme_temp"] = _lookup_temp(s, m["adapter"], m["label"])
+        for i, fan in enumerate(hw_map.get("fans", [])[:4], start=1):
+            out[f"fan{i}_rpm"] = _lookup_fan(s, fan["adapter"], fan["label"])
+
+        if not _sensor_map_logged:
+            _sensor_map_logged = True
+            log.info("Sensor map (from hw_map.json):")
+            if hw_map.get("cpu_temp"):
+                m = hw_map["cpu_temp"]
+                log.info("  %-16s -> %s / %s", "cpu_temp", m["adapter"], m["label"])
+            if hw_map.get("ambient_temp"):
+                m = hw_map["ambient_temp"]
+                log.info("  %-16s -> %s / %s", "ambient_temp", m["adapter"], m["label"])
+            for i, fan in enumerate(hw_map.get("fans", [])[:4], start=1):
+                log.info("  %-16s -> %s / %s", f"fan{i}_rpm", fan["adapter"], fan["label"])
+            if hw_map.get("nvme_temp"):
+                m = hw_map["nvme_temp"]
+                log.info("  %-16s -> %s / %s", "nvme_temp", m["adapter"], m["label"])
+
+        return out
+
+    # ── Auto-discovery path (no hw_map.json) ─────────────────────────────────
     matched = {}
     fan_hits = []
     available_adapters = list(s.keys())
@@ -266,10 +345,10 @@ def _extract_temps_and_fans(s):
         out[f"fan{i}_rpm"] = rpm
         matched[f"fan{i}_rpm"] = f"{a}/{lbl}"
 
-    # Log matched sensor map once on startup to aid troubleshooting
+    # Log auto-discovery results once on startup
     if not _sensor_map_logged:
         _sensor_map_logged = True
-        log.info("Sensor detection — adapters found: %s",
+        log.info("Sensor map (auto-discovery) — adapters found: %s",
                  ", ".join(available_adapters) or "(none)")
         for field, loc in matched.items():
             log.info("  Mapped %-16s -> %s", field, loc)
