@@ -86,6 +86,34 @@ def init_db():
                 c.execute(f"ALTER TABLE hw_metrics ADD COLUMN {col} {decl}")
         conn.commit()
 
+        # fan_status: permanent per-fan activity record keyed by unique_key.
+        # ever_active is promoted to 1 the first time a fan reports RPM > 0
+        # and never reverts.  This lets the dashboard distinguish "never-seen"
+        # empty headers from "previously-spinning, currently-stopped" fans.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS fan_status (
+                unique_key       TEXT PRIMARY KEY,
+                label            TEXT NOT NULL,
+                ever_active      INTEGER NOT NULL DEFAULT 0,
+                first_active_at  TIMESTAMP
+            )
+        """)
+        # Pre-populate rows for fans listed in hw_map.json (INSERT OR IGNORE so
+        # we never reset ever_active state that was already recorded).
+        try:
+            with open(HW_MAP_PATH) as _mf:
+                _hm = json.load(_mf)
+                for _f in _hm.get("fans", []):
+                    if "unique_key" in _f:
+                        c.execute(
+                            "INSERT OR IGNORE INTO fan_status "
+                            "(unique_key, label, ever_active) VALUES (?, ?, 0)",
+                            (_f["unique_key"], _f.get("label", _f["unique_key"]))
+                        )
+        except Exception:
+            pass
+        conn.commit()
+
         # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
         # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
         fan_labels = {}
@@ -310,8 +338,9 @@ def _extract_temps_and_fans(s):
         for fan in hw_map.get("fans", []):
             rpm = _lookup_by_key(s, fan["adapter"], fan["unique_key"])
             out["fans"].append({
-                "label": fan["label"],
-                "rpm":   int(rpm) if rpm is not None else None,
+                "unique_key": fan["unique_key"],
+                "label":      fan["label"],
+                "rpm":        int(rpm) if rpm is not None else None,
             })
 
         if not _sensor_map_logged:
@@ -394,7 +423,8 @@ def _extract_temps_and_fans(s):
             matched["cpu_temp"] = f"{best_loc} (coretemp max)"
 
     # All fan hits become the fans list — no limit
-    out["fans"] = [{"label": lbl, "rpm": rpm} for _, _, lbl, rpm in fan_hits]
+    out["fans"] = [{"unique_key": ukey, "label": lbl, "rpm": rpm}
+                   for _, ukey, lbl, rpm in fan_hits]
 
     # Log auto-discovery results once on startup
     if not _sensor_map_logged:
@@ -435,6 +465,7 @@ def get_live_metrics():
     metrics["gpu_fan_percent"] = gpu_fan
     metrics["gpu_power_watts"] = gpu_power
     metrics["timestamp"] = datetime.now().isoformat(timespec="seconds")
+    metrics["fan_status"] = get_fan_status()
     return metrics
 
 
@@ -479,6 +510,31 @@ def _collect_sample_with_deltas():
     return sample
 
 
+def _update_fan_status(c, fans):
+    """Upsert fan_status rows and promote ever_active=1 for fans with RPM > 0.
+
+    Called inside an already-open connection/cursor so the caller commits.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    for f in fans:
+        ukey = f.get("unique_key")
+        if not ukey:
+            continue
+        lbl = f.get("label", ukey)
+        c.execute(
+            "INSERT OR IGNORE INTO fan_status (unique_key, label, ever_active) "
+            "VALUES (?, ?, 0)",
+            (ukey, lbl),
+        )
+        rpm = f.get("rpm")
+        if rpm is not None and int(rpm) > 0:
+            c.execute(
+                "UPDATE fan_status SET ever_active=1, first_active_at=? "
+                "WHERE unique_key=? AND ever_active=0",
+                (now, ukey),
+            )
+
+
 def insert_sample(s):
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     try:
@@ -501,9 +557,60 @@ def insert_sample(s):
                 s.get("gpu_temp"), s.get("gpu_fan_percent"), s.get("gpu_power_watts"),
             ),
         )
+        _update_fan_status(c, s.get("fans", []))
         conn.commit()
     finally:
         conn.close()
+
+
+def get_fan_status():
+    """Return fan activity history keyed by unique_key.
+
+    Returns:
+      {unique_key: {"label": str, "ever_active": bool, "first_active_at": str|None}}
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        rows = conn.execute(
+            "SELECT unique_key, label, ever_active, first_active_at FROM fan_status"
+        ).fetchall()
+    finally:
+        conn.close()
+    return {
+        row[0]: {
+            "label":           row[1],
+            "ever_active":     bool(row[2]),
+            "first_active_at": row[3],
+        }
+        for row in rows
+    }
+
+
+def _bootstrap_fan_status():
+    """On startup, immediately promote fans that are spinning right now.
+
+    init_db() inserts fan_status rows with ever_active=0.  Without this call
+    the first page load would show all fans as hidden until the first 5-minute
+    sample fires.  Reading sensors once here lets currently-spinning fans be
+    correctly visible from the very first request.
+    """
+    try:
+        sensors = _read_sensors()
+        fans = _extract_temps_and_fans(sensors).get("fans", [])
+        if not fans:
+            return
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            c = conn.cursor()
+            _update_fan_status(c, fans)
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("fan_status bootstrapped: %d fan(s), %d active",
+                 len(fans),
+                 sum(1 for f in fans if f.get("rpm") and f["rpm"] > 0))
+    except Exception as e:
+        log.warning("fan_status bootstrap failed: %s", e)
 
 
 def get_recent_samples(limit=288):
@@ -553,6 +660,7 @@ def main():
     log.info("hw_monitor starting (db=%s interval=%ds iface=%s)",
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
+    _bootstrap_fan_status()
     # Sleep one interval first so the first delta covers a full window.
     _sleep_interruptible(SAMPLE_INTERVAL)
     while _running:

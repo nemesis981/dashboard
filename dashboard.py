@@ -1209,6 +1209,7 @@ def dashboard():
     hw_ram_pct = hw_live.get("ram_percent")
     hw_fans_js = json.dumps(hw_fans)
     hw_cpu_pct_js = "null" if hw_cpu_pct is None else str(hw_cpu_pct)
+    fan_status_js = json.dumps(hw_live.get("fan_status", {}))
     def _fmt(v, suffix=""):
         return "—" if v is None else f"{v}{suffix}"
 
@@ -1726,46 +1727,63 @@ def dashboard():
             icon.textContent = expanded ? "▼" : "▶";
             try {{ localStorage.setItem("fansExpanded", expanded ? "1" : "0"); }} catch(e) {{}}
         }}
-        function renderFanSection(fans, cpuPct) {{
+        function renderFanSection(fans, cpuPct, fanStatus) {{
             fans = fans || [];
+            fanStatus = fanStatus || {{}};
             var highLoad = cpuPct !== null && cpuPct !== undefined && cpuPct >= 40;
-            var nActive = 0, nIdle = 0, nConcern = 0;
-            var tiles = fans.map(function(f) {{
-                var lbl = escapeHtml(String(f.label || "Fan"));
+            var nActive = 0, nIdle = 0, nConcern = 0, nHidden = 0;
+            var tiles = [];
+            fans.forEach(function(f) {{
+                var ukey = f.unique_key;
+                // Fans with no status entry default to visible (safe fallback)
+                var status = ukey ? (fanStatus[ukey] || {{}}) : {{}};
+                var everActive = "ever_active" in status ? status.ever_active : true;
                 var rpm = f.rpm;
+                // Never-active fan at 0: hide entirely — presumed-empty header
+                if (!everActive && (rpm === null || rpm === undefined || rpm <= 0)) {{
+                    nHidden++;
+                    return;
+                }}
+                var lbl = escapeHtml(String(f.label || "Fan"));
                 var rpmText, cls;
                 if (rpm === null || rpm === undefined) {{
                     rpmText = "—"; cls = "fan-rpm-idle"; nIdle++;
                 }} else if (rpm > 200) {{
                     rpmText = rpm + " RPM"; cls = "fan-rpm-active"; nActive++;
                 }} else if (rpm <= 50 && highLoad) {{
+                    // Ever-active fan stopped under load — real concern
                     rpmText = rpm + " RPM"; cls = "fan-rpm-concern"; nConcern++;
                 }} else {{
                     rpmText = rpm === 0 ? "0 RPM (idle)" : rpm + " RPM";
                     cls = "fan-rpm-idle"; nIdle++;
                 }}
-                return '<div class="fan-tile"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
-                       '</div><div class="fan-tile-rpm ' + cls + '">' + rpmText + '</div></div>';
+                tiles.push('<div class="fan-tile"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
+                           '</div><div class="fan-tile-rpm ' + cls + '">' + rpmText + '</div></div>');
             }});
             var grid = document.getElementById("fanDetailGrid");
             if (grid) grid.innerHTML = tiles.join("");
             var parts = [];
-            if (nActive > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
-            if (nIdle > 0)   parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
+            if (nActive  > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
+            if (nIdle    > 0) parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
             if (nConcern > 0) parts.push('<span style="color:#ff4444;font-weight:bold">' + nConcern + ' stopped!</span>');
+            var hiddenNote = nHidden > 0
+                ? ' <span style="color:#333;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
+                : '';
+            var visibleCount = nActive + nIdle + nConcern;
             var el = document.getElementById("fanSummaryText");
-            if (el) el.innerHTML = 'Fans (' + fans.length + '):&ensp;' +
-                (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>');
+            if (el) el.innerHTML = 'Fans (' + visibleCount + '):&ensp;' +
+                (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>') +
+                hiddenNote;
             var dot = document.getElementById("fanStatusDot");
             if (dot) dot.style.background = nConcern > 0 ? "#ff4444"
                 : nActive > 0 ? "#00ff88"
-                : fans.length > 0 ? "#ffaa00" : "#555";
+                : visibleCount > 0 ? "#ffaa00" : "#555";
         }}
         (function initFanSection() {{
             var stored = null;
             try {{ stored = localStorage.getItem("fansExpanded"); }} catch(e) {{}}
             setFanSectionExpanded(stored === "1");
-            renderFanSection({hw_fans_js}, {hw_cpu_pct_js});
+            renderFanSection({hw_fans_js}, {hw_cpu_pct_js}, {fan_status_js});
         }})();
 
         function applyHwLive(hw) {{
@@ -1777,7 +1795,7 @@ def dashboard():
             document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
             document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
             document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
-            renderFanSection(hw.fans, hw.cpu_percent);
+            renderFanSection(hw.fans, hw.cpu_percent, hw.fan_status);
         }}
 
         function openHwModal() {{
