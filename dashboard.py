@@ -1055,14 +1055,15 @@ Alert: {raw_alert}
                 "reason": "Could not parse response"
             }
         now = datetime.now().isoformat()
+        new_action = "ignore" if analysis.get("risk_level") == "LOW" else "pending"
         if existing:
             c.execute("UPDATE alerts SET explanation=?, risk_level=? WHERE rule_id=?",
                      (analysis["explanation"], analysis["risk_level"], rule_id))
         else:
-            c.execute("""INSERT INTO alerts 
+            c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, "pending", 1, ?, ?)""",
-                (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], now, now))
+                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
+                (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], new_action, now, now))
         conn.commit()
         conn.close()
         return jsonify({**analysis, "cached": False, "src_ip": src_ip, "enrichment": enrichment})
@@ -1244,6 +1245,95 @@ def settings_page():
 
 @app.route("/firewall-db")
 def firewall_db():
+    # Tiered tooltip descriptions for known Suricata rule IDs.
+    # Each entry: (beginner, intermediate, pro)
+    RULE_TIPS = {
+        # Device Retrieving External IP Address family
+        "2054140": (
+            "A device on your network checked what its public internet address is — like asking 'what is my IP?' Very common and almost always harmless. Browsers, apps, and smart devices do this regularly.",
+            "ET INFO: device queried an external IP-echo service (ipify, ifconfig.me, etc.). Routine behavior on home networks; fires on IoT, browsers, and apps needing WAN IP awareness.",
+            "ET INFO Device Retrieving External IP. HTTP/DNS to IP-echo service. Expected on NAT'd LAN; low signal."
+        ),
+        "2054168": (
+            "A device checked its own public internet address using a slightly different method than the most common pattern. Still routine and harmless.",
+            "ET INFO external IP retrieval via alternate endpoint. Same class as 2054140; different URL/method signature.",
+            "ET INFO Device Retrieving External IP. Alt-endpoint variant of 2054140."
+        ),
+        "2054169": (
+            "Another variant of the 'device checking its public IP' pattern. Normal background behaviour.",
+            "ET INFO external IP retrieval, third endpoint variant. Same risk profile as 2054140/2054168.",
+            "ET INFO Device Retrieving External IP. Endpoint variant #3."
+        ),
+        "2025331": (
+            "A device asked an external service for its public IP address — routine and expected.",
+            "ET INFO external IP lookup via a specific service endpoint. Low risk, routine on home networks.",
+            "ET INFO Device Retrieving External IP. Service-specific signature."
+        ),
+        "2039594": (
+            "A device checked its public IP address using yet another external service. Completely routine.",
+            "ET INFO external IP retrieval, additional service variant. Same class and risk as other 205xxxx rules.",
+            "ET INFO Device Retrieving External IP. Additional service variant."
+        ),
+        "2026718": (
+            "A device on your network looked up its own public IP address. Normal behaviour.",
+            "ET INFO external IP lookup. One occurrence; same low-risk class as other IP-retrieval rules.",
+            "ET INFO Device Retrieving External IP. Single occurrence."
+        ),
+        # Potentially Bad Traffic — identified apps
+        "2027758": (
+            "Wondershare software (PDF editor, video tools, etc.) on your network sent data back to Wondershare's servers — likely telemetry or licence checks. Not malicious, but it does track usage.",
+            "ET POLICY Wondershare software telemetry/licensing traffic. 'Potentially Bad Traffic' reflects privacy concern, not active threat.",
+            "ET POLICY Wondershare telemetry/licensing C2. Privacy flag; not malicious."
+        ),
+        "2028651": (
+            "Steam (Valve's PC gaming platform) is communicating with its servers. Completely normal when the Steam app or a Steam game is running.",
+            "ET POLICY Steam gaming client protocol detected. 'Corporate Privacy Violation' is Suricata's DPI classification for recognisable platform traffic, not an actual threat.",
+            "ET POLICY Steam client traffic. Corporate privacy classification (DPI); expected. Not a threat."
+        ),
+        "2027867": (
+            "An Amazon Fire TV or Echo device is talking to Amazon's servers — normal operation for streaming and smart-home devices. The 'dewrain' label refers to the traffic pattern Amazon uses.",
+            "ET POLICY dewrain — Amazon Fire TV/Echo traffic to AWS. Pattern matches Amazon streaming device cloud communication.",
+            "ET dewrain. Fire TV/Echo → AWS traffic. Amazon streaming infra pattern. Not a threat."
+        ),
+        # Potentially Bad Traffic — generic patterns
+        "2029340": (
+            "Suricata spotted a traffic pattern it considers potentially suspicious, but assessed it as low risk. Likely an app communicating in an unusual but harmless way.",
+            "ET POLICY Potentially Bad Traffic. LOW risk; specific trigger context is in the raw alert. Review source/destination if unexpected.",
+            "ET POLICY Potentially Bad Traffic. LOW. Check raw alert for signature context."
+        ),
+        "2027757": (
+            "A network traffic pattern that Suricata flags as potentially suspicious, though it was rated low risk. Probably routine application traffic.",
+            "ET POLICY Potentially Bad Traffic, low frequency. LOW risk classification; check raw alert for specific trigger.",
+            "ET POLICY Potentially Bad Traffic. LOW. 3 occurrences."
+        ),
+        "2037042": (
+            "Another low-risk 'potentially bad traffic' pattern. Usually means an app doing something slightly unusual but not actually harmful.",
+            "ET POLICY Potentially Bad Traffic. LOW risk; infrequent. Examine raw alert for source application context.",
+            "ET POLICY Potentially Bad Traffic. LOW. Infrequent."
+        ),
+        "2027863": (
+            "A traffic pattern Suricata flagged as potentially suspicious but rated low risk. Very rare — only seen twice.",
+            "ET POLICY Potentially Bad Traffic. LOW risk; 2 occurrences. Check raw alert for specific context.",
+            "ET POLICY Potentially Bad Traffic. LOW. 2 hits."
+        ),
+        # ICMP / Misc Attack
+        "2400016": (
+            "An ICMP 'ping' was detected — this is how computers check if another device is reachable, like knocking on a door. On a home network this is almost always harmless.",
+            "GPL ICMP_INFO PING *NIX — ICMP echo request. 'Misc Attack' is a legacy Snort/GPL classification; ICMP pings are routine on home LANs. Worth reviewing src/dst if unexpected.",
+            "GPL ICMP_INFO PING *NIX. Legacy Misc Attack class. ICMP echo; routine on home LAN. Verify src/dst."
+        ),
+        "2400038": (
+            "Another ICMP ping alert — a device checked if another device was reachable. The difference from the other ping alert is the format of the ping, not the risk level.",
+            "GPL ICMP_INFO PING BSDtype — BSD-format ICMP echo variant. Same classification and risk as 2400016; distinguishes OS-specific ICMP payload format.",
+            "GPL ICMP_INFO PING BSDtype. BSD-format ICMP echo variant of 2400016. Same risk profile."
+        ),
+    }
+    GENERIC_TIP = (
+        "This Suricata rule fired for traffic that matched a known pattern. The AI rated it LOW risk — click 'View' on the main dashboard alert list to see the full AI analysis.",
+        "Suricata signature match; LOW risk per AI analysis. See the dashboard alert view for explanation and raw alert context.",
+        "Suricata sig match. LOW risk. See alert view for raw context."
+    )
+
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -1253,19 +1343,43 @@ def firewall_db():
         rows = ""
         for a in alerts:
             aid = int(a[0])
-            rule_id = html.escape(str(a[1] or ""))
+            rule_id_raw = str(a[1] or "")
+            rule_id = html.escape(rule_id_raw)
             rule_name = html.escape((a[2] or "")[:40])
             risk_level = html.escape(str(a[5] or ""))
             action_val = html.escape(str(a[7] or ""))
             times_seen = html.escape(str(a[8] or ""))
             last_seen = html.escape(str(a[10] or ""))
-            rows += f"""<tr>
-                <td>{rule_id}</td>
-                <td>{rule_name}</td>
-                <td>{risk_level}</td>
-                <td>{action_val}</td>
-                <td>{times_seen}</td>
-                <td>{last_seen}</td>
+
+            # Row styling by action status
+            if action_val == "pending":
+                row_style = "background:rgba(255,170,0,0.08);border-left:3px solid #ffaa00;"
+                action_color = "color:#ffaa00;font-weight:bold"
+            elif action_val == "ignore":
+                row_style = "opacity:0.55;"
+                action_color = "color:#555"
+            elif action_val == "block":
+                row_style = "background:rgba(255,68,68,0.08);border-left:3px solid #ff4444;"
+                action_color = "color:#ff4444;font-weight:bold"
+            elif action_val == "monitor":
+                row_style = "background:rgba(0,212,255,0.05);border-left:3px solid #00d4ff;"
+                action_color = "color:#00d4ff"
+            else:
+                row_style = ""
+                action_color = ""
+
+            tip_b, tip_m, tip_p = RULE_TIPS.get(rule_id_raw, GENERIC_TIP)
+            tip_b = html.escape(tip_b, quote=True)
+            tip_m = html.escape(tip_m, quote=True)
+            tip_p = html.escape(tip_p, quote=True)
+
+            rows += f"""<tr style="{row_style}">
+                <td style="color:#888">{rule_id}</td>
+                <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" style="cursor:help" title="{tip_m}">{rule_name}</td>
+                <td style="color:{'#00ff88' if a[5]=='LOW' else '#ffaa00' if a[5]=='MEDIUM' else '#ff4444'}">{risk_level}</td>
+                <td style="{action_color}">{action_val}</td>
+                <td style="color:#aaa;text-align:right">{times_seen}</td>
+                <td style="color:#aaa">{last_seen}</td>
                 <td>
                     <select onchange="changeAction({aid}, this.value)">
                         <option {"selected" if a[7]=="pending" else ""}>pending</option>
@@ -1285,8 +1399,9 @@ def firewall_db():
         h1 {{ color: #00d4ff; }}
         table {{ width: 100%; border-collapse: collapse; }}
         th {{ background: #16213e; color: #00d4ff; padding: 10px; text-align: left; }}
-        td {{ padding: 8px; border-bottom: 1px solid #333; font-size: 0.85em; }}
-        select {{ background: #16213e; color: #eee; border: 1px solid #00d4ff; padding: 3px; }}
+        td {{ padding: 8px; border-bottom: 1px solid #222; font-size: 0.85em; }}
+        tr:hover td {{ background: rgba(255,255,255,0.03); }}
+        select {{ background: #16213e; color: #eee; border: 1px solid #333; padding: 3px; border-radius:3px; }}
         a {{ color: #00d4ff; }}
     </style>
     <script>
@@ -1294,6 +1409,21 @@ def firewall_db():
             fetch("/api/db-action/" + id + "/" + action)
                 .then(r => r.json()).then(d => console.log(d));
         }}
+
+        // Apply tier-appropriate tooltip text to rule name cells.
+        // Called on load and whenever the tier changes.
+        function applyTierTooltips() {{
+            var tier = getTier();
+            var attr = "data-tip-" + tier;
+            document.querySelectorAll(".rule-name-cell[" + attr + "]").forEach(function(el) {{
+                el.title = el.getAttribute(attr) || el.getAttribute("data-tip-intermediate") || "";
+            }});
+        }}
+        window.onTierChange = applyTierTooltips;
+        window.addEventListener("storage", function(e) {{
+            if (e.key === "explanationTier") applyTierTooltips();
+        }});
+        document.addEventListener("DOMContentLoaded", applyTierTooltips);
     </script>
 </head>
 <body>
