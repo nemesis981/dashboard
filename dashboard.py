@@ -44,7 +44,7 @@ hw_monitor.init_db()
 
 app = Flask(__name__)
 
-PIHOLE_IP = "192.168.4.69"
+PIHOLE_IP = "192.168.4.69:8080"
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = "/home/paul/alert_manager/alerts.db"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
