@@ -155,7 +155,77 @@ def _init_cooldown_table():
                 last_sent_ts REAL NOT NULL
             )
         """)
+        # hw_alerts: persistent alert state read by the dashboard.
+        # Written here (by watchdog) whenever a condition is detected or clears.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS hw_alerts (
+                alert_key          TEXT PRIMARY KEY,
+                severity           TEXT NOT NULL,
+                breach             TEXT NOT NULL,
+                recommendation     TEXT NOT NULL,
+                first_triggered_ts REAL NOT NULL,
+                last_triggered_ts  REAL NOT NULL,
+                resolved_ts        REAL
+            )
+        """)
         conn.commit()
+    finally:
+        conn.close()
+
+
+def _upsert_hw_alert(key, severity, breach, recommendation):
+    """Record or refresh an active alert in hw_alerts.
+
+    If the alert is new (or was previously resolved), opens a fresh entry.
+    If it already exists and is unresolved, just bumps last_triggered_ts.
+    Called unconditionally on every detected breach so the row stays fresh
+    even while the email cooldown is suppressing repeated sends.
+    """
+    now = time.time()
+    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO hw_alerts
+                   (alert_key, severity, breach, recommendation,
+                    first_triggered_ts, last_triggered_ts, resolved_ts)
+               VALUES (?, ?, ?, ?, ?, ?, NULL)
+               ON CONFLICT(alert_key) DO UPDATE SET
+                   severity          = excluded.severity,
+                   breach            = excluded.breach,
+                   recommendation    = excluded.recommendation,
+                   last_triggered_ts = excluded.last_triggered_ts,
+                   -- re-open if it was previously resolved
+                   first_triggered_ts = CASE WHEN resolved_ts IS NOT NULL
+                                             THEN excluded.first_triggered_ts
+                                             ELSE first_triggered_ts END,
+                   resolved_ts       = NULL""",
+            (key, severity, breach, recommendation, now, now),
+        )
+        conn.commit()
+    except Exception as e:
+        logging.exception("_upsert_hw_alert %s: %s", key, e)
+    finally:
+        conn.close()
+
+
+def _resolve_stale_alerts(active_keys):
+    """Mark resolved any hw_alerts whose condition is no longer detected."""
+    now = time.time()
+    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("SELECT alert_key FROM hw_alerts WHERE resolved_ts IS NULL")
+        open_keys = {row[0] for row in c.fetchall()}
+        for key in open_keys - active_keys:
+            c.execute(
+                "UPDATE hw_alerts SET resolved_ts = ? WHERE alert_key = ?",
+                (now, key),
+            )
+            logging.info("HW alert resolved: %s", key)
+        conn.commit()
+    except Exception as e:
+        logging.exception("_resolve_stale_alerts: %s", e)
     finally:
         conn.close()
 
@@ -225,6 +295,10 @@ def _format_reading(sample):
 
 
 def _send_hw_alert(key, severity, breach, recommendation, sample):
+    # Always persist the alert state so the dashboard shows it immediately,
+    # even if the email is still on cooldown.
+    _upsert_hw_alert(key, severity, breach, recommendation)
+
     if not _hw_cooldown_ok(key):
         logging.info("HW alert %s suppressed by cooldown (last sent < 30 min ago)", key)
         return
@@ -274,7 +348,12 @@ def check_hw_metrics():
         cpu_t, gpu_t, amb_t, nvme_t, load, fan_summary,
     )
 
+    # Track every alert key that is currently breaching so we can resolve
+    # stale ones (conditions that have since cleared) at the end of this check.
+    breached_keys = set()
+
     if cpu_t is not None and cpu_t > THRESH_CPU_TEMP:
+        breached_keys.add("cpu_temp")
         _send_hw_alert(
             "cpu_temp", "CRITICAL",
             f"CPU temperature {cpu_t}°C exceeds {THRESH_CPU_TEMP}°C",
@@ -283,6 +362,7 @@ def check_hw_metrics():
         )
 
     if amb_t is not None and amb_t > THRESH_AMBIENT_TEMP:
+        breached_keys.add("ambient_temp")
         _send_hw_alert(
             "ambient_temp", "HIGH",
             f"Ambient temperature {amb_t}°C exceeds {THRESH_AMBIENT_TEMP}°C",
@@ -291,6 +371,7 @@ def check_hw_metrics():
         )
 
     if nvme_t is not None and nvme_t > THRESH_NVME_TEMP:
+        breached_keys.add("nvme_temp")
         _send_hw_alert(
             "nvme_temp", "HIGH",
             f"NVMe temperature {nvme_t}°C exceeds {THRESH_NVME_TEMP}°C",
@@ -299,6 +380,7 @@ def check_hw_metrics():
         )
 
     if gpu_t is not None and gpu_t > THRESH_GPU_TEMP:
+        breached_keys.add("gpu_temp")
         _send_hw_alert(
             "gpu_temp", "CRITICAL",
             f"GPU temperature {gpu_t}°C exceeds {THRESH_GPU_TEMP}°C",
@@ -323,8 +405,10 @@ def check_hw_metrics():
         if "cpu" in label.lower():
             # CPU fan slow/stopped while CPU is hot — immediate risk
             if cpu_t is not None and cpu_t > THRESH_CPU_TEMP_FOR_FAN_CHECK:
+                key = f"fan_stopped/{ukey}"
+                breached_keys.add(key)
                 _send_hw_alert(
-                    f"fan_stopped/{ukey}", "CRITICAL",
+                    key, "CRITICAL",
                     f"CPU fan '{label}' at {rpm} RPM while CPU is {cpu_t:.0f}°C",
                     "Inspect the CPU fan immediately. Risk of thermal damage if not addressed.",
                     sample,
@@ -332,8 +416,10 @@ def check_hw_metrics():
         else:
             # Chassis/other fan stopped while system is under load
             if load is not None and load > THRESH_LOAD_FOR_CHASSIS_FAN_CHECK:
+                key = f"fan_stopped/{ukey}"
+                breached_keys.add(key)
                 _send_hw_alert(
-                    f"fan_stopped/{ukey}", "HIGH",
+                    key, "HIGH",
                     f"Fan '{label}' ({ukey}) at {rpm} RPM while system under {load:.0f}% load",
                     f"Inspect '{label}'. A stopped fan under sustained load will raise temperatures.",
                     sample,
@@ -342,12 +428,16 @@ def check_hw_metrics():
     recent = _fetch_recent_cpu_percents(SUSTAINED_LOAD_SAMPLES)
     if (len(recent) >= SUSTAINED_LOAD_SAMPLES
             and all(p > THRESH_CPU_PERCENT_SUSTAINED for p in recent)):
+        breached_keys.add("cpu_sustained_load")
         _send_hw_alert(
             "cpu_sustained_load", "MEDIUM",
             f"CPU load above {THRESH_CPU_PERCENT_SUSTAINED}% for {SUSTAINED_LOAD_SAMPLES * 5} minutes",
             "Investigate runaway processes with `top` / `ps auxf`. May indicate stuck job or attack.",
             sample,
         )
+
+    # Clear any alerts whose condition is no longer detected this cycle.
+    _resolve_stale_alerts(breached_keys)
 
 
 def check_service(service: str) -> None:

@@ -114,6 +114,22 @@ def init_db():
             pass
         conn.commit()
 
+        # hw_alerts: tracks currently-active hardware alert conditions.
+        # Written by watchdog; read by the dashboard to show a persistent
+        # alert list independent of the fan section's collapsed/expanded state.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS hw_alerts (
+                alert_key         TEXT PRIMARY KEY,
+                severity          TEXT NOT NULL,
+                breach            TEXT NOT NULL,
+                recommendation    TEXT NOT NULL,
+                first_triggered_ts REAL NOT NULL,
+                last_triggered_ts  REAL NOT NULL,
+                resolved_ts        REAL
+            )
+        """)
+        conn.commit()
+
         # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
         # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
         fan_labels = {}
@@ -584,6 +600,30 @@ def get_fan_status():
         }
         for row in rows
     }
+
+
+def get_hw_alerts():
+    """Return active (unresolved) hardware alerts, newest-first.
+
+    Each dict: {alert_key, severity, breach, recommendation,
+                first_triggered_ts, last_triggered_ts}
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        rows = conn.execute(
+            """SELECT alert_key, severity, breach, recommendation,
+                      first_triggered_ts, last_triggered_ts
+               FROM hw_alerts
+               WHERE resolved_ts IS NULL
+               ORDER BY last_triggered_ts DESC"""
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        conn.close()
+    cols = ("alert_key", "severity", "breach", "recommendation",
+            "first_triggered_ts", "last_triggered_ts")
+    return [dict(zip(cols, r)) for r in rows]
 
 
 def _bootstrap_fan_status():

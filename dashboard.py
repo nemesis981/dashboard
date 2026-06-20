@@ -493,6 +493,10 @@ def api_stats():
     review_queue = get_review_queue()
     vpn = get_vpn_status()
     vpn_status_str = vpn.get("status", "Disconnected")
+    try:
+        hw_alerts = hw_monitor.get_hw_alerts()
+    except Exception:
+        hw_alerts = []
     return jsonify({
         "now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "pihole": get_pihole_summary(),
@@ -502,6 +506,7 @@ def api_stats():
         "quarantines": quarantines,
         "quarantine_banner_html": render_quarantine_banner_html(quarantines),
         "hw": hw_live,
+        "hw_alerts": hw_alerts,
         "alert_24h": {"total": alerts_24h["total"], "color": alert_color(alerts_24h["total"])},
         "health": {"score": health["score"], "color": health["color"]},
         "review_queue_count": len(review_queue),
@@ -1228,6 +1233,11 @@ def dashboard():
     hw_fans_js = json.dumps(hw_fans)
     hw_cpu_pct_js = "null" if hw_cpu_pct is None else str(hw_cpu_pct)
     fan_status_js = json.dumps(hw_live.get("fan_status", {}))
+    try:
+        hw_alerts_init = hw_monitor.get_hw_alerts()
+    except Exception:
+        hw_alerts_init = []
+    hw_alerts_js = json.dumps(hw_alerts_init)
     def _fmt(v, suffix=""):
         return "—" if v is None else f"{v}{suffix}"
 
@@ -1342,6 +1352,23 @@ def dashboard():
         .fan-rpm-active {{ color:#00ff88; }}
         .fan-rpm-idle {{ color:#555; }}
         .fan-rpm-concern {{ color:#ff4444; }}
+        .hw-alerts-section {{ margin-top:10px; border-top:1px solid #1e2d4e; padding-top:8px; }}
+        .hw-alerts-header {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }}
+        .hw-alert-row {{ display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:5px; cursor:pointer; background:rgba(255,68,68,0.08); border:1px solid rgba(255,68,68,0.3); margin-bottom:4px; }}
+        .hw-alert-row:hover {{ background:rgba(255,68,68,0.16); border-color:rgba(255,68,68,0.5); }}
+        .hw-alert-icon {{ font-size:1.1em; flex-shrink:0; }}
+        .hw-alert-body {{ flex:1; min-width:0; }}
+        .hw-alert-msg {{ color:#ff9999; font-size:0.85em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+        .hw-alert-meta {{ color:#666; font-size:0.72em; margin-top:2px; }}
+        .hw-alert-sev-CRITICAL {{ color:#ff4444; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
+        .hw-alert-sev-HIGH {{ color:#ff8800; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
+        .hw-alert-sev-MEDIUM {{ color:#ffcc00; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
+        .hw-alert-empty {{ color:#555; font-size:0.82em; padding:5px 2px; }}
+        .hw-alert-detail-modal {{ background:#16213e; border:1px solid #ff4444; border-radius:10px; padding:20px; max-width:600px; width:90%; max-height:85vh; overflow-y:auto; margin:60px auto; position:relative; }}
+        .hw-alert-detail-modal h3 {{ color:#ff6666; margin-top:0; }}
+        .hw-alert-detail-field {{ margin-bottom:12px; }}
+        .hw-alert-detail-label {{ color:#888; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-alert-detail-value {{ color:#ddd; font-size:0.9em; margin-top:3px; white-space:pre-wrap; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -1401,6 +1428,10 @@ def dashboard():
                     <span class="fan-summary-text" id="fanSummaryText">Fans: loading…</span>
                 </div>
                 <div id="fanDetailGrid" class="fan-detail-grid" style="display:none"></div>
+            </div>
+            <div class="hw-alerts-section" onclick="event.stopPropagation()">
+                <div class="hw-alerts-header">Hardware Alerts</div>
+                <div id="hwAlertsList"></div>
             </div>
         </div>
 
@@ -1515,6 +1546,18 @@ def dashboard():
             <div id="healthModalBody" style="color:#888;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hardware Alert Detail Modal -->
+    <div class="modal" id="hwAlertDetailModal" onclick="if(event.target.id==='hwAlertDetailModal')closeHwAlertDetailModal()">
+        <div class="hw-alert-detail-modal">
+            <button class="hw-close-x" onclick="closeHwAlertDetailModal()" title="Close (Esc)">✕</button>
+            <h3 id="hwAlertDetailTitle">Hardware Alert</h3>
+            <div id="hwAlertDetailBody"></div>
+            <div style="text-align:right;margin-top:12px">
+                <button class="btn btn-close" onclick="closeHwAlertDetailModal()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -1820,6 +1863,84 @@ def dashboard():
             renderFanSection({hw_fans_js}, {hw_cpu_pct_js}, {fan_status_js});
         }})();
 
+        // ── Hardware Alerts ───────────────────────────────────────────────
+        var _hwAlertIcons = {{
+            "cpu_temp": "🌡️", "ambient_temp": "🌡️", "nvme_temp": "💾",
+            "gpu_temp": "🎮", "cpu_sustained_load": "⚡"
+        }};
+        function _hwAlertIcon(key) {{
+            if (key.startsWith("fan_stopped/")) return "🌀";
+            return _hwAlertIcons[key] || "⚠️";
+        }}
+        function _fmtTs(ts) {{
+            if (!ts) return "—";
+            var d = new Date(ts * 1000);
+            return d.toLocaleString();
+        }}
+
+        var _currentHwAlerts = [];
+        function renderHwAlerts(alerts) {{
+            _currentHwAlerts = alerts || [];
+            var el = document.getElementById("hwAlertsList");
+            if (!el) return;
+            if (!_currentHwAlerts.length) {{
+                el.innerHTML = '<div class="hw-alert-empty">✓ No active hardware alerts</div>';
+                return;
+            }}
+            el.innerHTML = _currentHwAlerts.map(function(a, i) {{
+                var icon = _hwAlertIcon(a.alert_key);
+                var sevClass = "hw-alert-sev-" + (a.severity || "HIGH");
+                var since = _fmtTs(a.first_triggered_ts);
+                return '<div class="hw-alert-row" onclick="openHwAlertDetailModal(' + i + ')">' +
+                    '<span class="hw-alert-icon">' + icon + '</span>' +
+                    '<span class="' + sevClass + '">' + (a.severity || "") + '</span>' +
+                    '<span class="hw-alert-body">' +
+                        '<div class="hw-alert-msg">' + (a.breach || "") + '</div>' +
+                        '<div class="hw-alert-meta">Since ' + since + '</div>' +
+                    '</span>' +
+                    '<span style="color:#555;font-size:0.8em">▸</span>' +
+                '</div>';
+            }}).join("");
+        }}
+
+        function openHwAlertDetailModal(idx) {{
+            var a = _currentHwAlerts[idx];
+            if (!a) return;
+            var icon = _hwAlertIcon(a.alert_key);
+            document.getElementById("hwAlertDetailTitle").textContent =
+                icon + " " + (a.severity || "Alert") + " — Hardware Alert";
+            document.getElementById("hwAlertDetailBody").innerHTML =
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">Condition</div>' +
+                    '<div class="hw-alert-detail-value">' + (a.breach || "—") + '</div>' +
+                '</div>' +
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">Recommendation</div>' +
+                    '<div class="hw-alert-detail-value">' + (a.recommendation || "—") + '</div>' +
+                '</div>' +
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">First triggered</div>' +
+                    '<div class="hw-alert-detail-value">' + _fmtTs(a.first_triggered_ts) + '</div>' +
+                '</div>' +
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">Last confirmed</div>' +
+                    '<div class="hw-alert-detail-value">' + _fmtTs(a.last_triggered_ts) + '</div>' +
+                '</div>' +
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">Alert key</div>' +
+                    '<div class="hw-alert-detail-value" style="color:#555;font-size:0.85em">' +
+                        (a.alert_key || "—") +
+                    '</div>' +
+                '</div>';
+            document.getElementById("hwAlertDetailModal").style.display = "block";
+        }}
+
+        function closeHwAlertDetailModal() {{
+            document.getElementById("hwAlertDetailModal").style.display = "none";
+        }}
+
+        renderHwAlerts({hw_alerts_js});
+
         function applyHwLive(hw) {{
             if (!hw) return;
             document.getElementById("hwCpuTemp").textContent = fmtHw(hw.cpu_temp, "°C");
@@ -2015,6 +2136,7 @@ def dashboard():
             if (document.getElementById("alertBreakdownModal").style.display === "block") closeAlertBreakdownModal();
             if (document.getElementById("healthModal").style.display === "block") closeHealthModal();
             if (document.getElementById("vpnModal").style.display === "block") closeVpnModal();
+            if (document.getElementById("hwAlertDetailModal").style.display === "block") closeHwAlertDetailModal();
         }});
         document.getElementById("hwModal").addEventListener("click", function(e) {{
             if (e.target.id === "hwModal") closeHwModal();
@@ -2142,6 +2264,7 @@ def dashboard():
                         list.innerHTML = "";
                     }}
                     if (d.hw) applyHwLive(d.hw);
+                    if (d.hw_alerts !== undefined) renderHwAlerts(d.hw_alerts);
                     if (d.alert_24h) {{
                         var ael = document.getElementById("hwAlert24h");
                         ael.textContent = d.alert_24h.total;
