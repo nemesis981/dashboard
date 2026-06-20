@@ -1207,19 +1207,10 @@ def dashboard():
     hw_gpu_fan = hw_live.get("gpu_fan_percent")
     hw_cpu_pct = hw_live.get("cpu_percent")
     hw_ram_pct = hw_live.get("ram_percent")
+    hw_fans_js = json.dumps(hw_fans)
+    hw_cpu_pct_js = "null" if hw_cpu_pct is None else str(hw_cpu_pct)
     def _fmt(v, suffix=""):
         return "—" if v is None else f"{v}{suffix}"
-    def _fan_tiles_html(fans):
-        tiles = []
-        for f in fans:
-            lbl = html.escape(str(f.get("label", "Fan")))
-            rpm = f.get("rpm")
-            val = "—" if rpm is None else f"{rpm} rpm"
-            tiles.append(
-                f'<div class="hw-stat"><div class="hw-label">{lbl}</div>'
-                f'<div class="hw-value">{val}</div></div>'
-            )
-        return "".join(tiles)
 
     try:
         alerts_24h_init = get_24h_alert_stats()
@@ -1317,6 +1308,19 @@ def dashboard():
         .hw-close-x:hover {{ background:#ff4444; color:#fff; border-color:#ff4444; }}
         .chart-box {{ background:#0d1117; border-radius:6px; padding:10px; margin-bottom:12px; }}
         .chart-box h4 {{ color:#00d4ff; margin:0 0 6px 0; font-size:0.9em; }}
+        .fan-section {{ margin-top:10px; border-top:1px solid #1e2d4e; padding-top:6px; }}
+        .fan-summary {{ display:flex; align-items:center; cursor:pointer; padding:6px 4px; border-radius:4px; user-select:none; gap:8px; }}
+        .fan-summary:hover {{ background:rgba(0,212,255,0.06); }}
+        .fan-toggle {{ color:#00d4ff; font-size:0.75em; display:inline-block; width:10px; flex-shrink:0; }}
+        .fan-dot {{ width:9px; height:9px; border-radius:50%; display:inline-block; flex-shrink:0; }}
+        .fan-summary-text {{ color:#ccc; font-size:0.85em; }}
+        .fan-detail-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; margin-top:8px; }}
+        .fan-tile {{ background:#0d1117; border-radius:6px; padding:8px 6px; text-align:center; }}
+        .fan-tile-lbl {{ color:#888; font-size:0.65em; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+        .fan-tile-rpm {{ font-size:1.15em; font-weight:bold; margin-top:3px; }}
+        .fan-rpm-active {{ color:#00ff88; }}
+        .fan-rpm-idle {{ color:#555; }}
+        .fan-rpm-concern {{ color:#ff4444; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -1360,7 +1364,6 @@ def dashboard():
                 <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">RAM</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">GPU Fan</div><div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div></div>
-                <div id="hwFansContainer">{_fan_tiles_html(hw_fans)}</div>
                 <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
                     <div class="hw-label">24h System Alerts</div>
                     <div class="hw-value" id="hwAlert24h" style="color:{alert_24h_color}">{alert_24h_total}</div>
@@ -1369,6 +1372,14 @@ def dashboard():
                     <div class="hw-label">System Health</div>
                     <div class="hw-value" id="hwHealthScore" style="color:{health_color}">{health_score}%</div>
                 </div>
+            </div>
+            <div class="fan-section" onclick="event.stopPropagation()">
+                <div class="fan-summary" onclick="toggleFanSection()">
+                    <span class="fan-toggle" id="fanToggleIcon">▶</span>
+                    <span class="fan-dot" id="fanStatusDot" style="background:#444"></span>
+                    <span class="fan-summary-text" id="fanSummaryText">Fans: loading…</span>
+                </div>
+                <div id="fanDetailGrid" class="fan-detail-grid" style="display:none"></div>
             </div>
         </div>
 
@@ -1703,6 +1714,60 @@ def dashboard():
             return (v === null || v === undefined) ? "—" : v + suffix;
         }}
 
+        // ── Fan section ───────────────────────────────────────────────────────
+        function toggleFanSection() {{
+            var grid = document.getElementById("fanDetailGrid");
+            setFanSectionExpanded(grid.style.display === "none");
+        }}
+        function setFanSectionExpanded(expanded) {{
+            var grid = document.getElementById("fanDetailGrid");
+            var icon = document.getElementById("fanToggleIcon");
+            grid.style.display = expanded ? "grid" : "none";
+            icon.textContent = expanded ? "▼" : "▶";
+            try {{ localStorage.setItem("fansExpanded", expanded ? "1" : "0"); }} catch(e) {{}}
+        }}
+        function renderFanSection(fans, cpuPct) {{
+            fans = fans || [];
+            var highLoad = cpuPct !== null && cpuPct !== undefined && cpuPct >= 40;
+            var nActive = 0, nIdle = 0, nConcern = 0;
+            var tiles = fans.map(function(f) {{
+                var lbl = escapeHtml(String(f.label || "Fan"));
+                var rpm = f.rpm;
+                var rpmText, cls;
+                if (rpm === null || rpm === undefined) {{
+                    rpmText = "—"; cls = "fan-rpm-idle"; nIdle++;
+                }} else if (rpm > 200) {{
+                    rpmText = rpm + " RPM"; cls = "fan-rpm-active"; nActive++;
+                }} else if (rpm <= 50 && highLoad) {{
+                    rpmText = rpm + " RPM"; cls = "fan-rpm-concern"; nConcern++;
+                }} else {{
+                    rpmText = rpm === 0 ? "0 RPM (idle)" : rpm + " RPM";
+                    cls = "fan-rpm-idle"; nIdle++;
+                }}
+                return '<div class="fan-tile"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
+                       '</div><div class="fan-tile-rpm ' + cls + '">' + rpmText + '</div></div>';
+            }});
+            var grid = document.getElementById("fanDetailGrid");
+            if (grid) grid.innerHTML = tiles.join("");
+            var parts = [];
+            if (nActive > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
+            if (nIdle > 0)   parts.push('<span style="color:#555">' + nIdle + ' idle</span>');
+            if (nConcern > 0) parts.push('<span style="color:#ff4444;font-weight:bold">' + nConcern + ' stopped!</span>');
+            var el = document.getElementById("fanSummaryText");
+            if (el) el.innerHTML = 'Fans (' + fans.length + '):&ensp;' +
+                (parts.length ? parts.join('&ensp;') : '<span style="color:#888">none configured</span>');
+            var dot = document.getElementById("fanStatusDot");
+            if (dot) dot.style.background = nConcern > 0 ? "#ff4444"
+                : nActive > 0 ? "#00ff88"
+                : fans.length > 0 ? "#ffaa00" : "#555";
+        }}
+        (function initFanSection() {{
+            var stored = null;
+            try {{ stored = localStorage.getItem("fansExpanded"); }} catch(e) {{}}
+            setFanSectionExpanded(stored === "1");
+            renderFanSection({hw_fans_js}, {hw_cpu_pct_js});
+        }})();
+
         function applyHwLive(hw) {{
             if (!hw) return;
             document.getElementById("hwCpuTemp").textContent = fmtHw(hw.cpu_temp, "°C");
@@ -1712,17 +1777,7 @@ def dashboard():
             document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
             document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
             document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
-            var fc = document.getElementById("hwFansContainer");
-            if (fc) {{
-                fc.innerHTML = (hw.fans || []).map(function(f) {{
-                    var lbl = String(f.label || "Fan").replace(/[<>&"]/g, function(c) {{
-                        return {{'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}}[c];
-                    }});
-                    var val = (f.rpm === null || f.rpm === undefined) ? "—" : f.rpm + " rpm";
-                    return '<div class="hw-stat"><div class="hw-label">' + lbl +
-                           '</div><div class="hw-value">' + val + '</div></div>';
-                }}).join("");
-            }}
+            renderFanSection(hw.fans, hw.cpu_percent);
         }}
 
         function openHwModal() {{
@@ -1960,21 +2015,38 @@ def dashboard():
                 {{label: "Ambient", data: pick(samples, "ambient_temp"), borderColor: "#ffaa00", backgroundColor: "rgba(255,170,0,0.1)"}},
                 {{label: "NVMe",    data: pick(samples, "nvme_temp"),    borderColor: "#00d4ff", backgroundColor: "rgba(0,212,255,0.1)"}}
             ], "°C");
-            var fanLabels = [];
-            samples.forEach(function(s) {{
-                (s.fans || []).forEach(function(f) {{
-                    if (fanLabels.indexOf(f.label) === -1) fanLabels.push(f.label);
-                }});
-            }});
-            var fanPalette = ["#00ff88","#00d4ff","#8800ff","#ffaa00","#ff4444","#ff00ff","#ffffff"];
-            makeChart("chartFans", labels, fanLabels.map(function(lbl, i) {{
+            // Fan chart: use array position as the primary key so duplicate
+            // human-readable labels (e.g. 8× "Chassis Motherboard Fan") each
+            // get their own line.  Append " #N" suffix to distinguish repeats.
+            var _fanCount = 0;
+            samples.forEach(function(s) {{ _fanCount = Math.max(_fanCount, (s.fans || []).length); }});
+            var _fanLabels = [];
+            for (var _si = 0; _si < samples.length; _si++) {{
+                if (samples[_si].fans && samples[_si].fans.length > 0) {{
+                    var _seen = {{}};
+                    samples[_si].fans.forEach(function(f, fi) {{
+                        var base = String(f.label || ("Fan " + (fi + 1)));
+                        var lbl = base, n = 1;
+                        while (_seen[lbl]) {{ lbl = base + " #" + (++n); }}
+                        _seen[lbl] = true;
+                        _fanLabels[fi] = lbl;
+                    }});
+                    break;
+                }}
+            }}
+            for (var _fi = _fanLabels.length; _fi < _fanCount; _fi++) {{
+                _fanLabels[_fi] = "Fan " + (_fi + 1);
+            }}
+            var fanPalette = ["#00ff88","#00d4ff","#8800ff","#ffaa00","#ff4444","#ff00ff","#ffffff","#88ffcc","#ffbb44","#aa88ff"];
+            makeChart("chartFans", labels, _fanLabels.map(function(lbl, fi) {{
+                var posIdx = fi;
                 return {{
                     label: lbl,
                     data: samples.map(function(s) {{
-                        var hit = (s.fans || []).find(function(f) {{ return f.label === lbl; }});
-                        return hit ? hit.rpm : null;
+                        var fa = s.fans || [];
+                        return posIdx < fa.length ? fa[posIdx].rpm : null;
                     }}),
-                    borderColor: fanPalette[i % fanPalette.length]
+                    borderColor: fanPalette[fi % fanPalette.length]
                 }};
             }}), "RPM");
             makeChart("chartUsage", labels, [
