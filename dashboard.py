@@ -731,12 +731,12 @@ def _temp_score(temp, threshold, healthy_max):
 
 
 def _fan_score(sample):
-    """100% when all 3 chassis fans spinning > 200 RPM; scaled down otherwise."""
-    fans = [sample.get("fan1_rpm"), sample.get("fan2_rpm"), sample.get("fan3_rpm")]
-    if all(f is None for f in fans):
+    """100% when all configured fans spin > 200 RPM; scaled proportionally. 100% if none configured."""
+    fans = sample.get("fans", [])
+    if not fans:
         return 100.0
-    spinning = sum(1 for f in fans if f and f > 200)
-    return 100.0 * spinning / 3.0
+    spinning = sum(1 for f in fans if f.get("rpm") and f["rpm"] > 200)
+    return 100.0 * spinning / len(fans)
 
 
 def _alert_score(total):
@@ -765,13 +765,16 @@ def compute_health_score(hw_live, alerts_24h, svc_status):
     gpu_t = hw.get("gpu_temp")
     cpu_score = _temp_score(cpu_t, 85, 70)
     gpu_score = _temp_score(gpu_t, 85, 75)
+    fans_list = hw.get("fans", [])
     fan_score = _fan_score(hw)
     svc_active = svc_status.get("active", 0)
     svc_total = max(1, svc_status.get("total", 1))
     svc_score = 100.0 * svc_active / svc_total
     alert_total = alerts_24h.get("total", 0)
     alrt_score = _alert_score(alert_total)
-    spinning = int(round(fan_score / 100.0 * 3))
+    spinning = sum(1 for f in fans_list if f.get("rpm") and f["rpm"] > 200)
+    fan_detail = (f"{spinning}/{len(fans_list)} fans above 200 RPM"
+                  if fans_list else "no fans configured")
 
     components = [
         {"name": "CPU temperature", "weight": 25, "score": round(cpu_score, 1),
@@ -779,7 +782,7 @@ def compute_health_score(hw_live, alerts_24h, svc_status):
         {"name": "GPU temperature", "weight": 25, "score": round(gpu_score, 1),
          "detail": f"{gpu_t if gpu_t is not None else '—'}°C / threshold 85°C (healthy ≤75°C)"},
         {"name": "Fan speeds", "weight": 20, "score": round(fan_score, 1),
-         "detail": f"{spinning}/3 chassis fans above 200 RPM"},
+         "detail": fan_detail},
         {"name": "Services running", "weight": 20, "score": round(svc_score, 1),
          "detail": f"{svc_active}/{svc_status.get('total', 0)} monitored services active"},
         {"name": "System alerts (24h)", "weight": 10, "score": round(alrt_score, 1),
@@ -1200,14 +1203,23 @@ def dashboard():
     hw_ambient = hw_live.get("ambient_temp")
     hw_nvme = hw_live.get("nvme_temp")
     hw_gpu = hw_live.get("gpu_temp")
-    hw_f1 = hw_live.get("fan1_rpm")
-    hw_f2 = hw_live.get("fan2_rpm")
-    hw_f3 = hw_live.get("fan3_rpm")
+    hw_fans = hw_live.get("fans", [])
     hw_gpu_fan = hw_live.get("gpu_fan_percent")
     hw_cpu_pct = hw_live.get("cpu_percent")
     hw_ram_pct = hw_live.get("ram_percent")
     def _fmt(v, suffix=""):
         return "—" if v is None else f"{v}{suffix}"
+    def _fan_tiles_html(fans):
+        tiles = []
+        for f in fans:
+            lbl = html.escape(str(f.get("label", "Fan")))
+            rpm = f.get("rpm")
+            val = "—" if rpm is None else f"{rpm} rpm"
+            tiles.append(
+                f'<div class="hw-stat"><div class="hw-label">{lbl}</div>'
+                f'<div class="hw-value">{val}</div></div>'
+            )
+        return "".join(tiles)
 
     try:
         alerts_24h_init = get_24h_alert_stats()
@@ -1348,9 +1360,7 @@ def dashboard():
                 <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">RAM</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div></div>
                 <div class="hw-stat"><div class="hw-label">GPU Fan</div><div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div></div>
-                <div class="hw-stat"><div class="hw-label">Fan 1</div><div class="hw-value" id="hwFan1">{_fmt(hw_f1, " rpm")}</div></div>
-                <div class="hw-stat"><div class="hw-label">Fan 2</div><div class="hw-value" id="hwFan2">{_fmt(hw_f2, " rpm")}</div></div>
-                <div class="hw-stat"><div class="hw-label">Fan 3</div><div class="hw-value" id="hwFan3">{_fmt(hw_f3, " rpm")}</div></div>
+                <div id="hwFansContainer">{_fan_tiles_html(hw_fans)}</div>
                 <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
                     <div class="hw-label">24h System Alerts</div>
                     <div class="hw-value" id="hwAlert24h" style="color:{alert_24h_color}">{alert_24h_total}</div>
@@ -1702,9 +1712,17 @@ def dashboard():
             document.getElementById("hwCpuPct").textContent = fmtHw(hw.cpu_percent, "%");
             document.getElementById("hwRamPct").textContent = fmtHw(hw.ram_percent, "%");
             document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
-            document.getElementById("hwFan1").textContent = fmtHw(hw.fan1_rpm, " rpm");
-            document.getElementById("hwFan2").textContent = fmtHw(hw.fan2_rpm, " rpm");
-            document.getElementById("hwFan3").textContent = fmtHw(hw.fan3_rpm, " rpm");
+            var fc = document.getElementById("hwFansContainer");
+            if (fc) {{
+                fc.innerHTML = (hw.fans || []).map(function(f) {{
+                    var lbl = String(f.label || "Fan").replace(/[<>&"]/g, function(c) {{
+                        return {{'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}}[c];
+                    }});
+                    var val = (f.rpm === null || f.rpm === undefined) ? "—" : f.rpm + " rpm";
+                    return '<div class="hw-stat"><div class="hw-label">' + lbl +
+                           '</div><div class="hw-value">' + val + '</div></div>';
+                }}).join("");
+            }}
         }}
 
         function openHwModal() {{
@@ -1942,11 +1960,23 @@ def dashboard():
                 {{label: "Ambient", data: pick(samples, "ambient_temp"), borderColor: "#ffaa00", backgroundColor: "rgba(255,170,0,0.1)"}},
                 {{label: "NVMe",    data: pick(samples, "nvme_temp"),    borderColor: "#00d4ff", backgroundColor: "rgba(0,212,255,0.1)"}}
             ], "°C");
-            makeChart("chartFans", labels, [
-                {{label: "Fan 1", data: pick(samples, "fan1_rpm"), borderColor: "#00ff88"}},
-                {{label: "Fan 2", data: pick(samples, "fan2_rpm"), borderColor: "#00d4ff"}},
-                {{label: "Fan 3", data: pick(samples, "fan3_rpm"), borderColor: "#8800ff"}}
-            ], "RPM");
+            var fanLabels = [];
+            samples.forEach(function(s) {{
+                (s.fans || []).forEach(function(f) {{
+                    if (fanLabels.indexOf(f.label) === -1) fanLabels.push(f.label);
+                }});
+            }});
+            var fanPalette = ["#00ff88","#00d4ff","#8800ff","#ffaa00","#ff4444","#ff00ff","#ffffff"];
+            makeChart("chartFans", labels, fanLabels.map(function(lbl, i) {{
+                return {{
+                    label: lbl,
+                    data: samples.map(function(s) {{
+                        var hit = (s.fans || []).find(function(f) {{ return f.label === lbl; }});
+                        return hit ? hit.rpm : null;
+                    }}),
+                    borderColor: fanPalette[i % fanPalette.length]
+                }};
+            }}), "RPM");
             makeChart("chartUsage", labels, [
                 {{label: "CPU %",      data: pick(samples, "cpu_percent"), borderColor: "#ff4444"}},
                 {{label: "RAM (GB)",   data: pick(samples, "ram_used_gb"), borderColor: "#00ff88", yAxisID: "y"}}

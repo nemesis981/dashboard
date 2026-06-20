@@ -80,10 +80,40 @@ def init_db():
         for col, decl in (("gpu_temp", "INTEGER"),
                           ("gpu_fan_percent", "INTEGER"),
                           ("gpu_power_watts", "REAL"),
-                          ("fan4_rpm", "INTEGER")):
+                          ("fan4_rpm", "INTEGER"),
+                          ("fans_json", "TEXT")):
             if col not in existing:
                 c.execute(f"ALTER TABLE hw_metrics ADD COLUMN {col} {decl}")
         conn.commit()
+
+        # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
+        # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
+        fan_labels = {}
+        try:
+            with open(HW_MAP_PATH) as _mf:
+                _hm = json.load(_mf)
+                for _i, _f in enumerate(_hm.get("fans", []), start=1):
+                    fan_labels[_i] = _f.get("label", f"Fan {_i}")
+        except Exception:
+            pass
+        rows = c.execute(
+            "SELECT id, fan1_rpm, fan2_rpm, fan3_rpm, fan4_rpm "
+            "FROM hw_metrics WHERE fans_json IS NULL "
+            "AND (fan1_rpm IS NOT NULL OR fan2_rpm IS NOT NULL "
+            "     OR fan3_rpm IS NOT NULL OR fan4_rpm IS NOT NULL)"
+        ).fetchall()
+        migrated = 0
+        for row_id, f1, f2, f3, f4 in rows:
+            fans = [{"label": fan_labels.get(i, f"Fan {i}"), "rpm": rpm}
+                    for i, rpm in enumerate([f1, f2, f3, f4], start=1)
+                    if rpm is not None]
+            if fans:
+                c.execute("UPDATE hw_metrics SET fans_json = ? WHERE id = ?",
+                          (json.dumps(fans), row_id))
+                migrated += 1
+        if migrated:
+            conn.commit()
+            log.info("init_db: migrated %d rows from fan_rpm columns to fans_json", migrated)
     finally:
         conn.close()
 
@@ -216,13 +246,10 @@ def _extract_temps_and_fans(s):
     global _sensor_map_logged
 
     out = {
-        "cpu_temp":    None,
+        "cpu_temp":     None,
         "ambient_temp": None,
-        "nvme_temp":   None,
-        "fan1_rpm":    None,
-        "fan2_rpm":    None,
-        "fan3_rpm":    None,
-        "fan4_rpm":    None,
+        "nvme_temp":    None,
+        "fans":         [],
     }
 
     hw_map = _load_hw_map()
@@ -238,8 +265,9 @@ def _extract_temps_and_fans(s):
         if hw_map.get("nvme_temp"):
             m = hw_map["nvme_temp"]
             out["nvme_temp"] = _lookup_temp(s, m["adapter"], m["label"])
-        for i, fan in enumerate(hw_map.get("fans", [])[:4], start=1):
-            out[f"fan{i}_rpm"] = _lookup_fan(s, fan["adapter"], fan["label"])
+        for fan in hw_map.get("fans", []):
+            rpm = _lookup_fan(s, fan["adapter"], fan["label"])
+            out["fans"].append({"label": fan["label"], "rpm": rpm})
 
         if not _sensor_map_logged:
             _sensor_map_logged = True
@@ -250,8 +278,8 @@ def _extract_temps_and_fans(s):
             if hw_map.get("ambient_temp"):
                 m = hw_map["ambient_temp"]
                 log.info("  %-16s -> %s / %s", "ambient_temp", m["adapter"], m["label"])
-            for i, fan in enumerate(hw_map.get("fans", [])[:4], start=1):
-                log.info("  %-16s -> %s / %s", f"fan{i}_rpm", fan["adapter"], fan["label"])
+            for i, fan in enumerate(hw_map.get("fans", []), start=1):
+                log.info("  fan%-13d -> %s / %s", i, fan["adapter"], fan["label"])
             if hw_map.get("nvme_temp"):
                 m = hw_map["nvme_temp"]
                 log.info("  %-16s -> %s / %s", "nvme_temp", m["adapter"], m["label"])
@@ -340,10 +368,8 @@ def _extract_temps_and_fans(s):
             out["cpu_temp"] = best_temp
             matched["cpu_temp"] = f"{best_loc} (coretemp max)"
 
-    # Assign first 4 fan hits
-    for i, (a, lbl, rpm) in enumerate(fan_hits[:4], start=1):
-        out[f"fan{i}_rpm"] = rpm
-        matched[f"fan{i}_rpm"] = f"{a}/{lbl}"
+    # All fan hits become the fans list — no limit
+    out["fans"] = [{"label": lbl, "rpm": rpm} for _, lbl, rpm in fan_hits]
 
     # Log auto-discovery results once on startup
     if not _sensor_map_logged:
@@ -352,12 +378,14 @@ def _extract_temps_and_fans(s):
                  ", ".join(available_adapters) or "(none)")
         for field, loc in matched.items():
             log.info("  Mapped %-16s -> %s", field, loc)
+        for i, (_, lbl, _rpm) in enumerate(fan_hits, start=1):
+            log.info("  fan%-13d -> %s", i, lbl)
         if "ambient_temp" not in matched:
             log.warning(
                 "No ambient temperature sensor found (no label containing 'Ambient'); "
                 "available adapters: %s", ", ".join(available_adapters) or "(none)"
             )
-        if not any(f"fan{i}_rpm" in matched for i in range(1, 5)):
+        if not fan_hits:
             log.warning(
                 "No fan speed sensors found (no label containing 'fan'); "
                 "available adapters: %s", ", ".join(available_adapters) or "(none)"
@@ -433,16 +461,17 @@ def insert_sample(s):
         c.execute(
             """INSERT INTO hw_metrics
             (timestamp, cpu_temp, ambient_temp, nvme_temp,
-             fan1_rpm, fan2_rpm, fan3_rpm, fan4_rpm,
+             fans_json,
              cpu_percent, ram_used_gb,
              disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
              gpu_temp, gpu_fan_percent, gpu_power_watts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 s["timestamp"], s.get("cpu_temp"), s.get("ambient_temp"),
-                s.get("nvme_temp"), s.get("fan1_rpm"), s.get("fan2_rpm"),
-                s.get("fan3_rpm"), s.get("fan4_rpm"), s.get("cpu_percent"),
-                s.get("ram_used_gb"), s.get("disk_read_mb"), s.get("disk_write_mb"),
+                s.get("nvme_temp"),
+                json.dumps(s.get("fans", [])),
+                s.get("cpu_percent"), s.get("ram_used_gb"),
+                s.get("disk_read_mb"), s.get("disk_write_mb"),
                 s.get("net_in_mb"), s.get("net_out_mb"),
                 s.get("gpu_temp"), s.get("gpu_fan_percent"), s.get("gpu_power_watts"),
             ),
@@ -459,7 +488,7 @@ def get_recent_samples(limit=288):
         c = conn.cursor()
         c.execute(
             """SELECT timestamp, cpu_temp, ambient_temp, nvme_temp,
-                      fan1_rpm, fan2_rpm, fan3_rpm, fan4_rpm,
+                      fans_json,
                       cpu_percent, ram_used_gb,
                       disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
                       gpu_temp, gpu_fan_percent, gpu_power_watts
@@ -472,12 +501,18 @@ def get_recent_samples(limit=288):
     finally:
         conn.close()
     cols = ["timestamp", "cpu_temp", "ambient_temp", "nvme_temp",
-            "fan1_rpm", "fan2_rpm", "fan3_rpm", "fan4_rpm",
+            "fans_json",
             "cpu_percent", "ram_used_gb",
             "disk_read_mb", "disk_write_mb", "net_in_mb", "net_out_mb",
             "gpu_temp", "gpu_fan_percent", "gpu_power_watts"]
     rows.reverse()
-    return [dict(zip(cols, r)) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        raw = d.pop("fans_json", None)
+        d["fans"] = json.loads(raw) if raw else []
+        result.append(d)
+    return result
 
 
 def _sleep_interruptible(seconds):
@@ -499,12 +534,14 @@ def main():
         try:
             sample = _collect_sample_with_deltas()
             insert_sample(sample)
+            fans_summary = " ".join(
+                f"{f['label']}={f['rpm']}" for f in sample.get("fans", [])
+            ) or "none"
             log.info(
-                "sample cpu=%s ambient=%s nvme=%s fans=%s/%s/%s cpu%%=%s ram=%sGB "
+                "sample cpu=%s ambient=%s nvme=%s fans=[%s] cpu%%=%s ram=%sGB "
                 "gpu=%s°C/%s%%/%sW net=%s/%sMB disk=%s/%sMB",
                 sample.get("cpu_temp"), sample.get("ambient_temp"),
-                sample.get("nvme_temp"), sample.get("fan1_rpm"),
-                sample.get("fan2_rpm"), sample.get("fan3_rpm"),
+                sample.get("nvme_temp"), fans_summary,
                 sample.get("cpu_percent"), sample.get("ram_used_gb"),
                 sample.get("gpu_temp"), sample.get("gpu_fan_percent"),
                 sample.get("gpu_power_watts"),
