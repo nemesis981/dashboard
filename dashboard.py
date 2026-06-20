@@ -1513,16 +1513,16 @@ def dashboard():
 
     <div class="grid">
         <div class="card">
-            <h2>Pi-hole DNS Protection</h2>
-            <p>Queries Today: <span class="stat" id="phTotal">{total}</span></p>
-            <p>Blocked: <span class="stat" id="phBlocked">{blocked}</span></p>
-            <p>Percent Blocked: <span class="stat" id="phPercent">{percent}%</span></p>
+            <h2><span class="tier-text" data-beginner="Pi-hole — DNS Ad &amp; Tracker Blocker" data-intermediate="Pi-hole DNS Protection" data-pro="Pi-hole DNS">Pi-hole DNS Protection</span></h2>
+            <p><span class="tier-text" data-beginner="DNS Queries Today (all devices):" data-intermediate="Queries Today:" data-pro="Queries:">Queries Today:</span> <span class="stat" id="phTotal">{total}</span></p>
+            <p><span class="tier-text" data-beginner="Blocked (ads, trackers, malware domains):" data-intermediate="Blocked:" data-pro="Blocked:">Blocked:</span> <span class="stat" id="phBlocked">{blocked}</span></p>
+            <p><span class="tier-text" data-beginner="Block Rate (higher = more protection):" data-intermediate="Percent Blocked:" data-pro="Block %:">Percent Blocked:</span> <span class="stat" id="phPercent">{percent}%</span></p>
         </div>
 
         <div class="card">
-            <h2>System Status</h2>
-            <p>ClamAV: <span class="{"running" if clamav_status == "Running" else "stopped"}">{clamav_status}</span></p>
-            <p>VPN: <span id="vpnStatusText" onclick="openVpnModal()"
+            <h2><span class="tier-text" data-beginner="Security Services Status" data-intermediate="System Status" data-pro="Services">System Status</span></h2>
+            <p><span class="tier-text" data-beginner="ClamAV Antivirus:" data-intermediate="ClamAV:" data-pro="ClamAV:">ClamAV:</span> <span class="{"running" if clamav_status == "Running" else "stopped"}">{clamav_status}</span></p>
+            <p><span class="tier-text" data-beginner="VPN (encrypts your traffic):" data-intermediate="VPN:" data-pro="VPN:">VPN:</span> <span id="vpnStatusText" onclick="openVpnModal()"
                 style="color:{vpn_color};cursor:pointer;text-decoration:underline dotted"
                 title="Click for details">{html.escape(vpn_label)}</span></p>
             <p style="font-size:0.8em">CPU: {system_status.get("cpu", "N/A")}</p>
@@ -1531,23 +1531,45 @@ def dashboard():
         </div>
 
         <div class="card full-width hw-card" onclick="openHwModal()" style="cursor:pointer">
-            <h2>🌡️ Hardware Stats
-                <span style="float:right;font-size:0.75em;color:#888">click for 24h graphs ▸</span>
+            <h2>🌡️ <span class="tier-text" data-beginner="Hardware Health &amp; Temperatures" data-intermediate="Hardware Stats" data-pro="Hardware">Hardware Stats</span>
+                <span style="float:right;font-size:0.75em;color:#aaa"><span class="tier-text" data-beginner="click for 24-hour history graphs ▸" data-intermediate="click for 24h graphs ▸" data-pro="24h ▸">click for 24h graphs ▸</span></span>
             </h2>
             <div class="hw-grid">
-                <div class="hw-stat"><div class="hw-label">CPU Temp</div><div class="hw-value" id="hwCpuTemp">{_fmt(hw_cpu, "°C")}</div></div>
-                <div class="hw-stat"><div class="hw-label">GPU Temp</div><div class="hw-value" id="hwGpuTemp">{_fmt(hw_gpu, "°C")}</div></div>
-                <div class="hw-stat"><div class="hw-label">Ambient</div><div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div></div>
-                <div class="hw-stat"><div class="hw-label">NVMe</div><div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div></div>
-                <div class="hw-stat"><div class="hw-label">CPU Load</div><div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div></div>
-                <div class="hw-stat"><div class="hw-label">RAM Used</div><div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div><div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div></div>
-                <div class="hw-stat"><div class="hw-label">GPU Fan</div><div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div></div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="CPU Temperature" data-intermediate="CPU Temp" data-pro="CPU °C">CPU Temp</span></div>
+                    <div class="hw-value" id="hwCpuTemp">{_fmt(hw_cpu, "°C")}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="GPU Temperature" data-intermediate="GPU Temp" data-pro="GPU °C">GPU Temp</span></div>
+                    <div class="hw-value" id="hwGpuTemp">{_fmt(hw_gpu, "°C")}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="Case / Ambient Temp" data-intermediate="Ambient" data-pro="Ambient °C">Ambient</span></div>
+                    <div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="SSD Temperature (NVMe)" data-intermediate="NVMe" data-pro="NVMe °C">NVMe</span></div>
+                    <div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="CPU Usage" data-intermediate="CPU Load" data-pro="CPU %">CPU Load</span></div>
+                    <div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="RAM / Memory Used" data-intermediate="RAM Used" data-pro="RAM %">RAM Used</span></div>
+                    <div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div>
+                    <div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div>
+                </div>
+                <div class="hw-stat">
+                    <div class="hw-label"><span class="tier-text" data-beginner="GPU Fan Speed" data-intermediate="GPU Fan" data-pro="GPU Fan %">GPU Fan</span></div>
+                    <div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div>
+                </div>
                 <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
-                    <div class="hw-label">24h System Alerts</div>
+                    <div class="hw-label"><span class="tier-text" data-beginner="System Alerts (last 24h)" data-intermediate="24h System Alerts" data-pro="24h Alerts">24h System Alerts</span></div>
                     <div class="hw-value" id="hwAlert24h" style="color:{alert_24h_color}">{alert_24h_total}</div>
                 </div>
                 <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openHealthModal()">
-                    <div class="hw-label">System Health</div>
+                    <div class="hw-label"><span class="tier-text" data-beginner="Overall System Health" data-intermediate="System Health" data-pro="Health">System Health</span></div>
                     <div class="hw-value" id="hwHealthScore" style="color:{health_color}">{health_score}%</div>
                 </div>
             </div>
@@ -1569,7 +1591,7 @@ def dashboard():
         </div>
 
         <div class="card full-width">
-            <h2>🔥 AI Firewall — Today's Activity
+            <h2>🔥 <span class="tier-text" data-beginner="AI Firewall — Security Events Detected Today" data-intermediate="AI Firewall — Today's Activity" data-pro="AI Firewall">AI Firewall — Today's Activity</span>
                 <span style="float:right;font-size:0.8em">
                     <label style="color:#aaa;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
                         <input type="checkbox" id="showP3Toggle" onchange="toggleP3()" style="width:auto;margin-right:5px;vertical-align:middle">
@@ -1637,8 +1659,8 @@ def dashboard():
         </div>
 
         <div class="card full-width">
-            <h2>🖥️ Network Devices
-                <span style="float:right;font-size:0.8em;color:#888">✅ Trusted &nbsp; ❓ Unverified</span>
+            <h2>🖥️ <span class="tier-text" data-beginner="Devices on Your Network" data-intermediate="Network Devices" data-pro="Devices">Network Devices</span>
+                <span style="float:right;font-size:0.8em;color:#aaa"><span class="tier-text" data-beginner="✅ You trust this device &nbsp; ❓ Not yet verified" data-intermediate="✅ Trusted &nbsp; ❓ Unverified" data-pro="✅ Trusted ❓ Unknown">✅ Trusted &nbsp; ❓ Unverified</span></span>
             </h2>
             <table class="devices-table">
                 <thead><tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr></thead>
@@ -1655,9 +1677,9 @@ def dashboard():
             <h3>🔍 Nemesis AI Analysis</h3>
             <div id="modalContent">Analyzing...</div>
             <div style="margin-top:15px">
-                <button class="btn btn-block" onclick="takeAction('block')">🚫 Block IP</button>
-                <button class="btn btn-ignore" onclick="takeAction('ignore')">✓ Ignore Rule</button>
-                <button class="btn btn-monitor" onclick="takeAction('monitor')">👁 Monitor</button>
+                <button class="btn btn-block" onclick="takeAction('block')" id="btnBlock">🚫 Block IP</button>
+                <button class="btn btn-ignore" onclick="takeAction('ignore')" id="btnIgnore">✓ Ignore Rule</button>
+                <button class="btn btn-monitor" onclick="takeAction('monitor')" id="btnMonitor">👁 Monitor</button>
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
             </div>
@@ -1668,13 +1690,13 @@ def dashboard():
     <div class="modal" id="hwModal">
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHwModal()" title="Close (Esc)">✕</button>
-            <h3 style="color:#00d4ff;margin-top:0">🌡️ Hardware — last 24 hours</h3>
+            <h3 style="color:#00d4ff;margin-top:0">🌡️ <span class="tier-text" data-beginner="Hardware History — last 24 hours" data-intermediate="Hardware — last 24 hours" data-pro="Hardware 24h">Hardware — last 24 hours</span></h3>
             <div id="hwModalStatus" style="color:#aaa;font-size:0.85em">Loading…</div>
-            <div class="chart-box"><h4>Temperatures (°C)</h4><canvas id="chartTemp" height="120"></canvas></div>
-            <div class="chart-box"><h4>Fan Speeds (RPM)</h4><canvas id="chartFans" height="120"></canvas></div>
-            <div class="chart-box"><h4>CPU & RAM (%)</h4><canvas id="chartUsage" height="120"></canvas></div>
-            <div class="chart-box"><h4>Disk &amp; Network (MB / 5 min)</h4><canvas id="chartIo" height="120"></canvas></div>
-            <div class="chart-box"><h4>System Health Score (24h)</h4><canvas id="chartHealth" height="120"></canvas></div>
+            <div class="chart-box"><h4><span class="tier-text" data-beginner="Temperatures — how hot each component is running (°C)" data-intermediate="Temperatures (°C)" data-pro="Temps °C">Temperatures (°C)</span></h4><canvas id="chartTemp" height="120"></canvas></div>
+            <div class="chart-box"><h4><span class="tier-text" data-beginner="Fan Speeds — higher RPM = better cooling" data-intermediate="Fan Speeds (RPM)" data-pro="Fans RPM">Fan Speeds (RPM)</span></h4><canvas id="chartFans" height="120"></canvas></div>
+            <div class="chart-box"><h4><span class="tier-text" data-beginner="CPU &amp; RAM Usage (%)" data-intermediate="CPU &amp; RAM (%)" data-pro="CPU/RAM %">CPU &amp; RAM (%)</span></h4><canvas id="chartUsage" height="120"></canvas></div>
+            <div class="chart-box"><h4><span class="tier-text" data-beginner="Disk &amp; Network activity (MB per 5 minutes)" data-intermediate="Disk &amp; Network (MB / 5 min)" data-pro="Disk/Net MB/5m">Disk &amp; Network (MB / 5 min)</span></h4><canvas id="chartIo" height="120"></canvas></div>
+            <div class="chart-box"><h4><span class="tier-text" data-beginner="System Health Score over time (100% = fully healthy)" data-intermediate="System Health Score (24h)" data-pro="Health % 24h">System Health Score (24h)</span></h4><canvas id="chartHealth" height="120"></canvas></div>
             <div style="text-align:right">
                 <button class="btn btn-close" onclick="closeHwModal()">✕ Close</button>
             </div>
@@ -1685,7 +1707,7 @@ def dashboard():
     <div class="modal" id="alertBreakdownModal">
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeAlertBreakdownModal()" title="Close (Esc)">✕</button>
-            <h3 style="color:#00d4ff;margin-top:0">🛠️ 24h System Alert Breakdown</h3>
+            <h3 style="color:#00d4ff;margin-top:0"><span class="tier-text" data-beginner="🛠️ What triggered alerts in the last 24 hours?" data-intermediate="🛠️ 24h System Alert Breakdown" data-pro="🛠️ 24h Alerts">🛠️ 24h System Alert Breakdown</span></h3>
             <div id="alertBreakdownBody" style="color:#aaa;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeAlertBreakdownModal()">✕ Close</button>
@@ -1697,7 +1719,7 @@ def dashboard():
     <div class="modal" id="healthModal">
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHealthModal()" title="Close (Esc)">✕</button>
-            <h3 style="color:#00d4ff;margin-top:0">💚 System Health Score</h3>
+            <h3 style="color:#00d4ff;margin-top:0"><span class="tier-text" data-beginner="💚 How healthy is your system right now?" data-intermediate="💚 System Health Score" data-pro="💚 Health Score">💚 System Health Score</span></h3>
             <div id="healthModalBody" style="color:#aaa;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
@@ -1818,18 +1840,30 @@ def dashboard():
             currentSrcIp = "";
             document.getElementById("btnReport").style.display = "none";
             document.getElementById("alertModal").style.display = "block";
-            document.getElementById("modalContent").innerHTML = "<p>🤖 Nemesis AI analyzing...</p>";
+            document.getElementById("modalContent").innerHTML =
+                "<p>🤖 " + tierText(
+                    "Nemesis AI is checking this alert — this takes a few seconds…",
+                    "Nemesis AI analyzing...",
+                    "Analyzing…"
+                ) + "</p>";
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{
                     currentSrcIp = data.src_ip || "";
-                    var cached = data.cached ? " <span style=\'color:#888\'>(cached)</span>" : " <span style=\'color:#00ff88\'>(AI analyzed)</span>";
+                    var cached = data.cached
+                        ? " <span style='color:#aaa'>(" + tierText("from cache", "cached", "cached") + ")</span>"
+                        : " <span style='color:#00ff88'>(" + tierText("freshly analyzed by AI", "AI analyzed", "AI") + ")</span>";
                     var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
+                    var riskLabel = tierText(
+                        {{HIGH:"HIGH — Investigate this now", MEDIUM:"MEDIUM — Worth reviewing", LOW:"LOW — Likely safe"}}[data.risk_level] || data.risk_level,
+                        data.risk_level || "UNKNOWN",
+                        data.risk_level || "?"
+                    );
                     document.getElementById("modalContent").innerHTML = `
-                        <p><strong>Risk Level:</strong> <span style="color:${{riskColor}}">${{escapeHtml(data.risk_level || "UNKNOWN")}}</span>${{cached}}</p>
-                        <p><strong>Explanation:</strong> ${{escapeHtml(data.explanation || "No explanation available")}}</p>
-                        <p><strong>Recommended Action:</strong> ${{escapeHtml(data.recommended_action || "Monitor")}}</p>
-                        <p><strong>Reason:</strong> ${{escapeHtml(data.reason || "")}}</p>
+                        <p><strong>${{tierText("Threat Level","Risk Level","Risk")}}:</strong> <span style="color:${{riskColor}}">${{escapeHtml(riskLabel)}}</span>${{cached}}</p>
+                        <p><strong>${{tierText("What is this?","Explanation","Detail")}}:</strong> ${{escapeHtml(data.explanation || "No explanation available")}}</p>
+                        <p><strong>${{tierText("What should I do?","Recommended Action","Action")}}:</strong> ${{escapeHtml(data.recommended_action || "Monitor")}}</p>
+                        <p><strong>${{tierText("Why?","Reason","Reason")}}:</strong> ${{escapeHtml(data.reason || "")}}</p>
                         ${{renderEnrichment(data.enrichment)}}
                     `;
                     if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {{
@@ -2162,17 +2196,26 @@ def dashboard():
                     var rows = (d.breakdown || []).map(b =>
                         `<tr><td>${{escapeHtml(b.type)}}</td><td style="text-align:right">${{b.count}}</td></tr>`
                     ).join("");
-                    if (!rows) rows = `<tr><td colspan=2 style="color:#00ff88">No system alerts in the last 24 hours.</td></tr>`;
+                    if (!rows) rows = `<tr><td colspan=2 style="color:#00ff88">${{tierText(
+                        "✓ No hardware or service alerts in the last 24 hours — everything is running normally",
+                        "No system alerts in the last 24 hours.",
+                        "No alerts (24h)"
+                    )}}</td></tr>`;
                     var ct = d.thermal_fan || 0, cs = d.service_down || 0;
+                    var intro = tierText(
+                        "These are hardware and service alerts from the background watchdog — things like overheating, fan failures, or a security service going down. Network intrusion alerts are shown separately in the AI Firewall section below.",
+                        "Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.",
+                        "Watchdog alerts (thermal/fan/service). Network alerts → AI Firewall."
+                    );
                     document.getElementById("alertBreakdownBody").innerHTML = `
-                        <p style="color:#aaa;font-size:0.85em;margin:0 0 10px 0">Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.</p>
+                        <p style="color:#aaa;font-size:0.85em;margin:0 0 10px 0">${{intro}}</p>
                         <div style="display:flex;gap:20px;margin:10px 0">
-                            <div><span style="color:#aaa">Total:</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
-                            <div><span style="color:#aaa">Thermal/Fan:</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
-                            <div><span style="color:#aaa">Service down:</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
+                            <div><span style="color:#aaa">${{tierText("Total alerts:","Total:","Total:")}}</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
+                            <div><span style="color:#aaa">${{tierText("Overheating / fan:","Thermal/Fan:","Thermal:")}}</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
+                            <div><span style="color:#aaa">${{tierText("Service went down:","Service down:","Svc down:")}}</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
                         </div>
                         <table class="breakdown-table">
-                            <thead><tr><th>Alert type</th><th style="text-align:right">Count</th></tr></thead>
+                            <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th></tr></thead>
                             <tbody>${{rows}}</tbody>
                         </table>
                     `;
@@ -2198,23 +2241,33 @@ def dashboard():
                         return `<tr>
                             <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#aaa;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
                             <td style="width:100px"><div class="health-bar"><div class="health-bar-fill" style="width:${{c.score}}%;background:${{barColor}}"></div></div><div style="text-align:right;color:#aaa;font-size:0.8em">${{c.score}}%</div></td>
-                            <td style="text-align:right;width:60px">${{c.weight}}%</td>
+                            <td style="text-align:right;width:60px" title="${{tierText('How much this factor contributes to the total score','Weight','Weight')}}">${{c.weight}}%</td>
                             <td style="text-align:right;width:80px;color:${{barColor}};font-weight:bold">${{c.contribution}}</td>
                         </tr>`;
                     }}).join("");
                     var svcList = (d.services || []).map(s =>
                         `<span style="color:${{s.active ? '#00ff88' : '#ff4444'}};margin-right:12px">${{s.active ? '●' : '○'}} ${{escapeHtml(s.name)}}</span>`
                     ).join("");
+                    var overallLabel = tierText("Overall Health Score", "Overall", "Score");
+                    var noAlerts = `<tr><td colspan=2 style="color:#00ff88">${{tierText("✓ No system alerts in the last 24 hours — all clear","No system alerts in the last 24 hours.","No alerts (24h)")}}</td></tr>`;
                     document.getElementById("healthModalBody").innerHTML = `
                         <div style="margin:10px 0">
-                            <div style="font-size:0.85em;color:#aaa">Overall</div>
+                            <div style="font-size:0.85em;color:#aaa">${{overallLabel}}</div>
                             <div style="font-size:2.5em;font-weight:bold;color:${{totalColor}}">${{d.score}}%</div>
                         </div>
                         <table class="breakdown-table">
-                            <thead><tr><th>Component</th><th style="text-align:right">Score</th><th style="text-align:right">Weight</th><th style="text-align:right">Points</th></tr></thead>
+                            <thead><tr>
+                                <th>${{tierText("Factor","Component","Component")}}</th>
+                                <th style="text-align:right">${{tierText("Health","Score","Score")}}</th>
+                                <th style="text-align:right">${{tierText("Importance","Weight","Wt")}}</th>
+                                <th style="text-align:right">${{tierText("Points","Points","Pts")}}</th>
+                            </tr></thead>
                             <tbody>${{rows}}</tbody>
                         </table>
-                        <div style="margin-top:15px"><div style="color:#aaa;font-size:0.85em;margin-bottom:4px">Services</div>${{svcList}}</div>
+                        <div style="margin-top:15px">
+                            <div style="color:#aaa;font-size:0.85em;margin-bottom:4px">${{tierText("Security services running","Services","Services")}}</div>
+                            ${{svcList}}
+                        </div>
                     `;
                 }})
                 .catch(e => {{
@@ -2243,18 +2296,18 @@ def dashboard():
                 .then(d => {{
                     var color = vpnStatusColor(d.status);
                     var html = `
-                        <p><strong>Provider:</strong> ${{escapeHtml(d.provider || "Unknown")}}</p>
-                        <p><strong>Status:</strong> <span style="color:${{color}};font-weight:bold">${{escapeHtml(d.status || "Unknown")}}</span></p>
-                        <p><strong>VPN IP:</strong> ${{escapeHtml(d.vpn_ip || "—")}}</p>
-                        <p><strong>Server / Location:</strong> ${{escapeHtml(d.server_location || "—")}}</p>
-                        <p><strong>Protocol:</strong> ${{escapeHtml(d.protocol || "—")}}</p>
+                        <p><strong>${{tierText("VPN Service:","Provider:","Provider:")}}</strong> ${{escapeHtml(d.provider || "Unknown")}}</p>
+                        <p><strong>${{tierText("Connection Status:","Status:","Status:")}}</strong> <span style="color:${{color}};font-weight:bold">${{escapeHtml(d.status || "Unknown")}}</span></p>
+                        <p><strong>${{tierText("Your VPN IP Address:","VPN IP:","VPN IP:")}}</strong> ${{escapeHtml(d.vpn_ip || "—")}}</p>
+                        <p><strong>${{tierText("Connected Server:","Server / Location:","Server:")}}</strong> ${{escapeHtml(d.server_location || "—")}}</p>
+                        <p><strong>${{tierText("Encryption Protocol:","Protocol:","Protocol:")}}</strong> ${{escapeHtml(d.protocol || "—")}}</p>
                     `;
                     if (d.split_tunnel_apps && d.split_tunnel_apps.length) {{
-                        html += `<p style="margin-bottom:2px"><strong>Split Tunnel Apps:</strong></p><ul style="font-size:0.85em;color:#aaa;margin:4px 0 0 18px">`;
+                        html += `<p style="margin-bottom:2px"><strong>${{tierText("Apps bypassing VPN (split tunnel):","Split Tunnel Apps:","Split tunnel:")}}</strong></p><ul style="font-size:0.85em;color:#aaa;margin:4px 0 0 18px">`;
                         d.split_tunnel_apps.forEach(function(app) {{ html += `<li>${{escapeHtml(app)}}</li>`; }});
                         html += `</ul>`;
                     }} else if (d.provider && d.provider.toLowerCase().includes("pia")) {{
-                        html += `<p style="color:#aaa;font-size:0.85em">Split tunnel: none configured</p>`;
+                        html += `<p style="color:#aaa;font-size:0.85em">${{tierText("Split tunnel: no apps are bypassing the VPN","Split tunnel: none configured","Split tunnel: none")}}</p>`;
                     }}
                     document.getElementById("vpnModalContent").innerHTML = html;
                     // Hide action buttons if no supported CLI
@@ -2460,6 +2513,29 @@ def dashboard():
                 .catch(e => console.error("refresh failed", e));
         }}
         setInterval(refreshDashboard, 60000);
+
+        // Re-apply tier-dependent JS content when the user changes tier from /settings
+        // (localStorage storage events fire across tabs).
+        window.onTierChange = function() {{
+            applyTierText();
+            updateActionButtonLabels();
+        }};
+        window.addEventListener("storage", function(e) {{
+            if (e.key === "explanationTier") {{
+                applyTierText();
+                updateActionButtonLabels();
+            }}
+        }});
+
+        function updateActionButtonLabels() {{
+            var b = document.getElementById("btnBlock");
+            var ig = document.getElementById("btnIgnore");
+            var mo = document.getElementById("btnMonitor");
+            if (b)  b.textContent  = tierText("🚫 Block this IP address", "🚫 Block IP", "🚫 Block");
+            if (ig) ig.textContent = tierText("✓ Ignore — stop alerting on this rule", "✓ Ignore Rule", "✓ Ignore");
+            if (mo) mo.textContent = tierText("👁 Keep watching (monitor only)", "👁 Monitor", "👁 Monitor");
+        }}
+        updateActionButtonLabels();
 
         function confirmQuarantine(id) {{
             if (!confirm("Confirm this block permanently? The ufw rule will be kept and the alert marked 'block'.")) return;
