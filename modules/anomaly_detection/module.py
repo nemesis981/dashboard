@@ -55,6 +55,11 @@ AI_DEDUP_HOURS       = 24   # don't re-call API for same target within this wind
 AI_RATE_HOUR_DEFAULT = 10   # default max auto AI calls per hour
 AI_RATE_DAY_DEFAULT  = 50   # default max auto AI calls per day
 
+# ── Phase 3 AbuseIPDB constants ──────────────────────────────────────────────
+ABUSEIPDB_DEDUP_HOURS    = 24   # matches AI cache window
+ABUSEIPDB_REPORT_CATEGORY = "15"  # Hacking (C2/malware domain)
+ABUSEIPDB_REPORT_URL     = "https://api.abuseipdb.com/api/v2/report"
+
 # Domains so ubiquitous that "new" scores 0 for new-destination signal.
 _UBIQUITOUS = {
     "apple.com","icloud.com","mzstatic.com","apple-dns.net",
@@ -242,6 +247,11 @@ def _init_db() -> None:
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS anomaly_abuseipdb_dedup (
+            offending_target TEXT PRIMARY KEY,
+            reported_at      REAL NOT NULL
+        );
     """)
     conn.commit()
     conn.close()
@@ -413,8 +423,9 @@ def _detection_cycle() -> None:
     device_names = _load_device_names()
     how = _hour_of_week(datetime.fromtimestamp(now))
 
-    # Collect (inc_id, domain, itype, score, sig_dict, dev_list) for AI analysis
-    ai_queue = []
+    # Queues built during incident loop, consumed after commit
+    ai_queue           = []   # (inc_id, domain, itype, score, sig_dict, dev_list)
+    abuseipdb_candidates = [] # (inc_id, domain, itype, final_score)
 
     conn = _conn()
     try:
@@ -426,19 +437,22 @@ def _detection_cycle() -> None:
                 inc_id, final_score = _create_or_update_incident(
                     conn, domain, data, signals, device_names, now
                 )
-                if inc_id is not None and final_score >= SCORE_HIGH:
-                    # Build device list for AI prompt
-                    dev_list = [
-                        {"ip": ip,
-                         "name": device_names.get(ip, ip),
-                         "first_seen_ts": round(min(ts_list), 3),
-                         "query_count": len(ts_list)}
-                        for ip, ts_list in sorted(
-                            data["clients"].items(), key=lambda kv: min(kv[1])
-                        )
-                    ]
-                    ai_queue.append((inc_id, domain, signals["incident_type"],
-                                     final_score, signals, dev_list))
+                if inc_id is not None:
+                    abuseipdb_candidates.append(
+                        (inc_id, domain, signals["incident_type"], final_score)
+                    )
+                    if final_score >= SCORE_HIGH:
+                        dev_list = [
+                            {"ip": ip,
+                             "name": device_names.get(ip, ip),
+                             "first_seen_ts": round(min(ts_list), 3),
+                             "query_count": len(ts_list)}
+                            for ip, ts_list in sorted(
+                                data["clients"].items(), key=lambda kv: min(kv[1])
+                            )
+                        ]
+                        ai_queue.append((inc_id, domain, signals["incident_type"],
+                                         final_score, signals, dev_list))
         _expire_recurrence(conn, now)
         conn.commit()
     finally:
@@ -450,6 +464,16 @@ def _detection_cycle() -> None:
             _ai_analyze_incident(*item, is_auto=True)
         except Exception:
             log.exception("anomaly_detection: auto AI analysis failed for %s", item[1])
+
+    # AbuseIPDB auto-reporting — threshold is read fresh each cycle from settings
+    abuseipdb_thr = _get_abuseipdb_settings()["threshold"]
+    if abuseipdb_thr is not None:
+        for inc_id, domain, itype, score in abuseipdb_candidates:
+            if score >= abuseipdb_thr:
+                try:
+                    _auto_report_abuseipdb(inc_id, domain, itype, score)
+                except Exception:
+                    log.exception("anomaly_detection: AbuseIPDB reporting failed for %s", domain)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -726,6 +750,38 @@ def _get_ai_settings() -> dict:
     }
 
 
+def _get_abuseipdb_settings() -> dict:
+    active = _get_state("abuseipdb_active_control", "dropdown")
+    mode   = _get_state("abuseipdb_dropdown_mode", "off")
+    try:
+        score = float(_get_state("abuseipdb_slider_score", "40") or "40")
+    except ValueError:
+        score = 40.0
+    if active == "dropdown":
+        threshold = {"medium_plus": float(SCORE_MEDIUM),
+                     "high_only":   float(SCORE_HIGH)}.get(mode)  # "off" → None
+    else:
+        threshold = score
+    return {"active_control": active, "dropdown_mode": mode,
+            "slider_score": score, "threshold": threshold}
+
+
+def _get_cisa_settings() -> dict:
+    active = _get_state("cisa_active_control", "dropdown")
+    mode   = _get_state("cisa_dropdown_mode", "high_only")
+    try:
+        score = float(_get_state("cisa_slider_score", str(float(SCORE_HIGH))) or str(float(SCORE_HIGH)))
+    except ValueError:
+        score = float(SCORE_HIGH)
+    if active == "dropdown":
+        threshold = {"high_only":     float(SCORE_HIGH),
+                     "critical_only": float(SCORE_CRITICAL)}.get(mode, float(SCORE_HIGH))
+    else:
+        threshold = score
+    return {"active_control": active, "dropdown_mode": mode,
+            "slider_score": score, "threshold": threshold}
+
+
 def _check_auto_rate_limit(conn) -> tuple:
     """Return (is_limited: bool, reason: str)."""
     settings = _get_ai_settings()
@@ -979,6 +1035,118 @@ def _attach_ai_to_incident(conn, inc_id: int, report_json: str, generated_at: fl
         "UPDATE anomaly_incidents SET ai_report=?, ai_generated_at=? WHERE id=?",
         (report_json, generated_at, inc_id)
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 3: AbuseIPDB auto-reporting
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _submit_abuseipdb_report(api_key: str, ip: str, comment: str) -> bool:
+    """POST a single IP to the AbuseIPDB report endpoint. Returns True on success."""
+    from urllib import request as _urlreq, parse as _urlparse
+    from urllib.error import URLError, HTTPError
+    body = _urlparse.urlencode({
+        "ip": ip,
+        "categories": ABUSEIPDB_REPORT_CATEGORY,
+        "comment": comment[:1024],
+    }).encode()
+    req = _urlreq.Request(
+        ABUSEIPDB_REPORT_URL, data=body,
+        headers={"Key": api_key, "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    try:
+        with _urlreq.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read().decode())
+            score_after = result.get("data", {}).get("abuseConfidenceScore", "?")
+            log.info("anomaly_detection: AbuseIPDB accepted %s → confidence %s", ip, score_after)
+            return True
+    except HTTPError as e:
+        log.warning("anomaly_detection: AbuseIPDB HTTP %s for %s", e.code, ip)
+        return False
+    except Exception:
+        log.exception("anomaly_detection: AbuseIPDB submit failed for %s", ip)
+        return False
+
+
+def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -> None:
+    """
+    Full AbuseIPDB auto-report flow: dedup check → DNS resolve → POST each public IP.
+
+    Dedup: reuses anomaly_abuseipdb_dedup table, same 24h window as AI cache.
+    Domains are reported via their resolved public IPs (AbuseIPDB only accepts IPs).
+    If ABUSEIPDB_KEY is absent, returns silently.
+    """
+    api_key = os.environ.get("ABUSEIPDB_KEY", "")
+    if not api_key:
+        return
+    now = time.time()
+    conn = _conn()
+    try:
+        # Dedup: skip if reported within ABUSEIPDB_DEDUP_HOURS
+        row = conn.execute(
+            "SELECT reported_at FROM anomaly_abuseipdb_dedup WHERE offending_target=?",
+            (domain,)
+        ).fetchone()
+        if row and (now - row["reported_at"]) < ABUSEIPDB_DEDUP_HOURS * 3600:
+            log.info("anomaly_detection: AbuseIPDB dedup skip for %s (%.1fh ago)",
+                     domain, (now - row["reported_at"]) / 3600)
+            return
+
+        # Resolve domain → IPs (stdlib only, no external dependency)
+        import socket as _sock
+        import ipaddress as _ipmod
+        try:
+            raw_addrs = {ai[4][0] for ai in _sock.getaddrinfo(domain, None,
+                                                               type=_sock.SOCK_STREAM)}
+        except Exception:
+            log.warning("anomaly_detection: DNS resolution failed for %s — skipping AbuseIPDB", domain)
+            return
+
+        public_ips = []
+        for addr in raw_addrs:
+            try:
+                obj = _ipmod.ip_address(addr)
+                if not (obj.is_private or obj.is_loopback or obj.is_link_local
+                        or obj.is_reserved or obj.is_multicast):
+                    public_ips.append(str(addr))
+            except ValueError:
+                pass
+
+        if not public_ips:
+            log.info("anomaly_detection: %s resolves to no public IPs — skipping AbuseIPDB", domain)
+            return
+
+        label = _severity_label(score)[0]
+        comment = (
+            f"Nemesis Firewall anomaly: {itype.replace('_', ' ')} detected for domain "
+            f"{domain} (score {score:.0f}/{label}). DNS query pattern analysis flagged "
+            f"this domain on a home network firewall."
+        )
+
+        reported_any = False
+        for ip in public_ips:
+            if _submit_abuseipdb_report(api_key, ip, comment):
+                reported_any = True
+
+        if reported_any:
+            conn.execute(
+                "INSERT OR REPLACE INTO anomaly_abuseipdb_dedup"
+                "(offending_target, reported_at) VALUES(?,?)",
+                (domain, now)
+            )
+            conn.execute(
+                "UPDATE anomaly_incidents SET abuseipdb_reported=1 WHERE id=?",
+                (inc_id,)
+            )
+            conn.commit()
+            log.info("anomaly_detection: AbuseIPDB reported domain %s via IPs %s (score %.0f)",
+                     domain, public_ips, score)
+    except Exception:
+        log.exception("anomaly_detection: _auto_report_abuseipdb failed for %s", domain)
+    finally:
+        conn.close()
 
 
 def _format_ai_report_html(report: dict, from_cache: bool = False,
@@ -1269,6 +1437,8 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
     if not rows:
         return "", False
 
+    cisa_thr = _get_cisa_settings()["threshold"]
+
     parts = []
     for r in rows:
         inc_id  = r["id"]
@@ -1298,7 +1468,7 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
         )
 
         cisa_btn = ""
-        if score >= SCORE_HIGH:
+        if score >= cisa_thr:
             cisa_btn = (
                 f'<button onclick="typeof _adShowCISA===\'function\' ? '
                 f'_adShowCISA({inc_id}) : location.reload()" '
@@ -1372,16 +1542,16 @@ def _ai_modal_html() -> str:
 def _cisa_modal_html() -> str:
     return """
 <div id="_adCISAOverlay"
-     onclick="if(event.target===this)document.getElementById('_adCISAOverlay').style.display='none'"
+     onclick="if(event.target===this)_adCloseCISA()"
      style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:300;overflow-y:auto">
   <div style="background:#16213e;border:2px solid #ffaa00;border-radius:10px;
               padding:24px;max-width:600px;width:90%;margin:60px auto">
-    <h3 style="color:#ffaa00;margin-top:0">⚠️ Report to CISA — Review Before Sending</h3>
-    <p style="color:#ccc;font-size:0.88em;line-height:1.6">
-      The following information would be included in your CISA report.
-      <strong>Nothing is sent automatically.</strong>
-      Clicking "Open CISA Reporting Page" opens the official CISA form in a new tab —
-      you copy-paste the details below and submit manually.
+    <h3 style="color:#ffaa00;margin-top:0">⚠️ Report to CISA — Review Before Reporting</h3>
+    <p style="color:#ccc;font-size:0.88em;line-height:1.6;margin-bottom:10px">
+      Review the incident details below.
+      <strong>Nothing is sent automatically by this dashboard.</strong>
+      After confirming, the official CISA reporting form opens in a new tab where
+      you copy-paste these details and submit manually.
     </p>
     <div id="_adCISADetails"
          style="background:#0d1117;border:1px solid #333;border-radius:6px;
@@ -1389,20 +1559,37 @@ def _cisa_modal_html() -> str:
                 white-space:pre-wrap;max-height:300px;overflow-y:auto;margin:12px 0">
       Loading…
     </div>
-    <div style="display:flex;gap:10px;margin-top:16px;flex-wrap:wrap">
-      <button id="_adCISAOpenBtn"
+    <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;
+                  margin:14px 0 4px;padding:10px 12px;
+                  background:rgba(255,170,0,0.06);border:1px solid #ffaa0044;
+                  border-radius:6px">
+      <input type="checkbox" id="_adCISAConfirmCheck"
+             style="flex-shrink:0;margin-top:2px;accent-color:#ffaa00;width:16px;height:16px"
+             onchange="var b=document.getElementById('_adCISAOpenBtn');
+                       b.disabled=!this.checked;
+                       b.style.opacity=this.checked?'1':'0.4';
+                       b.style.cursor=this.checked?'pointer':'not-allowed'">
+      <span style="color:#eee;font-size:0.88em;line-height:1.5">
+        I have reviewed the details above. I understand that clicking the button below
+        opens the CISA reporting form in a new browser tab — I will manually complete
+        and submit the report there. This dashboard sends nothing automatically.
+      </span>
+    </label>
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+      <button id="_adCISAOpenBtn" disabled
               style="background:#ffaa00;color:#1a1a2e;border:none;padding:10px 20px;
-                     border-radius:5px;cursor:pointer;font-weight:bold">
-        Open CISA Reporting Page ↗
+                     border-radius:5px;font-weight:bold;opacity:0.4;cursor:not-allowed;
+                     transition:opacity 0.2s,cursor 0.2s">
+        Open CISA Reporting Form ↗
       </button>
-      <button onclick="document.getElementById('_adCISAOverlay').style.display='none'"
+      <button onclick="_adCloseCISA()"
               style="background:#333;color:#eee;border:none;padding:10px 20px;
                      border-radius:5px;cursor:pointer">
         Cancel — do not report
       </button>
     </div>
-    <p style="color:#555;font-size:0.78em;margin-top:12px">
-      CISA 24/7 Reporting: <a href="https://www.cisa.gov/report" target="_blank"
+    <p style="color:#555;font-size:0.78em;margin-top:12px;margin-bottom:0">
+      CISA 24/7 reporting: <a href="https://www.cisa.gov/report" target="_blank"
       rel="noopener" style="color:#666">cisa.gov/report</a> ·
       Phone: 1-888-282-0870
     </p>
@@ -1509,7 +1696,20 @@ def _card_js() -> str:
       }});
   }};
 
+  function _adResetCISAModal() {{
+    var chk = document.getElementById('_adCISAConfirmCheck');
+    var btn = document.getElementById('_adCISAOpenBtn');
+    if (chk) chk.checked = false;
+    if (btn) {{ btn.disabled = true; btn.style.opacity = '0.4'; btn.style.cursor = 'not-allowed'; }}
+  }}
+
+  window._adCloseCISA = function() {{
+    document.getElementById('_adCISAOverlay').style.display = 'none';
+    _adResetCISAModal();
+  }};
+
   window._adShowCISA = function(id) {{
+    _adResetCISAModal();
     document.getElementById('_adCISADetails').textContent = 'Loading…';
     document.getElementById('_adCISAOverlay').style.display = 'block';
     fetch('/api/anomaly/incident/' + id)
@@ -1521,6 +1721,9 @@ def _card_js() -> str:
         if (btn) btn.onclick = function() {{
           window.open('{CISA_REPORT_URL}', '_blank', 'noopener');
         }};
+      }})
+      .catch(function(){{
+        document.getElementById('_adCISADetails').textContent = 'Failed to load incident detail.';
       }});
   }};
 }})();
@@ -1793,10 +1996,15 @@ def _api_anomaly_settings():
     """GET returns current settings; POST updates them."""
     from flask import request, jsonify
     if request.method == "GET":
-        return jsonify(_get_ai_settings())
+        return jsonify({
+            **_get_ai_settings(),
+            "abuseipdb": _get_abuseipdb_settings(),
+            "cisa":      _get_cisa_settings(),
+        })
 
     data = request.get_json(silent=True) or {}
     try:
+        # AI settings
         if "rate_per_hour" in data:
             _set_state("ai_rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
         if "rate_per_day" in data:
@@ -1804,6 +2012,33 @@ def _api_anomaly_settings():
         if "allow_manual_override" in data:
             val = data["allow_manual_override"]
             _set_state("ai_allow_manual_override", "1" if val in (True, "1", 1) else "0")
+
+        # AbuseIPDB threshold settings
+        if "abuseipdb_active_control" in data:
+            v = data["abuseipdb_active_control"]
+            if v in ("dropdown", "slider"):
+                _set_state("abuseipdb_active_control", v)
+        if "abuseipdb_dropdown_mode" in data:
+            v = data["abuseipdb_dropdown_mode"]
+            if v in ("off", "medium_plus", "high_only"):
+                _set_state("abuseipdb_dropdown_mode", v)
+        if "abuseipdb_slider_score" in data:
+            _set_state("abuseipdb_slider_score",
+                       str(max(0, min(100, int(float(data["abuseipdb_slider_score"]))))))
+
+        # CISA threshold settings
+        if "cisa_active_control" in data:
+            v = data["cisa_active_control"]
+            if v in ("dropdown", "slider"):
+                _set_state("cisa_active_control", v)
+        if "cisa_dropdown_mode" in data:
+            v = data["cisa_dropdown_mode"]
+            if v in ("high_only", "critical_only"):
+                _set_state("cisa_dropdown_mode", v)
+        if "cisa_slider_score" in data:
+            _set_state("cisa_slider_score",
+                       str(max(0, min(100, int(float(data["cisa_slider_score"]))))))
+
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400

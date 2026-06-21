@@ -1216,9 +1216,17 @@ def settings_page():
         _ad_rate_h = _ad_st("ai_rate_per_hour", "10")
         _ad_rate_d = _ad_st("ai_rate_per_day",  "50")
         _ad_manual = _ad_st("ai_allow_manual_override", "1") == "1"
+        # Phase 3: AbuseIPDB + CISA threshold settings
+        _ad_ab_active  = _ad_st("abuseipdb_active_control", "dropdown")
+        _ad_ab_mode    = _ad_st("abuseipdb_dropdown_mode",  "off")
+        _ad_ab_score   = _ad_st("abuseipdb_slider_score",   "40")
+        _ad_cisa_active = _ad_st("cisa_active_control", "dropdown")
+        _ad_cisa_mode   = _ad_st("cisa_dropdown_mode",  "high_only")
+        _ad_cisa_score  = _ad_st("cisa_slider_score",   "60")
         _ad_conn.close()
     except Exception:
-        pass
+        _ad_ab_active  = "dropdown"; _ad_ab_mode  = "off";       _ad_ab_score  = "40"
+        _ad_cisa_active = "dropdown"; _ad_cisa_mode = "high_only"; _ad_cisa_score = "60"
 
     # Build module rows dynamically from discovered manifests
     manifests = modules_loader.get_all_manifests()
@@ -1250,12 +1258,24 @@ def settings_page():
             </label>
         </div>"""
 
-        # Anomaly detection: inject AI settings sub-section directly below the module row
+        # Anomaly detection: inject AI + Phase 3 settings sub-section below module row
         if name == "anomaly_detection":
-            _manual_checked = "checked" if _ad_manual else ""
+            _manual_checked  = "checked" if _ad_manual else ""
+            # AbuseIPDB radio states
+            _ab_drop_chk   = "checked" if _ad_ab_active  == "dropdown" else ""
+            _ab_score_chk  = "checked" if _ad_ab_active  == "slider"   else ""
+            _ab_off_sel    = "selected" if _ad_ab_mode   == "off"         else ""
+            _ab_med_sel    = "selected" if _ad_ab_mode   == "medium_plus" else ""
+            _ab_hi_sel     = "selected" if _ad_ab_mode   == "high_only"   else ""
+            # CISA radio states
+            _ci_drop_chk   = "checked" if _ad_cisa_active == "dropdown" else ""
+            _ci_score_chk  = "checked" if _ad_cisa_active == "slider"   else ""
+            _ci_hi_sel     = "selected" if _ad_cisa_mode  == "high_only"    else ""
+            _ci_crit_sel   = "selected" if _ad_cisa_mode  == "critical_only" else ""
             module_rows_html += f"""
         <div id="ad-subsettings" class="module-subsettings"
              style="display:{'block' if enabled else 'none'}">
+
             <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
                         letter-spacing:0.06em;margin-bottom:10px;font-weight:bold">
                 AI Analysis Settings
@@ -1282,8 +1302,76 @@ def settings_page():
                     <span class="toggle-slider"></span>
                 </label>
             </div>
+
+            <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
+                        letter-spacing:0.06em;margin:14px 0 6px;font-weight:bold">
+                AbuseIPDB Auto-Reporting Threshold
+                <span style="color:#555;font-weight:normal;font-size:0.88em;margin-left:6px;
+                             text-transform:none;letter-spacing:0">
+                  — select which control is active (●)
+                </span>
+            </div>
+            <div class="module-subsettings-row" style="gap:8px">
+                <input type="radio" name="ad-ab-ctrl" id="ad-ab-use-drop" value="dropdown"
+                       {_ab_drop_chk} onchange="saveAnomalySettings()"
+                       style="accent-color:#00d4ff;flex-shrink:0;cursor:pointer">
+                <label for="ad-ab-use-drop" class="module-subsettings-label"
+                       style="cursor:pointer">Named level</label>
+                <select id="ad-abuseipdb-mode" onchange="saveAnomalySettings()"
+                        style="background:#1a1a2e;border:1px solid #333;color:#eee;
+                               padding:3px 6px;border-radius:4px;font-size:0.86em">
+                    <option value="off" {_ab_off_sel}>Off (default)</option>
+                    <option value="medium_plus" {_ab_med_sel}>Medium-and-above (score ≥ 30)</option>
+                    <option value="high_only"   {_ab_hi_sel}>High-only (score ≥ 60)</option>
+                </select>
+            </div>
+            <div class="module-subsettings-row" style="gap:8px">
+                <input type="radio" name="ad-ab-ctrl" id="ad-ab-use-score" value="slider"
+                       {_ab_score_chk} onchange="saveAnomalySettings()"
+                       style="accent-color:#00d4ff;flex-shrink:0;cursor:pointer">
+                <label for="ad-ab-use-score" class="module-subsettings-label"
+                       style="cursor:pointer">Custom score</label>
+                <input type="number" id="ad-abuseipdb-score" value="{html.escape(_ad_ab_score)}"
+                       min="0" max="100" class="module-subsettings-input"
+                       onchange="saveAnomalySettings()">
+                <span style="color:#555;font-size:0.82em">≥ score</span>
+            </div>
+
+            <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
+                        letter-spacing:0.06em;margin:14px 0 6px;font-weight:bold">
+                CISA Button Threshold
+                <span style="color:#555;font-weight:normal;font-size:0.88em;margin-left:6px;
+                             text-transform:none;letter-spacing:0">
+                  — sets when "CISA" button appears on incidents
+                </span>
+            </div>
+            <div class="module-subsettings-row" style="gap:8px">
+                <input type="radio" name="ad-cisa-ctrl" id="ad-cisa-use-drop" value="dropdown"
+                       {_ci_drop_chk} onchange="saveAnomalySettings()"
+                       style="accent-color:#ffaa00;flex-shrink:0;cursor:pointer">
+                <label for="ad-cisa-use-drop" class="module-subsettings-label"
+                       style="cursor:pointer">Named level</label>
+                <select id="ad-cisa-mode" onchange="saveAnomalySettings()"
+                        style="background:#1a1a2e;border:1px solid #333;color:#eee;
+                               padding:3px 6px;border-radius:4px;font-size:0.86em">
+                    <option value="high_only"    {_ci_hi_sel}>High-and-above (score ≥ 60)</option>
+                    <option value="critical_only" {_ci_crit_sel}>Critical-only (score ≥ 80)</option>
+                </select>
+            </div>
+            <div class="module-subsettings-row" style="gap:8px">
+                <input type="radio" name="ad-cisa-ctrl" id="ad-cisa-use-score" value="slider"
+                       {_ci_score_chk} onchange="saveAnomalySettings()"
+                       style="accent-color:#ffaa00;flex-shrink:0;cursor:pointer">
+                <label for="ad-cisa-use-score" class="module-subsettings-label"
+                       style="cursor:pointer">Custom score</label>
+                <input type="number" id="ad-cisa-score" value="{html.escape(_ad_cisa_score)}"
+                       min="0" max="100" class="module-subsettings-input"
+                       onchange="saveAnomalySettings()">
+                <span style="color:#555;font-size:0.82em">≥ score</span>
+            </div>
+
             <div id="ad-settings-status"
-                 style="height:1.2em;font-size:0.8em;margin-top:6px;color:#00ff88"></div>
+                 style="height:1.2em;font-size:0.8em;margin-top:8px;color:#00ff88"></div>
         </div>"""
 
     if not module_rows_html:
@@ -1543,9 +1631,20 @@ def settings_page():
         }}
 
         function saveAnomalySettings() {{
-            var rateH = parseInt(document.getElementById('ad-rate-hour').value) || 10;
-            var rateD = parseInt(document.getElementById('ad-rate-day').value) || 50;
+            var rateH  = parseInt(document.getElementById('ad-rate-hour').value) || 10;
+            var rateD  = parseInt(document.getElementById('ad-rate-day').value) || 50;
             var manual = document.getElementById('ad-allow-manual').checked ? '1' : '0';
+            // AbuseIPDB
+            var abCtrlEl = document.querySelector('input[name="ad-ab-ctrl"]:checked');
+            var abCtrl   = abCtrlEl ? abCtrlEl.value : 'dropdown';
+            var abMode   = (document.getElementById('ad-abuseipdb-mode') || {{}}).value || 'off';
+            var abScore  = parseInt((document.getElementById('ad-abuseipdb-score') || {{}}).value) || 40;
+            // CISA
+            var ciCtrlEl = document.querySelector('input[name="ad-cisa-ctrl"]:checked');
+            var ciCtrl   = ciCtrlEl ? ciCtrlEl.value : 'dropdown';
+            var ciMode   = (document.getElementById('ad-cisa-mode') || {{}}).value || 'high_only';
+            var ciScore  = parseInt((document.getElementById('ad-cisa-score') || {{}}).value) || 60;
+
             var status = document.getElementById('ad-settings-status');
             status.style.color = '#aaa';
             status.textContent = 'Saving…';
@@ -1555,7 +1654,13 @@ def settings_page():
                 body: JSON.stringify({{
                     rate_per_hour: rateH,
                     rate_per_day: rateD,
-                    allow_manual_override: manual
+                    allow_manual_override: manual,
+                    abuseipdb_active_control: abCtrl,
+                    abuseipdb_dropdown_mode: abMode,
+                    abuseipdb_slider_score: abScore,
+                    cisa_active_control: ciCtrl,
+                    cisa_dropdown_mode: ciMode,
+                    cisa_slider_score: ciScore
                 }})
             }})
             .then(function(r) {{ return r.json(); }})
