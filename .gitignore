@@ -6,3 +6,4 @@ alert_manager/nemesis.log
 __pycache__/
 *.pyc
 .env
+.claude/
