@@ -679,8 +679,13 @@ def _root_domain(fqdn: str) -> str:
 
 
 def _hour_of_week(dt: datetime) -> int:
-    """Return 0-167: Monday 00:00 = 0."""
-    return dt.weekday() * 24 + dt.hour
+    """Return hour of day (0-23) for baseline bucketing.
+
+    Originally hour-of-week (0-167), but that requires 5+ weeks of data before
+    any slot reaches MIN_BASELINE_OBS=5. Hour-of-day (24 slots) saturates from
+    a 7-day baseline, which is the actual window we collect.
+    """
+    return dt.hour
 
 
 def _parse_ts(ts_str: str) -> float:
