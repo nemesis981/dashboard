@@ -1,0 +1,14 @@
+[Unit]
+Description=Security Dashboard
+After=network.target
+
+[Service]
+User=paul
+WorkingDirectory=/home/paul/dashboard
+EnvironmentFile=-/etc/watchdog.env
+EnvironmentFile=/etc/nemesis.env
+ExecStart=/usr/bin/python3 /home/paul/dashboard/dashboard.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

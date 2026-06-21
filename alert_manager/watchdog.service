@@ -1,0 +1,15 @@
+[Unit]
+Description=Service Watchdog
+After=network.target
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/watchdog.env
+EnvironmentFile=/etc/nemesis.env
+ExecStart=/usr/bin/python3 /home/paul/dashboard/alert_manager/watchdog.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -20,9 +20,9 @@ SERVICES = [
 ]
 
 CHECK_INTERVAL_SECONDS = 120
-LOG_PATH = "/home/paul/alert_manager/watchdog.log"
+LOG_PATH = "/home/paul/dashboard/alert_manager/watchdog.log"
 
-HW_DB_PATH = "/home/paul/alert_manager/alerts.db"
+HW_DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
 HW_CHECK_INTERVAL_SECONDS = 300
 HW_ALERT_COOLDOWN_SECONDS = 1800
 

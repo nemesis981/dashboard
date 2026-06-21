@@ -1,0 +1,13 @@
+[Unit]
+Description=Nemesis Device Scanner
+After=network.target
+
+[Service]
+User=paul
+WorkingDirectory=/home/paul/dashboard/alert_manager
+ExecStart=/usr/bin/python3 /home/paul/dashboard/alert_manager/device_scanner.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

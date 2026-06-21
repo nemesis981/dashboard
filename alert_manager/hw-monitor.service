@@ -1,0 +1,16 @@
+[Unit]
+Description=Nemesis Hardware Monitor
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/paul/dashboard/alert_manager/hw_monitor.py
+Restart=on-failure
+RestartSec=10
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

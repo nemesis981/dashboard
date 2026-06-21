@@ -18,9 +18,9 @@ from logging.handlers import RotatingFileHandler
 
 import psutil
 
-DB_PATH      = "/home/paul/alert_manager/alerts.db"
-LOG_FILE     = "/home/paul/alert_manager/hw_monitor.log"
-HW_MAP_PATH  = "/home/paul/alert_manager/hw_map.json"
+DB_PATH      = "/home/paul/dashboard/alert_manager/alerts.db"
+LOG_FILE     = "/home/paul/dashboard/alert_manager/hw_monitor.log"
+HW_MAP_PATH  = "/home/paul/dashboard/alert_manager/hw_map.json"
 NET_IFACE    = "enp131s0"
 SAMPLE_INTERVAL = 300
 

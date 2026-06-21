@@ -1,0 +1,18 @@
+[Unit]
+Description=Nemesis Alert Watcher
+After=suricata.service network-online.target
+Wants=suricata.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/nemesis.env
+ExecStart=/usr/bin/python3 /home/paul/dashboard/alert_manager/alert_watcher.py
+Restart=on-failure
+RestartSec=5
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
