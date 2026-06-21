@@ -24,6 +24,8 @@ _svc_cache = {"ts": 0.0, "data": None}
 _SVC_CACHE_TTL = 30.0
 _vpn_cache = {"ts": 0.0, "data": None}
 _VPN_CACHE_TTL = 30.0
+_drilldown_cache = {"ts": 0.0, "data": None, "date": None}
+_DRILLDOWN_CACHE_TTL = 30.0
 
 HEALTH_SERVICES = [
     "pihole-FTL", "clamav-daemon", "suricata",
@@ -37,6 +39,8 @@ _HW_ALERT_SENT_RE   = re.compile(r"HW alert sent: (\S+) \((.+)\)")
 # "HW alert email failed: KEY (...)"     — no breach, key only
 _HW_ALERT_FAILED_RE = re.compile(r"HW alert email failed: (\S+)")
 _SVC_ALERT_RE = re.compile(r"(?:Sent|Failed to send) alert email for (\S+)")
+_FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
+_FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
@@ -180,6 +184,144 @@ def get_alert_counts():
     except Exception as e:
         log.exception("get_alert_counts failed: %s", e)
         return {"total": 0, "p1": 0, "p2": 0, "p3": 0}
+
+def _get_today_drilldown():
+    """Parse today's fast.log lines and aggregate by rule_id.
+
+    Returns a dict keyed by rule_id (str) with:
+      priority, rule_name, classification, count, last_ts
+    Result is cached for _DRILLDOWN_CACHE_TTL seconds.
+    """
+    today = datetime.now().strftime("%m/%d/%Y")
+    now_mono = time.monotonic()
+    cached = _drilldown_cache["data"]
+    if (cached
+            and _drilldown_cache.get("date") == today
+            and now_mono - _drilldown_cache["ts"] < _DRILLDOWN_CACHE_TTL):
+        return cached
+
+    result = subprocess.run(
+        ["sudo", "tail", "-n", "200000", "/var/log/suricata/fast.log"],
+        capture_output=True, text=True, timeout=30,
+    )
+    prefix = today + "-"
+    rules = {}
+    for line in result.stdout.splitlines():
+        if not line.startswith(prefix):
+            continue
+        m_rule = _FAST_LOG_RULE_RE.search(line)
+        if not m_rule:
+            continue
+        rule_id = m_rule.group(1)
+        rule_name = m_rule.group(2).strip()
+        m_cls = _FAST_LOG_CLASS_RE.search(line)
+        classification = m_cls.group(1).strip() if m_cls else ""
+        priority = 3
+        if "Priority: 1" in line:
+            priority = 1
+        elif "Priority: 2" in line:
+            priority = 2
+        ts_raw = line.split(" ", 1)[0]
+        if rule_id in rules:
+            rules[rule_id]["count"] += 1
+            rules[rule_id]["last_ts"] = ts_raw
+            if priority < rules[rule_id]["priority"]:
+                rules[rule_id]["priority"] = priority
+        else:
+            rules[rule_id] = {
+                "rule_id": rule_id,
+                "priority": priority,
+                "rule_name": rule_name,
+                "classification": classification,
+                "count": 1,
+                "last_ts": ts_raw,
+            }
+
+    _drilldown_cache["data"] = rules
+    _drilldown_cache["ts"] = now_mono
+    _drilldown_cache["date"] = today
+    return rules
+
+
+def _enrich_drilldown_with_db(rules: dict) -> dict:
+    """Add action/risk_level/note from DB to each rule entry. Returns new dict."""
+    if not rules:
+        return rules
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        ids = list(rules.keys())
+        placeholders = ",".join("?" * len(ids))
+        c.execute(
+            f"SELECT rule_id, action, risk_level FROM alerts WHERE rule_id IN ({placeholders})",
+            ids,
+        )
+        db_rows = {r["rule_id"]: dict(r) for r in c.fetchall()}
+        c.execute(
+            f"""SELECT rule_id, note FROM alert_notes
+                WHERE rule_id IN ({placeholders})
+                GROUP BY rule_id HAVING MAX(created_at)""",
+            ids,
+        )
+        notes = {r["rule_id"]: r["note"] for r in c.fetchall()}
+        conn.close()
+    except Exception:
+        log.exception("_enrich_drilldown_with_db failed")
+        db_rows = {}
+        notes = {}
+
+    enriched = {}
+    for rid, entry in rules.items():
+        e = dict(entry)
+        db = db_rows.get(rid, {})
+        e["action"] = db.get("action", "none")
+        e["risk_level"] = db.get("risk_level", "")
+        e["note"] = notes.get(rid, "")
+        enriched[rid] = e
+    return enriched
+
+
+def _drilldown_status_reason(entry: dict) -> tuple:
+    """Return (reason_short, reason_long) explaining why rule is not in the attention list."""
+    action = entry.get("action", "none")
+    risk = entry.get("risk_level", "")
+    priority = entry.get("priority", 3)
+    if action == "ignore":
+        return (
+            "Reviewed — ignored",
+            "You previously reviewed this rule and marked it as safe to ignore. It is suppressed from the Alerts Requiring Attention list.",
+        )
+    if action == "block":
+        return (
+            "Blocked",
+            "The source IP for this rule was blocked. It no longer needs active attention.",
+        )
+    if action == "monitor":
+        return (
+            "Monitoring",
+            "This rule is being watched passively. It will not re-appear in the attention list unless conditions change.",
+        )
+    if action == "pending" and risk == "HIGH":
+        return (
+            "In review queue",
+            "This HIGH risk rule is sitting in the Review Queue waiting for your decision.",
+        )
+    if action == "pending":
+        return (
+            "In attention list",
+            "This rule is actively shown in the Alerts Requiring Attention section.",
+        )
+    if priority == 3:
+        return (
+            "P3 — informational",
+            "P3 alerts are informational only. They are intentionally excluded from the attention list, AI analysis, and email alerts.",
+        )
+    return (
+        "Not yet logged",
+        "This rule fired today but has not been individually processed by the AI analysis pipeline yet. It will appear in the attention list once the watchdog picks it up.",
+    )
+
 
 def get_active_alerts():
     try:
@@ -551,6 +693,105 @@ def api_stats():
             h for _, h in modules_loader.get_module_cards()
         ),
     })
+
+
+@app.route("/api/firewall/drilldown")
+def api_firewall_drilldown():
+    kind = request.args.get("kind", "total")
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        per_page = max(1, min(500, int(request.args.get("per_page", 10))))
+    except (ValueError, TypeError):
+        per_page = 10
+
+    try:
+        rules = _get_today_drilldown()
+        rules = _enrich_drilldown_with_db(rules)
+
+        if kind == "p1":
+            filtered = [e for e in rules.values() if e["priority"] == 1]
+        elif kind == "p2":
+            filtered = [e for e in rules.values() if e["priority"] == 2]
+        elif kind == "review_queue":
+            # Show HIGH risk_level regardless of action, pending first
+            filtered = [e for e in rules.values() if e.get("risk_level") == "HIGH"]
+            filtered.sort(key=lambda e: (0 if e.get("action") == "pending" else 1, e["rule_id"]))
+        else:  # total
+            filtered = list(rules.values())
+
+        if kind not in ("review_queue",):
+            filtered.sort(key=lambda e: (-e["count"], e["rule_id"]))
+
+        total_rules = len(filtered)
+        total_pages = max(1, (total_rules + per_page - 1) // per_page)
+        page = min(page, total_pages)
+        start = (page - 1) * per_page
+        page_rows = filtered[start:start + per_page]
+
+        rows_html = []
+        for e in page_rows:
+            reason_short, reason_long = _drilldown_status_reason(e)
+            pri_label = {1: "P1", 2: "P2", 3: "P3"}.get(e["priority"], "P?")
+            pri_color = {1: "#ff4444", 2: "#ff8800", 3: "#888"}.get(e["priority"], "#888")
+            action = e.get("action", "none")
+            action_color = {
+                "ignore": "#888", "block": "#ff4444",
+                "monitor": "#00d4ff", "pending": "#ff8800",
+            }.get(action, "#666")
+            note_html = (
+                f'<div style="color:#aaa;font-size:0.8em;margin-top:2px;font-style:italic">'
+                f'{html.escape(e["note"][:120])}</div>'
+            ) if e.get("note") else ""
+            rows_html.append(
+                f'<tr>'
+                f'<td style="color:{pri_color};font-weight:bold">{pri_label}</td>'
+                f'<td style="font-family:monospace;color:#ccc">{html.escape(e["rule_id"])}</td>'
+                f'<td style="color:#eee">{html.escape(e["rule_name"][:60])}{note_html}</td>'
+                f'<td style="color:#aaa;font-size:0.85em">{html.escape(e["classification"][:40])}</td>'
+                f'<td style="text-align:right;color:#00d4ff">{e["count"]}</td>'
+                f'<td style="color:{action_color};font-size:0.85em">{html.escape(reason_short)}'
+                f'<span class="tier-text" style="display:none" '
+                f'data-beginner="" data-intermediate="" data-pro=""></span>'
+                f'</td>'
+                f'<td style="color:#777;font-size:0.8em" title="{html.escape(reason_long)}" class="dd-reason-cell">'
+                f'<span class="tier-text" '
+                f'data-beginner="{html.escape(reason_long)}" '
+                f'data-intermediate="{html.escape(reason_short)}" '
+                f'data-pro="{html.escape(reason_short)}">'
+                f'{html.escape(reason_short)}</span>'
+                f'</td>'
+                f'</tr>'
+            )
+
+        table_html = (
+            '<table style="width:100%;border-collapse:collapse;font-size:0.88em">'
+            '<thead><tr style="color:#00d4ff;border-bottom:1px solid #333">'
+            '<th style="text-align:left;padding:4px 6px">Pri</th>'
+            '<th style="text-align:left;padding:4px 6px">Rule ID</th>'
+            '<th style="text-align:left;padding:4px 6px">Rule Name</th>'
+            '<th style="text-align:left;padding:4px 6px">Classification</th>'
+            '<th style="text-align:right;padding:4px 6px">Hits</th>'
+            '<th style="text-align:left;padding:4px 6px" colspan="2">Status</th>'
+            '</tr></thead>'
+            '<tbody>' + "".join(rows_html) + '</tbody>'
+            '</table>'
+        ) if page_rows else '<p style="color:#aaa">No rules found for today.</p>'
+
+        return jsonify({
+            "ok": True,
+            "kind": kind,
+            "total_rules": total_rules,
+            "total_pages": total_pages,
+            "page": page,
+            "per_page": per_page,
+            "table_html": table_html,
+        })
+    except Exception:
+        log.exception("api_firewall_drilldown failed")
+        return jsonify({"ok": False, "error": "Server error"}), 500
 
 
 def get_24h_alert_stats():
@@ -2342,6 +2583,8 @@ def dashboard():
         th {{ text-align: left; padding: 5px; border-bottom: 1px solid #00d4ff; font-size: 0.85em; color: #00d4ff; }}
         td {{ padding: 5px; border-bottom: 1px solid #222; font-size: 0.85em; }}
         .counter-box {{ display: inline-block; background: #0d1117; border-radius: 8px; padding: 10px 15px; margin: 5px; text-align: center; }}
+        .counter-clickable {{ cursor: pointer; transition: background 0.15s, border-color 0.15s; border: 1px solid transparent; }}
+        .counter-clickable:hover {{ background: #141d2e; border-color: #00d4ff; }}
         .counter-num {{ font-size: 1.8em; font-weight: bold; }}
         .p1 {{ color: #ff4444; }}
         .p2 {{ color: #ffaa00; }}
@@ -2527,20 +2770,20 @@ def dashboard():
                 </span>
             </h2>
             <div>
-                <div class="counter-box"><div class="counter-num total" id="cntTotal">{initial_total}</div>
+                <div class="counter-box counter-clickable" onclick="openFwDrilldown('total')" title="Click to see all rules firing today"><div class="counter-num total" id="cntTotal">{initial_total}</div>
                     <div><span class="tier-text" data-beginner="All Alerts Today" data-intermediate="Total" data-pro="Total">Total</span></div>
                     <div style="color:#888;font-size:0.65em;margin-top:2px"><span class="tier-text" data-beginner="includes routine traffic" data-intermediate="incl. P3 info" data-pro="P1+P2+P3">incl. P3 info</span></div>
                 </div>
-                <div class="counter-box"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div>
+                <div class="counter-box counter-clickable" onclick="openFwDrilldown('p1')" title="Click to see all Critical P1 rules today"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div>
                     <div><span class="tier-text" data-beginner="Critical Threats" data-intermediate="Critical P1" data-pro="P1">Critical P1</span></div>
                 </div>
-                <div class="counter-box"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div>
+                <div class="counter-box counter-clickable" onclick="openFwDrilldown('p2')" title="Click to see all High P2 rules today"><div class="counter-num p2" id="cntP2">{alert_counts["p2"]}</div>
                     <div><span class="tier-text" data-beginner="High Risk" data-intermediate="High P2" data-pro="P2">High P2</span></div>
                 </div>
                 <div class="counter-box" id="p3Box" style="display:none"><div class="counter-num p3" id="cntP3">{alert_counts["p3"]}</div>
                     <div><span class="tier-text" data-beginner="Background Traffic" data-intermediate="Info P3" data-pro="P3">Info P3</span></div>
                 </div>
-                <div class="counter-box"><div class="counter-num" id="cntReviewQueue" style="color:#ff8800">{review_queue_count}</div>
+                <div class="counter-box counter-clickable" onclick="openFwDrilldown('review_queue')" title="Click to see all HIGH risk rules today"><div class="counter-num" id="cntReviewQueue" style="color:#ff8800">{review_queue_count}</div>
                     <div style="color:#ff8800"><span class="tier-text" data-beginner="Needs Your Review" data-intermediate="Review Queue" data-pro="Queue">Review Queue</span></div>
                 </div>
             </div>
@@ -2739,6 +2982,33 @@ def dashboard():
                 <button class="btn btn-monitor" onclick="vpnAction('connect')">🔄 Reconnect</button>
                 <button class="btn btn-ignore" onclick="vpnAction('disconnect')">⏹ Disconnect</button>
                 <button class="btn btn-close" onclick="closeVpnModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firewall Counter Drilldown Modal -->
+    <div class="modal" id="fwDrillModal" onclick="if(event.target.id==='fwDrillModal')closeFwDrilldown()">
+        <div class="hw-modal-content" style="max-width:1100px">
+            <button class="hw-close-x" onclick="closeFwDrilldown()" title="Close (Esc)">✕</button>
+            <h3 style="color:#00d4ff;margin-top:0" id="fwDrillTitle">Loading…</h3>
+            <div id="fwDrillSubtitle" style="color:#aaa;font-size:0.85em;margin-bottom:12px"></div>
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
+                <span style="color:#888;font-size:0.85em" id="fwDrillPagInfo"></span>
+                <span style="flex:1"></span>
+                <label style="color:#aaa;font-size:0.85em">
+                    <span class="tier-text"
+                        data-beginner="Rows per page:"
+                        data-intermediate="Per page:"
+                        data-pro="Per page:">Per page:</span>
+                    <input id="fwDrillPerPageInput" type="number" min="1" max="500" value="10"
+                        style="width:60px;margin-left:4px;background:#0d1117;border:1px solid #333;color:#eee;padding:3px 6px;border-radius:4px"
+                        onchange="fwSetPerPage(this.value)">
+                </label>
+            </div>
+            <div id="fwDrillBody" style="overflow-x:auto">Loading…</div>
+            <div id="fwDrillPagin" style="margin-top:12px;display:flex;gap:6px;flex-wrap:wrap;align-items:center"></div>
+            <div style="text-align:right;margin-top:14px">
+                <button class="btn btn-close" onclick="closeFwDrilldown()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -3889,6 +4159,144 @@ def dashboard():
                 }})
                 .catch(e => alert("Error: " + e));
         }}
+
+        /* ── Firewall counter drilldown ── */
+        var _fwDrillKind = "total";
+        var _fwDrillPage = 1;
+        var _fwDrillPerPage = (function() {{
+            var v = parseInt(localStorage.getItem("fwDrillPerPage") || "10", 10);
+            return (isNaN(v) || v < 1) ? 10 : Math.min(v, 500);
+        }})();
+
+        function openFwDrilldown(kind) {{
+            _fwDrillKind = kind;
+            _fwDrillPage = 1;
+            var modal = document.getElementById("fwDrillModal");
+            modal.style.display = "flex";
+            document.getElementById("fwDrillPerPageInput").value = _fwDrillPerPage;
+            var titles = {{
+                total: [
+                    tierText("All Firewall Alerts Today", "Today's Firewall Alerts — All Rules", "All Rules Today"),
+                    tierText(
+                        "Every type of network alert that fired today, including routine background traffic. Click a rule to open the Alert Database.",
+                        "All unique rules that fired today (P1 + P2 + P3), grouped by rule ID.",
+                        "All rules: P1+P2+P3, deduplicated by rule_id."
+                    )
+                ],
+                p1: [
+                    tierText("Critical Threats Detected Today", "Critical P1 Rules — Today", "P1 Rules Today"),
+                    tierText(
+                        "These are the most serious alerts — the firewall saw something that looks like a real attack. Includes all Critical rules, even ones already reviewed or set to ignore.",
+                        "All P1 (Critical priority) rules that fired today, including those already reviewed, ignored, or blocked.",
+                        "P1 rules today; incl. ignored/blocked. Reason column shows why each is/isn't in the attention list."
+                    )
+                ],
+                p2: [
+                    tierText("High Risk Alerts Today", "High P2 Rules — Today", "P2 Rules Today"),
+                    tierText(
+                        "High-risk alerts detected today. Includes all P2 rules even if you've already reviewed them.",
+                        "All P2 (High priority) rules that fired today, including reviewed/ignored/blocked entries.",
+                        "P2 rules today; incl. ignored/blocked. Status column explains current disposition."
+                    )
+                ],
+                review_queue: [
+                    tierText("Everything Flagged as High Risk", "Review Queue — HIGH Risk Rules Today", "HIGH Risk Rules Today"),
+                    tierText(
+                        "Every rule the AI flagged as high risk today. Pending items need your decision. Others have already been handled.",
+                        "All rules with risk_level=HIGH that fired today. Pending items shown first.",
+                        "risk_level=HIGH rules today; pending-first sort."
+                    )
+                ]
+            }};
+            var t = titles[kind] || titles["total"];
+            document.getElementById("fwDrillTitle").textContent = t[0];
+            document.getElementById("fwDrillSubtitle").textContent = t[1];
+            document.getElementById("fwDrillBody").innerHTML =
+                "<p style='color:#aaa'>Loading…</p>";
+            document.getElementById("fwDrillPagin").innerHTML = "";
+            document.getElementById("fwDrillPagInfo").textContent = "";
+            _fwDrillFetch();
+        }}
+
+        function closeFwDrilldown() {{
+            document.getElementById("fwDrillModal").style.display = "none";
+        }}
+
+        function _fwDrillFetch() {{
+            var url = "/api/firewall/drilldown?kind=" + encodeURIComponent(_fwDrillKind)
+                    + "&page=" + _fwDrillPage
+                    + "&per_page=" + _fwDrillPerPage;
+            fetch(url, {{cache: "no-store"}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    if (!d.ok) {{
+                        document.getElementById("fwDrillBody").innerHTML =
+                            "<p style='color:#ff4444'>Error: " + escapeHtml(d.error || "unknown") + "</p>";
+                        return;
+                    }}
+                    document.getElementById("fwDrillBody").innerHTML = d.table_html;
+                    applyTierText();
+                    _fwDrillPage = d.page;
+                    var start = (d.page - 1) * d.per_page + 1;
+                    var end   = Math.min(d.page * d.per_page, d.total_rules);
+                    document.getElementById("fwDrillPagInfo").textContent =
+                        (d.total_rules === 0) ? "No results"
+                        : "Showing " + start + "–" + end + " of " + d.total_rules + " rules";
+                    _fwRenderPagin(d.total_pages, d.page);
+                }})
+                .catch(function(e) {{
+                    document.getElementById("fwDrillBody").innerHTML =
+                        "<p style='color:#ff4444'>Request failed: " + escapeHtml(String(e)) + "</p>";
+                }});
+        }}
+
+        function _fwRenderPagin(totalPages, currentPage) {{
+            var el = document.getElementById("fwDrillPagin");
+            if (totalPages <= 1) {{ el.innerHTML = ""; return; }}
+            var html = "";
+            var btnStyle = "padding:4px 10px;border-radius:4px;border:1px solid #333;cursor:pointer;font-size:0.85em;";
+            var activStyle = btnStyle + "background:#00d4ff;color:#1a1a2e;font-weight:bold;border-color:#00d4ff;";
+            var normStyle  = btnStyle + "background:#0d1117;color:#aaa;";
+            html += "<button style='" + normStyle + "' " + (currentPage===1?"disabled":"") +
+                    " onclick='fwGoPage(1)'>&laquo;</button>";
+            html += "<button style='" + normStyle + "' " + (currentPage===1?"disabled":"") +
+                    " onclick='fwGoPage(" + (currentPage-1) + ")'>&lsaquo;</button>";
+            var lo = Math.max(1, currentPage - 2);
+            var hi = Math.min(totalPages, currentPage + 2);
+            for (var p = lo; p <= hi; p++) {{
+                var s = (p === currentPage) ? activStyle : normStyle;
+                html += "<button style='" + s + "' onclick='fwGoPage(" + p + ")'>" + p + "</button>";
+            }}
+            html += "<button style='" + normStyle + "' " + (currentPage===totalPages?"disabled":"") +
+                    " onclick='fwGoPage(" + (currentPage+1) + ")'>&rsaquo;</button>";
+            html += "<button style='" + normStyle + "' " + (currentPage===totalPages?"disabled":"") +
+                    " onclick='fwGoPage(" + totalPages + ")'>&raquo;</button>";
+            el.innerHTML = html;
+        }}
+
+        function fwGoPage(p) {{
+            _fwDrillPage = p;
+            document.getElementById("fwDrillBody").innerHTML =
+                "<p style='color:#aaa'>Loading…</p>";
+            _fwDrillFetch();
+        }}
+
+        function fwSetPerPage(val) {{
+            var n = parseInt(val, 10);
+            if (isNaN(n) || n < 1) n = 10;
+            if (n > 500) n = 500;
+            _fwDrillPerPage = n;
+            localStorage.setItem("fwDrillPerPage", String(n));
+            _fwDrillPage = 1;
+            _fwDrillFetch();
+        }}
+
+        document.addEventListener("keydown", function(e) {{
+            if (e.key === "Escape") {{
+                var m = document.getElementById("fwDrillModal");
+                if (m && m.style.display !== "none") closeFwDrilldown();
+            }}
+        }});
     </script>
 </body>
 </html>"""
