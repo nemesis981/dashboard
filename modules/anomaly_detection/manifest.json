@@ -1,0 +1,12 @@
+{
+  "name": "anomaly_detection",
+  "display_name": "Zero-Day / Anomaly Detection",
+  "version": "1.0.0-phase1",
+  "description": "Monitors DNS queries across all devices using Suricata eve.json to detect zero-day threats, coordinated multi-device attacks, and behavioral anomalies. Builds a per-domain, per-hour-of-week baseline and scores incidents by novelty, device spread, timing correlation, and recurrence persistence. Phase 1: rule-based detection only.",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false
+}
