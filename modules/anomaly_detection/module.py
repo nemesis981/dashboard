@@ -456,83 +456,138 @@ def _update_baseline(conn, key: str, how: int, count: int, now: float) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
+    """
+    Pattern-based scoring.  Signals only contribute score when they form a
+    combination that maps to a real threat behaviour; no signal has standalone
+    weight beyond its own threat pattern.
+
+    Patterns
+    --------
+    A  Coordinated new destination  — unknown domain + 2+ devices + tight window
+    B  New destination (solo/sequential) — unknown domain, single device or slow spread
+    C  Volume spike  — known domain rate ≥ 3× baseline for this hour
+    (rare domains with no spike pattern → no incident; only recurrence can escalate)
+    """
     key = f"domain:{domain}"
     row = conn.execute(
         "SELECT total_count, obs_count FROM anomaly_baseline "
         "WHERE metric_key=? AND hour_of_week=?", (key, how)
     ).fetchone()
 
+    # Domain classification
     is_ubiq   = domain in _UBIQUITOUS
     obs_count = row["obs_count"] if row else 0
-    is_new    = (not row) or (obs_count < MIN_BASELINE_OBS)
+    is_unknown = (row is None) and not is_ubiq          # zero history on network
+    is_rare    = (row is not None) and (obs_count < MIN_BASELINE_OBS) and not is_ubiq
+    is_known   = (obs_count >= MIN_BASELINE_OBS)
 
-    # Volume spike check
-    is_vol = False
+    if is_ubiq:
+        domain_status = "ubiquitous"
+    elif is_unknown:
+        domain_status = "unknown"
+    elif is_rare:
+        domain_status = "rare"
+    else:
+        domain_status = "known"
+
+    # Volume spike — only reliable when the baseline is well-established
+    is_vol    = False
     vol_ratio = 1.0
-    if row and obs_count >= MIN_BASELINE_OBS:
+    if is_known:
         mean = row["total_count"] / obs_count
         if mean > 0 and data["count"] > max(5, mean * 3):
-            is_vol = True
+            is_vol    = True
             vol_ratio = data["count"] / mean
 
-    # Device analysis
-    clients = data["clients"]
+    # Device / timing analysis
+    clients      = data["clients"]
     device_count = len(clients)
-    all_ts = sorted(ts for ts_list in clients.values() for ts in ts_list)
-    time_spread = (all_ts[-1] - all_ts[0]) if len(all_ts) > 1 else 0
+    all_ts       = sorted(ts for ts_list in clients.values() for ts in ts_list)
+    time_spread  = (all_ts[-1] - all_ts[0]) if len(all_ts) > 1 else 0
+
+    is_simultaneous = (device_count >= 2) and (time_spread <= 60)
+    is_sequential   = (device_count >= 2) and (time_spread > 60)
 
     # Recurrence
     rec = conn.execute(
         "SELECT recurrence_count, last_seen FROM anomaly_recurrence "
         "WHERE offending_target=?", (domain,)
     ).fetchone()
-    recurrence_boost = 0
     recurrence_count = 0
+    recurrence_boost = 0
     if rec:
         age_days = (now - rec["last_seen"]) / 86400
         if age_days <= RECURRENCE_DAYS:
             recurrence_count = rec["recurrence_count"]
             recurrence_boost = min(recurrence_count * 5, 30)
 
-    # Scoring
+    # ── Pattern scoring ────────────────────────────────────────────────────────
     score = 0.0
-    if is_new and not is_ubiq:
-        score += 12
-    if is_vol:
-        score += 15
-        score += min(max(0, (vol_ratio - 3) * 2), 10)
-    if device_count > 1:
-        score += min((device_count - 1) * 8, 24)
-    if device_count > 1 and time_spread <= 30:
-        score += 10
-    elif device_count > 1 and time_spread <= 120:
-        score += 5
-    if is_new and is_vol and not is_ubiq:
-        score *= 1.5
+    pattern = "none"
+
+    if is_unknown and is_simultaneous:
+        # Pattern A: Coordinated New Destination
+        # All three factors (unknown + multi-device + simultaneous) must be present.
+        # Neither multi-device nor unknown alone has any weight.
+        pattern = "A"
+        score   = 25
+        score  += min((device_count - 1) * 10, 30)   # +10/+20/+30 for 2/3/4+ devices
+        if time_spread <= 15:
+            score += 15
+        elif time_spread <= 30:
+            score += 10
+        else:
+            score += 5    # 31-60s
+
+    elif is_unknown:
+        # Pattern B: New destination, single device or slow sequential spread
+        # Single device never reaches SCORE_FLOOR alone; only recurrence escalates it.
+        pattern = "B"
+        score   = 10
+        if is_sequential:
+            score += min((device_count - 1) * 5, 15)   # modest sequential bonus
+            if time_spread <= 300:
+                score += 5                               # ≤5 min spread
+
+    elif is_vol:
+        # Pattern C: Volume spike on known domain
+        pattern = "C"
+        score   = 20
+        score  += min(max(0, (vol_ratio - 3) * 3), 15)   # ratio bonus: 5×=+6, 8×=+15
+        if is_simultaneous:
+            score += min((device_count - 1) * 5, 15)      # multi-device accompanies spike
+
+    # Recurrence boosts any pattern (rare domains can escalate here even if base=0)
     score += recurrence_boost
 
-    # Incident type label
-    if device_count > 1 and (is_new or is_vol):
+    # ── Incident type label ────────────────────────────────────────────────────
+    if pattern == "A":
         itype = "coordinated"
-    elif is_new and not is_ubiq:
+    elif pattern == "B" and is_sequential:
+        itype = "slow_spread"
+    elif pattern == "B":
         itype = "new_destination"
-    elif is_vol:
+    elif pattern == "C":
         itype = "volume_spike"
     else:
         itype = "informational"
 
     return {
-        "score":             round(score, 1),
-        "incident_type":     itype,
-        "new_destination":   is_new and not is_ubiq,
-        "volume_spike":      is_vol,
-        "volume_ratio":      round(vol_ratio, 1),
-        "device_count":      device_count,
-        "time_spread_s":     round(time_spread, 1),
-        "recurrence_count":  recurrence_count,
-        "recurrence_boost":  recurrence_boost,
-        "baseline_obs":      obs_count,
-        "observed_count":    data["count"],
+        "score":            round(score, 1),
+        "incident_type":    itype,
+        "pattern":          pattern,
+        "domain_status":    domain_status,
+        "new_destination":  is_unknown,          # kept for display compat
+        "volume_spike":     is_vol,
+        "volume_ratio":     round(vol_ratio, 1),
+        "device_count":     device_count,
+        "time_spread_s":    round(time_spread, 1),
+        "simultaneous":     is_simultaneous,
+        "sequential":       is_sequential,
+        "recurrence_count": recurrence_count,
+        "recurrence_boost": recurrence_boost,
+        "baseline_obs":     obs_count,
+        "observed_count":   data["count"],
     }
 
 
@@ -740,8 +795,12 @@ def _severity_label(score: float) -> tuple:
 
 
 def _type_icon(itype: str) -> str:
-    return {"coordinated": "🔄", "new_destination": "🌐",
-            "volume_spike": "📈"}.get(itype, "🔍")
+    return {
+        "coordinated":   "🔄",
+        "new_destination": "🌐",
+        "slow_spread":   "📡",
+        "volume_spike":  "📈",
+    }.get(itype, "🔍")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1125,21 +1184,47 @@ def _api_incident_detail(inc_id: int):
 
     # Signal breakdown
     label, color = _severity_label(row["score"])
-    is_new = sig_raw.get("new_destination", False) if isinstance(sig_raw, dict) else False
-    is_vol = sig_raw.get("volume_spike", False) if isinstance(sig_raw, dict) else False
-    vol_r  = sig_raw.get("volume_ratio", 1.0) if isinstance(sig_raw, dict) else 1.0
-    rec_b  = sig_raw.get("recurrence_boost", 0) if isinstance(sig_raw, dict) else 0
-    rec_c  = sig_raw.get("recurrence_count", 0) if isinstance(sig_raw, dict) else 0
+    def _sg(k, default=None):
+        return sig_raw.get(k, default) if isinstance(sig_raw, dict) else default
+
+    pattern       = _sg("pattern", "")
+    domain_status = _sg("domain_status", "")
+    is_new        = _sg("new_destination", False)
+    is_vol        = _sg("volume_spike", False)
+    vol_r         = _sg("volume_ratio", 1.0)
+    rec_b         = _sg("recurrence_boost", 0)
+    rec_c         = _sg("recurrence_count", 0)
+    simultaneous  = _sg("simultaneous", False)
+    sequential    = _sg("sequential", False)
+    spread_s      = _sg("time_spread_s", 0)
+    dev_count     = row["device_count"]
 
     sig_parts = []
-    if is_new:
-        sig_parts.append("🌐 New destination (never/rarely seen in baseline)")
-    if is_vol:
-        sig_parts.append(f"📈 Volume spike ({vol_r:.1f}× above expected rate)")
-    if row["device_count"] > 1:
-        sig_parts.append(f"🔄 {row['device_count']} devices affected")
+    if pattern == "A":
+        sig_parts.append(
+            f"🔄 Pattern A — Coordinated new destination: {dev_count} devices contacted "
+            f"an unknown domain within {spread_s:.0f}s of each other"
+        )
+    elif pattern == "B" and sequential:
+        sig_parts.append(
+            f"📡 Pattern B — Slow-spread new destination: {dev_count} devices contacted "
+            f"an unknown domain sequentially (spread: {spread_s/60:.0f} min)"
+        )
+    elif pattern == "B":
+        sig_parts.append("🌐 Pattern B — New destination: first time this network has seen this domain")
+    elif pattern == "C":
+        sig_parts.append(f"📈 Pattern C — Volume spike: {vol_r:.1f}× above expected rate for this hour")
+        if simultaneous and dev_count > 1:
+            sig_parts.append(f"   └ {dev_count} devices simultaneously contributing to spike")
+
+    if domain_status:
+        status_label = {"unknown":"Zero prior history","rare":"Seen before but infrequently",
+                        "known":"Established domain (baseline reliable)","ubiquitous":"Common infrastructure"
+                        }.get(domain_status, domain_status)
+        sig_parts.append(f"📊 Domain status: {status_label} (obs_count={_sg('baseline_obs',0)})")
+
     if rec_b > 0:
-        sig_parts.append(f"🔁 Recurrence bonus: +{rec_b} pts ({rec_c} prior appearance(s))")
+        sig_parts.append(f"🔁 Recurrence: +{rec_b} pts — seen {rec_c} time(s) before (30-day window)")
 
     sig_html = ""
     for s in sig_parts:
