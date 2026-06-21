@@ -1576,6 +1576,7 @@ def firewall_db():
             note_btn_style = "color:#00d4ff;font-weight:bold" if nc > 0 else "color:#555"
             note_btn_label = f"Notes ({nc})" if nc > 0 else "Notes"
             rule_id_js = json.dumps(rule_id_raw)
+            row_notes_onclick = html.escape(f"openDbNotes({rule_id_js})")
 
             # Row styling by action status
             if action_val == "pending":
@@ -1599,14 +1600,14 @@ def firewall_db():
             tip_m = html.escape(tip_m, quote=True)
             tip_p = html.escape(tip_p, quote=True)
 
-            rows += f"""<tr style="{row_style}">
+            rows += f"""<tr class="db-row-click" style="{row_style}cursor:pointer" onclick="{row_notes_onclick}">
                 <td style="color:#888">{rule_id}</td>
-                <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" style="cursor:help" title="{tip_m}">{rule_name}</td>
+                <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" title="{tip_m}">{rule_name}</td>
                 <td style="color:{'#00ff88' if a[6]=='LOW' else '#ffaa00' if a[6]=='MEDIUM' else '#ff4444'}">{risk_level}</td>
                 <td style="{action_color}">{action_val}</td>
                 <td style="color:#aaa;text-align:right">{times_seen}</td>
                 <td style="color:#aaa">{last_seen}</td>
-                <td>
+                <td onclick="event.stopPropagation()">
                     <select onchange="changeAction({aid}, this.value)">
                         <option {"selected" if a[7]=="pending" else ""}>pending</option>
                         <option {"selected" if a[7]=="ignore" else ""}>ignore</option>
@@ -1614,7 +1615,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
                 </td>
-                <td><button onclick="openDbNotes({rule_id_js})" style="background:transparent;border:none;cursor:pointer;font-size:0.85em;{note_btn_style}">{html.escape(note_btn_label)}</button></td>
+                <td style="{note_btn_style};font-size:0.85em;white-space:nowrap">{html.escape(note_btn_label)} ▸</td>
             </tr>"""
         return f"""<!DOCTYPE html>
 <html>
@@ -1627,7 +1628,7 @@ def firewall_db():
         table {{ width: 100%; border-collapse: collapse; }}
         th {{ background: #16213e; color: #00d4ff; padding: 10px; text-align: left; }}
         td {{ padding: 8px; border-bottom: 1px solid #222; font-size: 0.85em; }}
-        tr:hover td {{ background: rgba(255,255,255,0.03); }}
+        tr.db-row-click:hover td {{ background: rgba(0,212,255,0.05); }}
         select {{ background: #16213e; color: #eee; border: 1px solid #333; padding: 3px; border-radius:3px; }}
         a {{ color: #00d4ff; }}
         .db-modal {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }}
@@ -2472,6 +2473,38 @@ def dashboard():
             <button class="hw-close-x" onclick="closeHwAlertDetailModal()" title="Close (Esc)">✕</button>
             <h3 id="hwAlertDetailTitle">Hardware Alert</h3>
             <div id="hwAlertDetailBody"></div>
+            <div id="hwAlertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <strong style="color:#00d4ff;font-size:0.95em">
+                        <span class="tier-text"
+                              data-beginner="Your Notes for this Alert Type"
+                              data-intermediate="Admin Notes (this alert key)"
+                              data-pro="Notes">Admin Notes</span>
+                    </strong>
+                    <button onclick="loadHwRelatedNotes()" style="background:transparent;border:1px solid #555;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
+                        <span class="tier-text"
+                              data-beginner="Find notes from the same source"
+                              data-intermediate="Find Related Notes"
+                              data-pro="Related Notes">Find Related Notes</span>
+                    </button>
+                </div>
+                <div id="hwNotesList" style="margin-bottom:12px;font-size:0.85em;color:#aaa"></div>
+                <div id="hwRelatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
+                <div>
+                    <textarea id="hwNoteInput" placeholder="Add a note…" rows="3"
+                        style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+                    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                        <button onclick="addHwNote()"
+                            style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">
+                            <span class="tier-text"
+                                  data-beginner="Save Note"
+                                  data-intermediate="Add Note"
+                                  data-pro="Add">Add Note</span>
+                        </button>
+                        <span id="hwNoteStatus" style="font-size:0.8em;color:#aaa"></span>
+                    </div>
+                </div>
+            </div>
             <div style="text-align:right;margin-top:12px">
                 <button class="btn btn-close" onclick="closeHwAlertDetailModal()">✕ Close</button>
             </div>
@@ -2999,10 +3032,144 @@ def dashboard():
                     '</div>' +
                 '</div>';
             document.getElementById("hwAlertDetailModal").style.display = "block";
+            loadHwNotes(a.alert_key);
         }}
 
         function closeHwAlertDetailModal() {{
             document.getElementById("hwAlertDetailModal").style.display = "none";
+            document.getElementById("hwAlertNotesSection").style.display = "none";
+            document.getElementById("hwRelatedNotesList").style.display = "none";
+            document.getElementById("hwNoteInput").value = "";
+            document.getElementById("hwNoteStatus").textContent = "";
+            _hwNotesKey = null;
+            _hwAllNotes = [];
+            _hwNotesPage = 0;
+        }}
+
+        var _hwNotesKey = null;
+        var _hwAllNotes = [];
+        var _hwNotesPage = 0;
+        var _hwNotesSortDesc = true;
+
+        function loadHwNotes(alertKey) {{
+            _hwNotesKey = alertKey;
+            _hwNotesPage = 0;
+            _hwAllNotes = [];
+            _hwNotesSortDesc = true;
+            document.getElementById("hwAlertNotesSection").style.display = "block";
+            document.getElementById("hwRelatedNotesList").style.display = "none";
+            document.getElementById("hwNoteStatus").textContent = "";
+            document.getElementById("hwNotesList").innerHTML =
+                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+            fetch("/api/notes/" + encodeURIComponent(alertKey))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    _hwAllNotes = notes;
+                    _renderHwNotesList();
+                }})
+                .catch(function() {{
+                    document.getElementById("hwNotesList").innerHTML =
+                        "<span style='color:#ff4444;font-size:0.85em'>Failed to load notes</span>";
+                }});
+        }}
+
+        function _renderHwNotesList() {{
+            var el = document.getElementById("hwNotesList");
+            var perPage = 5;
+            var sorted = _hwNotesSortDesc ? _hwAllNotes : _hwAllNotes.slice().reverse();
+            var visible = sorted.slice(0, (_hwNotesPage + 1) * perPage);
+            if (_hwAllNotes.length === 0) {{
+                el.innerHTML = "<span style='color:#555;font-size:0.85em'>" +
+                    tierText("No notes yet. Add one below.", "No notes yet.", "—") + "</span>";
+                return;
+            }}
+            var sortBtn = "<button onclick='_toggleHwNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+                (_hwNotesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
+            var items = visible.map(function(n) {{
+                return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
+                    '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                    '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                    escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div></div>';
+            }}).join("");
+            var moreCount = _hwAllNotes.length - visible.length;
+            var moreBtn = moreCount > 0
+                ? '<button onclick="_showMoreHwNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                : "";
+            el.innerHTML = sortBtn + items + moreBtn;
+        }}
+
+        function _toggleHwNoteSort() {{
+            _hwNotesSortDesc = !_hwNotesSortDesc;
+            _hwNotesPage = 0;
+            _renderHwNotesList();
+        }}
+
+        function _showMoreHwNotes() {{
+            _hwNotesPage++;
+            _renderHwNotesList();
+        }}
+
+        function addHwNote() {{
+            var text = (document.getElementById("hwNoteInput").value || "").trim();
+            if (!text || !_hwNotesKey) {{ return; }}
+            var status = document.getElementById("hwNoteStatus");
+            status.style.color = "#aaa";
+            status.textContent = tierText("Saving…", "Saving…", "…");
+            fetch("/api/notes/" + encodeURIComponent(_hwNotesKey), {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{note: text}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (d.ok) {{
+                    document.getElementById("hwNoteInput").value = "";
+                    status.style.color = "#00ff88";
+                    status.textContent = tierText("Note saved", "Saved", "✓");
+                    loadHwNotes(_hwNotesKey);
+                    setTimeout(function() {{ status.textContent = ""; }}, 2000);
+                }} else {{
+                    status.style.color = "#ff4444";
+                    status.textContent = "Error: " + escapeHtml(d.error || "unknown");
+                }}
+            }})
+            .catch(function() {{
+                status.style.color = "#ff4444";
+                status.textContent = "Error saving note";
+            }});
+        }}
+
+        function loadHwRelatedNotes() {{
+            if (!_hwNotesKey) {{ return; }}
+            var el = document.getElementById("hwRelatedNotesList");
+            el.style.display = "block";
+            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
+            fetch("/api/notes/related/" + encodeURIComponent(_hwNotesKey))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    if (notes.length === 0) {{
+                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>" +
+                            tierText(
+                                "No related notes found — hardware alert keys are not linked to source IPs.",
+                                "No related notes found.",
+                                "No related notes."
+                            ) + "</div>";
+                        return;
+                    }}
+                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
+                        tierText("Notes from other alerts by same source", "Related Notes", "Related Notes") + "</div>";
+                    var items = notes.map(function(n) {{
+                        return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
+                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                            escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div></div>';
+                    }}).join("");
+                    el.innerHTML = header + items;
+                }})
+                .catch(function() {{
+                    el.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Failed to load</span>";
+                }});
         }}
 
         renderHwAlerts({hw_alerts_js});
@@ -3164,6 +3331,7 @@ def dashboard():
                 '</div>';
 
             document.getElementById("hwAlertDetailModal").style.display = "block";
+            loadHwNotes(b.type);
         }}
 
         function openHealthModal() {{
