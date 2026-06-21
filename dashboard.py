@@ -332,6 +332,24 @@ def _ensure_quarantines_table():
         conn.close()
 
 
+def _ensure_alert_notes_table():
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rule_id TEXT NOT NULL,
+                note TEXT NOT NULL,
+                author TEXT NOT NULL DEFAULT 'admin',
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_notes_rule ON alert_notes(rule_id)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_active_quarantines():
     _ensure_quarantines_table()
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
@@ -421,14 +439,12 @@ def render_alerts_html(active_alerts):
         rule_name = alert["rule_name"][:50] if alert["rule_name"] else "Unknown"
         timestamp = alert.get("timestamp", "") or "—"
         onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
-        parts.append(f"""<tr>
+        parts.append(f"""<tr class="hw-clickable" style="cursor:pointer" onclick="{onclick}">
             <td><span style="color:{color}">{label}</span></td>
             <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(timestamp)}</td>
             <td style="font-size:0.8em">{html.escape(rule_name)}</td>
             <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
-            <td><button onclick="{onclick}"
-                style="background:#00d4ff;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px">
-                View</button></td>
+            <td style="color:#00d4ff;font-size:0.8em;padding-left:6px">▸</td>
         </tr>""")
     return "".join(parts)
 
@@ -447,15 +463,13 @@ def render_review_queue_html(items):
         classification = item["classification"][:35] if item["classification"] else "—"
         src_ip = item["src_ip"] or "—"
         onclick = html.escape(f"viewAlert({json.dumps(str(item['rule_id']))}, {json.dumps('')})")
-        parts.append(f"""<tr>
+        parts.append(f"""<tr class="hw-clickable" style="cursor:pointer" onclick="{onclick}">
             <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(ts)}</td>
             <td style="font-size:0.8em">{html.escape(rule_name)}</td>
             <td style="font-size:0.8em">{html.escape(src_ip)}</td>
             <td style="font-size:0.8em;color:#aaa">{html.escape(classification)}</td>
             <td style="font-size:0.8em;text-align:center">{html.escape(str(item['times_seen']))}</td>
-            <td><button onclick="{onclick}"
-                style="background:#ff8800;color:#1a1a2e;border:none;padding:3px 8px;cursor:pointer;border-radius:3px;font-weight:bold">
-                View</button></td>
+            <td style="color:#ff8800;font-size:0.8em;padding-left:6px">▸</td>
         </tr>""")
     return "".join(parts)
 
@@ -1538,11 +1552,15 @@ def firewall_db():
         "Suricata sig match. LOW risk. See alert view for raw context."
     )
 
+    _ensure_alert_notes_table()
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM alerts ORDER BY last_seen DESC")
         alerts = c.fetchall()
+        note_counts = {r[0]: r[1] for r in conn.execute(
+            "SELECT rule_id, COUNT(*) FROM alert_notes GROUP BY rule_id"
+        )}
         conn.close()
         rows = ""
         for a in alerts:
@@ -1554,6 +1572,10 @@ def firewall_db():
             action_val = html.escape(str(a[7] or ""))
             times_seen = html.escape(str(a[8] or ""))
             last_seen = html.escape(str(a[10] or ""))
+            nc = note_counts.get(rule_id_raw, 0)
+            note_btn_style = "color:#00d4ff;font-weight:bold" if nc > 0 else "color:#555"
+            note_btn_label = f"Notes ({nc})" if nc > 0 else "Notes"
+            rule_id_js = json.dumps(rule_id_raw)
 
             # Row styling by action status
             if action_val == "pending":
@@ -1592,6 +1614,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
                 </td>
+                <td><button onclick="openDbNotes({rule_id_js})" style="background:transparent;border:none;cursor:pointer;font-size:0.85em;{note_btn_style}">{html.escape(note_btn_label)}</button></td>
             </tr>"""
         return f"""<!DOCTYPE html>
 <html>
@@ -1607,8 +1630,18 @@ def firewall_db():
         tr:hover td {{ background: rgba(255,255,255,0.03); }}
         select {{ background: #16213e; color: #eee; border: 1px solid #333; padding: 3px; border-radius:3px; }}
         a {{ color: #00d4ff; }}
+        .db-modal {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }}
+        .db-modal-inner {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:560px; width:90%; max-height:85vh; overflow-y:auto; margin:60px auto; position:relative; }}
+        .db-modal-inner h3 {{ color:#00d4ff; margin-top:0; }}
+        .note-item {{ border-left:2px solid #333; padding:6px 10px; margin-bottom:8px; }}
+        .note-text {{ color:#ddd; font-size:0.85em; white-space:pre-wrap; }}
+        .note-meta {{ color:#555; font-size:0.75em; margin-top:3px; }}
     </style>
     <script>
+        function escHtml(s) {{
+            return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+        }}
+
         function changeAction(id, action) {{
             fetch("/api/db-action/" + id + "/" + action)
                 .then(r => r.json()).then(d => console.log(d));
@@ -1628,6 +1661,169 @@ def firewall_db():
             if (e.key === "explanationTier") applyTierTooltips();
         }});
         document.addEventListener("DOMContentLoaded", applyTierTooltips);
+
+        // ── Notes panel ──────────────────────────────────────────
+        var _dbNotesRuleId = null;
+        var _dbAllNotes = [];
+        var _dbNotesPage = 0;
+        var _dbNotesSortDesc = true;
+
+        function openDbNotes(ruleId) {{
+            _dbNotesRuleId = ruleId;
+            _dbAllNotes = [];
+            _dbNotesPage = 0;
+            _dbNotesSortDesc = true;
+            document.getElementById("dbNotesModal").style.display = "block";
+            document.getElementById("dbNoteRuleLabel").textContent = ruleId;
+            document.getElementById("dbRelatedNotesList").style.display = "none";
+            document.getElementById("dbNoteStatus").textContent = "";
+            document.getElementById("dbNoteInput").value = "";
+            document.getElementById("dbNotesList").innerHTML =
+                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+            fetch("/api/notes/" + encodeURIComponent(ruleId))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    _dbAllNotes = notes;
+                    _renderDbNotes();
+                }})
+                .catch(function() {{
+                    document.getElementById("dbNotesList").innerHTML =
+                        "<span style='color:#ff4444;font-size:0.85em'>Failed to load notes</span>";
+                }});
+        }}
+
+        function closeDbNotes() {{
+            document.getElementById("dbNotesModal").style.display = "none";
+            _dbNotesRuleId = null;
+        }}
+
+        function _renderDbNotes() {{
+            var el = document.getElementById("dbNotesList");
+            var perPage = 5;
+            var sorted = _dbNotesSortDesc ? _dbAllNotes : _dbAllNotes.slice().reverse();
+            var visible = sorted.slice(0, (_dbNotesPage + 1) * perPage);
+            if (_dbAllNotes.length === 0) {{
+                el.innerHTML = "<span style='color:#555;font-size:0.85em'>No notes yet. Add one below.</span>";
+                return;
+            }}
+            var sortBtn = "<button onclick='_toggleDbNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+                (_dbNotesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
+            var items = visible.map(function(n) {{
+                return '<div class="note-item"><div class="note-text">' + escHtml(n.note) + '</div>' +
+                    '<div class="note-meta">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) + '</div></div>';
+            }}).join("");
+            var moreCount = _dbAllNotes.length - visible.length;
+            var moreBtn = moreCount > 0
+                ? '<button onclick="_showMoreDbNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                : "";
+            el.innerHTML = sortBtn + items + moreBtn;
+        }}
+
+        function _toggleDbNoteSort() {{
+            _dbNotesSortDesc = !_dbNotesSortDesc;
+            _dbNotesPage = 0;
+            _renderDbNotes();
+        }}
+
+        function _showMoreDbNotes() {{
+            _dbNotesPage++;
+            _renderDbNotes();
+        }}
+
+        function addDbNote() {{
+            var text = (document.getElementById("dbNoteInput").value || "").trim();
+            if (!text || !_dbNotesRuleId) {{ return; }}
+            var status = document.getElementById("dbNoteStatus");
+            status.style.color = "#aaa";
+            status.textContent = "Saving…";
+            fetch("/api/notes/" + encodeURIComponent(_dbNotesRuleId), {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{note: text}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (d.ok) {{
+                    document.getElementById("dbNoteInput").value = "";
+                    status.style.color = "#00ff88";
+                    status.textContent = "Saved";
+                    openDbNotes(_dbNotesRuleId);
+                    setTimeout(function() {{ status.textContent = ""; }}, 2000);
+                }} else {{
+                    status.style.color = "#ff4444";
+                    status.textContent = "Error: " + escHtml(d.error || "unknown");
+                }}
+            }})
+            .catch(function() {{
+                status.style.color = "#ff4444";
+                status.textContent = "Error saving note";
+            }});
+        }}
+
+        function loadDbRelatedNotes() {{
+            if (!_dbNotesRuleId) {{ return; }}
+            var el = document.getElementById("dbRelatedNotesList");
+            el.style.display = "block";
+            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
+            fetch("/api/notes/related/" + encodeURIComponent(_dbNotesRuleId))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    if (notes.length === 0) {{
+                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>No related notes found (no other alerts share the same source IP with notes).</div>";
+                        return;
+                    }}
+                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>Related Notes (same source IP)</div>";
+                    var items = notes.map(function(n) {{
+                        return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
+                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div class="note-text">' + escHtml(n.note) + '</div>' +
+                            '<div class="note-meta">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) + '</div></div>';
+                    }}).join("");
+                    el.innerHTML = header + items;
+                }})
+                .catch(function() {{
+                    el.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Failed to load related notes</span>";
+                }});
+        }}
+
+        // ── Keyword search ────────────────────────────────────────
+        function searchNotes() {{
+            var q = (document.getElementById("noteSearchInput").value || "").trim();
+            var resEl = document.getElementById("noteSearchResults");
+            if (!q) {{
+                resEl.style.display = "none";
+                return;
+            }}
+            resEl.style.display = "block";
+            resEl.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
+            fetch("/api/notes/search?q=" + encodeURIComponent(q))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(results) {{
+                    if (results.length === 0) {{
+                        resEl.innerHTML = "<span style='color:#555;font-size:0.85em'>No notes match <em>" + escHtml(q) + "</em></span>";
+                        return;
+                    }}
+                    var items = results.map(function(n) {{
+                        return '<div style="border-left:2px solid #00d4ff;padding:6px 10px;margin-bottom:8px;background:#0d1117;border-radius:0 4px 4px 0">' +
+                            '<div style="color:#aaa;font-size:0.75em;margin-bottom:2px">' +
+                            'Rule ' + escHtml(n.rule_id) + (n.rule_name ? ' — ' + escHtml(n.rule_name) : '') + '</div>' +
+                            '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escHtml(n.note) + '</div>' +
+                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) +
+                            ' <button onclick="openDbNotes(' + JSON.stringify(n.rule_id) + ')" style="background:transparent;border:none;color:#00d4ff;cursor:pointer;font-size:0.85em;padding:0 4px">→ Notes</button></div>' +
+                            '</div>';
+                    }}).join("");
+                    resEl.innerHTML = '<div style="color:#aaa;font-size:0.8em;margin-bottom:8px">' + results.length + ' note(s) matching <em>' + escHtml(q) + '</em></div>' + items;
+                }})
+                .catch(function() {{
+                    resEl.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Search failed</span>";
+                }});
+        }}
+
+        document.addEventListener("DOMContentLoaded", function() {{
+            document.getElementById("noteSearchInput").addEventListener("keydown", function(e) {{
+                if (e.key === "Enter") searchNotes();
+            }});
+        }});
     </script>
 </head>
 <body>
@@ -1638,10 +1834,41 @@ def firewall_db():
         Routine informational (P3) traffic — DNS lookups, ET POLICY notices, protocol scans — is not individually logged here,
         but is counted in the dashboard's Total and can be inspected in Suricata's fast.log directly.
     </p>
+    <div style="margin-bottom:16px;display:flex;gap:8px;align-items:center">
+        <input type="text" id="noteSearchInput" placeholder="Search all notes…"
+            style="background:#16213e;border:1px solid #333;color:#eee;padding:6px 10px;border-radius:4px;width:280px;font-size:0.9em">
+        <button onclick="searchNotes()"
+            style="background:#00d4ff;color:#1a1a2e;border:none;padding:6px 14px;cursor:pointer;border-radius:4px;font-weight:bold;font-size:0.9em">Search Notes</button>
+    </div>
+    <div id="noteSearchResults" style="display:none;background:#0d1117;border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:16px;max-height:300px;overflow-y:auto"></div>
     <table>
-        <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Action</th><th>Times Seen</th><th>Last Seen</th><th>Change</th></tr>
+        <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Action</th><th>Times Seen</th><th>Last Seen</th><th>Change</th><th>Notes</th></tr>
         {rows}
     </table>
+
+    <!-- Notes panel modal -->
+    <div class="db-modal" id="dbNotesModal" onclick="if(event.target.id==='dbNotesModal')closeDbNotes()">
+        <div class="db-modal-inner">
+            <h3>📝 Admin Notes — <span id="dbNoteRuleLabel" style="font-weight:normal;font-size:0.8em;color:#aaa"></span></h3>
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                <div id="dbNotesList" style="flex:1;font-size:0.85em"></div>
+            </div>
+            <div id="dbRelatedNotesList" style="display:none;border-top:1px solid #222;padding-top:10px;margin-bottom:10px"></div>
+            <div style="border-top:1px solid #333;padding-top:12px;margin-top:4px">
+                <textarea id="dbNoteInput" placeholder="Add a note…" rows="3"
+                    style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+                <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                    <button onclick="addDbNote()"
+                        style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">Add Note</button>
+                    <button onclick="loadDbRelatedNotes()"
+                        style="background:transparent;border:1px solid #555;color:#aaa;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em">Find Related Notes</button>
+                    <span id="dbNoteStatus" style="font-size:0.8em;color:#aaa"></span>
+                    <button onclick="closeDbNotes()"
+                        style="background:transparent;border:1px solid #555;color:#888;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em;margin-left:auto">✕ Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>"""
     except Exception as e:
@@ -1663,6 +1890,107 @@ def db_action(alert_id, action):
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notes/<path:rule_id>")
+def get_notes(rule_id):
+    _ensure_alert_notes_table()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT id, note, author, created_at FROM alert_notes "
+            "WHERE rule_id=? ORDER BY created_at DESC",
+            (rule_id,)
+        ).fetchall()
+        conn.close()
+        return jsonify([{"id": r[0], "note": r[1], "author": r[2], "created_at": r[3]} for r in rows])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notes/<path:rule_id>", methods=["POST"])
+def add_note(rule_id):
+    _ensure_alert_notes_table()
+    try:
+        data = request.get_json(silent=True) or {}
+        note = (data.get("note") or "").strip()
+        if not note:
+            return jsonify({"error": "empty note"}), 400
+        author = (data.get("author") or "admin").strip()[:50]
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute(
+            "INSERT INTO alert_notes (rule_id, note, author, created_at) VALUES (?, ?, ?, ?)",
+            (rule_id, note[:2000], author, now)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notes/search")
+def search_notes():
+    _ensure_alert_notes_table()
+    try:
+        q = (request.args.get("q") or "").strip()
+        if not q:
+            return jsonify([])
+        conn = sqlite3.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT n.id, n.rule_id, n.note, n.author, n.created_at, a.rule_name "
+            "FROM alert_notes n LEFT JOIN alerts a ON a.rule_id = n.rule_id "
+            "WHERE n.note LIKE ? ORDER BY n.created_at DESC LIMIT 100",
+            (f"%{q}%",)
+        ).fetchall()
+        conn.close()
+        return jsonify([
+            {"id": r[0], "rule_id": r[1], "note": r[2], "author": r[3],
+             "created_at": r[4], "rule_name": r[5]}
+            for r in rows
+        ])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/notes/related/<path:rule_id>")
+def related_notes(rule_id):
+    _ensure_alert_notes_table()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        alert = conn.execute(
+            "SELECT src_ip FROM alerts WHERE rule_id=?", (rule_id,)
+        ).fetchone()
+        if not alert or not alert[0]:
+            conn.close()
+            return jsonify([])
+        src_ip = alert[0]
+        other_ids = [
+            r[0] for r in conn.execute(
+                "SELECT DISTINCT rule_id FROM alerts WHERE src_ip=? AND rule_id!=?",
+                (src_ip, rule_id)
+            ).fetchall()
+        ]
+        if not other_ids:
+            conn.close()
+            return jsonify([])
+        placeholders = ",".join("?" * len(other_ids))
+        rows = conn.execute(
+            f"SELECT n.id, n.rule_id, n.note, n.author, n.created_at, a.rule_name "
+            f"FROM alert_notes n LEFT JOIN alerts a ON a.rule_id = n.rule_id "
+            f"WHERE n.rule_id IN ({placeholders}) ORDER BY n.created_at DESC LIMIT 50",
+            other_ids
+        ).fetchall()
+        conn.close()
+        return jsonify([
+            {"id": r[0], "rule_id": r[1], "note": r[2], "author": r[3],
+             "created_at": r[4], "rule_name": r[5]}
+            for r in rows
+        ])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/api/modules")
 def api_modules():
@@ -2014,7 +2342,7 @@ def dashboard():
                         <th style="color:#ff8800">Source IP</th>
                         <th style="color:#ff8800">Classification</th>
                         <th style="color:#ff8800;text-align:center">Seen</th>
-                        <th style="color:#ff8800">Action</th>
+                        <th style="color:#ff8800"></th>
                     </tr></thead>
                     <tbody id="reviewQueueRows">
                     {review_queue_html}
@@ -2026,7 +2354,7 @@ def dashboard():
                 data-intermediate="⚠️ Alerts Requiring Attention"
                 data-pro="⚠️ Active P1/P2">⚠️ Alerts Requiring Attention</span></h3>
             <table>
-                <thead><tr><th>Priority</th><th>Time</th><th>Alert</th><th>Source IP</th><th>Action</th></tr></thead>
+                <thead><tr><th>Priority</th><th>Time</th><th>Alert</th><th>Source IP</th><th></th></tr></thead>
                 <tbody id="alertsRows">
                 {alerts_html}
                 </tbody>
@@ -2052,7 +2380,7 @@ def dashboard():
 
     <!-- Alert Modal -->
     <div class="modal" id="alertModal">
-        <div class="modal-content">
+        <div class="modal-content" style="max-height:85vh;overflow-y:auto">
             <h3>🔍 Nemesis AI Analysis</h3>
             <div id="modalContent">Analyzing...</div>
             <div style="margin-top:15px">
@@ -2061,6 +2389,38 @@ def dashboard():
                 <button class="btn btn-monitor" onclick="takeAction('monitor')" id="btnMonitor">👁 Monitor</button>
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
+            </div>
+            <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <strong style="color:#00d4ff;font-size:0.95em">
+                        <span class="tier-text"
+                              data-beginner="Your Notes for this Alert Type"
+                              data-intermediate="Admin Notes (this rule)"
+                              data-pro="Notes">Admin Notes</span>
+                    </strong>
+                    <button onclick="loadRelatedNotes()" style="background:transparent;border:1px solid #555;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
+                        <span class="tier-text"
+                              data-beginner="Find notes from the same source IP"
+                              data-intermediate="Find Related Notes"
+                              data-pro="Related Notes">Find Related Notes</span>
+                    </button>
+                </div>
+                <div id="notesList" style="margin-bottom:12px;font-size:0.85em;color:#aaa"></div>
+                <div id="relatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
+                <div>
+                    <textarea id="noteInput" placeholder="Add a note…" rows="3"
+                        style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+                    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                        <button onclick="addNote()"
+                            style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">
+                            <span class="tier-text"
+                                  data-beginner="Save Note"
+                                  data-intermediate="Add Note"
+                                  data-pro="Add">Add Note</span>
+                        </button>
+                        <span id="noteStatus" style="font-size:0.8em;color:#aaa"></span>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -2214,6 +2574,11 @@ def dashboard():
             `;
         }}
 
+        var _currentNotesRuleId = null;
+        var _notesPage = 0;
+        var _allNotes = [];
+        var _notesSortDesc = true;
+
         function viewAlert(ruleId, rawAlert) {{
             currentRuleId = ruleId;
             currentSrcIp = "";
@@ -2225,6 +2590,7 @@ def dashboard():
                     "Nemesis AI analyzing...",
                     "Analyzing…"
                 ) + "</p>";
+            loadNotes(ruleId);
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{
@@ -2281,6 +2647,138 @@ def dashboard():
         function closeModal() {{
             document.getElementById("alertModal").style.display = "none";
             document.getElementById("btnReport").style.display = "none";
+            document.getElementById("alertNotesSection").style.display = "none";
+            document.getElementById("relatedNotesList").style.display = "none";
+            document.getElementById("noteInput").value = "";
+            document.getElementById("noteStatus").textContent = "";
+            _currentNotesRuleId = null;
+            _allNotes = [];
+            _notesPage = 0;
+        }}
+
+        function loadNotes(ruleId) {{
+            _currentNotesRuleId = ruleId;
+            _notesPage = 0;
+            _allNotes = [];
+            var sec = document.getElementById("alertNotesSection");
+            sec.style.display = "block";
+            document.getElementById("relatedNotesList").style.display = "none";
+            document.getElementById("noteStatus").textContent = "";
+            document.getElementById("notesList").innerHTML =
+                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+            fetch("/api/notes/" + encodeURIComponent(ruleId))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    _allNotes = notes;
+                    _renderNotesList();
+                }})
+                .catch(function() {{
+                    document.getElementById("notesList").innerHTML =
+                        "<span style='color:#ff4444;font-size:0.85em'>Failed to load notes</span>";
+                }});
+        }}
+
+        function _renderNotesList() {{
+            var el = document.getElementById("notesList");
+            var perPage = 5;
+            var visible = _notesSortDesc
+                ? _allNotes.slice(0, (_notesPage + 1) * perPage)
+                : _allNotes.slice().reverse().slice(0, (_notesPage + 1) * perPage);
+            if (_allNotes.length === 0) {{
+                el.innerHTML = "<span style='color:#555;font-size:0.85em'>" +
+                    tierText("No notes yet. Add the first one below.", "No notes yet.", "—") + "</span>";
+                return;
+            }}
+            var sortBtn = "<button onclick='_toggleNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+                (_notesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
+            var items = visible.map(function(n) {{
+                return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
+                    '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                    '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                    escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
+                    '</div>';
+            }}).join("");
+            var moreCount = _allNotes.length - visible.length;
+            var moreBtn = moreCount > 0
+                ? '<button onclick="_showMoreNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                : "";
+            el.innerHTML = sortBtn + items + moreBtn;
+        }}
+
+        function _toggleNoteSort() {{
+            _notesSortDesc = !_notesSortDesc;
+            _notesPage = 0;
+            _renderNotesList();
+        }}
+
+        function _showMoreNotes() {{
+            _notesPage++;
+            _renderNotesList();
+        }}
+
+        function addNote() {{
+            var text = (document.getElementById("noteInput").value || "").trim();
+            if (!text || !_currentNotesRuleId) {{ return; }}
+            var status = document.getElementById("noteStatus");
+            status.style.color = "#aaa";
+            status.textContent = tierText("Saving…", "Saving…", "…");
+            fetch("/api/notes/" + encodeURIComponent(_currentNotesRuleId), {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{note: text}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (d.ok) {{
+                    document.getElementById("noteInput").value = "";
+                    status.style.color = "#00ff88";
+                    status.textContent = tierText("Note saved", "Saved", "✓");
+                    loadNotes(_currentNotesRuleId);
+                    setTimeout(function() {{ status.textContent = ""; }}, 2000);
+                }} else {{
+                    status.style.color = "#ff4444";
+                    status.textContent = "Error: " + escapeHtml(d.error || "unknown");
+                }}
+            }})
+            .catch(function() {{
+                status.style.color = "#ff4444";
+                status.textContent = "Error saving note";
+            }});
+        }}
+
+        function loadRelatedNotes() {{
+            if (!_currentNotesRuleId) {{ return; }}
+            var el = document.getElementById("relatedNotesList");
+            el.style.display = "block";
+            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
+            fetch("/api/notes/related/" + encodeURIComponent(_currentNotesRuleId))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(notes) {{
+                    if (notes.length === 0) {{
+                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>" +
+                            tierText(
+                                "No notes found for other alerts from the same source IP.",
+                                "No related notes found.",
+                                "No related notes."
+                            ) + "</div>";
+                        return;
+                    }}
+                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
+                        tierText("Notes from other alerts by the same source", "Related Notes (same source IP)", "Related Notes") +
+                        "</div>";
+                    var items = notes.map(function(n) {{
+                        return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
+                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                            escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
+                            '</div>';
+                    }}).join("");
+                    el.innerHTML = header + items;
+                }})
+                .catch(function() {{
+                    el.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Failed to load related notes</span>";
+                }});
         }}
 
         function editDevice(mac, name, type) {{
