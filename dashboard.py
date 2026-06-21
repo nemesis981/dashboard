@@ -894,7 +894,22 @@ def compute_health_sparkline(samples, fan_status=None):
 
 @app.route("/api/alert-breakdown-24h")
 def api_alert_breakdown_24h():
-    return jsonify(get_24h_alert_stats())
+    data = get_24h_alert_stats()
+    if not data.get("breakdown"):
+        return jsonify(data)
+    _ensure_alert_notes_table()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        nc = {r[0]: r[1] for r in conn.execute(
+            "SELECT rule_id, COUNT(*) FROM alert_notes GROUP BY rule_id"
+        )}
+        conn.close()
+        return jsonify({
+            **data,
+            "breakdown": [dict(b, note_count=nc.get(b["type"], 0)) for b in data["breakdown"]]
+        })
+    except Exception:
+        return jsonify(data)
 
 
 @app.route("/api/health-score")
@@ -1574,7 +1589,7 @@ def firewall_db():
             last_seen = html.escape(str(a[10] or ""))
             nc = note_counts.get(rule_id_raw, 0)
             note_btn_style = "color:#00d4ff;font-weight:bold" if nc > 0 else "color:#555"
-            note_btn_label = f"Notes ({nc})" if nc > 0 else "Notes"
+            note_btn_label = str(nc) if nc > 0 else "None"
             rule_id_js = json.dumps(rule_id_raw)
             row_notes_onclick = html.escape(f"openDbNotes({rule_id_js})")
 
@@ -3239,13 +3254,17 @@ def dashboard():
                 .then(d => {{
                     window._breakdown24h = d.breakdown || [];
                     var rows = window._breakdown24h.map(function(b, idx) {{
+                        var nc = b.note_count || 0;
+                        var noteStyle = nc > 0 ? 'color:#00d4ff;font-weight:bold' : 'color:#555';
+                        var noteLabel = nc > 0 ? String(nc) : 'None';
                         return '<tr class="hw-clickable" style="cursor:pointer" onclick="open24hAlertDetail(' + idx + ')">' +
                                '<td>' + escapeHtml(b.type) + '</td>' +
                                '<td style="text-align:right">' + b.count + '</td>' +
+                               '<td style="' + noteStyle + ';font-size:0.85em">' + noteLabel + '</td>' +
                                '<td style="color:#00d4ff;font-size:0.8em;padding-left:6px">▸</td>' +
                                '</tr>';
                     }}).join("");
-                    if (!rows) rows = `<tr><td colspan=3 style="color:#00ff88">${{tierText(
+                    if (!rows) rows = `<tr><td colspan=4 style="color:#00ff88">${{tierText(
                         "✓ No hardware or service alerts in the last 24 hours — everything is running normally",
                         "No system alerts in the last 24 hours.",
                         "No alerts (24h)"
@@ -3264,7 +3283,7 @@ def dashboard():
                             <div><span style="color:#aaa">${{tierText("Service went down:","Service down:","Svc down:")}}</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
                         </div>
                         <table class="breakdown-table">
-                            <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th><th></th></tr></thead>
+                            <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th><th>${{tierText("Notes","Notes","Notes")}}</th><th></th></tr></thead>
                             <tbody>${{rows}}</tbody>
                         </table>
                     `;
