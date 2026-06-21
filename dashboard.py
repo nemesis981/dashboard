@@ -32,7 +32,10 @@ HEALTH_SERVICES = [
 ]
 
 WATCHDOG_LOG_PATH = "/home/paul/alert_manager/watchdog.log"
-_HW_ALERT_RE = re.compile(r"HW alert (?:sent|email failed): (\w+)")
+# "HW alert sent: KEY (breach message)"  — breach present
+_HW_ALERT_SENT_RE   = re.compile(r"HW alert sent: (\S+) \((.+)\)")
+# "HW alert email failed: KEY (...)"     — no breach, key only
+_HW_ALERT_FAILED_RE = re.compile(r"HW alert email failed: (\S+)")
 _SVC_ALERT_RE = re.compile(r"(?:Sent|Failed to send) alert email for (\S+)")
 
 sys.path.insert(0, "/home/paul/alert_manager")
@@ -551,6 +554,7 @@ def get_24h_alert_stats():
         return cached
     cutoff = datetime.now() - timedelta(days=1)
     thermal_fan = service_down = 0
+    # breakdown[key] = {"count": N, "occurrences": [{"ts": str, "breach": str|None}, ...]}
     breakdown = {}
     try:
         with open(WATCHDOG_LOG_PATH) as f:
@@ -561,23 +565,48 @@ def get_24h_alert_stats():
                     continue
                 if ts < cutoff:
                     continue
-                m = _HW_ALERT_RE.search(line)
+                ts_str = line[:19]
+
+                m = _HW_ALERT_SENT_RE.search(line)
                 if m:
                     thermal_fan += 1
                     key = f"thermal/fan: {m.group(1)}"
-                    breakdown[key] = breakdown.get(key, 0) + 1
+                    occ = {"ts": ts_str, "breach": m.group(2)}
+                    entry = breakdown.setdefault(key, {"count": 0, "occurrences": []})
+                    entry["count"] += 1
+                    entry["occurrences"].append(occ)
                     continue
+
+                m = _HW_ALERT_FAILED_RE.search(line)
+                if m:
+                    thermal_fan += 1
+                    key = f"thermal/fan: {m.group(1)}"
+                    occ = {"ts": ts_str, "breach": None}
+                    entry = breakdown.setdefault(key, {"count": 0, "occurrences": []})
+                    entry["count"] += 1
+                    entry["occurrences"].append(occ)
+                    continue
+
                 m = _SVC_ALERT_RE.search(line)
                 if m:
                     service_down += 1
                     key = f"service down: {m.group(1)}"
-                    breakdown[key] = breakdown.get(key, 0) + 1
+                    occ = {"ts": ts_str, "breach": None}
+                    entry = breakdown.setdefault(key, {"count": 0, "occurrences": []})
+                    entry["count"] += 1
+                    entry["occurrences"].append(occ)
     except FileNotFoundError:
         log.warning("get_24h_alert_stats: %s not found", WATCHDOG_LOG_PATH)
     except Exception as e:
         log.exception("get_24h_alert_stats failed: %s", e)
+
+    # Most recent first; cap at 50 occurrences per key to limit JSON size
+    for entry in breakdown.values():
+        entry["occurrences"] = list(reversed(entry["occurrences"]))[:50]
+
     bd_list = sorted(
-        ({"type": k, "count": v} for k, v in breakdown.items()),
+        ({"type": k, "count": v["count"], "occurrences": v["occurrences"]}
+         for k, v in breakdown.items()),
         key=lambda x: -x["count"],
     )
     data = {
@@ -2543,19 +2572,24 @@ def dashboard():
             fetch("/api/alert-breakdown-24h", {{cache: "no-store"}})
                 .then(r => r.json())
                 .then(d => {{
-                    var rows = (d.breakdown || []).map(b =>
-                        `<tr><td>${{escapeHtml(b.type)}}</td><td style="text-align:right">${{b.count}}</td></tr>`
-                    ).join("");
-                    if (!rows) rows = `<tr><td colspan=2 style="color:#00ff88">${{tierText(
+                    window._breakdown24h = d.breakdown || [];
+                    var rows = window._breakdown24h.map(function(b, idx) {{
+                        return '<tr class="hw-clickable" style="cursor:pointer" onclick="open24hAlertDetail(' + idx + ')">' +
+                               '<td>' + escapeHtml(b.type) + '</td>' +
+                               '<td style="text-align:right">' + b.count + '</td>' +
+                               '<td style="color:#00d4ff;font-size:0.8em;padding-left:6px">▸</td>' +
+                               '</tr>';
+                    }}).join("");
+                    if (!rows) rows = `<tr><td colspan=3 style="color:#00ff88">${{tierText(
                         "✓ No hardware or service alerts in the last 24 hours — everything is running normally",
                         "No system alerts in the last 24 hours.",
                         "No alerts (24h)"
                     )}}</td></tr>`;
                     var ct = d.thermal_fan || 0, cs = d.service_down || 0;
                     var intro = tierText(
-                        "These are hardware and service alerts from the background watchdog — things like overheating, fan failures, or a security service going down. Network intrusion alerts are shown separately in the AI Firewall section below.",
-                        "Thermal, fan-failure, and service-down alerts from the watchdog. Suricata network alerts appear in the AI Firewall section.",
-                        "Watchdog alerts (thermal/fan/service). Network alerts → AI Firewall."
+                        "These are hardware and service alerts from the background watchdog — things like overheating, fan failures, or a security service going down. Click any row for full detail. Network intrusion alerts are shown separately in the AI Firewall section below.",
+                        "Thermal, fan-failure, and service-down alerts from the watchdog. Click a row for detail. Suricata network alerts appear in the AI Firewall section.",
+                        "Watchdog alerts (thermal/fan/service). Click row for detail. Network alerts → AI Firewall."
                     );
                     document.getElementById("alertBreakdownBody").innerHTML = `
                         <p style="color:#aaa;font-size:0.85em;margin:0 0 10px 0">${{intro}}</p>
@@ -2565,7 +2599,7 @@ def dashboard():
                             <div><span style="color:#aaa">${{tierText("Service went down:","Service down:","Svc down:")}}</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
                         </div>
                         <table class="breakdown-table">
-                            <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th></tr></thead>
+                            <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th><th></th></tr></thead>
                             <tbody>${{rows}}</tbody>
                         </table>
                     `;
@@ -2577,6 +2611,61 @@ def dashboard():
 
         function closeAlertBreakdownModal() {{
             document.getElementById("alertBreakdownModal").style.display = "none";
+        }}
+
+        function _hw24hRec(alertType) {{
+            var k = alertType.replace(/^thermal[/]fan: /, "");
+            var recs = {{
+                "cpu_temp":          "Check CPU fan and case airflow. Consider reducing load until temps recover.",
+                "ambient_temp":      "Check room ventilation, dust filters, and chassis fan operation.",
+                "nvme_temp":         "Verify NVMe heatsink contact and ambient airflow over the M.2 slot.",
+                "gpu_temp":          "Check GPU fan and case airflow. Reduce GPU load (gaming, compute, ML) until temps recover.",
+                "cpu_sustained_load":"Investigate runaway processes with `top` / `ps auxf`. May indicate stuck job or attack.",
+                "cpu_fan_failure":   "Inspect the CPU fan immediately. Risk of thermal damage if not addressed."
+            }};
+            if (recs[k]) return recs[k];
+            if (k.indexOf("fan_stopped") === 0) return "Inspect the fan. A stopped fan under sustained load will raise temperatures.";
+            if (alertType.indexOf("service down:") === 0)
+                return "Check service status with `systemctl status " + escapeHtml(k) + "`. Restart if needed and investigate root cause.";
+            return "";
+        }}
+
+        function open24hAlertDetail(idx) {{
+            var b = (window._breakdown24h || [])[idx];
+            if (!b) return;
+            var rec  = _hw24hRec(b.type);
+            var icon = b.type.indexOf("service") === 0 ? "🔧" : "🌡️";
+            document.getElementById("hwAlertDetailTitle").textContent = icon + " " + b.type;
+
+            var occs = (b.occurrences || []).map(function(o) {{
+                return '<div style="padding:4px 0;border-bottom:1px solid #1e2d4e;font-size:0.88em">' +
+                       '<span style="color:#00d4ff">' + escapeHtml(o.ts) + '</span>' +
+                       (o.breach ? ' &mdash; <span style="color:#ddd">' + escapeHtml(o.breach) + '</span>'
+                                 : ' <span style="color:#555">(email delivery failed — breach detail not logged)</span>') +
+                       '</div>';
+            }}).join("") || '<div style="color:#555;font-size:0.88em">No occurrence detail captured in log</div>';
+
+            document.getElementById("hwAlertDetailBody").innerHTML =
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">Alert key</div>' +
+                    '<div class="hw-alert-detail-value">' + escapeHtml(b.type) +
+                        ' <span style="color:#888;font-size:0.85em">(' + b.count +
+                        ' occurrence' + (b.count !== 1 ? 's' : '') + ' in last 24h)</span></div>' +
+                '</div>' +
+                (rec ?
+                    '<div class="hw-alert-detail-field">' +
+                        '<div class="hw-alert-detail-label">Recommendation</div>' +
+                        '<div class="hw-alert-detail-value">' + escapeHtml(rec) + '</div>' +
+                    '</div>'
+                : '') +
+                '<div class="hw-alert-detail-field">' +
+                    '<div class="hw-alert-detail-label">' +
+                        (b.count > 1 ? 'Occurrences (most recent first)' : 'Occurrence') +
+                    '</div>' +
+                    '<div class="hw-alert-detail-value">' + occs + '</div>' +
+                '</div>';
+
+            document.getElementById("hwAlertDetailModal").style.display = "block";
         }}
 
         function openHealthModal() {{
