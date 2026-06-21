@@ -33,7 +33,7 @@ HEALTH_SERVICES = [
     "alert-watcher", "hw-monitor", "watchdog",
 ]
 
-WATCHDOG_LOG_PATH = "/home/paul/alert_manager/watchdog.log"
+WATCHDOG_LOG_PATH = "/home/paul/dashboard/alert_manager/watchdog.log"
 # "HW alert sent: KEY (breach message)"  — breach present
 _HW_ALERT_SENT_RE   = re.compile(r"HW alert sent: (\S+) \((.+)\)")
 # "HW alert email failed: KEY (...)"     — no breach, key only
@@ -42,12 +42,13 @@ _SVC_ALERT_RE = re.compile(r"(?:Sent|Failed to send) alert email for (\S+)")
 _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
-sys.path.insert(0, "/home/paul/alert_manager")
+sys.path.insert(0, "/home/paul/dashboard/alert_manager")
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
 import modules_loader
 import diagnostics as _diag
+import email_utils
 
 hw_monitor.init_db()
 
@@ -55,7 +56,7 @@ app = Flask(__name__)
 
 PIHOLE_IP = "192.168.4.69:8080"
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
-DB_PATH = "/home/paul/alert_manager/alerts.db"
+DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
@@ -2000,10 +2001,6 @@ def api_diag_run_all():
 
 @app.route("/api/diagnostics/submit", methods=["POST"])
 def api_diag_submit():
-    import smtplib
-    from email.mime.multipart import MIMEMultipart
-    from email.mime.text import MIMEText as _MIMEText
-
     data = request.get_json(force=True, silent=True) or {}
     user_notes = _diag.redact(str(data.get("notes", "")).strip())
     results = data.get("results", [])
@@ -2037,27 +2034,17 @@ def api_diag_submit():
 
     body = "\n".join(lines)
 
-    sender   = os.environ.get("WATCHDOG_EMAIL", "")
-    password = os.environ.get("WATCHDOG_PASSWORD", "")
-    if not sender or not password:
+    sender = os.environ.get("WATCHDOG_EMAIL", "")
+    if not sender or not os.environ.get("WATCHDOG_PASSWORD", ""):
         return jsonify({"ok": False, "error": "WATCHDOG_EMAIL / WATCHDOG_PASSWORD not configured in nemesis.env — cannot send email."})
 
-    try:
-        msg = MIMEMultipart()
-        msg["Subject"] = f"[Nemesis Support] Diagnostics — {hostname} — {now_str}"
-        msg["From"] = sender
-        msg["To"] = "nemesis-firewall-support@proton.me"
-        msg["Cc"] = sender
-        msg.attach(_MIMEText(body, "plain"))
-        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
-            smtp.starttls()
-            smtp.login(sender, password)
-            smtp.send_message(msg)
+    subject = f"[Nemesis Support] Diagnostics — {hostname} — {now_str}"
+    ok = email_utils.send_email(subject, body, to="nemesis-firewall-support@proton.me", cc=sender)
+    if ok:
         log.info("diagnostics: support email sent from %s", sender)
         return jsonify({"ok": True, "sent_from": sender})
-    except Exception as e:
-        log.exception("diagnostics: email send failed")
-        return jsonify({"ok": False, "error": str(e)})
+    else:
+        return jsonify({"ok": False, "error": "Email send failed — check SMTP settings and credentials in nemesis.env (SMTP_HOST, SMTP_PORT, WATCHDOG_EMAIL, WATCHDOG_PASSWORD)."})
 
 
 @app.route("/diagnostics")
