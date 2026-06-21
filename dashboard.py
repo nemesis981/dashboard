@@ -2062,19 +2062,38 @@ def api_diag_submit():
 
 @app.route("/diagnostics")
 def diagnostics_page():
-    checks_meta = [
-        {
-            "id":   m.META["id"],
-            "name": m.META["name"],
-            "icon": m.META["icon"],
-            "desc_beginner":      m.META["descriptions"]["beginner"],
-            "desc_intermediate":  m.META["descriptions"]["intermediate"],
-            "desc_pro":           m.META["descriptions"]["pro"],
-        }
-        for m in _diag.CHECKS
-    ]
-    import json as _json
-    checks_json = _json.dumps(checks_meta)
+    # Build check cards entirely in Python — avoids JS string/quote escaping bugs.
+    check_ids_js = "[" + ",".join(f'"{m.META["id"]}"' for m in _diag.CHECKS) + "]"
+
+    cards_html = ""
+    for m in _diag.CHECKS:
+        cid   = html.escape(m.META["id"])
+        name  = html.escape(m.META["name"])
+        icon  = html.escape(m.META["icon"])
+        db    = html.escape(m.META["descriptions"]["beginner"],  quote=True)
+        di    = html.escape(m.META["descriptions"]["intermediate"], quote=True)
+        dp    = html.escape(m.META["descriptions"]["pro"],       quote=True)
+        cards_html += f"""
+    <div class="check-card" id="card-{cid}">
+        <div class="check-header">
+            <span class="check-icon">{icon}</span>
+            <div class="check-title">
+                <div class="check-name">{name}</div>
+                <div class="check-desc tier-text"
+                     data-beginner="{db}"
+                     data-intermediate="{di}"
+                     data-pro="{dp}">{di}</div>
+            </div>
+            <span class="check-status status-idle" id="badge-{cid}">Not run</span>
+            <button class="run-btn" id="btn-{cid}"
+                    onclick="runCheck(this.dataset.id)" data-id="{cid}">Run</button>
+        </div>
+        <div class="check-output" id="out-{cid}">
+            <div class="check-summary" id="sum-{cid}"></div>
+            <pre id="pre-{cid}"></pre>
+        </div>
+    </div>"""
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2093,11 +2112,11 @@ def diagnostics_page():
                        padding: 14px 16px; margin-bottom: 12px; }}
         .check-header {{ display: flex; align-items: center; gap: 12px; }}
         .check-icon {{ font-size: 1.4em; flex-shrink: 0; }}
-        .check-title {{ flex: 1; }}
+        .check-title {{ flex: 1; min-width: 0; }}
         .check-name {{ font-weight: bold; color: #eee; font-size: 1em; }}
         .check-desc {{ color: #888; font-size: 0.83em; margin-top: 2px; line-height: 1.4; }}
         .check-status {{ font-size: 0.78em; font-weight: bold; padding: 3px 8px;
-                         border-radius: 10px; flex-shrink: 0; }}
+                         border-radius: 10px; flex-shrink: 0; white-space: nowrap; }}
         .status-ok    {{ background: rgba(0,255,136,0.15); color: #00ff88; }}
         .status-warn  {{ background: rgba(255,136,0,0.15);  color: #ff8800; }}
         .status-error {{ background: rgba(255,68,68,0.15);  color: #ff4444; }}
@@ -2111,13 +2130,13 @@ def diagnostics_page():
         .run-btn:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
         .check-output {{ margin-top: 12px; display: none; }}
         .check-output.visible {{ display: block; }}
+        .check-summary {{ font-size: 0.85em; color: #aaa; margin: 4px 0 2px 0; }}
         .check-output pre {{ background: #060b12; border: 1px solid #1e2d4e; border-radius: 4px;
                               padding: 12px; font-size: 0.8em; line-height: 1.5;
                               color: #ccc; white-space: pre-wrap; word-break: break-word;
-                              max-height: 350px; overflow-y: auto; margin: 6px 0 0 0; }}
-        .check-summary {{ font-size: 0.85em; color: #aaa; margin-top: 6px; }}
+                              max-height: 350px; overflow-y: auto; margin: 0; }}
         .top-actions {{ display: flex; gap: 10px; align-items: center;
-                        margin-bottom: 24px; flex-wrap: wrap; }}
+                        margin-bottom: 20px; flex-wrap: wrap; }}
         .btn-run-all {{ background: #16213e; border: 1px solid #00d4ff; color: #00d4ff;
                         padding: 9px 20px; border-radius: 5px; cursor: pointer;
                         font-weight: bold; font-size: 0.95em; transition: background 0.15s; }}
@@ -2136,22 +2155,22 @@ def diagnostics_page():
         .redact-notice {{ background: rgba(0,212,255,0.07); border: 1px solid rgba(0,212,255,0.2);
                           border-radius: 6px; padding: 10px 14px; font-size: 0.83em;
                           color: #aaa; margin-bottom: 18px; }}
-        .submit-status {{ font-size: 0.88em; color: #aaa; margin-top: 8px; }}
+        .submit-status {{ font-size: 0.88em; margin-top: 8px; }}
         #runAllProgress {{ font-size: 0.85em; color: #aaa; }}
     </style>
 </head>
 <body>
     <h1>🔍 Nemesis Diagnostics
         <span style="float:right;font-size:0.42em">
-            <a class="back" href="/" title="Back to dashboard">← Dashboard</a>
+            <a class="back" href="/">← Dashboard</a>
             &nbsp;|&nbsp;
             <a class="back" href="/settings" target="_blank" rel="noopener">⚙️ Settings</a>
         </span>
     </h1>
     <p class="intro">
         <span class="tier-text"
-            data-beginner="Run these checks to see the current health of your Nemesis Firewall. Each check examines a different part of the system. When you're done, you can send the results to support — all API keys and passwords are automatically hidden before anything is sent."
-            data-intermediate="Run individual or all diagnostic checks. Sensitive values (API keys, passwords) are automatically redacted from all output before display or submission. Use the free-text box to describe your issue before submitting."
+            data-beginner="Run these checks to see the current health of your Nemesis Firewall. Each check examines a different part of the system. When you&apos;re done, you can send the results to support — all API keys and passwords are automatically hidden before anything is sent."
+            data-intermediate="Run individual or all diagnostic checks. Sensitive values (API keys, passwords) are automatically redacted server-side before display or submission. Use the free-text box to describe your issue before submitting."
             data-pro="Diagnostic runner for Nemesis components. Each check is independently runnable (python3 -m diagnostics.&lt;id&gt;). Redaction applied server-side before all output. Submit POSTs to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP.">
             Run these checks to see the current health of your Nemesis Firewall.
         </span>
@@ -2162,8 +2181,8 @@ def diagnostics_page():
         <span class="tier-text"
             data-beginner="Your API keys, email passwords, and other private settings are automatically hidden before any results are displayed or sent — you never need to scrub them yourself."
             data-intermediate="All sensitive values from /etc/nemesis.env (API keys, passwords, tokens) are redacted server-side before output reaches your browser or a support email."
-            data-pro="Redaction: loads /etc/nemesis.env + live os.environ at run time, replaces all secret values ≥8 chars with [REDACTED] in output and summary fields before JSON serialization.">
-            Your API keys, email passwords, and other private settings are automatically hidden before any results are displayed or sent.
+            data-pro="Redaction: loads /etc/nemesis.env + live os.environ at run time; replaces all secret values ≥8 chars with [REDACTED] before JSON response is serialized.">
+            Your API keys, email passwords, and other private settings are automatically hidden.
         </span>
     </div>
 
@@ -2172,97 +2191,63 @@ def diagnostics_page():
         <span id="runAllProgress"></span>
     </div>
 
-    <div id="checksContainer"></div>
+    <h2><span class="tier-text"
+        data-beginner="Individual Checks — click Run to see results"
+        data-intermediate="Diagnostic Checks"
+        data-pro="Checks ({len(_diag.CHECKS)})">Diagnostic Checks</span></h2>
 
-    <h2>
-        <span class="tier-text"
-            data-beginner="Describe What's Happening (optional)"
-            data-intermediate="User Notes / Issue Description"
-            data-pro="Notes for Support">Notes for Support</span>
-    </h2>
+{cards_html}
+
+    <h2><span class="tier-text"
+        data-beginner="Describe What&apos;s Happening (optional)"
+        data-intermediate="Notes for Support"
+        data-pro="Notes for Support">Notes for Support</span></h2>
     <p style="color:#888;font-size:0.85em;margin:0 0 8px 0">
         <span class="tier-text"
-            data-beginner="Describe what's wrong, what you expected to happen, or any question you have. This will be included in your support report alongside the diagnostic results."
-            data-intermediate="Free-text issue description included verbatim in submitted reports. Sensitive values you type here are also redacted before sending."
-            data-pro="Included in email body as 'USER NOTES'. Redacted server-side before SMTP send.">
-            Describe what's wrong, what you expected to happen, or any question you have.
+            data-beginner="Describe what&apos;s wrong, what you expected to happen, or any question you have. This will be included in your report alongside the diagnostic results."
+            data-intermediate="Free-text description included with submitted reports. Sensitive values are redacted before sending."
+            data-pro="Included in email body as USER NOTES. Redacted server-side before SMTP send.">
+            Describe what's wrong or any question you have.
         </span>
     </p>
     <textarea id="supportNotes" class="notes-area" rows="5"
-        placeholder="e.g. 'The anomaly detection module stopped sending alerts after I restarted the server...'"></textarea>
+        placeholder="e.g. The anomaly detection module stopped sending alerts after I restarted the server..."></textarea>
 
     <div style="margin-top:16px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
         <button class="btn-submit" onclick="submitReport()">📧 Submit to Support</button>
         <div>
-            <div class="submit-status" id="submitStatus"></div>
+            <div class="submit-status" id="submitStatus" style="color:#aaa"></div>
             <div style="color:#666;font-size:0.78em;margin-top:4px">
                 <span class="tier-text"
-                    data-beginner="Sends an email with your notes and the diagnostic results you've run. You'll also get a copy at your configured alert email address."
-                    data-intermediate="Sends to nemesis-firewall-support@proton.me via your WATCHDOG_EMAIL SMTP. CC'd to your WATCHDOG_EMAIL for your records."
-                    data-pro="POST /api/diagnostics/submit — SMTP via WATCHDOG_EMAIL/WATCHDOG_PASSWORD. To: nemesis-firewall-support@proton.me, Cc: WATCHDOG_EMAIL.">
-                    Sends to nemesis-firewall-support@proton.me. You'll get a copy at your alert email address.
+                    data-beginner="Sends an email with your notes and whichever diagnostic results you&apos;ve run. You&apos;ll get a copy at your configured alert email address."
+                    data-intermediate="Sends to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP. CC&apos;d to WATCHDOG_EMAIL."
+                    data-pro="POST /api/diagnostics/submit → SMTP to nemesis-firewall-support@proton.me, Cc: WATCHDOG_EMAIL.">
+                    Sends to nemesis-firewall-support@proton.me. You get a copy at your alert email.
                 </span>
             </div>
         </div>
     </div>
 
     <script>
-    var CHECKS = {checks_json};
-    var _results = {{}};   // id -> result object from server
-    var _running = {{}};   // id -> true if currently running
+    var CHECK_IDS = {check_ids_js};
+    var _results = {{}};
+    var _running = {{}};
 
-    function _statusClass(status) {{
-        return 'status-' + (status || 'idle');
+    function _statusClass(s) {{
+        return 'status-' + ({{ok:'ok',warn:'warn',error:'error',info:'info'}}[s] || 'idle');
     }}
-    function _statusLabel(status) {{
-        return ({{ok:'✓ OK', warn:'⚠ Warning', error:'✗ Error', info:'ℹ Info', idle:'Not run'}})
-               [status || 'idle'] || status;
-    }}
-
-    function buildUI() {{
-        var container = document.getElementById('checksContainer');
-        CHECKS.forEach(function(c) {{
-            var div = document.createElement('div');
-            div.className = 'check-card';
-            div.id = 'card-' + c.id;
-            div.innerHTML =
-                '<div class="check-header">' +
-                  '<span class="check-icon">' + c.icon + '</span>' +
-                  '<div class="check-title">' +
-                    '<div class="check-name">' + c.name + '</div>' +
-                    '<div class="check-desc tier-text"' +
-                         ' data-beginner="' + escHtml(c.desc_beginner) + '"' +
-                         ' data-intermediate="' + escHtml(c.desc_intermediate) + '"' +
-                         ' data-pro="' + escHtml(c.desc_pro) + '">' +
-                         escHtml(c.desc_intermediate) +
-                    '</div>' +
-                  '</div>' +
-                  '<span class="check-status status-idle" id="badge-' + c.id + '">Not run</span>' +
-                  '<button class="run-btn" id="btn-' + c.id + '" onclick="runCheck(\'' + c.id + '\')">Run</button>' +
-                '</div>' +
-                '<div class="check-output" id="out-' + c.id + '">' +
-                  '<div class="check-summary" id="sum-' + c.id + '"></div>' +
-                  '<pre id="pre-' + c.id + '"></pre>' +
-                '</div>';
-            container.appendChild(div);
-        }});
-        applyTierText();
-    }}
-
-    function escHtml(s) {{
-        return String(s)
-            .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    function _statusLabel(s) {{
+        return ({{ok:'✓ OK', warn:'⚠ Warning', error:'✗ Error', info:'ℹ Info'}})[s] || 'Not run';
     }}
 
     function runCheck(id) {{
         if (_running[id]) return;
         _running[id] = true;
-        var btn   = document.getElementById('btn-' + id);
+        var btn   = document.getElementById('btn-'   + id);
         var badge = document.getElementById('badge-' + id);
-        var out   = document.getElementById('out-' + id);
-        var pre   = document.getElementById('pre-' + id);
-        var sum   = document.getElementById('sum-' + id);
+        var out   = document.getElementById('out-'   + id);
+        var pre   = document.getElementById('pre-'   + id);
+        var sum   = document.getElementById('sum-'   + id);
         btn.disabled = true;
         btn.textContent = 'Running…';
         badge.className = 'check-status status-info';
@@ -2292,31 +2277,33 @@ def diagnostics_page():
     }}
 
     async function runAll() {{
-        var btn = document.getElementById('btnRunAll');
+        var btn  = document.getElementById('btnRunAll');
         var prog = document.getElementById('runAllProgress');
         btn.disabled = true;
-        for (var i = 0; i < CHECKS.length; i++) {{
-            var id = CHECKS[i].id;
-            prog.textContent = 'Running ' + (i + 1) + ' / ' + CHECKS.length + ': ' + CHECKS[i].name + '…';
+        for (var i = 0; i < CHECK_IDS.length; i++) {{
+            var id = CHECK_IDS[i];
+            var name = (document.getElementById('card-' + id)
+                           .querySelector('.check-name') || {{}}).textContent || id;
+            prog.textContent = 'Running ' + (i + 1) + ' / ' + CHECK_IDS.length + ': ' + name + '…';
             await new Promise(function(resolve) {{
-                var checkId = id;
-                if (_running[checkId]) {{ resolve(); return; }}
-                _running[checkId] = true;
-                var badge = document.getElementById('badge-' + checkId);
-                var out   = document.getElementById('out-' + checkId);
-                var pre   = document.getElementById('pre-' + checkId);
-                var sum   = document.getElementById('sum-' + checkId);
-                var cbtn  = document.getElementById('btn-' + checkId);
+                var cid  = id;
+                if (_running[cid]) {{ resolve(); return; }}
+                _running[cid] = true;
+                var badge = document.getElementById('badge-' + cid);
+                var out   = document.getElementById('out-'   + cid);
+                var pre   = document.getElementById('pre-'   + cid);
+                var sum   = document.getElementById('sum-'   + cid);
+                var cbtn  = document.getElementById('btn-'   + cid);
                 cbtn.disabled = true;
                 cbtn.textContent = 'Running…';
                 badge.className = 'check-status status-info';
                 badge.textContent = '⌛ Running';
                 out.classList.add('visible');
                 pre.textContent = 'Running…';
-                fetch('/api/diagnostics/run/' + checkId, {{cache: 'no-store'}})
+                fetch('/api/diagnostics/run/' + cid, {{cache: 'no-store'}})
                     .then(function(r) {{ return r.json(); }})
                     .then(function(d) {{
-                        _results[checkId] = d;
+                        _results[cid] = d;
                         badge.className = 'check-status ' + _statusClass(d.status);
                         badge.textContent = _statusLabel(d.status);
                         sum.textContent = d.summary || '';
@@ -2331,24 +2318,26 @@ def diagnostics_page():
                         cbtn.disabled = false;
                         cbtn.textContent = 'Retry';
                     }})
-                    .finally(function() {{ _running[checkId] = false; resolve(); }});
+                    .finally(function() {{ _running[cid] = false; resolve(); }});
             }});
         }}
-        prog.textContent = 'All ' + CHECKS.length + ' checks complete.';
+        prog.textContent = 'All ' + CHECK_IDS.length + ' checks complete.';
         btn.disabled = false;
     }}
 
     function submitReport() {{
         var notes = document.getElementById('supportNotes').value.trim();
         var runResults = Object.values(_results);
+        var statusEl = document.getElementById('submitStatus');
         if (runResults.length === 0 && !notes) {{
-            document.getElementById('submitStatus').textContent =
-                'Run at least one check or add a note before submitting.';
+            statusEl.textContent = 'Run at least one check or add a note before submitting.';
+            statusEl.style.color = '#ff8800';
             return;
         }}
         var btn = document.querySelector('.btn-submit');
         btn.disabled = true;
-        document.getElementById('submitStatus').textContent = 'Sending…';
+        statusEl.style.color = '#aaa';
+        statusEl.textContent = 'Sending…';
         fetch('/api/diagnostics/submit', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
@@ -2357,22 +2346,19 @@ def diagnostics_page():
             .then(function(r) {{ return r.json(); }})
             .then(function(d) {{
                 if (d.ok) {{
-                    document.getElementById('submitStatus').textContent =
-                        '✓ Sent! Check your inbox for a copy (sent from ' + (d.sent_from || 'your alert email') + ').';
-                    document.getElementById('submitStatus').style.color = '#00ff88';
+                    statusEl.textContent = '✓ Sent! You’ll receive a copy at ' + (d.sent_from || 'your alert email') + '.';
+                    statusEl.style.color = '#00ff88';
                 }} else {{
-                    document.getElementById('submitStatus').textContent = '✗ Failed: ' + (d.error || 'unknown error');
-                    document.getElementById('submitStatus').style.color = '#ff4444';
+                    statusEl.textContent = '✗ Failed: ' + (d.error || 'unknown error');
+                    statusEl.style.color = '#ff4444';
                 }}
             }})
             .catch(function(e) {{
-                document.getElementById('submitStatus').textContent = '✗ Request error: ' + String(e);
-                document.getElementById('submitStatus').style.color = '#ff4444';
+                statusEl.textContent = '✗ Request error: ' + String(e);
+                statusEl.style.color = '#ff4444';
             }})
             .finally(function() {{ btn.disabled = false; }});
     }}
-
-    buildUI();
     </script>
 </body>
 </html>"""
