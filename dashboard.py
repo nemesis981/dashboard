@@ -39,6 +39,7 @@ sys.path.insert(0, "/home/paul/alert_manager")
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
+import modules_loader
 
 hw_monitor.init_db()
 
@@ -49,6 +50,9 @@ PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = "/home/paul/alert_manager/alerts.db"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
+MODULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
+
+modules_loader.init(app, DB_PATH, MODULES_DIR)
 
 pihole_session = {"sid": None}
 
@@ -526,6 +530,9 @@ def api_stats():
             "status": vpn_status_str,
             "vpn_ip": vpn.get("vpn_ip"),
         },
+        "module_cards_html": "".join(
+            h for _, h in modules_loader.get_module_cards()
+        ),
     })
 
 
@@ -1137,38 +1144,113 @@ def set_action(rule_id, action):
 
 @app.route("/settings")
 def settings_page():
-    return """<!DOCTYPE html>
+    # Build module rows dynamically from discovered manifests
+    manifests = modules_loader.get_all_manifests()
+    module_rows_html = ""
+    for name, m in sorted(manifests.items(), key=lambda kv: kv[1].get("display_name", kv[0])):
+        enabled = modules_loader.is_enabled(name)
+        display_name = html.escape(m.get("display_name", name))
+        description = html.escape(m.get("description", ""))
+        category = html.escape(m.get("category", ""))
+        confirm_required = "true" if m.get("confirmation_required") else "false"
+        confirm_msg = html.escape(m.get("confirmation_message", ""), quote=True)
+        toggle_checked = "checked" if enabled else ""
+        toggle_color = "#00ff88" if enabled else "#444"
+        status_label = "Enabled" if enabled else "Disabled"
+        status_color = "#00ff88" if enabled else "#666"
+        module_rows_html += f"""
+        <div class="module-row" id="mod-row-{name}">
+            <div class="module-info">
+                <div class="module-name">{display_name}
+                    <span class="module-cat">{category}</span>
+                </div>
+                <div class="module-desc">{description}</div>
+                <div class="module-status" id="mod-status-{name}" style="color:{status_color}">{status_label}</div>
+            </div>
+            <label class="toggle-switch" title="{'Enable' if not enabled else 'Disable'} {display_name}">
+                <input type="checkbox" id="mod-toggle-{name}" {toggle_checked}
+                    onchange="handleModuleToggle('{name}', this.checked, {confirm_required}, '{confirm_msg}')">
+                <span class="toggle-slider"></span>
+            </label>
+        </div>"""
+
+    if not module_rows_html:
+        module_rows_html = '<p style="color:#555;font-style:italic">No modules found in modules/ directory.</p>'
+
+    return f"""<!DOCTYPE html>
 <html>
 <head>
     <title>Nemesis — Settings</title>
     <script src="/static/tier.js"></script>
     <style>
-        body { font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
-               padding: 24px; max-width: 700px; margin: 0 auto; }
-        h1 { color: #00d4ff; margin-bottom: 4px; }
-        h2 { color: #00d4ff; font-size: 1.05em; margin: 28px 0 8px 0;
-             border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }
-        .back { color: #00d4ff; text-decoration: none; font-size: 0.9em; }
-        .back:hover { text-decoration: underline; }
-        .settings-section { margin-bottom: 32px; }
-        .tier-option { display: flex; align-items: flex-start; gap: 12px;
+        body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
+               padding: 24px; max-width: 700px; margin: 0 auto; }}
+        h1 {{ color: #00d4ff; margin-bottom: 4px; }}
+        h2 {{ color: #00d4ff; font-size: 1.05em; margin: 28px 0 8px 0;
+             border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }}
+        .back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
+        .back:hover {{ text-decoration: underline; }}
+        .settings-section {{ margin-bottom: 32px; }}
+        .tier-option {{ display: flex; align-items: flex-start; gap: 12px;
                        padding: 12px 14px; border-radius: 6px; cursor: pointer;
                        border: 1px solid transparent; margin-bottom: 8px;
-                       transition: background 0.15s, border-color 0.15s; }
-        .tier-option:hover { background: rgba(0,212,255,0.06); }
-        .tier-option.selected { background: rgba(0,212,255,0.1);
-                                border-color: rgba(0,212,255,0.4); }
-        .tier-option input[type=radio] { margin-top: 3px; flex-shrink: 0;
-                                          accent-color: #00d4ff; width: 16px; height: 16px; }
-        .tier-label { flex: 1; }
-        .tier-label strong { color: #eee; font-size: 1em; }
-        .tier-label em { color: #888; font-size: 0.85em; margin-left: 6px; }
-        .tier-label p { color: #aaa; font-size: 0.85em; margin: 4px 0 0 0; line-height: 1.5; }
-        .save-note { color: #00ff88; font-size: 0.82em; margin-top: 6px;
-                     display: none; }
-        .settings-intro { color: #aaa; font-size: 0.9em; margin: 0 0 18px 0; line-height: 1.6; }
-        .other-section-placeholder { color: #555; font-size: 0.85em;
-                                      font-style: italic; padding: 10px 0; }
+                       transition: background 0.15s, border-color 0.15s; }}
+        .tier-option:hover {{ background: rgba(0,212,255,0.06); }}
+        .tier-option.selected {{ background: rgba(0,212,255,0.1);
+                                border-color: rgba(0,212,255,0.4); }}
+        .tier-option input[type=radio] {{ margin-top: 3px; flex-shrink: 0;
+                                          accent-color: #00d4ff; width: 16px; height: 16px; }}
+        .tier-label {{ flex: 1; }}
+        .tier-label strong {{ color: #eee; font-size: 1em; }}
+        .tier-label em {{ color: #888; font-size: 0.85em; margin-left: 6px; }}
+        .tier-label p {{ color: #aaa; font-size: 0.85em; margin: 4px 0 0 0; line-height: 1.5; }}
+        .save-note {{ color: #00ff88; font-size: 0.82em; margin-top: 6px; display: none; }}
+        .settings-intro {{ color: #aaa; font-size: 0.9em; margin: 0 0 18px 0; line-height: 1.6; }}
+        /* Module rows */
+        .module-row {{ display: flex; align-items: center; gap: 14px;
+                       padding: 14px 0; border-bottom: 1px solid #1e2d4e; }}
+        .module-row:last-child {{ border-bottom: none; }}
+        .module-info {{ flex: 1; }}
+        .module-name {{ font-weight: bold; color: #eee; margin-bottom: 3px; }}
+        .module-cat {{ display: inline-block; font-size: 0.72em; color: #00d4ff;
+                       background: rgba(0,212,255,0.1); padding: 1px 7px;
+                       border-radius: 10px; margin-left: 8px; font-weight: normal;
+                       vertical-align: middle; }}
+        .module-desc {{ color: #aaa; font-size: 0.84em; line-height: 1.5; margin-bottom: 4px; }}
+        .module-status {{ font-size: 0.78em; font-weight: bold; }}
+        /* Toggle switch */
+        .toggle-switch {{ position: relative; display: inline-block;
+                          width: 48px; height: 26px; flex-shrink: 0; }}
+        .toggle-switch input {{ opacity: 0; width: 0; height: 0; }}
+        .toggle-slider {{ position: absolute; cursor: pointer; inset: 0;
+                          background: #333; border-radius: 26px;
+                          transition: background 0.2s; }}
+        .toggle-slider:before {{ content: ""; position: absolute;
+                                  width: 20px; height: 20px; left: 3px; bottom: 3px;
+                                  background: #888; border-radius: 50%;
+                                  transition: transform 0.2s, background 0.2s; }}
+        input:checked + .toggle-slider {{ background: rgba(0,212,255,0.25); }}
+        input:checked + .toggle-slider:before {{ transform: translateX(22px); background: #00d4ff; }}
+        /* Confirmation modal */
+        .confirm-overlay {{ display: none; position: fixed; inset: 0;
+                             background: rgba(0,0,0,0.85); z-index: 100; }}
+        .confirm-box {{ background: #16213e; border: 1px solid #ffaa00;
+                         border-radius: 10px; padding: 24px; max-width: 500px;
+                         margin: 100px auto; }}
+        .confirm-box h3 {{ color: #ffaa00; margin-top: 0; }}
+        .confirm-box p {{ color: #ccc; font-size: 0.9em; line-height: 1.6; }}
+        .confirm-check {{ display: flex; align-items: flex-start; gap: 10px;
+                           margin: 16px 0; cursor: pointer; }}
+        .confirm-check input {{ flex-shrink: 0; margin-top: 3px;
+                                  accent-color: #ffaa00; width: 16px; height: 16px; }}
+        .confirm-check span {{ color: #eee; font-size: 0.9em; }}
+        .confirm-actions {{ display: flex; gap: 10px; margin-top: 16px; }}
+        .btn-confirm {{ padding: 9px 20px; background: #ffaa00; color: #1a1a2e;
+                         border: none; border-radius: 5px; cursor: pointer;
+                         font-weight: bold; opacity: 0.4; }}
+        .btn-confirm.ready {{ opacity: 1; cursor: pointer; }}
+        .btn-cancel {{ padding: 9px 20px; background: #333; color: #eee;
+                        border: none; border-radius: 5px; cursor: pointer; }}
     </style>
 </head>
 <body>
@@ -1215,29 +1297,122 @@ def settings_page():
         <p class="save-note" id="saveNote">✓ Saved — takes effect immediately on all pages</p>
     </div>
 
+    <div class="settings-section">
+        <h2>Modules</h2>
+        <p class="settings-intro">
+            Optional features that can be enabled or disabled independently.
+            Disabled modules are not loaded at all — they have zero runtime cost.
+            Changes take effect immediately.
+        </p>
+        <div id="moduleList">
+        {module_rows_html}
+        </div>
+        <p id="moduleMsg" style="display:none;font-size:0.85em;margin-top:10px"></p>
+    </div>
+
+    <!-- Confirmation modal for dangerous toggles -->
+    <div class="confirm-overlay" id="confirmOverlay">
+        <div class="confirm-box">
+            <h3>⚠️ Important — read before enabling</h3>
+            <p id="confirmMsg"></p>
+            <label class="confirm-check">
+                <input type="checkbox" id="confirmCheck" onchange="confirmCheckChanged()">
+                <span>I understand the implications and have already taken the required steps.</span>
+            </label>
+            <div class="confirm-actions">
+                <button class="btn-confirm" id="btnConfirmEnable" disabled onclick="doConfirmEnable()">
+                    Enable anyway
+                </button>
+                <button class="btn-cancel" onclick="cancelConfirm()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <script>
-        function chooseTier(tier) {
+        // --- Tier selector ---
+        function chooseTier(tier) {{
             setTier(tier);
             document.getElementById('radioBeginner').checked    = (tier === 'beginner');
             document.getElementById('radioIntermediate').checked = (tier === 'intermediate');
             document.getElementById('radioPro').checked         = (tier === 'pro');
-            ['Beginner','Intermediate','Pro'].forEach(function(t) {
+            ['Beginner','Intermediate','Pro'].forEach(function(t) {{
                 document.getElementById('opt' + t).classList.toggle(
                     'selected', t.toLowerCase() === tier);
-            });
+            }});
             var note = document.getElementById('saveNote');
             note.style.display = 'block';
             clearTimeout(note._t);
-            note._t = setTimeout(function() { note.style.display = 'none'; }, 3000);
-        }
-
-        // Init from stored tier
-        (function() {
+            note._t = setTimeout(function() {{ note.style.display = 'none'; }}, 3000);
+        }}
+        (function() {{
             var t = getTier();
             document.getElementById('radio' + t.charAt(0).toUpperCase() + t.slice(1)).checked = true;
             document.getElementById('opt'   + t.charAt(0).toUpperCase() + t.slice(1))
                 .classList.add('selected');
-        })();
+        }})();
+
+        // --- Module toggles ---
+        var _pendingModule = null;
+
+        function handleModuleToggle(name, wantEnabled, confirmRequired, confirmMsg) {{
+            if (wantEnabled && confirmRequired) {{
+                // Show confirmation modal; revert toggle visually until confirmed
+                document.getElementById('mod-toggle-' + name).checked = false;
+                _pendingModule = name;
+                document.getElementById('confirmMsg').textContent = confirmMsg;
+                document.getElementById('confirmCheck').checked = false;
+                document.getElementById('btnConfirmEnable').disabled = true;
+                document.getElementById('btnConfirmEnable').classList.remove('ready');
+                document.getElementById('confirmOverlay').style.display = 'block';
+            }} else {{
+                setModuleEnabled(name, wantEnabled);
+            }}
+        }}
+
+        function confirmCheckChanged() {{
+            var ready = document.getElementById('confirmCheck').checked;
+            document.getElementById('btnConfirmEnable').disabled = !ready;
+            document.getElementById('btnConfirmEnable').classList.toggle('ready', ready);
+        }}
+
+        function doConfirmEnable() {{
+            document.getElementById('confirmOverlay').style.display = 'none';
+            if (_pendingModule) {{
+                document.getElementById('mod-toggle-' + _pendingModule).checked = true;
+                setModuleEnabled(_pendingModule, true);
+                _pendingModule = null;
+            }}
+        }}
+
+        function cancelConfirm() {{
+            document.getElementById('confirmOverlay').style.display = 'none';
+            _pendingModule = null;
+        }}
+
+        function setModuleEnabled(name, enabled) {{
+            var url = '/api/modules/' + name + '/' + (enabled ? 'enable' : 'disable');
+            var statusEl = document.getElementById('mod-status-' + name);
+            statusEl.style.color = '#ffaa00';
+            statusEl.textContent = enabled ? 'Enabling…' : 'Disabling…';
+
+            fetch(url, {{method: 'POST'}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    if (d.error) {{
+                        statusEl.style.color = '#ff4444';
+                        statusEl.textContent = 'Error: ' + d.error;
+                        document.getElementById('mod-toggle-' + name).checked = !enabled;
+                    }} else {{
+                        statusEl.style.color = enabled ? '#00ff88' : '#666';
+                        statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
+                    }}
+                }})
+                .catch(function(e) {{
+                    statusEl.style.color = '#ff4444';
+                    statusEl.textContent = 'Request failed';
+                    document.getElementById('mod-toggle-' + name).checked = !enabled;
+                }});
+        }}
     </script>
 </body>
 </html>"""
@@ -1460,6 +1635,43 @@ def db_action(alert_id, action):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/modules")
+def api_modules():
+    """List all discovered modules with their enabled state and runtime status."""
+    manifests = modules_loader.get_all_manifests()
+    result = []
+    for name, m in manifests.items():
+        result.append({
+            "name": name,
+            "display_name": m.get("display_name", name),
+            "description": m.get("description", ""),
+            "category": m.get("category", ""),
+            "enabled": modules_loader.is_enabled(name),
+            "status": modules_loader.module_status(name),
+            "confirmation_required": m.get("confirmation_required", False),
+            "confirmation_message": m.get("confirmation_message", ""),
+        })
+    return jsonify({"modules": result})
+
+
+@app.route("/api/modules/<name>/enable", methods=["POST"])
+def api_module_enable(name):
+    try:
+        modules_loader.set_enabled(name, True)
+        return jsonify({"success": True, "status": modules_loader.module_status(name)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/modules/<name>/disable", methods=["POST"])
+def api_module_disable(name):
+    try:
+        modules_loader.set_enabled(name, False)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -1528,6 +1740,10 @@ def dashboard():
     quarantines = get_active_quarantines()
     quarantine_banner_html = render_quarantine_banner_html(quarantines)
     quarantine_banner_display = "block" if quarantines else "none"
+
+    module_cards_html = "".join(
+        card_html for _, card_html in modules_loader.get_module_cards()
+    )
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1798,6 +2014,10 @@ def dashboard():
                 {devices_html}
                 </tbody>
             </table>
+        </div>
+
+        <div id="moduleCardsContainer" style="display:contents">
+        {module_cards_html}
         </div>
     </div>
 
@@ -2637,6 +2857,9 @@ def dashboard():
                         document.getElementById("alertsRows").innerHTML = d.alerts_html;
                         document.getElementById("devicesRows").innerHTML = d.devices_html;
                         document.getElementById("reviewQueueRows").innerHTML = d.review_queue_html;
+                        if (d.module_cards_html !== undefined) {{
+                            document.getElementById("moduleCardsContainer").innerHTML = d.module_cards_html;
+                        }}
                         applyTierText();
                     }}
                 }})

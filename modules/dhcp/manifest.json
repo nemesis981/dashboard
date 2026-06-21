@@ -1,0 +1,13 @@
+{
+  "name": "dhcp",
+  "display_name": "DHCP Server (Pi-hole)",
+  "version": "1.0.0",
+  "description": "Activates Pi-hole's built-in DHCP server so Nemesis hands out IP addresses on your network instead of your Eero. Gives you per-device lease visibility and DNS-level tracking for every device the moment it connects.",
+  "category": "network",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": ["PIHOLE_IP", "PIHOLE_PASSWORD"],
+  "enabled_by_default": false,
+  "confirmation_required": true,
+  "confirmation_message": "Enabling DHCP takeover makes this machine the DHCP server for your entire network. Before enabling, you MUST disable DHCP on your Eero (or other router). Running two DHCP servers at the same time will cause IP conflicts and connectivity failures for every device on your network."
+}
