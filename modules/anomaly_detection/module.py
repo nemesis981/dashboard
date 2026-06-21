@@ -274,7 +274,9 @@ def _build_initial_baseline() -> None:
     log.info("anomaly_detection: building initial baseline from %s", EVE_LOG)
     cutoff = time.time() - INITIAL_BASELINE_MAX_DAYS * 86400
     count = 0
-    batch: dict = {}   # metric_key -> {hour_of_week: count}
+    # metric_key -> hour_of_week -> date_str -> query_count
+    # Using per-day buckets so obs_count = distinct calendar days, not batch count.
+    batch: dict = {}
 
     try:
         with open(EVE_LOG, "rb") as f:
@@ -304,25 +306,29 @@ def _build_initial_baseline() -> None:
                     continue
 
                 key = f"domain:{domain}"
-                how = _hour_of_week(datetime.fromtimestamp(ts))
-                batch.setdefault(key, {}).setdefault(how, 0)
-                batch[key][how] += 1
+                dt = datetime.fromtimestamp(ts)
+                how = _hour_of_week(dt)
+                date_str = dt.strftime("%Y-%m-%d")
+                batch.setdefault(key, {}).setdefault(how, {}).setdefault(date_str, 0)
+                batch[key][how][date_str] += 1
                 count += 1
 
-        # Flush to DB in one transaction
+        # Flush to DB: obs_count = number of distinct calendar days seen at this hour slot
         now = time.time()
         conn = _conn()
         for key, hours in batch.items():
-            for how, cnt in hours.items():
+            for how, days in hours.items():
+                total = sum(days.values())
+                obs   = len(days)
                 conn.execute("""
                     INSERT INTO anomaly_baseline(metric_key, hour_of_week,
                         total_count, obs_count, last_updated)
-                    VALUES(?, ?, ?, 1, ?)
+                    VALUES(?, ?, ?, ?, ?)
                     ON CONFLICT(metric_key, hour_of_week) DO UPDATE SET
                         total_count  = total_count + excluded.total_count,
-                        obs_count    = obs_count + 1,
+                        obs_count    = obs_count + excluded.obs_count,
                         last_updated = excluded.last_updated
-                """, (key, how, cnt, now))
+                """, (key, how, total, obs, now))
         conn.commit()
         conn.close()
         log.info("anomaly_detection: baseline built from %d DNS events, "
@@ -331,6 +337,15 @@ def _build_initial_baseline() -> None:
         log.warning("anomaly_detection: %s not found, starting with empty baseline", EVE_LOG)
     except Exception:
         log.exception("anomaly_detection: baseline build error")
+
+    # Fix 1: pin the file offset to NOW so the first detection cycle only reads
+    # events that arrive AFTER the baseline scan, not the full history again.
+    try:
+        st = os.stat(EVE_LOG)
+        _set_state("eve_offset", str(st.st_size))
+        _set_state("eve_inode",  str(st.st_ino))
+    except OSError:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -427,7 +442,11 @@ def _update_baseline(conn, key: str, how: int, count: int, now: float) -> None:
         VALUES(?, ?, ?, 1, ?)
         ON CONFLICT(metric_key, hour_of_week) DO UPDATE SET
             total_count  = total_count + excluded.total_count,
-            obs_count    = obs_count + 1,
+            obs_count    = CASE
+                WHEN date(last_updated, 'unixepoch') < date(excluded.last_updated, 'unixepoch')
+                THEN obs_count + 1
+                ELSE obs_count
+            END,
             last_updated = excluded.last_updated
     """, (key, how, count, now))
 
