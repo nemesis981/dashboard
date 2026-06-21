@@ -1089,7 +1089,7 @@ def analyze_alert(rule_id):
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=500,
             messages=[{
                 "role": "user",
@@ -1202,6 +1202,24 @@ def set_action(rule_id, action):
 
 @app.route("/settings")
 def settings_page():
+    # Read anomaly_detection AI settings from DB (best-effort; fall back to defaults)
+    _ad_rate_h = "10"
+    _ad_rate_d = "50"
+    _ad_manual = True
+    try:
+        _ad_conn = sqlite3.connect(DB_PATH, timeout=5)
+        def _ad_st(k, d=""):
+            r = _ad_conn.execute(
+                "SELECT value FROM anomaly_state WHERE key=?", (k,)
+            ).fetchone()
+            return r[0] if r else d
+        _ad_rate_h = _ad_st("ai_rate_per_hour", "10")
+        _ad_rate_d = _ad_st("ai_rate_per_day",  "50")
+        _ad_manual = _ad_st("ai_allow_manual_override", "1") == "1"
+        _ad_conn.close()
+    except Exception:
+        pass
+
     # Build module rows dynamically from discovered manifests
     manifests = modules_loader.get_all_manifests()
     module_rows_html = ""
@@ -1230,6 +1248,42 @@ def settings_page():
                     onchange="handleModuleToggle('{name}', this.checked, {confirm_required}, '{confirm_msg}')">
                 <span class="toggle-slider"></span>
             </label>
+        </div>"""
+
+        # Anomaly detection: inject AI settings sub-section directly below the module row
+        if name == "anomaly_detection":
+            _manual_checked = "checked" if _ad_manual else ""
+            module_rows_html += f"""
+        <div id="ad-subsettings" class="module-subsettings"
+             style="display:{'block' if enabled else 'none'}">
+            <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
+                        letter-spacing:0.06em;margin-bottom:10px;font-weight:bold">
+                AI Analysis Settings
+            </div>
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">Max automatic AI analyses per hour</span>
+                <input type="number" id="ad-rate-hour" value="{html.escape(_ad_rate_h)}"
+                       min="0" max="100" class="module-subsettings-input"
+                       onchange="saveAnomalySettings()">
+            </div>
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">Max automatic AI analyses per day</span>
+                <input type="number" id="ad-rate-day" value="{html.escape(_ad_rate_d)}"
+                       min="0" max="1000" class="module-subsettings-input"
+                       onchange="saveAnomalySettings()">
+            </div>
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    Allow manual AI analysis when automatic rate limit is reached
+                </span>
+                <label class="toggle-switch" style="flex-shrink:0">
+                    <input type="checkbox" id="ad-allow-manual" {_manual_checked}
+                           onchange="saveAnomalySettings()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+            <div id="ad-settings-status"
+                 style="height:1.2em;font-size:0.8em;margin-top:6px;color:#00ff88"></div>
         </div>"""
 
     if not module_rows_html:
@@ -1276,6 +1330,17 @@ def settings_page():
                        vertical-align: middle; }}
         .module-desc {{ color: #aaa; font-size: 0.84em; line-height: 1.5; margin-bottom: 4px; }}
         .module-status {{ font-size: 0.78em; font-weight: bold; }}
+        /* Module sub-settings (e.g. anomaly detection AI config) */
+        .module-subsettings {{ background: rgba(0,212,255,0.03);
+                                border: 1px solid #1e2d4e; border-radius: 6px;
+                                padding: 12px 16px; margin: -6px 0 4px 0; }}
+        .module-subsettings-row {{ display: flex; align-items: center; gap: 12px;
+                                    padding: 7px 0; border-bottom: 1px solid #1e2d4e44; }}
+        .module-subsettings-row:last-of-type {{ border-bottom: none; }}
+        .module-subsettings-label {{ color: #aaa; font-size: 0.86em; flex: 1; }}
+        .module-subsettings-input {{ background: #1a1a2e; border: 1px solid #333; color: #eee;
+                                      padding: 4px 8px; border-radius: 4px; width: 60px;
+                                      text-align: center; font-size: 0.9em; }}
         /* Toggle switch */
         .toggle-switch {{ position: relative; display: inline-block;
                           width: 48px; height: 26px; flex-shrink: 0; }}
@@ -1463,6 +1528,11 @@ def settings_page():
                     }} else {{
                         statusEl.style.color = enabled ? '#00ff88' : '#666';
                         statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
+                        // Show/hide anomaly sub-settings when toggled
+                        if (name === 'anomaly_detection') {{
+                            var sub = document.getElementById('ad-subsettings');
+                            if (sub) sub.style.display = enabled ? 'block' : 'none';
+                        }}
                     }}
                 }})
                 .catch(function(e) {{
@@ -1470,6 +1540,35 @@ def settings_page():
                     statusEl.textContent = 'Request failed';
                     document.getElementById('mod-toggle-' + name).checked = !enabled;
                 }});
+        }}
+
+        function saveAnomalySettings() {{
+            var rateH = parseInt(document.getElementById('ad-rate-hour').value) || 10;
+            var rateD = parseInt(document.getElementById('ad-rate-day').value) || 50;
+            var manual = document.getElementById('ad-allow-manual').checked ? '1' : '0';
+            var status = document.getElementById('ad-settings-status');
+            status.style.color = '#aaa';
+            status.textContent = 'Saving…';
+            fetch('/api/anomaly/settings', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    rate_per_hour: rateH,
+                    rate_per_day: rateD,
+                    allow_manual_override: manual
+                }})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                status.textContent = d.ok ? '✓ Saved' : 'Error: ' + (d.error || 'unknown');
+                clearTimeout(status._t);
+                status._t = setTimeout(function() {{ status.textContent = ''; }}, 3000);
+            }})
+            .catch(function() {{
+                status.style.color = '#ff4444';
+                status.textContent = 'Request failed';
+            }});
         }}
     </script>
 </body>

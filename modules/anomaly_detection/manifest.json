@@ -1,8 +1,8 @@
 {
   "name": "anomaly_detection",
   "display_name": "Zero-Day / Anomaly Detection",
-  "version": "1.0.0-phase1",
-  "description": "Monitors DNS queries across all devices using Suricata eve.json to detect zero-day threats, coordinated multi-device attacks, and behavioral anomalies. Builds a per-domain, per-hour-of-week baseline and scores incidents by novelty, device spread, timing correlation, and recurrence persistence. Phase 1: rule-based detection only.",
+  "version": "2.0.0-phase2",
+  "description": "Monitors DNS queries across all devices using Suricata eve.json to detect zero-day threats, coordinated multi-device attacks, and behavioral anomalies. Scores incidents by novelty, device spread, timing, and recurrence. Phase 2: auto-generates Claude AI incident reports for HIGH+ incidents (requires ANTHROPIC_API_KEY in nemesis.env), with 24h dedup, 30-day recurrence reuse, configurable rate limits, and manual analysis via AI button.",
   "category": "security",
   "provides_dashboard_card": true,
   "requires_background_service": false,

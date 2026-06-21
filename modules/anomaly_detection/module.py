@@ -1,5 +1,5 @@
 """
-Zero-Day / Anomaly Detection Module — Phase 1 (rule-based detection only)
+Zero-Day / Anomaly Detection Module — Phase 2 (AI-augmented)
 
 Data source
 -----------
@@ -13,9 +13,9 @@ The module maintains its own tables inside the shared alerts.db:
   anomaly_baseline   — per-domain, per-hour-of-week query counts
   anomaly_incidents  — scored anomaly events
   anomaly_recurrence — 30-day rolling persistence tracker
+  anomaly_ai_cache   — per-target AI reports (24h dedup / 30-day reuse)
   anomaly_state      — file offset + module operational state
 
-Phase 2 will add: AI-generated incident reports (Claude API)
 Phase 3 will add: AbuseIPDB auto-reporting + CISA manual-report flow
 Phase 4 will add: API-key hygiene audit across the whole codebase
 """
@@ -23,7 +23,6 @@ Phase 4 will add: API-key hygiene audit across the whole codebase
 import os
 import json
 import time
-import stat
 import threading
 import logging
 import sqlite3
@@ -43,19 +42,20 @@ POLL_INTERVAL       = 60        # seconds between detection cycles
 MIN_BASELINE_OBS    = 5         # minimum weekly observations before domain is "known"
 SCORE_FLOOR         = 15        # minimum score to create an incident
 SCORE_MEDIUM        = 30
-SCORE_HIGH          = 60        # future: triggers AI; shows CISA button
+SCORE_HIGH          = 60        # triggers auto AI; shows CISA button
 SCORE_CRITICAL      = 80
 RECURRENCE_DAYS     = 30        # rolling window for recurrence tracking
 MERGE_WINDOW_H      = 24        # hours: merge events for same target into one incident
 PAGE_SIZE           = 10        # incidents shown per page in the card
 
-# After a fresh enable the module scans the full eve.json to build the
-# baseline before starting live detection.  This typically takes ~15-30s.
 INITIAL_BASELINE_MAX_DAYS = 7
 
-# Domains (registrable, TLD+1) that are so ubiquitous on home networks that
-# flagging them as "new" during the initial scan would produce noise.  They
-# are still tracked in the baseline but score 0 for new-destination signal.
+# ── Phase 2 AI constants ─────────────────────────────────────────────────────
+AI_DEDUP_HOURS       = 24   # don't re-call API for same target within this window
+AI_RATE_HOUR_DEFAULT = 10   # default max auto AI calls per hour
+AI_RATE_DAY_DEFAULT  = 50   # default max auto AI calls per day
+
+# Domains so ubiquitous that "new" scores 0 for new-destination signal.
 _UBIQUITOUS = {
     "apple.com","icloud.com","mzstatic.com","apple-dns.net",
     "akamaiedge.net","akamaized.net","akamai.net",
@@ -77,10 +77,8 @@ _UBIQUITOUS = {
     "pihole.net","pi.hole",
 }
 
-# DNS query types we care about (connection-establishment queries)
 _QTYPES = {"A", "AAAA"}
 
-# ── CISA reporting URL ────────────────────────────────────────────────────────
 CISA_REPORT_URL = "https://www.cisa.gov/report"
 
 
@@ -92,7 +90,6 @@ class Module(NemesisModule):
         self._stop_evt   = threading.Event()
         self._thread     = None
         self._state_lock = threading.Lock()
-        # populated once DB is open
         self._building_baseline = False
         self._baseline_built    = False
 
@@ -137,11 +134,15 @@ class Module(NemesisModule):
     def get_routes(self) -> list:
         return [
             ("/api/anomaly/incidents",
-             _api_incidents,      {"methods": ["GET"]}),
+             _api_incidents,        {"methods": ["GET"]}),
             ("/api/anomaly/incident/<int:inc_id>",
-             _api_incident_detail, {"methods": ["GET"]}),
+             _api_incident_detail,  {"methods": ["GET"]}),
             ("/api/anomaly/incident/<int:inc_id>/close",
-             _api_incident_close, {"methods": ["POST"]}),
+             _api_incident_close,   {"methods": ["POST"]}),
+            ("/api/anomaly/incident/<int:inc_id>/analyze",
+             _api_incident_analyze, {"methods": ["POST"]}),
+            ("/api/anomaly/settings",
+             _api_anomaly_settings, {"methods": ["GET", "POST"]}),
         ]
 
     # ── Background thread ─────────────────────────────────────────────────────
@@ -231,6 +232,12 @@ def _init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_ar_target
             ON anomaly_recurrence(offending_target);
 
+        CREATE TABLE IF NOT EXISTS anomaly_ai_cache (
+            offending_target TEXT PRIMARY KEY,
+            ai_report_json   TEXT NOT NULL,
+            generated_at     REAL NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS anomaly_state (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -270,12 +277,9 @@ def _set_state(key: str, value: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_initial_baseline() -> None:
-    """Scan the most recent INITIAL_BASELINE_MAX_DAYS of eve.json and build baseline."""
     log.info("anomaly_detection: building initial baseline from %s", EVE_LOG)
     cutoff = time.time() - INITIAL_BASELINE_MAX_DAYS * 86400
     count = 0
-    # metric_key -> hour_of_week -> date_str -> query_count
-    # Using per-day buckets so obs_count = distinct calendar days, not batch count.
     batch: dict = {}
 
     try:
@@ -313,7 +317,6 @@ def _build_initial_baseline() -> None:
                 batch[key][how][date_str] += 1
                 count += 1
 
-        # Flush to DB: obs_count = number of distinct calendar days seen at this hour slot
         now = time.time()
         conn = _conn()
         for key, hours in batch.items():
@@ -338,8 +341,6 @@ def _build_initial_baseline() -> None:
     except Exception:
         log.exception("anomaly_detection: baseline build error")
 
-    # Fix 1: pin the file offset to NOW so the first detection cycle only reads
-    # events that arrive AFTER the baseline scan, not the full history again.
     try:
         st = os.stat(EVE_LOG)
         _set_state("eve_offset", str(st.st_size))
@@ -353,26 +354,24 @@ def _build_initial_baseline() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detection_cycle() -> None:
-    eve_offset   = int(_get_state("eve_offset",   "0"))
-    eve_inode    = int(_get_state("eve_inode",    "0"))
+    eve_offset = int(_get_state("eve_offset", "0"))
+    eve_inode  = int(_get_state("eve_inode",  "0"))
 
     try:
         st = os.stat(EVE_LOG)
     except FileNotFoundError:
         return
 
-    # Detect file rotation (new inode or file shrank)
     cur_inode = st.st_ino
     cur_size  = st.st_size
     if cur_inode != eve_inode or cur_size < eve_offset:
         eve_offset = 0
 
     if cur_size <= eve_offset:
-        return   # nothing new
+        return
 
-    # Read new lines
     now = time.time()
-    by_domain: dict = {}   # domain -> {clients: {ip: [ts,...]}, count: int}
+    by_domain: dict = {}
 
     with open(EVE_LOG, "rb") as f:
         f.seek(eve_offset)
@@ -411,11 +410,12 @@ def _detection_cycle() -> None:
     if not by_domain:
         return
 
-    # Load device name map once per cycle
     device_names = _load_device_names()
-
-    # Analyse and score
     how = _hour_of_week(datetime.fromtimestamp(now))
+
+    # Collect (inc_id, domain, itype, score, sig_dict, dev_list) for AI analysis
+    ai_queue = []
+
     conn = _conn()
     try:
         for domain, data in by_domain.items():
@@ -423,12 +423,33 @@ def _detection_cycle() -> None:
 
             signals = _evaluate(conn, domain, data, how, now)
             if signals["score"] >= SCORE_FLOOR:
-                _create_or_update_incident(conn, domain, data, signals,
-                                           device_names, now)
+                inc_id, final_score = _create_or_update_incident(
+                    conn, domain, data, signals, device_names, now
+                )
+                if inc_id is not None and final_score >= SCORE_HIGH:
+                    # Build device list for AI prompt
+                    dev_list = [
+                        {"ip": ip,
+                         "name": device_names.get(ip, ip),
+                         "first_seen_ts": round(min(ts_list), 3),
+                         "query_count": len(ts_list)}
+                        for ip, ts_list in sorted(
+                            data["clients"].items(), key=lambda kv: min(kv[1])
+                        )
+                    ]
+                    ai_queue.append((inc_id, domain, signals["incident_type"],
+                                     final_score, signals, dev_list))
         _expire_recurrence(conn, now)
         conn.commit()
     finally:
         conn.close()
+
+    # Auto AI analysis — runs after commit, outside the detection conn
+    for item in ai_queue:
+        try:
+            _ai_analyze_incident(*item, is_auto=True)
+        except Exception:
+            log.exception("anomaly_detection: auto AI analysis failed for %s", item[1])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -457,16 +478,13 @@ def _update_baseline(conn, key: str, how: int, count: int, now: float) -> None:
 
 def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
     """
-    Pattern-based scoring.  Signals only contribute score when they form a
-    combination that maps to a real threat behaviour; no signal has standalone
-    weight beyond its own threat pattern.
+    Pattern-based scoring.
 
     Patterns
     --------
     A  Coordinated new destination  — unknown domain + 2+ devices + tight window
     B  New destination (solo/sequential) — unknown domain, single device or slow spread
     C  Volume spike  — known domain rate ≥ 3× baseline for this hour
-    (rare domains with no spike pattern → no incident; only recurrence can escalate)
     """
     key = f"domain:{domain}"
     row = conn.execute(
@@ -474,10 +492,9 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
         "WHERE metric_key=? AND hour_of_week=?", (key, how)
     ).fetchone()
 
-    # Domain classification
     is_ubiq   = domain in _UBIQUITOUS
     obs_count = row["obs_count"] if row else 0
-    is_unknown = (row is None) and not is_ubiq          # zero history on network
+    is_unknown = (row is None) and not is_ubiq
     is_rare    = (row is not None) and (obs_count < MIN_BASELINE_OBS) and not is_ubiq
     is_known   = (obs_count >= MIN_BASELINE_OBS)
 
@@ -490,7 +507,6 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
     else:
         domain_status = "known"
 
-    # Volume spike — only reliable when the baseline is well-established
     is_vol    = False
     vol_ratio = 1.0
     if is_known:
@@ -499,7 +515,6 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
             is_vol    = True
             vol_ratio = data["count"] / mean
 
-    # Device / timing analysis
     clients      = data["clients"]
     device_count = len(clients)
     all_ts       = sorted(ts for ts_list in clients.values() for ts in ts_list)
@@ -508,7 +523,6 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
     is_simultaneous = (device_count >= 2) and (time_spread <= 60)
     is_sequential   = (device_count >= 2) and (time_spread > 60)
 
-    # Recurrence
     rec = conn.execute(
         "SELECT recurrence_count, last_seen FROM anomaly_recurrence "
         "WHERE offending_target=?", (domain,)
@@ -521,46 +535,37 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
             recurrence_count = rec["recurrence_count"]
             recurrence_boost = min(recurrence_count * 5, 30)
 
-    # ── Pattern scoring ────────────────────────────────────────────────────────
     score = 0.0
     pattern = "none"
 
     if is_unknown and is_simultaneous:
-        # Pattern A: Coordinated New Destination
-        # All three factors (unknown + multi-device + simultaneous) must be present.
-        # Neither multi-device nor unknown alone has any weight.
         pattern = "A"
         score   = 25
-        score  += min((device_count - 1) * 10, 30)   # +10/+20/+30 for 2/3/4+ devices
+        score  += min((device_count - 1) * 10, 30)
         if time_spread <= 15:
             score += 15
         elif time_spread <= 30:
             score += 10
         else:
-            score += 5    # 31-60s
+            score += 5
 
     elif is_unknown:
-        # Pattern B: New destination, single device or slow sequential spread
-        # Single device never reaches SCORE_FLOOR alone; only recurrence escalates it.
         pattern = "B"
         score   = 10
         if is_sequential:
-            score += min((device_count - 1) * 5, 15)   # modest sequential bonus
+            score += min((device_count - 1) * 5, 15)
             if time_spread <= 300:
-                score += 5                               # ≤5 min spread
+                score += 5
 
     elif is_vol:
-        # Pattern C: Volume spike on known domain
         pattern = "C"
         score   = 20
-        score  += min(max(0, (vol_ratio - 3) * 3), 15)   # ratio bonus: 5×=+6, 8×=+15
+        score  += min(max(0, (vol_ratio - 3) * 3), 15)
         if is_simultaneous:
-            score += min((device_count - 1) * 5, 15)      # multi-device accompanies spike
+            score += min((device_count - 1) * 5, 15)
 
-    # Recurrence boosts any pattern (rare domains can escalate here even if base=0)
     score += recurrence_boost
 
-    # ── Incident type label ────────────────────────────────────────────────────
     if pattern == "A":
         itype = "coordinated"
     elif pattern == "B" and is_sequential:
@@ -577,7 +582,7 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
         "incident_type":    itype,
         "pattern":          pattern,
         "domain_status":    domain_status,
-        "new_destination":  is_unknown,          # kept for display compat
+        "new_destination":  is_unknown,
         "volume_spike":     is_vol,
         "volume_ratio":     round(vol_ratio, 1),
         "device_count":     device_count,
@@ -596,7 +601,8 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
-                                device_names: dict, now: float) -> None:
+                                device_names: dict, now: float):
+    """Create or merge an incident. Returns (inc_id, final_score)."""
     merge_after = now - MERGE_WINDOW_H * 3600
     existing = conn.execute(
         "SELECT id, score, devices_json, evidence_json, device_count "
@@ -606,10 +612,8 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
         (domain, merge_after)
     ).fetchone()
 
-    # Build device list sorted by first observation time
     dev_list = []
-    for ip, ts_list in sorted(data["clients"].items(),
-                               key=lambda kv: min(kv[1])):
+    for ip, ts_list in sorted(data["clients"].items(), key=lambda kv: min(kv[1])):
         dev_list.append({
             "ip":           ip,
             "name":         device_names.get(ip, ip),
@@ -618,12 +622,11 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
         })
 
     evidence = {
-        "signals":        {k: v for k, v in signals.items() if k != "score"},
-        "captured_at":    round(now, 3),
+        "signals":     {k: v for k, v in signals.items() if k != "score"},
+        "captured_at": round(now, 3),
     }
 
     if existing:
-        # Merge: keep highest score, union device lists, update evidence
         new_score = max(existing["score"], signals["score"])
         old_devs  = json.loads(existing["devices_json"] or "[]")
         merged    = _merge_devices(old_devs, dev_list)
@@ -638,21 +641,22 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
         """, (now, new_score, len(merged),
               json.dumps(merged), json.dumps(old_ev),
               signals["incident_type"], existing["id"]))
+        return existing["id"], new_score
     else:
         conn.execute("""
             INSERT INTO anomaly_incidents
                 (created_at, updated_at, incident_type, offending_target,
                  score, status, device_count, devices_json, evidence_json)
-            VALUES (?,?,?,?,?,  'open',  ?,?,?)
+            VALUES (?,?,?,?,?, 'open', ?,?,?)
         """, (now, now, signals["incident_type"], domain,
               signals["score"], len(dev_list),
               json.dumps(dev_list), json.dumps(evidence)))
         inc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _update_recurrence(conn, domain, signals["score"], inc_id, now)
+        return inc_id, signals["score"]
 
 
 def _merge_devices(old: list, new: list) -> list:
-    """Union two device lists; update query_count for existing IPs."""
     by_ip = {d["ip"]: d for d in old}
     for d in new:
         ip = d["ip"]
@@ -688,12 +692,10 @@ def _update_recurrence(conn, target: str, score: float,
                  WHERE id=?
             """, (now, rec["recurrence_count"] + 1,
                   max(rec["max_score"], score),
-                  json.dumps(ids[-50:]),   # keep last 50 IDs
+                  json.dumps(ids[-50:]),
                   rec["id"]))
             return
-        # Expired — reset below
 
-    # Insert or reset
     conn.execute("""
         INSERT OR REPLACE INTO anomaly_recurrence
             (offending_target, first_seen, last_seen,
@@ -704,9 +706,337 @@ def _update_recurrence(conn, target: str, score: float,
 
 def _expire_recurrence(conn, now: float) -> None:
     cutoff = now - RECURRENCE_DAYS * 86400
-    conn.execute(
-        "DELETE FROM anomaly_recurrence WHERE last_seen<?", (cutoff,)
+    conn.execute("DELETE FROM anomaly_recurrence WHERE last_seen<?", (cutoff,))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 2: AI analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_api_key() -> str:
+    """Return ANTHROPIC_API_KEY from environment (loaded by systemd from nemesis.env)."""
+    return os.environ.get("ANTHROPIC_API_KEY", "")
+
+
+def _get_ai_settings() -> dict:
+    return {
+        "rate_per_hour":        int(_get_state("ai_rate_per_hour", str(AI_RATE_HOUR_DEFAULT))),
+        "rate_per_day":         int(_get_state("ai_rate_per_day",  str(AI_RATE_DAY_DEFAULT))),
+        "allow_manual_override": _get_state("ai_allow_manual_override", "1") == "1",
+    }
+
+
+def _check_auto_rate_limit(conn) -> tuple:
+    """Return (is_limited: bool, reason: str)."""
+    settings = _get_ai_settings()
+    now = time.time()
+
+    def _st(k, d="0"):
+        r = conn.execute("SELECT value FROM anomaly_state WHERE key=?", (k,)).fetchone()
+        return r[0] if r else d
+
+    # Hourly window
+    h_start = float(_st("ai_hour_window_start", "0"))
+    h_count = int(_st("ai_hour_count", "0"))
+    window_age_h = now - h_start
+    if window_age_h > 3600 or h_start == 0:
+        h_count = 0   # window expired or never started
+
+    if h_count >= settings["rate_per_hour"]:
+        if h_start == 0 or window_age_h > 3600:
+            reset_str = "immediately on reset"
+        else:
+            mins_left = max(1, int((3600 - window_age_h) / 60) + 1)
+            reset_str = f"resets in ~{mins_left}m"
+        return True, f"{h_count}/{settings['rate_per_hour']} per hour ({reset_str})"
+
+    # Daily window
+    d_start = float(_st("ai_day_window_start", "0"))
+    d_count = int(_st("ai_day_count", "0"))
+    window_age_d = now - d_start
+    if window_age_d > 86400 or d_start == 0:
+        d_count = 0   # window expired or never started
+
+    if d_count >= settings["rate_per_day"]:
+        if d_start == 0 or window_age_d > 86400:
+            reset_str = "immediately on reset"
+        else:
+            hrs_left = max(1, int((86400 - window_age_d) / 3600) + 1)
+            reset_str = f"resets in ~{hrs_left}h"
+        return True, f"{d_count}/{settings['rate_per_day']} per day ({reset_str})"
+
+    return False, ""
+
+
+def _increment_auto_rate(conn) -> None:
+    now = time.time()
+
+    def _st(k, d="0"):
+        r = conn.execute("SELECT value FROM anomaly_state WHERE key=?", (k,)).fetchone()
+        return r[0] if r else d
+
+    def _save(k, v):
+        conn.execute("INSERT OR REPLACE INTO anomaly_state(key,value) VALUES(?,?)", (k, str(v)))
+
+    # Hour
+    h_start = float(_st("ai_hour_window_start", "0"))
+    h_count = int(_st("ai_hour_count", "0"))
+    if now - h_start > 3600:
+        h_start = now
+        h_count = 0
+    _save("ai_hour_window_start", h_start)
+    _save("ai_hour_count", h_count + 1)
+
+    # Day
+    d_start = float(_st("ai_day_window_start", "0"))
+    d_count = int(_st("ai_day_count", "0"))
+    if now - d_start > 86400:
+        d_start = now
+        d_count = 0
+    _save("ai_day_window_start", d_start)
+    _save("ai_day_count", d_count + 1)
+
+
+def _build_ai_prompt(domain: str, itype: str, score: float, label: str,
+                     sig_dict: dict, device_list: list) -> str:
+    pattern   = sig_dict.get("pattern", "")
+    obs       = sig_dict.get("baseline_obs", 0)
+    vol_r     = sig_dict.get("volume_ratio", 1.0)
+    spread_s  = sig_dict.get("time_spread_s", 0)
+    rec_count = sig_dict.get("recurrence_count", 0)
+    rec_boost = sig_dict.get("recurrence_boost", 0)
+    dev_count = sig_dict.get("device_count", len(device_list))
+
+    pattern_desc = {
+        "A": (f"Coordinated new destination — {dev_count} device(s) queried this unknown domain "
+              f"within {spread_s:.0f}s of each other"),
+        "B": (f"New destination — {'sequential spread across ' + str(dev_count) + ' device(s)' if sig_dict.get('sequential') else 'single device, first time seen on this network'}"),
+        "C": (f"Volume spike — {vol_r:.1f}× above expected query rate for this time of day"),
+    }.get(pattern, itype.replace("_", " ").title())
+
+    recurrence_note = (
+        f"Previously flagged {rec_count} time(s) in the 30-day window "
+        f"(recurrence score boost: +{rec_boost} points)"
+        if rec_count > 0 else "First appearance in the 30-day recurrence window"
     )
+
+    dev_lines = "\n".join(
+        f"  {i+1}. {d.get('name', d.get('ip','?'))} ({d.get('ip','?')}) "
+        f"— first query at {datetime.fromtimestamp(d.get('first_seen_ts', 0)).strftime('%H:%M:%S')}, "
+        f"{d.get('query_count', 1)} DNS query/queries"
+        for i, d in enumerate(device_list)
+    ) or "  (no device detail)"
+
+    return f"""You are Nemesis, an AI security assistant for a home network firewall.
+Analyze this anomaly detection incident and respond in JSON only, no markdown:
+
+Target domain: {domain}
+Incident type: {itype.replace('_', ' ').title()}
+Severity: {score:.0f}/100 ({label})
+Detection pattern: {pattern_desc}
+Domain baseline: {obs} observation day(s) at this hour (0 = never seen before on this network)
+{recurrence_note}
+
+Devices that queried this domain:
+{dev_lines}
+
+{{
+    "explanation": "Plain-English explanation of what this incident means for a home network user (2-3 sentences)",
+    "threat_assessment": "Most likely scenario — benign / suspicious / malicious — and the key reason why",
+    "recommended_action": "Specific action the user should take (e.g. Monitor for 24h, Block via firewall, Investigate device X)",
+    "confidence": "HIGH/MEDIUM/LOW"
+}}"""
+
+
+def _do_ai_call(api_key: str, domain: str, itype: str, score: float,
+                label: str, sig_dict: dict, device_list: list) -> dict | None:
+    """Call Claude API. Returns parsed dict or None on failure."""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        prompt = _build_ai_prompt(domain, itype, score, label, sig_dict, device_list)
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=600,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        text = msg.content[0].text.strip()
+        # Strip markdown fences if model adds them
+        if text.startswith("```"):
+            parts = text.split("```", 2)
+            text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
+        try:
+            return json.loads(text)
+        except Exception:
+            return {
+                "explanation": text,
+                "threat_assessment": "(could not parse structured response)",
+                "recommended_action": "Review manually",
+                "confidence": "LOW",
+            }
+    except Exception:
+        log.exception("anomaly_detection: AI call failed for %s", domain)
+        return None
+
+
+def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,
+                          sig_dict: dict, device_list: list,
+                          is_auto: bool = True) -> dict | None:
+    """
+    Full AI analysis flow with dedup, rate limiting, and caching.
+
+    Dedup rules:
+      • Target analyzed in last 24h  → always reuse (both auto and manual)
+      • Target in recurrence window (>24h, <30d), is_auto=True → reuse original
+      • Otherwise → generate fresh (subject to rate limit for auto)
+
+    Returns the parsed AI report dict, or None if skipped/failed.
+    """
+    api_key = _get_api_key()
+    if not api_key:
+        return None
+
+    label = _severity_label(score)[0]
+    now   = time.time()
+
+    conn = _conn()
+    try:
+        # ── Dedup / recurrence cache check ────────────────────────────────────
+        cached = conn.execute(
+            "SELECT ai_report_json, generated_at FROM anomaly_ai_cache "
+            "WHERE offending_target=?", (domain,)
+        ).fetchone()
+
+        if cached:
+            age_h = (now - cached["generated_at"]) / 3600
+            if age_h < AI_DEDUP_HOURS:
+                # Within 24h: always reuse
+                _attach_ai_to_incident(conn, inc_id, cached["ai_report_json"],
+                                       cached["generated_at"])
+                conn.commit()
+                log.info("anomaly_detection: AI reused from 24h cache for %s", domain)
+                return json.loads(cached["ai_report_json"])
+
+            if is_auto:
+                # Past 24h: check recurrence — if still in 30-day window, reuse for auto
+                in_recurrence = conn.execute(
+                    "SELECT 1 FROM anomaly_recurrence "
+                    "WHERE offending_target=? AND last_seen>?",
+                    (domain, now - RECURRENCE_DAYS * 86400)
+                ).fetchone()
+                if in_recurrence:
+                    _attach_ai_to_incident(conn, inc_id, cached["ai_report_json"],
+                                           cached["generated_at"])
+                    conn.commit()
+                    log.info("anomaly_detection: AI reused from recurrence cache for %s", domain)
+                    return json.loads(cached["ai_report_json"])
+
+        # ── Rate limit check ──────────────────────────────────────────────────
+        if is_auto:
+            limited, reason = _check_auto_rate_limit(conn)
+            if limited:
+                log.info("anomaly_detection: auto AI rate limited — %s", reason)
+                return None
+        else:
+            settings = _get_ai_settings()
+            if not settings["allow_manual_override"]:
+                limited, reason = _check_auto_rate_limit(conn)
+                if limited:
+                    log.info("anomaly_detection: manual AI blocked (override disabled) — %s", reason)
+                    return None
+
+        # ── Make the API call ─────────────────────────────────────────────────
+        report = _do_ai_call(api_key, domain, itype, score, label, sig_dict, device_list)
+        if report is None:
+            return None
+
+        report_json = json.dumps(report)
+
+        # Store in cache and on the incident
+        conn.execute(
+            "INSERT OR REPLACE INTO anomaly_ai_cache "
+            "(offending_target, ai_report_json, generated_at) VALUES (?,?,?)",
+            (domain, report_json, now)
+        )
+        _attach_ai_to_incident(conn, inc_id, report_json, now)
+
+        if is_auto:
+            _increment_auto_rate(conn)
+
+        conn.commit()
+        log.info("anomaly_detection: AI report generated for %s (score %.0f)", domain, score)
+        return report
+
+    except Exception:
+        log.exception("anomaly_detection: _ai_analyze_incident failed for %s", domain)
+        return None
+    finally:
+        conn.close()
+
+
+def _attach_ai_to_incident(conn, inc_id: int, report_json: str, generated_at: float) -> None:
+    conn.execute(
+        "UPDATE anomaly_incidents SET ai_report=?, ai_generated_at=? WHERE id=?",
+        (report_json, generated_at, inc_id)
+    )
+
+
+def _format_ai_report_html(report: dict, from_cache: bool = False,
+                            cache_age_h: float = 0.0) -> str:
+    """Render a parsed AI report dict as an HTML snippet for display."""
+    explanation     = _html.escape(report.get("explanation", ""))
+    threat          = _html.escape(report.get("threat_assessment", ""))
+    action          = _html.escape(report.get("recommended_action", ""))
+    confidence      = report.get("confidence", "").upper()
+    conf_color = {"HIGH": "#00ff88", "MEDIUM": "#ffcc00", "LOW": "#ff8800"}.get(confidence, "#aaa")
+
+    cache_note = ""
+    if from_cache:
+        if cache_age_h < 1:
+            age_str = "just now"
+        elif cache_age_h < 24:
+            age_str = f"{cache_age_h:.0f}h ago"
+        else:
+            age_str = f"{cache_age_h/24:.0f}d ago"
+        cache_note = (
+            f'<div style="color:#555;font-size:0.78em;margin-top:10px;font-style:italic">'
+            f'Analysis generated {age_str} · reused from cache</div>'
+        )
+
+    return f"""
+<div style="font-size:0.88em">
+  <div style="margin-bottom:10px">
+    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Explanation</span>
+    <div style="color:#ddd;margin-top:4px;line-height:1.5">{explanation}</div>
+  </div>
+  <div style="margin-bottom:10px">
+    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Threat Assessment</span>
+    <div style="color:#ccc;margin-top:4px;line-height:1.5">{threat}</div>
+  </div>
+  <div style="margin-bottom:6px">
+    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Recommended Action</span>
+    <div style="margin-top:4px">
+      <span style="color:#00d4ff;font-weight:bold">{action}</span>
+      &nbsp;&nbsp;
+      <span style="background:{conf_color}22;color:{conf_color};font-size:0.78em;
+                   padding:2px 7px;border-radius:8px;border:1px solid {conf_color}55">
+        {confidence} confidence
+      </span>
+    </div>
+  </div>
+  {cache_note}
+</div>"""
+
+
+def _is_currently_rate_limited() -> tuple:
+    """Returns (is_limited: bool, reason: str) without raising."""
+    try:
+        conn = _conn()
+        limited, reason = _check_auto_rate_limit(conn)
+        conn.close()
+        return limited, reason
+    except Exception:
+        return False, ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -714,11 +1044,9 @@ def _expire_recurrence(conn, now: float) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _root_domain(fqdn: str) -> str:
-    """Return registrable domain (TLD+1) from an FQDN, lowercased."""
     if not fqdn:
         return ""
     parts = fqdn.rstrip(".").lower().split(".")
-    # Ignore pure-local / arpa / numeric-only labels
     if len(parts) < 2:
         return ""
     tld = parts[-1]
@@ -726,7 +1054,7 @@ def _root_domain(fqdn: str) -> str:
                "arpa", "invalid"):
         return ""
     try:
-        int(parts[-1])   # purely numeric TLD → IP in reverse
+        int(parts[-1])
         return ""
     except ValueError:
         pass
@@ -734,21 +1062,14 @@ def _root_domain(fqdn: str) -> str:
 
 
 def _hour_of_week(dt: datetime) -> int:
-    """Return hour of day (0-23) for baseline bucketing.
-
-    Originally hour-of-week (0-167), but that requires 5+ weeks of data before
-    any slot reaches MIN_BASELINE_OBS=5. Hour-of-day (24 slots) saturates from
-    a 7-day baseline, which is the actual window we collect.
-    """
+    """Return hour of day (0-23) for baseline bucketing."""
     return dt.hour
 
 
 def _parse_ts(ts_str: str) -> float:
-    """Parse Suricata ISO timestamp to unix float, or 0 on failure."""
     if not ts_str:
         return 0.0
     try:
-        # e.g. "2026-06-20T20:47:18.123456-0500"
         clean = ts_str[:26].replace("T", " ")
         dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S.%f")
         return dt.timestamp()
@@ -761,7 +1082,6 @@ def _parse_ts(ts_str: str) -> float:
 
 
 def _load_device_names() -> dict:
-    """Return {ip: friendly_name} from the devices table."""
     try:
         conn = _conn()
         rows = conn.execute("SELECT ip, friendly_name FROM devices").fetchall()
@@ -772,7 +1092,6 @@ def _load_device_names() -> dict:
 
 
 def _rel_time(ts: float) -> str:
-    """Return human-readable relative time string."""
     diff = time.time() - ts
     if diff < 60:
         return "just now"
@@ -784,7 +1103,6 @@ def _rel_time(ts: float) -> str:
 
 
 def _severity_label(score: float) -> tuple:
-    """Return (label, color) for a score."""
     if score >= SCORE_CRITICAL:
         return "CRITICAL", "#ff4444"
     if score >= SCORE_HIGH:
@@ -796,10 +1114,10 @@ def _severity_label(score: float) -> tuple:
 
 def _type_icon(itype: str) -> str:
     return {
-        "coordinated":   "🔄",
+        "coordinated":     "🔄",
         "new_destination": "🌐",
-        "slow_spread":   "📡",
-        "volume_spike":  "📈",
+        "slow_spread":     "📡",
+        "volume_spike":    "📈",
     }.get(itype, "🔍")
 
 
@@ -808,7 +1126,6 @@ def _type_icon(itype: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _render_card(building: bool, built: bool) -> str:
-    """Render the full-width incident card for the main dashboard."""
     status_badge = ""
     if building:
         status_badge = ('<span style="font-size:0.78em;color:#ffaa00;margin-left:10px">'
@@ -817,7 +1134,6 @@ def _render_card(building: bool, built: bool) -> str:
         status_badge = ('<span style="font-size:0.78em;color:#888;margin-left:10px">'
                         '(starting)</span>')
 
-    # Summary stats
     stats_html = ""
     try:
         conn = _conn()
@@ -843,7 +1159,17 @@ def _render_card(building: bool, built: bool) -> str:
     except Exception:
         pass
 
-    # Incident rows
+    # Rate limit notice
+    rate_notice = ""
+    limited, limit_reason = _is_currently_rate_limited()
+    if limited and _get_api_key():
+        rate_notice = (
+            '<div style="background:rgba(255,170,0,0.08);border:1px solid #ffaa0044;'
+            'border-radius:6px;padding:7px 12px;margin-bottom:12px;font-size:0.82em;color:#ffaa00">'
+            f'⏸ Automatic AI analysis paused — rate limit reached ({limit_reason}). '
+            'Manual analysis via the AI button is still available.</div>'
+        )
+
     incident_rows, has_more = _render_incident_rows(page=1)
 
     more_btn = ""
@@ -865,10 +1191,8 @@ def _render_card(building: bool, built: bool) -> str:
                ' — monitoring active' if built else '') + '</p>'
         )
 
-    # CISA confirmation modal (always rendered; hidden by default)
-    cisa_modal = _cisa_modal_html()
-
-    # Score explanation modal
+    cisa_modal  = _cisa_modal_html()
+    ai_modal    = _ai_modal_html()
     detail_modal = (
         '<div id="_adDetailOverlay" onclick="if(event.target===this)'
         'document.getElementById(\'_adDetailOverlay\').style.display=\'none\'" '
@@ -885,7 +1209,6 @@ def _render_card(building: bool, built: bool) -> str:
         '</div></div></div>'
     )
 
-    # The JavaScript for the card (only runs on initial page load)
     js = _card_js()
 
     return f"""
@@ -894,6 +1217,8 @@ def _render_card(building: bool, built: bool) -> str:
     🔍 Zero-Day / Anomaly Detection{status_badge}
     <span style="margin-left:auto;font-size:0.78em;font-weight:normal">{stats_html}</span>
   </h2>
+
+  {rate_notice}
 
   <div style="overflow-x:auto">
   <table style="width:100%;border-collapse:collapse;font-size:0.84em">
@@ -904,7 +1229,7 @@ def _render_card(building: bool, built: bool) -> str:
         <th style="padding:6px 10px;text-align:left;border-bottom:1px solid #1e2d4e;width:120px">Type</th>
         <th style="padding:6px 10px;text-align:center;border-bottom:1px solid #1e2d4e;width:60px">Devices</th>
         <th style="padding:6px 10px;text-align:left;border-bottom:1px solid #1e2d4e;width:80px">When</th>
-        <th style="padding:6px 10px;text-align:left;border-bottom:1px solid #1e2d4e;width:130px">Actions</th>
+        <th style="padding:6px 10px;text-align:left;border-bottom:1px solid #1e2d4e;width:160px">Actions</th>
       </tr>
     </thead>
     <tbody id="_adIncidentBody">
@@ -916,19 +1241,20 @@ def _render_card(building: bool, built: bool) -> str:
   <div id="_adMoreContainer">{more_btn}</div>
 
   {detail_modal}
+  {ai_modal}
   {cisa_modal}
   <script>{js}</script>
 </div>"""
 
 
 def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
-    """Return (html_string, has_more_bool) for one page of incidents."""
     offset = (page - 1) * per_page
     try:
         conn = _conn()
         rows = conn.execute("""
             SELECT id, created_at, updated_at, incident_type, offending_target,
-                   score, device_count, devices_json, evidence_json, status
+                   score, device_count, devices_json, evidence_json, status,
+                   ai_report, ai_generated_at
               FROM anomaly_incidents
              WHERE status='open'
              ORDER BY score DESC, updated_at DESC
@@ -955,6 +1281,21 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
         icon = _type_icon(itype)
         itype_display = _html.escape(itype.replace("_", " ").title())
         rel = _rel_time(ts)
+
+        # AI button — visible for all incidents; style hints when report exists
+        has_ai = bool(r["ai_report"])
+        ai_btn_style = (
+            "color:#00ff88;border-color:#00ff8844" if has_ai
+            else "color:#888;border-color:#444"
+        )
+        ai_btn_title = "View AI analysis" if has_ai else "Generate AI incident report"
+        ai_btn = (
+            f'<button onclick="typeof _adShowAI===\'function\' ? '
+            f'_adShowAI({inc_id}) : location.reload()" '
+            f'style="background:transparent;{ai_btn_style};border:1px solid;'
+            f'padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em;'
+            f'margin-left:4px" title="{ai_btn_title}" id="_adAIBtn{inc_id}">AI</button>'
+        )
 
         cisa_btn = ""
         if score >= SCORE_HIGH:
@@ -985,16 +1326,15 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
   </td>
   <td style="padding:8px 10px;text-align:center;color:#aaa">{ndevs}</td>
   <td style="padding:8px 10px;color:#666;font-size:0.82em">{rel}</td>
-  <td style="padding:8px 10px">
-    <button onclick="typeof _adToggleDetail===\'function\' ? '
-    '_adToggleDetail({inc_id}) : location.reload()" '
-    'style="background:transparent;color:#00d4ff;border:1px solid #00d4ff;'
-    'padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em">Details</button>
-    <button onclick="typeof _adCloseInc===\'function\' ? '
-    '_adCloseInc({inc_id}) : location.reload()" '
-    'style="background:transparent;color:#555;border:1px solid #555;'
-    'padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em;'
-    'margin-left:4px" title="Dismiss / mark reviewed">✓</button>
+  <td style="padding:8px 10px;white-space:nowrap">
+    <button onclick="typeof _adToggleDetail===\'function\' ? _adToggleDetail({inc_id}) : location.reload()"
+            style="background:transparent;color:#00d4ff;border:1px solid #00d4ff;
+                   padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em">Details</button>
+    {ai_btn}
+    <button onclick="typeof _adCloseInc===\'function\' ? _adCloseInc({inc_id}) : location.reload()"
+            style="background:transparent;color:#555;border:1px solid #555;
+                   padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em;
+                   margin-left:4px" title="Dismiss / mark reviewed">✓</button>
     {cisa_btn}
   </td>
 </tr>
@@ -1007,6 +1347,26 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
 </tr>""")
 
     return "\n".join(parts), has_more
+
+
+def _ai_modal_html() -> str:
+    return """
+<div id="_adAIOverlay"
+     onclick="if(event.target===this)document.getElementById('_adAIOverlay').style.display='none'"
+     style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:300;overflow-y:auto">
+  <div style="background:#16213e;border:1px solid #00d4ff;border-radius:10px;
+              padding:24px;max-width:620px;width:90%;margin:60px auto">
+    <h3 style="color:#00d4ff;margin-top:0" id="_adAITitle">🤖 AI Incident Analysis</h3>
+    <div id="_adAIBody" style="color:#ccc;font-size:0.9em;line-height:1.6">
+      Loading…
+    </div>
+    <div style="text-align:right;margin-top:18px">
+      <button onclick="document.getElementById('_adAIOverlay').style.display='none'"
+              style="background:#333;color:#eee;border:none;padding:8px 18px;
+                     border-radius:5px;cursor:pointer">✕ Close</button>
+    </div>
+  </div>
+</div>"""
 
 
 def _cisa_modal_html() -> str:
@@ -1051,10 +1411,8 @@ def _cisa_modal_html() -> str:
 
 
 def _card_js() -> str:
-    """JavaScript embedded in the card — runs once on initial page load."""
     return f"""
 (function() {{
-  // Guard: define functions once even if innerHTML is refreshed
   if (window._adInit) return;
   window._adInit = true;
 
@@ -1109,6 +1467,48 @@ def _card_js() -> str:
       .catch(function(){{ if(btn) btn.disabled=false; }});
   }};
 
+  window._adShowAI = function(id) {{
+    var overlay = document.getElementById('_adAIOverlay');
+    var body    = document.getElementById('_adAIBody');
+    var title   = document.getElementById('_adAITitle');
+    var btn     = document.getElementById('_adAIBtn' + id);
+    if (!overlay) return;
+    overlay.style.display = 'block';
+    if (body)  body.innerHTML  = '<span style="color:#aaa">Generating AI analysis…</span>';
+    if (title) title.textContent = '🤖 AI Incident Analysis';
+    if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}
+    fetch('/api/anomaly/incident/' + id + '/analyze', {{method:'POST'}})
+      .then(function(r){{return r.json();}})
+      .then(function(d){{
+        if (btn) {{ btn.textContent = 'AI'; btn.disabled = false; }}
+        if (d.rate_limited) {{
+          if (body) body.innerHTML =
+            '<div style="color:#ffaa00;padding:10px 0">' +
+            '⏸ AI analysis rate limit reached. ' +
+            (d.manual_blocked
+              ? 'Manual override is disabled — adjust in Settings.'
+              : 'Try again later or adjust the limit in Settings.') +
+            '</div>';
+          return;
+        }}
+        if (d.error) {{
+          if (body) body.innerHTML = '<div style="color:#ff4444">Error: ' + d.error + '</div>';
+          return;
+        }}
+        if (d.domain && title) title.textContent = '🤖 AI Analysis — ' + d.domain;
+        if (body) body.innerHTML = d.html || '<em>No report available</em>';
+        // Update AI button style to "has report"
+        if (btn) {{
+          btn.style.color = '#00ff88';
+          btn.style.borderColor = '#00ff8844';
+        }}
+      }})
+      .catch(function(e){{
+        if (btn) {{ btn.textContent = 'AI'; btn.disabled = false; }}
+        if (body) body.innerHTML = '<div style="color:#ff4444">Request failed</div>';
+      }});
+  }};
+
   window._adShowCISA = function(id) {{
     document.getElementById('_adCISADetails').textContent = 'Loading…';
     document.getElementById('_adCISAOverlay').style.display = 'block';
@@ -1128,7 +1528,7 @@ def _card_js() -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Flask route handlers (module-level functions, not methods)
+# Flask route handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _api_incidents():
@@ -1148,14 +1548,12 @@ def _api_incident_detail(inc_id: int):
         ).fetchone()
         conn.close()
     except Exception as e:
-        from flask import jsonify
         return jsonify({"error": str(e)}), 500
 
     if not row:
-        from flask import jsonify
         return jsonify({"error": "not found"}), 404
 
-    devices = json.loads(row["devices_json"] or "[]")
+    devices  = json.loads(row["devices_json"] or "[]")
     evidence = json.loads(row["evidence_json"] or "{}")
     signals  = evidence.get("latest_signals", evidence.get("signals", {})) or {}
     sig_raw  = signals.get("signals", signals)
@@ -1182,14 +1580,12 @@ def _api_incident_detail(inc_id: int):
                           f'<td style="padding:4px 8px;text-align:right;color:#aaa">{qc}</td></tr>')
         prop_html += "</table>"
 
-    # Signal breakdown
     label, color = _severity_label(row["score"])
     def _sg(k, default=None):
         return sig_raw.get(k, default) if isinstance(sig_raw, dict) else default
 
     pattern       = _sg("pattern", "")
     domain_status = _sg("domain_status", "")
-    is_new        = _sg("new_destination", False)
     is_vol        = _sg("volume_spike", False)
     vol_r         = _sg("volume_ratio", 1.0)
     rec_b         = _sg("recurrence_boost", 0)
@@ -1230,15 +1626,15 @@ def _api_incident_detail(inc_id: int):
     for s in sig_parts:
         sig_html += f'<div style="padding:3px 0;color:#ccc">{_html.escape(s)}</div>'
 
-    domain = _html.escape(row["offending_target"])
+    domain_esc    = _html.escape(row["offending_target"])
     itype_display = row["incident_type"].replace("_", " ").title()
-    created = datetime.fromtimestamp(row["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
+    created       = datetime.fromtimestamp(row["created_at"]).strftime("%Y-%m-%d %H:%M:%S")
 
     detail_html = f"""
 <div style="font-size:0.88em">
   <div style="margin-bottom:10px">
     <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">Target</span>
-    <div style="font-family:monospace;color:#eee;margin-top:2px">{domain}</div>
+    <div style="font-family:monospace;color:#eee;margin-top:2px">{domain_esc}</div>
   </div>
   <div style="margin-bottom:10px">
     <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">Score / Severity</span>
@@ -1258,7 +1654,6 @@ def _api_incident_detail(inc_id: int):
   </div>
 </div>"""
 
-    # CISA pre-filled text
     rec_note = (f" (recurrence #{rec_c}, boost +{rec_b}pts)"
                 if rec_c else " (first appearance)")
     cisa_text = (
@@ -1300,3 +1695,115 @@ def _api_incident_close(inc_id: int):
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+def _api_incident_analyze(inc_id: int):
+    """Manual AI analysis endpoint. Not subject to rate cap by default."""
+    from flask import jsonify
+    try:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT offending_target, incident_type, score, devices_json, "
+            "evidence_json, ai_report, ai_generated_at "
+            "FROM anomaly_incidents WHERE id=?", (inc_id,)
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    if not row:
+        return jsonify({"error": "not found"}), 404
+
+    domain   = row["offending_target"]
+    itype    = row["incident_type"]
+    score    = row["score"]
+    evidence = json.loads(row["evidence_json"] or "{}")
+    signals  = evidence.get("latest_signals", evidence.get("signals", {})) or {}
+    sig_dict = signals.get("signals", signals) if isinstance(signals, dict) else {}
+    devices  = json.loads(row["devices_json"] or "[]")
+
+    # Check settings for manual override
+    settings = _get_ai_settings()
+
+    # Check rate limit if manual override is disabled
+    if not settings["allow_manual_override"]:
+        try:
+            conn2 = _conn()
+            limited, reason = _check_auto_rate_limit(conn2)
+            conn2.close()
+            if limited:
+                return jsonify({
+                    "rate_limited": True,
+                    "manual_blocked": True,
+                    "message": f"Rate limit active ({reason}) and manual override is disabled in Settings."
+                })
+        except Exception:
+            pass
+
+    # Check cache state BEFORE calling AI so from_cache reflects a prior analysis
+    pre_gen_at = None
+    try:
+        cpre = _conn()
+        cpre_row = cpre.execute(
+            "SELECT generated_at FROM anomaly_ai_cache WHERE offending_target=?",
+            (domain,)
+        ).fetchone()
+        cpre.close()
+        if cpre_row:
+            pre_gen_at = cpre_row["generated_at"]
+    except Exception:
+        pass
+
+    # Call AI analysis (is_auto=False bypasses rate limit by default)
+    report = _ai_analyze_incident(
+        inc_id, domain, itype, score, sig_dict, devices, is_auto=False
+    )
+
+    if report is None:
+        if not _get_api_key():
+            return jsonify({"error": "ANTHROPIC_API_KEY not configured in nemesis.env"})
+        try:
+            conn3 = _conn()
+            limited, reason = _check_auto_rate_limit(conn3)
+            conn3.close()
+            if limited and not settings["allow_manual_override"]:
+                return jsonify({"rate_limited": True, "manual_blocked": True,
+                                "message": reason})
+        except Exception:
+            pass
+        return jsonify({"error": "AI analysis failed — check server logs"})
+
+    # from_cache = True only if this result came from a pre-existing cache entry
+    now = time.time()
+    from_cache  = pre_gen_at is not None
+    cache_age_h = (now - pre_gen_at) / 3600 if pre_gen_at else 0
+
+    report_html = _format_ai_report_html(report, from_cache=from_cache, cache_age_h=cache_age_h)
+
+    return jsonify({
+        "ok": True,
+        "domain": domain,
+        "html": report_html,
+        "from_cache": from_cache,
+        "rate_limited": False,
+    })
+
+
+def _api_anomaly_settings():
+    """GET returns current settings; POST updates them."""
+    from flask import request, jsonify
+    if request.method == "GET":
+        return jsonify(_get_ai_settings())
+
+    data = request.get_json(silent=True) or {}
+    try:
+        if "rate_per_hour" in data:
+            _set_state("ai_rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
+        if "rate_per_day" in data:
+            _set_state("ai_rate_per_day",  str(max(0, int(data["rate_per_day"]))))
+        if "allow_manual_override" in data:
+            val = data["allow_manual_override"]
+            _set_state("ai_allow_manual_override", "1" if val in (True, "1", 1) else "0")
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
