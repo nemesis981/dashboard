@@ -47,6 +47,7 @@ from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
 import modules_loader
+import diagnostics as _diag
 
 hw_monitor.init_db()
 
@@ -1525,14 +1526,63 @@ def settings_page():
                 <span class="module-subsettings-label">Max automatic AI analyses per hour</span>
                 <input type="number" id="ad-rate-hour" value="{html.escape(_ad_rate_h)}"
                        min="0" max="100" class="module-subsettings-input"
-                       onchange="saveAnomalySettings()">
+                       onchange="saveAnomalySettings()" oninput="updateAICostEstimate()">
             </div>
             <div class="module-subsettings-row">
                 <span class="module-subsettings-label">Max automatic AI analyses per day</span>
                 <input type="number" id="ad-rate-day" value="{html.escape(_ad_rate_d)}"
                        min="0" max="1000" class="module-subsettings-input"
-                       onchange="saveAnomalySettings()">
+                       onchange="saveAnomalySettings()" oninput="updateAICostEstimate()">
             </div>
+
+            <div id="ai-cost-estimate" style="background:#060b12;border:1px solid #1e2d4e;
+                 border-radius:6px;padding:10px 14px;margin:8px 0 10px 0;font-size:0.83em">
+                <div style="color:#00d4ff;font-weight:bold;margin-bottom:6px">
+                    <span class="tier-text"
+                        data-beginner="Estimated AI Cost"
+                        data-intermediate="Approx. AI Analysis Cost"
+                        data-pro="Cost Estimate (Claude Sonnet 4.6)">Approx. AI Analysis Cost</span>
+                </div>
+                <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px">
+                    <div>
+                        <span style="color:#888">
+                            <span class="tier-text"
+                                data-beginner="Cost per check:"
+                                data-intermediate="Per analysis:"
+                                data-pro="Per call (~350 in / 150 out tokens):">Per analysis:</span>
+                        </span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold">~$0.003</span>
+                    </div>
+                    <div>
+                        <span style="color:#888">
+                            <span class="tier-text"
+                                data-beginner="Max hourly cost:"
+                                data-intermediate="Max cost / hour:"
+                                data-pro="Max cost/hr (at hourly limit):">Max cost / hour:</span>
+                        </span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~$0.030</span>
+                    </div>
+                    <div>
+                        <span style="color:#888">
+                            <span class="tier-text"
+                                data-beginner="Max daily cost:"
+                                data-intermediate="Max cost / day:"
+                                data-pro="Max cost/day (at daily limit):">Max cost / day:</span>
+                        </span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-day">~$0.150</span>
+                    </div>
+                </div>
+                <div style="color:#666;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e;padding-top:7px">
+                    <strong style="color:#888">⚠ Estimates only.</strong>
+                    <span class="tier-text"
+                        data-beginner="These numbers are rough guesses to help you plan. The actual cost depends on how complex each alert is, and Anthropic's prices can change. Don't rely on these as a guarantee."
+                        data-intermediate="Based on typical prompt size (~350 input tokens, ~150 output tokens) at Claude Sonnet 4.6 rates ($3/1M input, $15/1M output). Actual cost varies with incident complexity and is subject to Anthropic pricing changes."
+                        data-pro="Estimate: 350 input × $3/1M + 150 output × $15/1M ≈ $0.003/call. Real calls vary ±50% with domain count and signal complexity. Verify against Anthropic's current pricing at anthropic.com/pricing.">
+                        Based on typical prompt size. Actual costs vary by incident complexity and Anthropic's current pricing.
+                    </span>
+                </div>
+            </div>
+
             <div class="module-subsettings-row">
                 <span class="module-subsettings-label">
                     Allow manual AI analysis when automatic rate limit is reached
@@ -1706,7 +1756,11 @@ def settings_page():
     </style>
 </head>
 <body>
-    <h1>⚙️ Settings</h1>
+    <h1>⚙️ Settings
+        <a href="/diagnostics" target="_blank" rel="noopener"
+           style="float:right;font-size:0.42em;color:#888;text-decoration:none;font-weight:normal;margin-top:10px"
+           title="Diagnostics &amp; Support">🔍 Diagnostics</a>
+    </h1>
     <p><a class="back" href="/">← Back to Dashboard</a></p>
 
     <div class="settings-section">
@@ -1916,6 +1970,409 @@ def settings_page():
                 status.textContent = 'Request failed';
             }});
         }}
+
+        var _COST_PER_ANALYSIS = 0.003;
+        function updateAICostEstimate() {{
+            var h = parseFloat(document.getElementById('ad-rate-hour').value) || 0;
+            var d = parseFloat(document.getElementById('ad-rate-day').value) || 0;
+            var hEl = document.getElementById('ai-cost-hour');
+            var dEl = document.getElementById('ai-cost-day');
+            if (hEl) hEl.textContent = '~$' + (h * _COST_PER_ANALYSIS).toFixed(3);
+            if (dEl) dEl.textContent = '~$' + (d * _COST_PER_ANALYSIS).toFixed(3);
+        }}
+        updateAICostEstimate();
+    </script>
+</body>
+</html>"""
+
+
+@app.route("/api/diagnostics/run/<check_id>")
+def api_diag_run(check_id):
+    result = _diag.run_check(check_id)
+    return jsonify(result)
+
+
+@app.route("/api/diagnostics/run-all")
+def api_diag_run_all():
+    results = [_diag.run_check(m.META["id"]) for m in _diag.CHECKS]
+    return jsonify(results)
+
+
+@app.route("/api/diagnostics/submit", methods=["POST"])
+def api_diag_submit():
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText as _MIMEText
+
+    data = request.get_json(force=True, silent=True) or {}
+    user_notes = _diag.redact(str(data.get("notes", "")).strip())
+    results = data.get("results", [])
+    hostname = subprocess.run(
+        ["hostname"], capture_output=True, text=True
+    ).stdout.strip() or "unknown"
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    lines = [
+        f"Nemesis Firewall Diagnostics Report",
+        f"Generated: {now_str}  |  Host: {hostname}",
+        "=" * 70,
+        "",
+        "USER NOTES:",
+        user_notes if user_notes else "(none provided)",
+        "",
+        "=" * 70,
+        "DIAGNOSTIC RESULTS:",
+        "",
+    ]
+    for res in results:
+        name   = res.get("name", res.get("id", "?"))
+        status = res.get("status", "?").upper()
+        summary = _diag.redact(res.get("summary", ""))
+        output  = _diag.redact(res.get("output", ""))
+        lines.append(f"[{status}] {name}")
+        lines.append(f"  Summary: {summary}")
+        lines.append("-" * 60)
+        lines.append(output)
+        lines.append("")
+
+    body = "\n".join(lines)
+
+    sender   = os.environ.get("WATCHDOG_EMAIL", "")
+    password = os.environ.get("WATCHDOG_PASSWORD", "")
+    if not sender or not password:
+        return jsonify({"ok": False, "error": "WATCHDOG_EMAIL / WATCHDOG_PASSWORD not configured in nemesis.env — cannot send email."})
+
+    try:
+        msg = MIMEMultipart()
+        msg["Subject"] = f"[Nemesis Support] Diagnostics — {hostname} — {now_str}"
+        msg["From"] = sender
+        msg["To"] = "nemesis-firewall-support@proton.me"
+        msg["Cc"] = sender
+        msg.attach(_MIMEText(body, "plain"))
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
+            smtp.starttls()
+            smtp.login(sender, password)
+            smtp.send_message(msg)
+        log.info("diagnostics: support email sent from %s", sender)
+        return jsonify({"ok": True, "sent_from": sender})
+    except Exception as e:
+        log.exception("diagnostics: email send failed")
+        return jsonify({"ok": False, "error": str(e)})
+
+
+@app.route("/diagnostics")
+def diagnostics_page():
+    checks_meta = [
+        {
+            "id":   m.META["id"],
+            "name": m.META["name"],
+            "icon": m.META["icon"],
+            "desc_beginner":      m.META["descriptions"]["beginner"],
+            "desc_intermediate":  m.META["descriptions"]["intermediate"],
+            "desc_pro":           m.META["descriptions"]["pro"],
+        }
+        for m in _diag.CHECKS
+    ]
+    import json as _json
+    checks_json = _json.dumps(checks_meta)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis — Diagnostics</title>
+    <script src="/static/tier.js"></script>
+    <style>
+        body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
+               padding: 24px; max-width: 900px; margin: 0 auto; }}
+        h1 {{ color: #00d4ff; margin-bottom: 4px; }}
+        h2 {{ color: #00d4ff; font-size: 1.05em; margin: 28px 0 10px 0;
+             border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }}
+        a.back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
+        a.back:hover {{ text-decoration: underline; }}
+        .intro {{ color: #aaa; font-size: 0.9em; margin: 0 0 20px 0; line-height: 1.6; }}
+        .check-card {{ background: #0d1117; border: 1px solid #1e2d4e; border-radius: 8px;
+                       padding: 14px 16px; margin-bottom: 12px; }}
+        .check-header {{ display: flex; align-items: center; gap: 12px; }}
+        .check-icon {{ font-size: 1.4em; flex-shrink: 0; }}
+        .check-title {{ flex: 1; }}
+        .check-name {{ font-weight: bold; color: #eee; font-size: 1em; }}
+        .check-desc {{ color: #888; font-size: 0.83em; margin-top: 2px; line-height: 1.4; }}
+        .check-status {{ font-size: 0.78em; font-weight: bold; padding: 3px 8px;
+                         border-radius: 10px; flex-shrink: 0; }}
+        .status-ok    {{ background: rgba(0,255,136,0.15); color: #00ff88; }}
+        .status-warn  {{ background: rgba(255,136,0,0.15);  color: #ff8800; }}
+        .status-error {{ background: rgba(255,68,68,0.15);  color: #ff4444; }}
+        .status-info  {{ background: rgba(0,212,255,0.1);   color: #00d4ff; }}
+        .status-idle  {{ background: rgba(100,100,100,0.15); color: #888; }}
+        .run-btn {{ background: #00d4ff; color: #1a1a2e; border: none;
+                    padding: 6px 16px; border-radius: 4px; cursor: pointer;
+                    font-weight: bold; font-size: 0.88em; flex-shrink: 0;
+                    transition: background 0.15s; }}
+        .run-btn:hover {{ background: #00b8d9; }}
+        .run-btn:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
+        .check-output {{ margin-top: 12px; display: none; }}
+        .check-output.visible {{ display: block; }}
+        .check-output pre {{ background: #060b12; border: 1px solid #1e2d4e; border-radius: 4px;
+                              padding: 12px; font-size: 0.8em; line-height: 1.5;
+                              color: #ccc; white-space: pre-wrap; word-break: break-word;
+                              max-height: 350px; overflow-y: auto; margin: 6px 0 0 0; }}
+        .check-summary {{ font-size: 0.85em; color: #aaa; margin-top: 6px; }}
+        .top-actions {{ display: flex; gap: 10px; align-items: center;
+                        margin-bottom: 24px; flex-wrap: wrap; }}
+        .btn-run-all {{ background: #16213e; border: 1px solid #00d4ff; color: #00d4ff;
+                        padding: 9px 20px; border-radius: 5px; cursor: pointer;
+                        font-weight: bold; font-size: 0.95em; transition: background 0.15s; }}
+        .btn-run-all:hover {{ background: rgba(0,212,255,0.1); }}
+        .btn-run-all:disabled {{ border-color: #444; color: #555; cursor: not-allowed; }}
+        .btn-submit {{ background: #00ff88; color: #1a1a2e; border: none;
+                       padding: 9px 20px; border-radius: 5px; cursor: pointer;
+                       font-weight: bold; font-size: 0.95em; transition: background 0.15s; }}
+        .btn-submit:hover {{ background: #00cc6a; }}
+        .btn-submit:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
+        .notes-area {{ width: 100%; box-sizing: border-box; background: #0d1117;
+                       border: 1px solid #333; color: #eee; border-radius: 6px;
+                       padding: 10px 12px; font-size: 0.9em; resize: vertical;
+                       font-family: Arial, sans-serif; }}
+        .notes-area:focus {{ outline: none; border-color: #00d4ff; }}
+        .redact-notice {{ background: rgba(0,212,255,0.07); border: 1px solid rgba(0,212,255,0.2);
+                          border-radius: 6px; padding: 10px 14px; font-size: 0.83em;
+                          color: #aaa; margin-bottom: 18px; }}
+        .submit-status {{ font-size: 0.88em; color: #aaa; margin-top: 8px; }}
+        #runAllProgress {{ font-size: 0.85em; color: #aaa; }}
+    </style>
+</head>
+<body>
+    <h1>🔍 Nemesis Diagnostics
+        <span style="float:right;font-size:0.42em">
+            <a class="back" href="/" title="Back to dashboard">← Dashboard</a>
+            &nbsp;|&nbsp;
+            <a class="back" href="/settings" target="_blank" rel="noopener">⚙️ Settings</a>
+        </span>
+    </h1>
+    <p class="intro">
+        <span class="tier-text"
+            data-beginner="Run these checks to see the current health of your Nemesis Firewall. Each check examines a different part of the system. When you're done, you can send the results to support — all API keys and passwords are automatically hidden before anything is sent."
+            data-intermediate="Run individual or all diagnostic checks. Sensitive values (API keys, passwords) are automatically redacted from all output before display or submission. Use the free-text box to describe your issue before submitting."
+            data-pro="Diagnostic runner for Nemesis components. Each check is independently runnable (python3 -m diagnostics.&lt;id&gt;). Redaction applied server-side before all output. Submit POSTs to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP.">
+            Run these checks to see the current health of your Nemesis Firewall.
+        </span>
+    </p>
+
+    <div class="redact-notice">
+        🔒 <strong>Automatic redaction:</strong>
+        <span class="tier-text"
+            data-beginner="Your API keys, email passwords, and other private settings are automatically hidden before any results are displayed or sent — you never need to scrub them yourself."
+            data-intermediate="All sensitive values from /etc/nemesis.env (API keys, passwords, tokens) are redacted server-side before output reaches your browser or a support email."
+            data-pro="Redaction: loads /etc/nemesis.env + live os.environ at run time, replaces all secret values ≥8 chars with [REDACTED] in output and summary fields before JSON serialization.">
+            Your API keys, email passwords, and other private settings are automatically hidden before any results are displayed or sent.
+        </span>
+    </div>
+
+    <div class="top-actions">
+        <button class="btn-run-all" id="btnRunAll" onclick="runAll()">▶ Run All Checks</button>
+        <span id="runAllProgress"></span>
+    </div>
+
+    <div id="checksContainer"></div>
+
+    <h2>
+        <span class="tier-text"
+            data-beginner="Describe What's Happening (optional)"
+            data-intermediate="User Notes / Issue Description"
+            data-pro="Notes for Support">Notes for Support</span>
+    </h2>
+    <p style="color:#888;font-size:0.85em;margin:0 0 8px 0">
+        <span class="tier-text"
+            data-beginner="Describe what's wrong, what you expected to happen, or any question you have. This will be included in your support report alongside the diagnostic results."
+            data-intermediate="Free-text issue description included verbatim in submitted reports. Sensitive values you type here are also redacted before sending."
+            data-pro="Included in email body as 'USER NOTES'. Redacted server-side before SMTP send.">
+            Describe what's wrong, what you expected to happen, or any question you have.
+        </span>
+    </p>
+    <textarea id="supportNotes" class="notes-area" rows="5"
+        placeholder="e.g. 'The anomaly detection module stopped sending alerts after I restarted the server...'"></textarea>
+
+    <div style="margin-top:16px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <button class="btn-submit" onclick="submitReport()">📧 Submit to Support</button>
+        <div>
+            <div class="submit-status" id="submitStatus"></div>
+            <div style="color:#666;font-size:0.78em;margin-top:4px">
+                <span class="tier-text"
+                    data-beginner="Sends an email with your notes and the diagnostic results you've run. You'll also get a copy at your configured alert email address."
+                    data-intermediate="Sends to nemesis-firewall-support@proton.me via your WATCHDOG_EMAIL SMTP. CC'd to your WATCHDOG_EMAIL for your records."
+                    data-pro="POST /api/diagnostics/submit — SMTP via WATCHDOG_EMAIL/WATCHDOG_PASSWORD. To: nemesis-firewall-support@proton.me, Cc: WATCHDOG_EMAIL.">
+                    Sends to nemesis-firewall-support@proton.me. You'll get a copy at your alert email address.
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    var CHECKS = {checks_json};
+    var _results = {{}};   // id -> result object from server
+    var _running = {{}};   // id -> true if currently running
+
+    function _statusClass(status) {{
+        return 'status-' + (status || 'idle');
+    }}
+    function _statusLabel(status) {{
+        return ({{ok:'✓ OK', warn:'⚠ Warning', error:'✗ Error', info:'ℹ Info', idle:'Not run'}})
+               [status || 'idle'] || status;
+    }}
+
+    function buildUI() {{
+        var container = document.getElementById('checksContainer');
+        CHECKS.forEach(function(c) {{
+            var div = document.createElement('div');
+            div.className = 'check-card';
+            div.id = 'card-' + c.id;
+            div.innerHTML =
+                '<div class="check-header">' +
+                  '<span class="check-icon">' + c.icon + '</span>' +
+                  '<div class="check-title">' +
+                    '<div class="check-name">' + c.name + '</div>' +
+                    '<div class="check-desc tier-text"' +
+                         ' data-beginner="' + escHtml(c.desc_beginner) + '"' +
+                         ' data-intermediate="' + escHtml(c.desc_intermediate) + '"' +
+                         ' data-pro="' + escHtml(c.desc_pro) + '">' +
+                         escHtml(c.desc_intermediate) +
+                    '</div>' +
+                  '</div>' +
+                  '<span class="check-status status-idle" id="badge-' + c.id + '">Not run</span>' +
+                  '<button class="run-btn" id="btn-' + c.id + '" onclick="runCheck(\'' + c.id + '\')">Run</button>' +
+                '</div>' +
+                '<div class="check-output" id="out-' + c.id + '">' +
+                  '<div class="check-summary" id="sum-' + c.id + '"></div>' +
+                  '<pre id="pre-' + c.id + '"></pre>' +
+                '</div>';
+            container.appendChild(div);
+        }});
+        applyTierText();
+    }}
+
+    function escHtml(s) {{
+        return String(s)
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }}
+
+    function runCheck(id) {{
+        if (_running[id]) return;
+        _running[id] = true;
+        var btn   = document.getElementById('btn-' + id);
+        var badge = document.getElementById('badge-' + id);
+        var out   = document.getElementById('out-' + id);
+        var pre   = document.getElementById('pre-' + id);
+        var sum   = document.getElementById('sum-' + id);
+        btn.disabled = true;
+        btn.textContent = 'Running…';
+        badge.className = 'check-status status-info';
+        badge.textContent = '⌛ Running';
+        out.classList.add('visible');
+        pre.textContent = 'Running check…';
+        sum.textContent = '';
+        fetch('/api/diagnostics/run/' + id, {{cache: 'no-store'}})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                _results[id] = d;
+                badge.className = 'check-status ' + _statusClass(d.status);
+                badge.textContent = _statusLabel(d.status);
+                sum.textContent = d.summary || '';
+                pre.textContent = d.output || '(no output)';
+                btn.disabled = false;
+                btn.textContent = 'Re-run';
+            }})
+            .catch(function(e) {{
+                badge.className = 'check-status status-error';
+                badge.textContent = '✗ Error';
+                pre.textContent = 'Request failed: ' + String(e);
+                btn.disabled = false;
+                btn.textContent = 'Retry';
+            }})
+            .finally(function() {{ _running[id] = false; }});
+    }}
+
+    async function runAll() {{
+        var btn = document.getElementById('btnRunAll');
+        var prog = document.getElementById('runAllProgress');
+        btn.disabled = true;
+        for (var i = 0; i < CHECKS.length; i++) {{
+            var id = CHECKS[i].id;
+            prog.textContent = 'Running ' + (i + 1) + ' / ' + CHECKS.length + ': ' + CHECKS[i].name + '…';
+            await new Promise(function(resolve) {{
+                var checkId = id;
+                if (_running[checkId]) {{ resolve(); return; }}
+                _running[checkId] = true;
+                var badge = document.getElementById('badge-' + checkId);
+                var out   = document.getElementById('out-' + checkId);
+                var pre   = document.getElementById('pre-' + checkId);
+                var sum   = document.getElementById('sum-' + checkId);
+                var cbtn  = document.getElementById('btn-' + checkId);
+                cbtn.disabled = true;
+                cbtn.textContent = 'Running…';
+                badge.className = 'check-status status-info';
+                badge.textContent = '⌛ Running';
+                out.classList.add('visible');
+                pre.textContent = 'Running…';
+                fetch('/api/diagnostics/run/' + checkId, {{cache: 'no-store'}})
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(d) {{
+                        _results[checkId] = d;
+                        badge.className = 'check-status ' + _statusClass(d.status);
+                        badge.textContent = _statusLabel(d.status);
+                        sum.textContent = d.summary || '';
+                        pre.textContent = d.output || '(no output)';
+                        cbtn.disabled = false;
+                        cbtn.textContent = 'Re-run';
+                    }})
+                    .catch(function(e) {{
+                        badge.className = 'check-status status-error';
+                        badge.textContent = '✗ Error';
+                        pre.textContent = 'Request failed: ' + String(e);
+                        cbtn.disabled = false;
+                        cbtn.textContent = 'Retry';
+                    }})
+                    .finally(function() {{ _running[checkId] = false; resolve(); }});
+            }});
+        }}
+        prog.textContent = 'All ' + CHECKS.length + ' checks complete.';
+        btn.disabled = false;
+    }}
+
+    function submitReport() {{
+        var notes = document.getElementById('supportNotes').value.trim();
+        var runResults = Object.values(_results);
+        if (runResults.length === 0 && !notes) {{
+            document.getElementById('submitStatus').textContent =
+                'Run at least one check or add a note before submitting.';
+            return;
+        }}
+        var btn = document.querySelector('.btn-submit');
+        btn.disabled = true;
+        document.getElementById('submitStatus').textContent = 'Sending…';
+        fetch('/api/diagnostics/submit', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{notes: notes, results: runResults}}),
+        }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (d.ok) {{
+                    document.getElementById('submitStatus').textContent =
+                        '✓ Sent! Check your inbox for a copy (sent from ' + (d.sent_from || 'your alert email') + ').';
+                    document.getElementById('submitStatus').style.color = '#00ff88';
+                }} else {{
+                    document.getElementById('submitStatus').textContent = '✗ Failed: ' + (d.error || 'unknown error');
+                    document.getElementById('submitStatus').style.color = '#ff4444';
+                }}
+            }})
+            .catch(function(e) {{
+                document.getElementById('submitStatus').textContent = '✗ Request error: ' + String(e);
+                document.getElementById('submitStatus').style.color = '#ff4444';
+            }})
+            .finally(function() {{ btn.disabled = false; }});
+    }}
+
+    buildUI();
     </script>
 </body>
 </html>"""
@@ -2669,7 +3126,11 @@ def dashboard():
     <script src="/static/tier.js"></script>
 </head>
 <body>
-    <h1>🛡️ Nemesis Firewall <a href="/settings" target="_blank" rel="noopener" style="float:right;font-size:0.45em;color:#888;text-decoration:none;font-weight:normal;margin-top:8px" title="Settings">⚙️ Settings</a></h1>
+    <h1>🛡️ Nemesis Firewall <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
+        <a href="/settings" target="_blank" rel="noopener" style="color:#888;text-decoration:none" title="Settings">⚙️ Settings</a>
+        &nbsp;|&nbsp;
+        <a href="/diagnostics" target="_blank" rel="noopener" style="color:#888;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
+    </span></h1>
     <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
