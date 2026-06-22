@@ -14,12 +14,13 @@ META = {
 }
 
 SERVICES = [
-    ("suricata",               "Suricata IDS"),
-    ("pihole-FTL",             "Pi-hole DNS"),
-    ("nemesis-dashboard",      "Dashboard"),
-    ("nemesis-watchdog",       "Watchdog"),
-    ("nemesis-hw-monitor",     "HW Monitor"),
-    ("nemesis-alert-watcher",  "Alert Watcher"),
+    ("suricata",        "Suricata IDS"),
+    ("pihole-FTL",      "Pi-hole DNS"),
+    ("dashboard",       "Dashboard"),
+    ("watchdog",        "Watchdog"),
+    ("hw-monitor",      "HW Monitor"),
+    ("alert-watcher",   "Alert Watcher"),
+    ("device-scanner",  "Device Scanner"),
 ]
 
 
