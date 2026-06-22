@@ -148,6 +148,8 @@ class Module(NemesisModule):
              _api_incident_analyze, {"methods": ["POST"]}),
             ("/api/anomaly/settings",
              _api_anomaly_settings, {"methods": ["GET", "POST"]}),
+            ("/api/anomaly/usage",
+             _api_anomaly_usage,    {"methods": ["GET"]}),
         ]
 
     # ── Background thread ─────────────────────────────────────────────────────
@@ -252,6 +254,15 @@ def _init_db() -> None:
             offending_target TEXT PRIMARY KEY,
             reported_at      REAL NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS anomaly_ai_usage (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            date       TEXT    NOT NULL,
+            hour       INTEGER NOT NULL,
+            call_count INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(date, hour)
+        );
+        CREATE INDEX IF NOT EXISTS idx_aau_date ON anomaly_ai_usage(date);
     """)
     conn.commit()
     conn.close()
@@ -782,6 +793,82 @@ def _get_cisa_settings() -> dict:
             "slider_score": score, "threshold": threshold}
 
 
+def _get_ai_pricing() -> dict:
+    """Read AI pricing from environment ($/MTok). Defaults: Claude Sonnet 4.6 as of June 2026."""
+    try:
+        input_p = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK", "3.00"))
+    except (ValueError, TypeError):
+        input_p = 3.00
+    try:
+        output_p = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00"))
+    except (ValueError, TypeError):
+        output_p = 15.00
+    return {"input_per_mtok": input_p, "output_per_mtok": output_p}
+
+
+def _cost_per_call(pricing: dict | None = None) -> float:
+    """Estimated cost per AI analysis call (~350 input tokens, ~150 output tokens)."""
+    if pricing is None:
+        pricing = _get_ai_pricing()
+    return (350 * pricing["input_per_mtok"] / 1_000_000 +
+            150 * pricing["output_per_mtok"] / 1_000_000)
+
+
+def _increment_usage_counter(conn) -> None:
+    """Record one actual AI API call in the persistent usage table."""
+    now = datetime.now()
+    conn.execute(
+        """INSERT INTO anomaly_ai_usage(date, hour, call_count)
+           VALUES(?, ?, 1)
+           ON CONFLICT(date, hour) DO UPDATE SET call_count = call_count + 1""",
+        (now.strftime("%Y-%m-%d"), now.hour)
+    )
+
+
+def _get_usage_stats() -> dict:
+    """Return actual AI call counts for today/week/month and current pricing."""
+    try:
+        conn = _conn()
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        week_start  = (now - timedelta(days=7)).strftime("%Y-%m-%d")
+        month_start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        today_calls = (conn.execute(
+            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date=?", (today,)
+        ).fetchone()[0] or 0)
+        week_calls = (conn.execute(
+            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date>=?", (week_start,)
+        ).fetchone()[0] or 0)
+        month_calls = (conn.execute(
+            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date>=?", (month_start,)
+        ).fetchone()[0] or 0)
+
+        hourly_rows = conn.execute(
+            "SELECT hour, call_count FROM anomaly_ai_usage WHERE date=? ORDER BY hour",
+            (today,)
+        ).fetchall()
+        conn.close()
+
+        pricing = _get_ai_pricing()
+        cpc     = _cost_per_call(pricing)
+        return {
+            "today":         int(today_calls),
+            "week":          int(week_calls),
+            "month":         int(month_calls),
+            "hourly":        {r["hour"]: r["call_count"] for r in hourly_rows},
+            "pricing":       pricing,
+            "cost_per_call": round(cpc, 6),
+        }
+    except Exception:
+        log.exception("anomaly_detection: _get_usage_stats failed")
+        pricing = _get_ai_pricing()
+        return {
+            "today": 0, "week": 0, "month": 0, "hourly": {},
+            "pricing": pricing, "cost_per_call": round(_cost_per_call(pricing), 6),
+        }
+
+
 def _check_auto_rate_limit(conn) -> tuple:
     """Return (is_limited: bool, reason: str)."""
     settings = _get_ai_settings()
@@ -1015,6 +1102,7 @@ def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,
             (domain, report_json, now)
         )
         _attach_ai_to_incident(conn, inc_id, report_json, now)
+        _increment_usage_counter(conn)
 
         if is_auto:
             _increment_auto_rate(conn)
@@ -2042,3 +2130,8 @@ def _api_anomaly_settings():
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 400
+
+
+def _api_anomaly_usage():
+    from flask import jsonify
+    return jsonify(_get_usage_stats())

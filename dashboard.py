@@ -1449,6 +1449,8 @@ def settings_page():
     _ad_rate_h = "10"
     _ad_rate_d = "50"
     _ad_manual = True
+    _ad_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
+    _ad_output_price = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
     try:
         _ad_conn = sqlite3.connect(DB_PATH, timeout=5)
         def _ad_st(k, d=""):
@@ -1538,11 +1540,51 @@ def settings_page():
 
             <div id="ai-cost-estimate" style="background:#060b12;border:1px solid #1e2d4e;
                  border-radius:6px;padding:10px 14px;margin:8px 0 10px 0;font-size:0.83em">
+
+                <!-- Pricing configuration -->
+                <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #1e2d4e22">
+                    <div style="color:#00d4ff;font-weight:bold;margin-bottom:6px;font-size:0.92em">
+                        <span class="tier-text"
+                            data-beginner="AI Pricing (used for cost estimates below)"
+                            data-intermediate="Configured Pricing — Claude Sonnet 4.6"
+                            data-pro="Pricing ($/MTok)">Configured Pricing</span>
+                    </div>
+                    <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:5px">
+                        <div>
+                            <span style="color:#888">
+                                <span class="tier-text"
+                                    data-beginner="Cost per million tokens sent to AI:"
+                                    data-intermediate="Input ($/MTok):"
+                                    data-pro="In $/MTok:">Input ($/MTok):</span>
+                            </span>
+                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_input_price:.2f}")}</span>
+                        </div>
+                        <div>
+                            <span style="color:#888">
+                                <span class="tier-text"
+                                    data-beginner="Cost per million tokens received from AI:"
+                                    data-intermediate="Output ($/MTok):"
+                                    data-pro="Out $/MTok:">Output ($/MTok):</span>
+                            </span>
+                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_output_price:.2f}")}</span>
+                        </div>
+                    </div>
+                    <div style="color:#555;font-size:0.88em;line-height:1.5">
+                        <span class="tier-text"
+                            data-beginner="Last verified: June 2026. If Anthropic changes their prices, update ANTHROPIC_INPUT_PRICE_PER_MTOK and ANTHROPIC_OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env. Check current pricing at"
+                            data-intermediate="Last verified: June 2026 · Update in /etc/nemesis.env if pricing changes ·"
+                            data-pro="Last verified June 2026 · /etc/nemesis.env ·">Last verified: June 2026 ·</span>
+                        <a href="https://claude.com/pricing" target="_blank" rel="noopener"
+                           style="color:#00d4ff;text-decoration:none">claude.com/pricing ↗</a>
+                    </div>
+                </div>
+
+                <!-- Max cost estimates (rate-limit based) -->
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:6px">
                     <span class="tier-text"
-                        data-beginner="Estimated AI Cost"
+                        data-beginner="Estimated Max AI Cost (based on your rate limits)"
                         data-intermediate="Approx. AI Analysis Cost"
-                        data-pro="Cost Estimate (Claude Sonnet 4.6)">Approx. AI Analysis Cost</span>
+                        data-pro="Cost Estimate (Sonnet 4.6)">Approx. AI Analysis Cost</span>
                 </div>
                 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px">
                     <div>
@@ -1550,36 +1592,84 @@ def settings_page():
                             <span class="tier-text"
                                 data-beginner="Cost per check:"
                                 data-intermediate="Per analysis:"
-                                data-pro="Per call (~350 in / 150 out tokens):">Per analysis:</span>
+                                data-pro="Per call (~350in/150out tok):">Per analysis:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold">~$0.003</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-per-call">~${html.escape(f"{(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.4f}")}</span>
                     </div>
                     <div>
                         <span style="color:#888">
                             <span class="tier-text"
                                 data-beginner="Max hourly cost:"
                                 data-intermediate="Max cost / hour:"
-                                data-pro="Max cost/hr (at hourly limit):">Max cost / hour:</span>
+                                data-pro="Max cost/hr:">Max cost / hour:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~$0.030</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~${html.escape(f"{float(_ad_rate_h)*(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.3f}")}</span>
                     </div>
                     <div>
                         <span style="color:#888">
                             <span class="tier-text"
                                 data-beginner="Max daily cost:"
                                 data-intermediate="Max cost / day:"
-                                data-pro="Max cost/day (at daily limit):">Max cost / day:</span>
+                                data-pro="Max cost/day:">Max cost / day:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-day">~$0.150</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-day">~${html.escape(f"{float(_ad_rate_d)*(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.3f}")}</span>
                     </div>
                 </div>
-                <div style="color:#666;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e;padding-top:7px">
+
+                <!-- Actual usage tracking -->
+                <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e2d4e22">
+                    <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px;flex-wrap:wrap">
+                        <span style="color:#00d4ff;font-weight:bold;font-size:0.92em">
+                            <span class="tier-text"
+                                data-beginner="Actual AI Calls Made (real API calls, not estimates)"
+                                data-intermediate="Actual AI Usage"
+                                data-pro="Actual Usage">Actual AI Usage</span>
+                        </span>
+                        <span style="color:#333">|</span>
+                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                            <input type="radio" name="ai-usage-period" value="hour"
+                                   style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
+                                   onchange="switchUsagePeriod('hour')">
+                            <span class="tier-text" data-beginner="By Hour (today)" data-intermediate="Hourly" data-pro="1h">Hourly</span>
+                        </label>
+                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                            <input type="radio" name="ai-usage-period" value="day" checked
+                                   style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
+                                   onchange="switchUsagePeriod('day')">
+                            <span class="tier-text" data-beginner="Today" data-intermediate="Today" data-pro="Today">Today</span>
+                        </label>
+                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                            <input type="radio" name="ai-usage-period" value="week"
+                                   style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
+                                   onchange="switchUsagePeriod('week')">
+                            <span class="tier-text" data-beginner="This Week" data-intermediate="7 days" data-pro="7d">7 days</span>
+                        </label>
+                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                            <input type="radio" name="ai-usage-period" value="month"
+                                   style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
+                                   onchange="switchUsagePeriod('month')">
+                            <span class="tier-text" data-beginner="This Month" data-intermediate="30 days" data-pro="30d">30 days</span>
+                        </label>
+                    </div>
+                    <div id="ai-usage-display" style="color:#aaa;font-size:0.88em;min-height:1.4em">
+                        <span style="color:#444">Loading usage…</span>
+                    </div>
+                    <div style="color:#555;font-size:0.8em;margin-top:4px">
+                        <span class="tier-text"
+                            data-beginner="Counts only real API calls — cache hits (where a previous analysis is reused) are free and not counted here."
+                            data-intermediate="Cache hits excluded — only new API calls counted."
+                            data-pro="Cache hits not counted.">Cache hits excluded — only new API calls counted.</span>
+                    </div>
+                </div>
+
+                <!-- Disclaimer -->
+                <div style="color:#666;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e22;padding-top:7px;margin-top:8px">
                     <strong style="color:#888">⚠ Estimates only.</strong>
                     <span class="tier-text"
-                        data-beginner="These numbers are rough guesses to help you plan. The actual cost depends on how complex each alert is, and Anthropic's prices can change. Don't rely on these as a guarantee."
-                        data-intermediate="Based on typical prompt size (~350 input tokens, ~150 output tokens) at Claude Sonnet 4.6 rates ($3/1M input, $15/1M output). Actual cost varies with incident complexity and is subject to Anthropic pricing changes."
-                        data-pro="Estimate: 350 input × $3/1M + 150 output × $15/1M ≈ $0.003/call. Real calls vary ±50% with domain count and signal complexity. Verify against Anthropic's current pricing at anthropic.com/pricing.">
-                        Based on typical prompt size. Actual costs vary by incident complexity and Anthropic's current pricing.
+                        data-beginner="These are rough estimates. Actual cost depends on alert complexity. If Anthropic changes their prices, update ANTHROPIC_INPUT_PRICE_PER_MTOK and ANTHROPIC_OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env."
+                        data-intermediate="Based on ~350 input / ~150 output tokens per call at configured prices. Actual varies ±50%. If pricing changes, update ANTHROPIC_INPUT/OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env."
+                        data-pro="~350in/~150out tok at configured prices. Varies ±50%. Update ANTHROPIC_IN/OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env if pricing changes.">
+                        Based on typical prompt size. Actual costs vary. Update /etc/nemesis.env if pricing changes.
                     </span>
                 </div>
             </div>
@@ -1972,7 +2062,7 @@ def settings_page():
             }});
         }}
 
-        var _COST_PER_ANALYSIS = 0.003;
+        var _COST_PER_ANALYSIS = {(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.6f};
         function updateAICostEstimate() {{
             var h = parseFloat(document.getElementById('ad-rate-hour').value) || 0;
             var d = parseFloat(document.getElementById('ad-rate-day').value) || 0;
@@ -1982,6 +2072,66 @@ def settings_page():
             if (dEl) dEl.textContent = '~$' + (d * _COST_PER_ANALYSIS).toFixed(3);
         }}
         updateAICostEstimate();
+
+        var _aiUsageCache = null;
+        function switchUsagePeriod(period) {{
+            var display = document.getElementById('ai-usage-display');
+            if (!display) return;
+
+            function render(d) {{
+                var count, label;
+                if (period === 'hour') {{
+                    var hr = String(new Date().getHours());
+                    count = (d.hourly && d.hourly[hr]) ? d.hourly[hr] : 0;
+                    label = tierText(
+                        'calls in the current hour (today)',
+                        'this hour (today)',
+                        'current hr'
+                    );
+                }} else if (period === 'week') {{
+                    count = d.week || 0;
+                    label = tierText('calls in the last 7 days', 'last 7 days', '7d');
+                }} else if (period === 'month') {{
+                    count = d.month || 0;
+                    label = tierText('calls in the last 30 days', 'last 30 days', '30d');
+                }} else {{
+                    count = d.today || 0;
+                    label = tierText('AI analysis calls made today', 'calls today', 'today');
+                }}
+                var cost = (count * (d.cost_per_call || 0)).toFixed(4);
+                display.innerHTML =
+                    '<span style="color:#eee;font-weight:bold">' + count + '</span>'
+                    + ' <span style="color:#666">'
+                    + tierText('AI analysis calls', 'calls', 'calls')
+                    + ' (' + label + ')</span>'
+                    + ' — '
+                    + tierText('estimated cost', 'est. cost', 'est.')
+                    + ' <span style="color:#00ff88;font-weight:bold">$' + cost + '</span>';
+            }}
+
+            if (_aiUsageCache) {{
+                render(_aiUsageCache);
+                return;
+            }}
+
+            display.innerHTML = '<span style="color:#444">'
+                + tierText('Loading usage data…', 'Loading…', '…')
+                + '</span>';
+            fetch('/api/anomaly/usage')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    _aiUsageCache = d;
+                    // Invalidate cache after 60 s so the next switch re-fetches
+                    setTimeout(function() {{ _aiUsageCache = null; }}, 60000);
+                    render(d);
+                }})
+                .catch(function() {{
+                    display.innerHTML = '<span style="color:#ff4444">'
+                        + tierText('Could not load usage data', 'Load failed', 'Error')
+                        + '</span>';
+                }});
+        }}
+        switchUsagePeriod('day');
     </script>
 </body>
 </html>"""
