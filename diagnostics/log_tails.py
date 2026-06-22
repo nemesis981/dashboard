@@ -14,7 +14,7 @@ META = {
     },
 }
 
-_LOG_BASE = "/home/paul/alert_manager"
+_LOG_BASE = "/home/paul/dashboard/alert_manager"
 LOG_FILES = [
     (os.path.join(_LOG_BASE, "watchdog.log"),      "Watchdog"),
     (os.path.join(_LOG_BASE, "hw_monitor.log"),    "HW Monitor"),

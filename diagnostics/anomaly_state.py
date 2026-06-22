@@ -14,7 +14,7 @@ META = {
     },
 }
 
-DB_PATH = "/home/paul/alert_manager/alerts.db"
+DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
 
 
 def run() -> dict:

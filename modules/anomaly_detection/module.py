@@ -35,7 +35,7 @@ log = logging.getLogger("nemesis.anomaly")
 
 # ── File paths ───────────────────────────────────────────────────────────────
 EVE_LOG      = "/var/log/suricata/eve.json"
-DB_PATH      = "/home/paul/alert_manager/alerts.db"
+DB_PATH      = "/home/paul/dashboard/alert_manager/alerts.db"
 
 # ── Tuning ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL       = 60        # seconds between detection cycles

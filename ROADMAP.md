@@ -138,9 +138,9 @@
 
 ### Key Paths
 - Dashboard: /home/paul/dashboard/dashboard.py
-- Alert Manager: /home/paul/alert_manager/
-- Database: /home/paul/alert_manager/alerts.db
-- Logs: /home/paul/alert_manager/watchdog.log
+- Alert Manager: /home/paul/dashboard/alert_manager/
+- Database: /home/paul/dashboard/alert_manager/alerts.db
+- Logs: /home/paul/dashboard/alert_manager/watchdog.log
 
 ### Network
 - Server IP: 192.168.4.69 (static)
