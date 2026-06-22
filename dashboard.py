@@ -4798,7 +4798,7 @@ def dashboard():
                                 document.getElementById("sensorNotificationBar").innerHTML =
                                     notifs.map(function(n) {{
                                         return '<div class="hw-notification-bar">🔔 ' + escapeHtml(n.message) +
-                                               ' <button onclick="dismissHwNotif(\'' + n.sensor_key + '\')">Dismiss & Reset</button></div>';
+                                               ' <button onclick="dismissHwNotif(this.dataset.key)" data-key="' + escapeHtml(n.sensor_key) + '">Dismiss &amp; Reset</button></div>';
                                     }}).join("");
                             }}
                         }}).catch(function() {{}});
