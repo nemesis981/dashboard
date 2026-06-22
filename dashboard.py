@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import logging
+import threading
 from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
@@ -1410,6 +1411,15 @@ def set_action(rule_id, action):
 
 @app.route("/settings")
 def settings_page():
+    # Detect windows_agent mode for restart button
+    try:
+        hw_map_data = hw_monitor._load_hw_map() or {}
+        _is_windows_agent = hw_map_data.get("source") == "windows_agent"
+        _agent_ip = hw_map_data.get("agent_ip", "")
+    except Exception:
+        _is_windows_agent = False
+        _agent_ip = ""
+
     # Read anomaly_detection AI settings from DB (best-effort; fall back to defaults)
     _ad_rate_h = "10"
     _ad_rate_d = "50"
@@ -1898,6 +1908,19 @@ def settings_page():
     </h1>
     <p><a class="back" href="/">← Back to Dashboard</a></p>
 
+    <div class="settings-section" style="background:#0d1117;border:1px solid #1e2d4e;border-radius:8px;padding:16px 20px">
+        <h2 style="margin-top:0;color:#00d4ff">System Control</h2>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+            <button id="restartDashBtn" onclick="restartDashboard()"
+                style="background:#ff4444;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em">
+                🔄 Restart Dashboard
+            </button>
+            <span id="restartDashMsg" style="color:#ffaa00;font-size:0.85em;display:none">Restarting — page will reload in 5 seconds…</span>
+            {'<button id="restartAgentBtn" onclick="restartWindowsAgent()"style="background:#ff8800;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em;margin-left:4px">🖥️ Restart Windows Agent</button><span id="restartAgentMsg" style="color:#ffaa00;font-size:0.85em;display:none">Restart command sent…</span>' if _is_windows_agent else ''}
+        </div>
+        <p style="color:#888;font-size:0.82em;margin:10px 0 0 0">Restart applies configuration changes and clears cached state. The page will auto-reload after 5 seconds.</p>
+    </div>
+
     <div class="settings-section">
         <h2>Explanation Detail Level</h2>
         <p class="settings-intro">
@@ -2300,6 +2323,20 @@ def settings_page():
                 }});
         }}
         switchUsagePeriod('day');
+
+        function restartDashboard() {{
+            var btn = document.getElementById('restartDashBtn');
+            var msg = document.getElementById('restartDashMsg');
+            btn.disabled = true;
+            btn.textContent = 'Restarting…';
+            btn.style.opacity = '0.6';
+            msg.style.display = 'inline';
+            fetch('/api/restart', {{method: 'POST'}})
+                .catch(function() {{}});
+            setTimeout(function() {{ location.reload(); }}, 5000);
+        }}
+
+        {'function restartWindowsAgent() {var btn=document.getElementById("restartAgentBtn");var msg=document.getElementById("restartAgentMsg");btn.disabled=true;btn.style.opacity="0.6";msg.style.display="inline";fetch("http://' + _agent_ip + ':5001/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"restart"})}).then(function(){msg.textContent="Restart command sent.";}).catch(function(e){msg.textContent="Error: "+e;msg.style.color="#ff4444";});}' if _is_windows_agent else ''}
     </script>
 </body>
 </html>"""
@@ -3298,6 +3335,15 @@ def api_hw_snapshot_detail(snap_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/restart", methods=["POST"])
+def api_restart():
+    def _do_restart():
+        time.sleep(2)
+        subprocess.run(["sudo", "systemctl", "restart", "dashboard"])
+    threading.Thread(target=_do_restart, daemon=True).start()
+    return jsonify({"status": "restarting"})
+
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -3484,6 +3530,25 @@ def dashboard():
         .hw-alert-detail-field {{ margin-bottom:12px; }}
         .hw-alert-detail-label {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-alert-detail-value {{ color:#ddd; font-size:0.9em; margin-top:3px; white-space:pre-wrap; }}
+        /* Sticky jump menu */
+        .jump-nav {{ position:sticky; top:0; z-index:50; background:#111827; border-bottom:1px solid #1e2d4e;
+                     padding:6px 0; margin:0 -20px 12px -20px; display:flex; gap:4px; flex-wrap:wrap;
+                     align-items:center; padding-left:20px; padding-right:20px; }}
+        .jump-nav a {{ color:#888; text-decoration:none; font-size:0.8em; padding:4px 10px;
+                       border-radius:4px; border:1px solid #1e2d4e; white-space:nowrap; transition:all 0.15s; }}
+        .jump-nav a:hover {{ color:#00d4ff; border-color:#00d4ff; background:rgba(0,212,255,0.07); }}
+        /* Collapsible sections */
+        .section-chevron {{ font-size:0.7em; color:#555; flex-shrink:0; transition:transform 0.2s; }}
+        .section-badge {{ display:none; background:#ff4444; color:#fff; border-radius:10px;
+                          padding:2px 8px; font-size:0.7em; font-weight:bold; margin-left:6px; }}
+        /* Pihole tooltip */
+        .ph-info {{ display:inline-block; color:#555; cursor:help; font-size:0.8em;
+                    margin-left:4px; vertical-align:middle; position:relative; }}
+        .ph-info:hover .ph-tooltip {{ display:block; }}
+        .ph-tooltip {{ display:none; position:absolute; left:0; top:1.4em; background:#0d1117;
+                        border:1px solid #1e2d4e; border-radius:6px; padding:8px 12px;
+                        font-size:0.82em; color:#aaa; width:260px; z-index:20;
+                        white-space:normal; line-height:1.5; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
@@ -3496,6 +3561,15 @@ def dashboard():
     </span></h1>
     <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
+    <nav class="jump-nav">
+        <span style="color:#555;font-size:0.75em;margin-right:4px">Jump:</span>
+        <a href="#section-hw">🌡️ Hardware</a>
+        <a href="#section-firewall">🔥 AI Firewall</a>
+        <a href="#section-devices">🖥️ Devices</a>
+        <a href="#section-anomaly">🔍 Anomaly</a>
+        <a href="#section-tickets">🎫 Tickets</a>
+    </nav>
+
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
         <h2>🚨 Auto-Quarantined IPs</h2>
         <div id="quarantineList">{quarantine_banner_html}</div>
@@ -3504,7 +3578,11 @@ def dashboard():
     <div class="grid">
         <div class="card">
             <h2><span class="tier-text" data-beginner="Pi-hole — DNS Ad &amp; Tracker Blocker" data-intermediate="Pi-hole DNS Protection" data-pro="Pi-hole DNS">Pi-hole DNS Protection</span></h2>
-            <p><span class="tier-text" data-beginner="DNS Queries Today (all devices):" data-intermediate="Queries Today:" data-pro="Queries:">Queries Today:</span> <span class="stat" id="phTotal">{total}</span></p>
+            <p>
+                <span class="tier-text" data-beginner="DNS Queries Today (all devices):" data-intermediate="Queries Today:" data-pro="Queries:">Queries Today:</span>
+                <span class="stat" id="phTotal">{total}</span>
+                <span class="ph-info">ℹ<span class="ph-tooltip" id="phResetTooltip">Loading reset time…</span></span>
+            </p>
             <p><span class="tier-text" data-beginner="Blocked (ads, trackers, malware domains):" data-intermediate="Blocked:" data-pro="Blocked:">Blocked:</span> <span class="stat" id="phBlocked">{blocked}</span></p>
             <p><span class="tier-text" data-beginner="Block Rate (higher = more protection):" data-intermediate="Percent Blocked:" data-pro="Block %:">Percent Blocked:</span> <span class="stat" id="phPercent">{percent}%</span></p>
         </div>
@@ -3520,12 +3598,16 @@ def dashboard():
             <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>
         </div>
 
-        <div class="card full-width hw-card">
-            <h2>🌡️ <span class="tier-text" data-beginner="Hardware Health &amp; Temperatures" data-intermediate="Hardware Stats" data-pro="Hardware">Hardware Stats</span>
-                <button onclick="openHwModal()" class="hw-overview-btn" title="Open 24-hour combined graphs">
+        <div class="card full-width hw-card" id="section-hw">
+            <h2 style="cursor:pointer" onclick="toggleSection('hw')" data-section-badge="{len(hw_alerts_init)}">
+                <span class="section-chevron" id="chevron-hw">▼</span>
+                🌡️ <span class="tier-text" data-beginner="Hardware Health &amp; Temperatures" data-intermediate="Hardware Stats" data-pro="Hardware">Hardware Stats</span>
+                <span class="section-badge" id="badge-hw"></span>
+                <button onclick="event.stopPropagation();openHwModal()" class="hw-overview-btn" title="Open 24-hour combined graphs">
                     <span class="tier-text" data-beginner="Overview graphs ▸" data-intermediate="Overview ▸" data-pro="Overview ▸">Overview ▸</span>
                 </button>
             </h2>
+            <div id="section-hw-body">
             <div class="hw-grid">
                 <div class="hw-stat hw-clickable" onclick="openSensorPopup('cpu_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="CPU Temperature" data-intermediate="CPU Temp" data-pro="CPU °C">CPU Temp</span></div>
@@ -3580,11 +3662,15 @@ def dashboard():
                     data-pro="HW Alerts">Hardware Alerts</span></div>
                 <div id="hwAlertsList"></div>
             </div>
+            </div><!-- end section-hw-body -->
         </div>
 
-        <div class="card full-width">
-            <h2>🔥 <span class="tier-text" data-beginner="AI Firewall — Security Events Detected Today" data-intermediate="AI Firewall — Today's Activity" data-pro="AI Firewall">AI Firewall — Today's Activity</span>
-                <span style="float:right;font-size:0.8em">
+        <div class="card full-width" id="section-firewall">
+            <h2 style="cursor:pointer" onclick="toggleSection('firewall')" data-section-badge="{alert_counts['p1'] + alert_counts['p2']}">
+                <span class="section-chevron" id="chevron-firewall">▼</span>
+                🔥 <span class="tier-text" data-beginner="AI Firewall — Security Events Detected Today" data-intermediate="AI Firewall — Today's Activity" data-pro="AI Firewall">AI Firewall — Today's Activity</span>
+                <span class="section-badge" id="badge-firewall"></span>
+                <span style="float:right;font-size:0.8em" onclick="event.stopPropagation()">
                     <label style="color:#aaa;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
                         <input type="checkbox" id="showP3Toggle" onchange="toggleP3()" style="width:auto;margin-right:5px;vertical-align:middle">
                         <span class="tier-text"
@@ -3595,6 +3681,7 @@ def dashboard():
                     <a href="/firewall-db" target="_blank" rel="noopener" style="color:#00d4ff;text-decoration:none">📋 Alert Database</a>
                 </span>
             </h2>
+            <div id="section-firewall-body">
             <div>
                 <div class="counter-box counter-clickable" onclick="openFwDrilldown('total')" title="Click to see all rules firing today"><div class="counter-num total" id="cntTotal">{initial_total}</div>
                     <div><span class="tier-text" data-beginner="All Alerts Today" data-intermediate="Total" data-pro="Total">Total</span></div>
@@ -3648,18 +3735,24 @@ def dashboard():
                 {alerts_html}
                 </tbody>
             </table>
+            </div><!-- end section-firewall-body -->
         </div>
 
-        <div class="card full-width">
-            <h2>🖥️ <span class="tier-text" data-beginner="Devices on Your Network" data-intermediate="Network Devices" data-pro="Devices">Network Devices</span>
-                <span style="float:right;font-size:0.8em;color:#aaa"><span class="tier-text" data-beginner="✅ You trust this device &nbsp; ❓ Not yet verified" data-intermediate="✅ Trusted &nbsp; ❓ Unverified" data-pro="✅ Trusted ❓ Unknown">✅ Trusted &nbsp; ❓ Unverified</span></span>
+        <div class="card full-width" id="section-devices">
+            <h2 style="cursor:pointer" onclick="toggleSection('devices')" data-section-badge="0">
+                <span class="section-chevron" id="chevron-devices">▼</span>
+                🖥️ <span class="tier-text" data-beginner="Devices on Your Network" data-intermediate="Network Devices" data-pro="Devices">Network Devices</span>
+                <span class="section-badge" id="badge-devices"></span>
+                <span style="float:right;font-size:0.8em;color:#aaa" onclick="event.stopPropagation()"><span class="tier-text" data-beginner="✅ You trust this device &nbsp; ❓ Not yet verified" data-intermediate="✅ Trusted &nbsp; ❓ Unverified" data-pro="✅ Trusted ❓ Unknown">✅ Trusted &nbsp; ❓ Unverified</span></span>
             </h2>
+            <div id="section-devices-body">
             <table class="devices-table">
                 <thead><tr><th>IP</th><th>Friendly Name</th><th>Type</th><th>MAC</th><th>Trust</th></tr></thead>
                 <tbody id="devicesRows">
                 {devices_html}
                 </tbody>
             </table>
+            </div><!-- end section-devices-body -->
         </div>
 
         <div id="moduleCardsContainer" style="display:contents">
@@ -3916,6 +4009,88 @@ def dashboard():
     </div>
 
     <script>
+        // ── Pi-hole UTC reset tooltip ──────────────────────────────────────────
+        (function() {{
+            var now = new Date();
+            var nextUtcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
+            var opts = {{hour: '2-digit', minute: '2-digit', timeZoneName: 'short'}};
+            var localStr = nextUtcMidnight.toLocaleTimeString(undefined, opts);
+            var tier = localStorage.getItem('nemesisTier') || 'intermediate';
+            var msgs = {{
+                beginner: "Pi-hole's daily count resets at a set time each night — next reset at " + localStr,
+                intermediate: "Pi-hole resets stats at UTC midnight. In your timezone that's " + localStr,
+                pro: "Pi-hole FTL resets at UTC 00:00. Next reset: " + nextUtcMidnight.toLocaleString()
+            }};
+            var tip = document.getElementById('phResetTooltip');
+            if (tip) tip.textContent = msgs[tier] || msgs.intermediate;
+        }})();
+
+        // ── Collapsible sections ───────────────────────────────────────────────
+        var _sectionIds = ['hw', 'firewall', 'devices', 'anomaly', 'tickets'];
+
+        function toggleSection(id) {{
+            var body = document.getElementById('section-' + id + '-body');
+            var chevron = document.getElementById('chevron-' + id);
+            if (!body) return;
+            var collapsed = body.style.display === 'none';
+            body.style.display = collapsed ? '' : 'none';
+            if (chevron) chevron.textContent = collapsed ? '▼' : '▶';
+            localStorage.setItem('sec-collapsed-' + id, collapsed ? '0' : '1');
+            _updateBadge(id);
+        }}
+
+        function _getBadgeCount(id) {{
+            var h2 = document.querySelector('#section-' + id + ' > h2');
+            if (!h2) return 0;
+            var base = parseInt(h2.getAttribute('data-section-badge') || '0', 10);
+            // Live-update from DOM for sections we can read
+            if (id === 'firewall') {{
+                var p1 = parseInt((document.getElementById('cntP1') || {{}}).textContent || '0', 10);
+                var p2 = parseInt((document.getElementById('cntP2') || {{}}).textContent || '0', 10);
+                base = p1 + p2;
+            }} else if (id === 'hw') {{
+                var alerts = document.querySelectorAll('#hwAlertsList .hw-alert-row');
+                base = alerts.length || base;
+            }}
+            return base;
+        }}
+
+        function _updateBadge(id) {{
+            var body = document.getElementById('section-' + id + '-body');
+            var badge = document.getElementById('badge-' + id);
+            if (!badge) return;
+            var collapsed = body && body.style.display === 'none';
+            if (!collapsed) {{ badge.style.display = 'none'; return; }}
+            var count = _getBadgeCount(id);
+            if (count > 0) {{
+                badge.textContent = count + ' new';
+                badge.style.display = 'inline-block';
+                badge.style.background = (id === 'firewall') ? '#ff4444' : '#ff8800';
+            }} else {{
+                badge.style.display = 'none';
+            }}
+        }}
+
+        function _initCollapseSections() {{
+            _sectionIds.forEach(function(id) {{
+                var stored = localStorage.getItem('sec-collapsed-' + id);
+                if (stored === '1') {{
+                    var body = document.getElementById('section-' + id + '-body');
+                    var chevron = document.getElementById('chevron-' + id);
+                    if (body) {{ body.style.display = 'none'; }}
+                    if (chevron) chevron.textContent = '▶';
+                    _updateBadge(id);
+                }}
+            }});
+        }}
+
+        // Also update badges when hw alerts list is updated
+        function _refreshSectionBadges() {{
+            _sectionIds.forEach(function(id) {{
+                _updateBadge(id);
+            }});
+        }}
+
         var currentRuleId = "";
         var currentSrcIp = "";
 
@@ -4430,6 +4605,7 @@ def dashboard():
                     '<span style="color:#888;font-size:0.8em">▸</span>' +
                 '</div>';
             }}).join("");
+            _refreshSectionBadges();
         }}
 
         function openHwAlertDetailModal(idx) {{
@@ -5222,6 +5398,7 @@ def dashboard():
                     document.getElementById("cntP2").textContent = d.alert_counts.p2;
                     document.getElementById("cntP3").textContent = d.alert_counts.p3;
                     applyP3Visibility(isP3Shown());
+                    _refreshSectionBadges();
                     var banner = document.getElementById("quarantineBanner");
                     var list = document.getElementById("quarantineList");
                     if (d.quarantines && d.quarantines.length) {{
@@ -5450,6 +5627,11 @@ def dashboard():
                 var m = document.getElementById("fwDrillModal");
                 if (m && m.style.display !== "none") closeFwDrilldown();
             }}
+        }});
+
+        // Initialize collapsible sections on load
+        document.addEventListener("DOMContentLoaded", function() {{
+            _initCollapseSections();
         }});
     </script>
 </body>

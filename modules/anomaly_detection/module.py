@@ -1468,12 +1468,17 @@ def _render_card(building: bool, built: bool) -> str:
     js = _card_js()
 
     return f"""
-<div class="card full-width">
-  <h2 style="display:flex;align-items:center;gap:8px">
+<div class="card full-width" id="section-anomaly">
+  <h2 style="display:flex;align-items:center;gap:8px;cursor:pointer"
+      onclick="toggleSection('anomaly')"
+      data-section-badge="{total_open}">
+    <span class="section-chevron" id="chevron-anomaly">▼</span>
     🔍 Zero-Day / Anomaly Detection{status_badge}
-    <span style="margin-left:auto;font-size:0.78em;font-weight:normal">{stats_html}</span>
+    <span class="section-badge" id="badge-anomaly" style="display:none;background:#ff8800;color:#1a1a2e;border-radius:10px;padding:2px 8px;font-size:0.72em;font-weight:bold;margin-left:6px"></span>
+    <span style="margin-left:auto;font-size:0.78em;font-weight:normal;cursor:default" onclick="event.stopPropagation()">{stats_html}</span>
   </h2>
 
+  <div id="section-anomaly-body">
   {rate_notice}
 
   <div style="overflow-x:auto">
@@ -1500,6 +1505,7 @@ def _render_card(building: bool, built: bool) -> str:
   {ai_modal}
   {cisa_modal}
   <script>{js}</script>
+  </div><!-- end section-anomaly-body -->
 </div>"""
 
 

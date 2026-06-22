@@ -851,7 +851,7 @@ class Module(NemesisModule):
         color   = "#ffaa00" if n > 0 else "#555"
         label   = f"{n} open ticket{'s' if n != 1 else ''}"
         return (
-            f'<div class="card" style="cursor:pointer" onclick="location.href=\'/tickets\'">'
+            f'<div class="card" id="section-tickets" style="cursor:pointer" onclick="window.open(\'/tickets\',\'_blank\')">'
             f'  <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;'
             f'letter-spacing:0.06em;margin-bottom:4px">🎫 Tickets</div>'
             f'  <div style="color:{color};font-size:1.3em;font-weight:bold">{n}</div>'
