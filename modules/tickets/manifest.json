@@ -1,0 +1,12 @@
+{
+  "name": "tickets",
+  "display_name": "Tickets & Notes",
+  "version": "1.0.0",
+  "description": "Unified note-taking and ticket tracking for Suricata alerts and hardware sensor events. Notes are lightweight one-off annotations; tickets are trackable issues with status, priority, auto-numbering (NF-XXXX), and relevance scoring against existing tickets and notes.",
+  "category": "operations",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": true,
+  "confirmation_required": false
+}

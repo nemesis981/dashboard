@@ -246,7 +246,7 @@ def _get_today_drilldown():
 
 
 def _enrich_drilldown_with_db(rules: dict) -> dict:
-    """Add action/risk_level/note from DB to each rule entry. Returns new dict."""
+    """Add action/risk_level from DB to each rule entry. Returns new dict."""
     if not rules:
         return rules
     try:
@@ -260,18 +260,10 @@ def _enrich_drilldown_with_db(rules: dict) -> dict:
             ids,
         )
         db_rows = {r["rule_id"]: dict(r) for r in c.fetchall()}
-        c.execute(
-            f"""SELECT rule_id, note FROM alert_notes
-                WHERE rule_id IN ({placeholders})
-                GROUP BY rule_id HAVING MAX(created_at)""",
-            ids,
-        )
-        notes = {r["rule_id"]: r["note"] for r in c.fetchall()}
         conn.close()
     except Exception:
         log.exception("_enrich_drilldown_with_db failed")
         db_rows = {}
-        notes = {}
 
     enriched = {}
     for rid, entry in rules.items():
@@ -279,7 +271,6 @@ def _enrich_drilldown_with_db(rules: dict) -> dict:
         db = db_rows.get(rid, {})
         e["action"] = db.get("action", "none")
         e["risk_level"] = db.get("risk_level", "")
-        e["note"] = notes.get(rid, "")
         enriched[rid] = e
     return enriched
 
@@ -476,22 +467,6 @@ def _ensure_quarantines_table():
         conn.close()
 
 
-def _ensure_alert_notes_table():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS alert_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                rule_id TEXT NOT NULL,
-                note TEXT NOT NULL,
-                author TEXT NOT NULL DEFAULT 'admin',
-                created_at TEXT NOT NULL
-            )
-        """)
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_alert_notes_rule ON alert_notes(rule_id)")
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def get_active_quarantines():
@@ -1137,22 +1112,7 @@ def compute_health_sparkline(samples, fan_status=None):
 
 @app.route("/api/alert-breakdown-24h")
 def api_alert_breakdown_24h():
-    data = get_24h_alert_stats()
-    if not data.get("breakdown"):
-        return jsonify(data)
-    _ensure_alert_notes_table()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        nc = {r[0]: r[1] for r in conn.execute(
-            "SELECT rule_id, COUNT(*) FROM alert_notes GROUP BY rule_id"
-        )}
-        conn.close()
-        return jsonify({
-            **data,
-            "breakdown": [dict(b, note_count=nc.get(b["type"], 0)) for b in data["breakdown"]]
-        })
-    except Exception:
-        return jsonify(data)
+    return jsonify(get_24h_alert_stats())
 
 
 @app.route("/api/health-score")
@@ -1323,6 +1283,9 @@ def analyze_alert(rule_id):
                 "explanation": existing[4],
                 "risk_level": existing[5],
                 "action": existing[7],
+                "times_seen": existing[8] or 1,
+                "last_seen": existing[10] or "",
+                "rule_name": existing[2] or "",
                 "recommended_action": "See previous decision",
                 "reason": "Retrieved from local database",
                 "cached": True,
@@ -1374,7 +1337,9 @@ Alert: {raw_alert}
                 (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], new_action, now, now))
         conn.commit()
         conn.close()
-        return jsonify({**analysis, "cached": False, "src_ip": src_ip, "enrichment": enrichment})
+        return jsonify({**analysis, "cached": False, "src_ip": src_ip,
+                        "enrichment": enrichment, "times_seen": 1,
+                        "last_seen": now, "action": new_action, "rule_name": ""})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1756,6 +1721,85 @@ def settings_page():
                  style="height:1.2em;font-size:0.8em;margin-top:8px;color:#00ff88"></div>
         </div>"""
 
+        # Tickets module: inject settings sub-section below its module row
+        if name == "tickets":
+            try:
+                from modules.tickets.module import _get_settings as _tk_settings
+                _tk = _tk_settings()
+            except Exception:
+                _tk = {"relevance_threshold": 70, "auto_ticket_on_alert": True,
+                       "min_severity_for_auto_ticket": "HIGH", "max_related_results": 5}
+            _tk_auto_chk = "checked" if _tk.get("auto_ticket_on_alert") else ""
+            _tk_sev      = str(_tk.get("min_severity_for_auto_ticket", "HIGH"))
+            module_rows_html += f"""
+        <div id="tk-subsettings" class="module-subsettings"
+             style="display:{'block' if enabled else 'none'}">
+            <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
+                        letter-spacing:0.06em;margin-bottom:10px;font-weight:bold">
+                Ticket &amp; Note Settings
+            </div>
+
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Auto-create a ticket when a new high-severity alert fires"
+                        data-intermediate="Auto-open ticket on alert"
+                        data-pro="Auto-ticket on alert">Auto-open ticket on alert</span>
+                </span>
+                <label class="toggle-switch" style="flex-shrink:0">
+                    <input type="checkbox" id="tk-auto-ticket" {_tk_auto_chk}
+                           onchange="saveTicketSettings()">
+                    <span class="toggle-slider"></span>
+                </label>
+            </div>
+
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Minimum alert severity level that triggers auto-ticket creation"
+                        data-intermediate="Min severity for auto-ticket"
+                        data-pro="Min severity">Min severity for auto-ticket</span>
+                </span>
+                <select id="tk-min-severity" onchange="saveTicketSettings()"
+                        style="background:#1a1a2e;border:1px solid #333;color:#eee;
+                               padding:3px 6px;border-radius:4px;font-size:0.86em">
+                    <option value="LOW"      {"selected" if _tk_sev=="LOW"      else ""}>LOW</option>
+                    <option value="MEDIUM"   {"selected" if _tk_sev=="MEDIUM"   else ""}>MEDIUM</option>
+                    <option value="HIGH"     {"selected" if _tk_sev=="HIGH"     else ""}>HIGH</option>
+                    <option value="CRITICAL" {"selected" if _tk_sev=="CRITICAL" else ""}>CRITICAL</option>
+                </select>
+            </div>
+
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="How similar (0–100) another ticket must be before it's shown as possibly related to a new one"
+                        data-intermediate="Relevance threshold for related tickets (0–100)"
+                        data-pro="Relevance threshold (0–100)">Relevance threshold (0–100)</span>
+                </span>
+                <input type="number" id="tk-threshold"
+                       value="{html.escape(str(_tk.get('relevance_threshold', 70)))}"
+                       min="0" max="100" class="module-subsettings-input"
+                       onchange="saveTicketSettings()" oninput="saveTicketSettings()">
+            </div>
+
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Maximum number of related tickets to surface per new ticket"
+                        data-intermediate="Max related results shown"
+                        data-pro="Max related results">Max related results</span>
+                </span>
+                <input type="number" id="tk-max-related"
+                       value="{html.escape(str(_tk.get('max_related_results', 5)))}"
+                       min="1" max="20" class="module-subsettings-input"
+                       onchange="saveTicketSettings()" oninput="saveTicketSettings()">
+            </div>
+
+            <div id="tk-settings-status"
+                 style="height:1.2em;font-size:0.8em;margin-top:8px;color:#00ff88"></div>
+        </div>"""
+
     if not module_rows_html:
         module_rows_html = '<p style="color:#555;font-style:italic">No modules found in modules/ directory.</p>'
 
@@ -2002,9 +2046,11 @@ def settings_page():
                     }} else {{
                         statusEl.style.color = enabled ? '#00ff88' : '#666';
                         statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
-                        // Show/hide anomaly sub-settings when toggled
-                        if (name === 'anomaly_detection') {{
-                            var sub = document.getElementById('ad-subsettings');
+                        // Show/hide module sub-settings when toggled
+                        var subIds = {{anomaly_detection: 'ad-subsettings', tickets: 'tk-subsettings'}};
+                        var subId = subIds[name];
+                        if (subId) {{
+                            var sub = document.getElementById(subId);
                             if (sub) sub.style.display = enabled ? 'block' : 'none';
                         }}
                     }}
@@ -2072,6 +2118,35 @@ def settings_page():
             if (dEl) dEl.textContent = '~$' + (d * _COST_PER_ANALYSIS).toFixed(3);
         }}
         updateAICostEstimate();
+
+        function saveTicketSettings() {{
+            var status = document.getElementById('tk-settings-status');
+            if (!status) return;
+            status.style.color = '#aaa';
+            status.textContent = 'Saving…';
+            var payload = {{
+                auto_ticket_on_alert:         document.getElementById('tk-auto-ticket')  ? document.getElementById('tk-auto-ticket').checked  : true,
+                min_severity_for_auto_ticket: document.getElementById('tk-min-severity') ? document.getElementById('tk-min-severity').value    : 'HIGH',
+                relevance_threshold:          parseInt(document.getElementById('tk-threshold')   ? document.getElementById('tk-threshold').value   : 70),
+                max_related_results:          parseInt(document.getElementById('tk-max-related') ? document.getElementById('tk-max-related').value : 5),
+            }};
+            fetch('/api/tickets/settings', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify(payload)
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                status.textContent = d.ok ? '✓ Saved' : 'Error: ' + (d.error || 'unknown');
+                clearTimeout(status._t);
+                status._t = setTimeout(function() {{ status.textContent = ''; }}, 3000);
+            }})
+            .catch(function() {{
+                status.style.color = '#ff4444';
+                status.textContent = 'Request failed';
+            }});
+        }}
 
         var _aiUsageCache = null;
         function switchUsagePeriod(period) {{
@@ -2592,15 +2667,11 @@ def firewall_db():
         "Suricata sig match. LOW risk. See alert view for raw context."
     )
 
-    _ensure_alert_notes_table()
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("SELECT * FROM alerts ORDER BY last_seen DESC")
         alerts = c.fetchall()
-        note_counts = {r[0]: r[1] for r in conn.execute(
-            "SELECT rule_id, COUNT(*) FROM alert_notes GROUP BY rule_id"
-        )}
         conn.close()
         rows = ""
         for a in alerts:
@@ -2612,9 +2683,6 @@ def firewall_db():
             action_val = html.escape(str(a[7] or ""))
             times_seen = html.escape(str(a[8] or ""))
             last_seen = html.escape(str(a[10] or ""))
-            nc = note_counts.get(rule_id_raw, 0)
-            note_btn_style = "color:#00d4ff;font-weight:bold" if nc > 0 else "color:#555"
-            note_btn_label = str(nc) if nc > 0 else "None"
             rule_id_js = json.dumps(rule_id_raw)
             row_notes_onclick = html.escape(f"openDbNotes({rule_id_js})")
 
@@ -2655,7 +2723,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
                 </td>
-                <td style="{note_btn_style};font-size:0.85em;white-space:nowrap">{html.escape(note_btn_label)} ▸</td>
+                <td style="color:#555;font-size:0.85em;white-space:nowrap">Notes ▸</td>
             </tr>"""
         return f"""<!DOCTYPE html>
 <html>
@@ -2721,7 +2789,7 @@ def firewall_db():
             document.getElementById("dbNoteInput").value = "";
             document.getElementById("dbNotesList").innerHTML =
                 "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
-            fetch("/api/notes/" + encodeURIComponent(ruleId))
+            fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     _dbAllNotes = notes;
@@ -2777,7 +2845,7 @@ def firewall_db():
             var status = document.getElementById("dbNoteStatus");
             status.style.color = "#aaa";
             status.textContent = "Saving…";
-            fetch("/api/notes/" + encodeURIComponent(_dbNotesRuleId), {{
+            fetch("/api/tickets/notes/" + encodeURIComponent(_dbNotesRuleId), {{
                 method: "POST",
                 headers: {{"Content-Type": "application/json"}},
                 body: JSON.stringify({{note: text}})
@@ -2806,7 +2874,7 @@ def firewall_db():
             var el = document.getElementById("dbRelatedNotesList");
             el.style.display = "block";
             el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
-            fetch("/api/notes/related/" + encodeURIComponent(_dbNotesRuleId))
+            fetch("/api/tickets/related/" + encodeURIComponent(_dbNotesRuleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{
@@ -2837,7 +2905,7 @@ def firewall_db():
             }}
             resEl.style.display = "block";
             resEl.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
-            fetch("/api/notes/search?q=" + encodeURIComponent(q))
+            fetch("/api/tickets/search?q=" + encodeURIComponent(q))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(results) {{
                     if (results.length === 0) {{
@@ -2933,104 +3001,6 @@ def db_action(alert_id, action):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/notes/<path:rule_id>")
-def get_notes(rule_id):
-    _ensure_alert_notes_table()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT id, note, author, created_at FROM alert_notes "
-            "WHERE rule_id=? ORDER BY created_at DESC",
-            (rule_id,)
-        ).fetchall()
-        conn.close()
-        return jsonify([{"id": r[0], "note": r[1], "author": r[2], "created_at": r[3]} for r in rows])
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/notes/<path:rule_id>", methods=["POST"])
-def add_note(rule_id):
-    _ensure_alert_notes_table()
-    try:
-        data = request.get_json(silent=True) or {}
-        note = (data.get("note") or "").strip()
-        if not note:
-            return jsonify({"error": "empty note"}), 400
-        author = (data.get("author") or "admin").strip()[:50]
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute(
-            "INSERT INTO alert_notes (rule_id, note, author, created_at) VALUES (?, ?, ?, ?)",
-            (rule_id, note[:2000], author, now)
-        )
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/notes/search")
-def search_notes():
-    _ensure_alert_notes_table()
-    try:
-        q = (request.args.get("q") or "").strip()
-        if not q:
-            return jsonify([])
-        conn = sqlite3.connect(DB_PATH)
-        rows = conn.execute(
-            "SELECT n.id, n.rule_id, n.note, n.author, n.created_at, a.rule_name "
-            "FROM alert_notes n LEFT JOIN alerts a ON a.rule_id = n.rule_id "
-            "WHERE n.note LIKE ? ORDER BY n.created_at DESC LIMIT 100",
-            (f"%{q}%",)
-        ).fetchall()
-        conn.close()
-        return jsonify([
-            {"id": r[0], "rule_id": r[1], "note": r[2], "author": r[3],
-             "created_at": r[4], "rule_name": r[5]}
-            for r in rows
-        ])
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/notes/related/<path:rule_id>")
-def related_notes(rule_id):
-    _ensure_alert_notes_table()
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        alert = conn.execute(
-            "SELECT src_ip FROM alerts WHERE rule_id=?", (rule_id,)
-        ).fetchone()
-        if not alert or not alert[0]:
-            conn.close()
-            return jsonify([])
-        src_ip = alert[0]
-        other_ids = [
-            r[0] for r in conn.execute(
-                "SELECT DISTINCT rule_id FROM alerts WHERE src_ip=? AND rule_id!=?",
-                (src_ip, rule_id)
-            ).fetchall()
-        ]
-        if not other_ids:
-            conn.close()
-            return jsonify([])
-        placeholders = ",".join("?" * len(other_ids))
-        rows = conn.execute(
-            f"SELECT n.id, n.rule_id, n.note, n.author, n.created_at, a.rule_name "
-            f"FROM alert_notes n LEFT JOIN alerts a ON a.rule_id = n.rule_id "
-            f"WHERE n.rule_id IN ({placeholders}) ORDER BY n.created_at DESC LIMIT 50",
-            other_ids
-        ).fetchall()
-        conn.close()
-        return jsonify([
-            {"id": r[0], "rule_id": r[1], "note": r[2], "author": r[3],
-             "created_at": r[4], "rule_name": r[5]}
-            for r in rows
-        ])
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/modules")
@@ -3685,6 +3655,37 @@ def dashboard():
         var _allNotes = [];
         var _notesSortDesc = true;
 
+        function _actionBadge(action) {{
+            var colors = {{
+                block:   "#ff4444", ignore: "#555", monitor: "#00d4ff",
+                pending: "#ffaa00", none:   "#555"
+            }};
+            var labels = {{
+                block:   tierText("Blocked — source IP is blocked", "Blocked",        "block"),
+                ignore:  tierText("Ignored — alert suppressed",     "Ignored",        "ignore"),
+                monitor: tierText("Monitoring — kept under watch",   "Monitoring",     "monitor"),
+                pending: tierText("Pending Review — needs a decision","Pending Review","pending"),
+                none:    tierText("No action taken yet",             "No action",      "none"),
+            }};
+            var a = action || "none";
+            return "<span style='display:inline-block;padding:2px 8px;border-radius:3px;"
+                + "background:#0d1117;border:1px solid " + (colors[a]||"#555") + "33;"
+                + "color:" + (colors[a]||"#555") + ";font-size:0.78em;font-weight:bold'>"
+                + (labels[a] || a) + "</span>";
+        }}
+
+        function _tierExplanation(data) {{
+            var seen = data.times_seen || 1;
+            var action = data.action || "none";
+            var risk   = data.risk_level || "UNKNOWN";
+            var b = "This alert has been seen " + seen + " time(s) and is currently marked as \""
+                  + action + "\". Risk level: " + risk + ".";
+            var m = "Seen " + seen + "×. Action: " + action + ". Risk: " + risk + ".";
+            var p = "seen=" + seen + " action=" + action + " risk=" + risk;
+            return "<div style='font-size:0.82em;color:#888;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
+                + tierText(b, m, p) + "</div>";
+        }}
+
         function viewAlert(ruleId, rawAlert) {{
             currentRuleId = ruleId;
             currentSrcIp = "";
@@ -3701,28 +3702,64 @@ def dashboard():
                 .then(r => r.json())
                 .then(data => {{
                     currentSrcIp = data.src_ip || "";
-                    var cached = data.cached
-                        ? " <span style='color:#aaa'>(" + tierText("from cache", "cached", "cached") + ")</span>"
-                        : " <span style='color:#00ff88'>(" + tierText("freshly analyzed by AI", "AI analyzed", "AI") + ")</span>";
+                    var seen = data.times_seen || 1;
+
+                    // 1. Prior action badge
+                    var actionBadge = _actionBadge(data.action);
+
+                    // 2. Previous instances row (only when seen > 1)
+                    var prevInstances = "";
+                    if (seen > 1) {{
+                        var lastTs = (data.last_seen || "").substring(0, 16).replace("T", " ");
+                        prevInstances = "<details style='margin:4px 0 8px;font-size:0.82em'>"
+                            + "<summary style='cursor:pointer;color:#aaa'>"
+                            + tierText(
+                                "Seen " + seen + " times — expand for details",
+                                "Previous instances (" + seen + ")",
+                                seen + "× seen"
+                              )
+                            + "</summary>"
+                            + "<div style='color:#666;padding:4px 0 0 10px'>"
+                            + tierText(
+                                "This alert has triggered " + seen + " times. Last occurrence: " + (lastTs||"unknown") + ".",
+                                "Count: " + seen + " · Last seen: " + (lastTs||"—"),
+                                "n=" + seen + " last=" + (lastTs||"?")
+                              )
+                            + "</div></details>";
+                    }}
+
+                    // 3. AI status indicator
+                    var aiStatus = data.cached
+                        ? " <span style='color:#aaa;font-size:0.78em'>(" + tierText("previously analysed — from cache", "cached result", "cached") + ")</span>"
+                        : " <span style='color:#00ff88;font-size:0.78em'>(" + tierText("freshly analysed by AI just now", "AI analyzed", "fresh") + ")</span>";
+
                     var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
                     var riskLabel = tierText(
                         {{HIGH:"HIGH — Investigate this now", MEDIUM:"MEDIUM — Worth reviewing", LOW:"LOW — Likely safe"}}[data.risk_level] || data.risk_level,
                         data.risk_level || "UNKNOWN",
                         data.risk_level || "?"
                     );
-                    document.getElementById("modalContent").innerHTML = `
-                        <p><strong>${{tierText("Threat Level","Risk Level","Risk")}}:</strong> <span style="color:${{riskColor}}">${{escapeHtml(riskLabel)}}</span>${{cached}}</p>
-                        <p><strong>${{tierText("What is this?","Explanation","Detail")}}:</strong> ${{escapeHtml(data.explanation || "No explanation available")}}</p>
-                        <p><strong>${{tierText("What should I do?","Recommended Action","Action")}}:</strong> ${{escapeHtml(data.recommended_action || "Monitor")}}</p>
-                        <p><strong>${{tierText("Why?","Reason","Reason")}}:</strong> ${{escapeHtml(data.reason || "")}}</p>
-                        ${{renderEnrichment(data.enrichment)}}
-                    `;
+
+                    // 5. Tiered explanation block
+                    var tierExpl = _tierExplanation(data);
+
+                    document.getElementById("modalContent").innerHTML =
+                        // action badge at top
+                        "<div style='margin-bottom:8px'>" + actionBadge + "</div>"
+                        + tierExpl
+                        + prevInstances
+                        + "<p><strong>" + tierText("Threat Level","Risk Level","Risk") + ":</strong>"
+                        + " <span style='color:" + riskColor + "'>" + escapeHtml(riskLabel) + "</span>" + aiStatus + "</p>"
+                        + "<p><strong>" + tierText("What is this?","Explanation","Detail") + ":</strong> " + escapeHtml(data.explanation || "No explanation available") + "</p>"
+                        + "<p><strong>" + tierText("What should I do?","Recommended Action","Action") + ":</strong> " + escapeHtml(data.recommended_action || "Monitor") + "</p>"
+                        + "<p><strong>" + tierText("Why?","Reason","Reason") + ":</strong> " + escapeHtml(data.reason || "") + "</p>"
+                        + renderEnrichment(data.enrichment);
                     if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {{
                         document.getElementById("btnReport").style.display = "inline-block";
                     }}
                 }})
                 .catch(e => {{
-                    document.getElementById("modalContent").innerHTML = "<p style=\'color:#ff4444\'>Error: " + escapeHtml(e) + "</p>";
+                    document.getElementById("modalContent").innerHTML = "<p style='color:#ff4444'>Error: " + escapeHtml(e) + "</p>";
                 }});
         }}
 
@@ -3772,7 +3809,7 @@ def dashboard():
             document.getElementById("noteStatus").textContent = "";
             document.getElementById("notesList").innerHTML =
                 "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
-            fetch("/api/notes/" + encodeURIComponent(ruleId))
+            fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     _allNotes = notes;
@@ -3828,7 +3865,7 @@ def dashboard():
             var status = document.getElementById("noteStatus");
             status.style.color = "#aaa";
             status.textContent = tierText("Saving…", "Saving…", "…");
-            fetch("/api/notes/" + encodeURIComponent(_currentNotesRuleId), {{
+            fetch("/api/tickets/notes/" + encodeURIComponent(_currentNotesRuleId), {{
                 method: "POST",
                 headers: {{"Content-Type": "application/json"}},
                 body: JSON.stringify({{note: text}})
@@ -3857,7 +3894,7 @@ def dashboard():
             var el = document.getElementById("relatedNotesList");
             el.style.display = "block";
             el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
-            fetch("/api/notes/related/" + encodeURIComponent(_currentNotesRuleId))
+            fetch("/api/tickets/related/" + encodeURIComponent(_currentNotesRuleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{
@@ -4134,7 +4171,7 @@ def dashboard():
             document.getElementById("hwNoteStatus").textContent = "";
             document.getElementById("hwNotesList").innerHTML =
                 "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
-            fetch("/api/notes/" + encodeURIComponent(alertKey))
+            fetch("/api/tickets/notes/" + encodeURIComponent(alertKey))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     _hwAllNotes = notes;
@@ -4188,7 +4225,7 @@ def dashboard():
             var status = document.getElementById("hwNoteStatus");
             status.style.color = "#aaa";
             status.textContent = tierText("Saving…", "Saving…", "…");
-            fetch("/api/notes/" + encodeURIComponent(_hwNotesKey), {{
+            fetch("/api/tickets/notes/" + encodeURIComponent(_hwNotesKey), {{
                 method: "POST",
                 headers: {{"Content-Type": "application/json"}},
                 body: JSON.stringify({{note: text}})
@@ -4217,7 +4254,7 @@ def dashboard():
             var el = document.getElementById("hwRelatedNotesList");
             el.style.display = "block";
             el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
-            fetch("/api/notes/related/" + encodeURIComponent(_hwNotesKey))
+            fetch("/api/tickets/related/" + encodeURIComponent(_hwNotesKey))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{

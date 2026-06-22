@@ -320,6 +320,24 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
     else:
         logging.error("HW alert email failed: %s (cooldown still recorded)", key)
 
+    try:
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        from modules.tickets.module import open_ticket as _open_ticket, _get_settings as _tk_settings
+        _tk = _tk_settings()
+        _sev_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        _min_sev = _tk.get("min_severity_for_auto_ticket", "HIGH")
+        if _tk.get("auto_ticket_on_alert", True) and \
+                _sev_order.get(severity, 0) >= _sev_order.get(_min_sev, 2):
+            _open_ticket(
+                sensor_key=key,
+                title=f"Auto: {breach}",
+                body=body,
+                priority=severity,
+            )
+    except Exception:
+        pass  # never crash watchdog
+
 
 def check_hw_metrics():
     now = time.time()
