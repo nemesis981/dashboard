@@ -3119,6 +3119,7 @@ def dashboard():
 <html>
 <head>
     <title>Nemesis Firewall</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; margin: 0; }}
         h1 {{ color: #00d4ff; margin-bottom: 5px; }}
@@ -3678,9 +3679,8 @@ def dashboard():
             var seen = data.times_seen || 1;
             var action = data.action || "none";
             var risk   = data.risk_level || "UNKNOWN";
-            var b = "This alert has been seen " + seen + " time(s) and is currently marked as \""
-                  + action + "\". Risk level: " + risk + ".";
-            var m = "Seen " + seen + "×. Action: " + action + ". Risk: " + risk + ".";
+            var b = 'This alert has been seen ' + seen + ' time(s) and is currently marked as "' + action + '". Risk level: ' + risk + '.';
+            var m = 'Seen ' + seen + '×. Action: ' + action + '. Risk: ' + risk + '.';
             var p = "seen=" + seen + " action=" + action + " risk=" + risk;
             return "<div style='font-size:0.82em;color:#888;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
                 + tierText(b, m, p) + "</div>";
