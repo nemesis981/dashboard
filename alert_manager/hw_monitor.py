@@ -12,8 +12,10 @@ import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from logging.handlers import RotatingFileHandler
 
 import psutil
@@ -22,7 +24,8 @@ DB_PATH      = "/home/paul/dashboard/alert_manager/alerts.db"
 LOG_FILE     = "/home/paul/dashboard/alert_manager/hw_monitor.log"
 HW_MAP_PATH  = "/home/paul/dashboard/alert_manager/hw_map.json"
 NET_IFACE    = "enp131s0"
-SAMPLE_INTERVAL = 300
+SAMPLE_INTERVAL  = 300
+WA_LISTEN_PORT   = 5001   # port for Windows-agent POST receiver
 
 log = logging.getLogger("hw_monitor")
 log.setLevel(logging.INFO)
@@ -467,6 +470,24 @@ def _extract_temps_and_fans(s):
 
 def get_live_metrics():
     """Snapshot of current metrics for the dashboard card. Cheap, no delta state."""
+    hw_map = _load_hw_map()
+    if hw_map and hw_map.get("source") == "windows_agent":
+        # In windows_agent mode the DB is the source of truth.  Return the
+        # most recent sample written by the HTTP listener.
+        samples = get_recent_samples(limit=1)
+        if samples:
+            m = samples[0].copy()
+            m["fan_status"] = get_fan_status()
+            return m
+        return {
+            "cpu_temp": None, "ambient_temp": None, "nvme_temp": None,
+            "fans": [], "cpu_percent": None, "ram_used_gb": None,
+            "ram_total_gb": None, "ram_percent": None,
+            "gpu_temp": None, "gpu_fan_percent": None, "gpu_power_watts": None,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "fan_status": get_fan_status(),
+        }
+
     sensors = _read_sensors()
     metrics = _extract_temps_and_fans(sensors)
     vm = psutil.virtual_memory()
@@ -653,6 +674,142 @@ def _bootstrap_fan_status():
         log.warning("fan_status bootstrap failed: %s", e)
 
 
+# ── Windows agent source ──────────────────────────────────────────────────────
+# When hw_map.json contains {"source": "windows_agent"}, hw_monitor skips all
+# lm-sensors reads and instead receives pre-labeled JSON sensor data from a
+# Python agent running on the Windows host via POST /hw_data on port 5001.
+#
+# UFW: allow inbound on port 5001 from the Windows host IP only, e.g.:
+#   sudo ufw allow from <host_ip> to any port 5001 proto tcp
+# Do NOT expose this port globally — the listener has no authentication.
+
+
+def _wa_payload_to_metrics(payload: dict) -> dict:
+    """Convert a Windows-agent POST body to the metrics dict used by insert_sample().
+
+    Expected payload shape:
+      {
+        "source": "windows_agent",
+        "timestamp": "2026-06-22T13:00:00",
+        "sensors": {
+          "cpu_temp":    {"value": 65.0, "unit": "°C"},
+          "gpu_temp":    {"value": 72.0, "unit": "°C"},
+          "nvme_temp":   {"value": 41.0, "unit": "°C"},
+          "ram_percent": {"value": 45.2, "unit": "%"},
+          "fan1":        {"value": 1200,  "unit": "RPM", "name": "CPU Fan"},
+          ...
+        }
+      }
+    """
+    sensors = payload.get("sensors", {})
+    ts = payload.get("timestamp") or datetime.now().isoformat(timespec="seconds")
+
+    def _val(key, cast=float):
+        entry = sensors.get(key)
+        if entry is None:
+            return None
+        try:
+            return cast(entry["value"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    # Collect all fan* keys (excluding gpu_fan_percent which is its own field)
+    fans = []
+    for key, entry in sorted(sensors.items()):
+        if key.startswith("fan") and key != "gpu_fan_percent":
+            try:
+                rpm = int(float(entry["value"]))
+                label = entry.get("name") or key.replace("_", " ").title()
+                fans.append({"unique_key": key, "label": label, "rpm": rpm})
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    return {
+        "cpu_temp":        _val("cpu_temp"),
+        "ambient_temp":    _val("ambient_temp"),
+        "nvme_temp":       _val("nvme_temp"),
+        "fans":            fans,
+        "cpu_percent":     _val("cpu_percent"),
+        "ram_used_gb":     _val("ram_used_gb"),
+        "ram_total_gb":    _val("ram_total_gb"),
+        "ram_percent":     _val("ram_percent"),
+        "gpu_temp":        _val("gpu_temp", int),
+        "gpu_fan_percent": _val("gpu_fan_percent", int),
+        "gpu_power_watts": _val("gpu_power_watts"),
+        "disk_read_mb":    _val("disk_read_mb"),
+        "disk_write_mb":   _val("disk_write_mb"),
+        "net_in_mb":       _val("net_in_mb"),
+        "net_out_mb":      _val("net_out_mb"),
+        "timestamp":       ts,
+    }
+
+
+def _start_windows_agent_listener():
+    """Start the background HTTP listener that receives sensor POSTs from Windows.
+
+    Runs in a daemon thread so it exits automatically when the main process ends.
+    Calls insert_sample() on every valid POST so the dashboard reads from the DB.
+    """
+
+    class _WaHandler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass  # silence default per-request stdout logging
+
+        def do_POST(self):
+            if self.path != "/hw_data":
+                self.send_response(404)
+                self.end_headers()
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length)
+                payload = json.loads(body)
+            except Exception as e:
+                log.warning("windows_agent listener: bad POST body: %s", e)
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"bad request"}')
+                return
+
+            if payload.get("source") != "windows_agent":
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"source must be windows_agent"}')
+                return
+
+            try:
+                metrics = _wa_payload_to_metrics(payload)
+                insert_sample(metrics)
+                log.info(
+                    "windows_agent: sample cpu=%s°C gpu=%s°C fans=%d cpu%%=%s",
+                    metrics.get("cpu_temp"), metrics.get("gpu_temp"),
+                    len(metrics.get("fans", [])), metrics.get("cpu_percent"),
+                )
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"ok":true}')
+            except Exception as e:
+                log.exception("windows_agent: failed to store sample: %s", e)
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"error":"internal error"}')
+
+    def _serve():
+        try:
+            server = HTTPServer(("0.0.0.0", WA_LISTEN_PORT), _WaHandler)
+            log.info("Hardware source: windows_agent — listening on port %d", WA_LISTEN_PORT)
+            server.serve_forever()
+        except Exception as e:
+            log.error("windows_agent listener failed to start: %s", e)
+
+    t = threading.Thread(target=_serve, daemon=True, name="wa-listener")
+    t.start()
+
+
 def get_recent_samples(limit=288):
     """Return up to `limit` samples, oldest first (suitable for charts)."""
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
@@ -700,6 +857,17 @@ def main():
     log.info("hw_monitor starting (db=%s interval=%ds iface=%s)",
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
+
+    # Detect windows_agent mode before touching sensors.
+    hw_map = _load_hw_map()
+    if hw_map and hw_map.get("source") == "windows_agent":
+        _start_windows_agent_listener()
+        # Main thread must stay alive to keep the daemon listener thread running.
+        while _running:
+            _sleep_interruptible(60)
+        log.info("hw_monitor stopped")
+        return
+
     _bootstrap_fan_status()
     # Sleep one interval first so the first delta covers a full window.
     _sleep_interruptible(SAMPLE_INTERVAL)
