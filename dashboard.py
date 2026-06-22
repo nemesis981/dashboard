@@ -4340,9 +4340,12 @@ def dashboard():
                     cls = "fan-rpm-idle"; nIdle++;
                 }}
                 var fanClickKey = ukey || lbl;
-                tiles.push('<div class="fan-tile hw-clickable" onclick="openSensorPopupFan(' +
-                           JSON.stringify(fanClickKey) + ',' + JSON.stringify(String(f.label || "Fan")) + ')" ' +
-                           'title="Click for fan history"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
+                var fanLabelStr = String(f.label || "Fan");
+                tiles.push('<div class="fan-tile hw-clickable"' +
+                           ' data-fkey="' + escapeHtml(fanClickKey) + '"' +
+                           ' data-flabel="' + escapeHtml(fanLabelStr) + '"' +
+                           ' onclick="openSensorPopupFan(this.dataset.fkey, this.dataset.flabel)"' +
+                           ' title="Click for fan history"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
                            '</div><div class="fan-tile-rpm ' + cls + '">' + rpmText + '</div></div>');
             }});
             var grid = document.getElementById("fanDetailGrid");
