@@ -1951,6 +1951,54 @@ def settings_page():
         <p id="moduleMsg" style="display:none;font-size:0.85em;margin-top:10px"></p>
     </div>
 
+    <div class="settings-card">
+        <h2>🌡️ Hardware Tools</h2>
+        <div style="display:flex;flex-direction:column;gap:16px">
+            <div>
+                <div style="color:#ccc;font-size:0.9em;margin-bottom:8px;font-weight:bold">Reset Sensor Baselines</div>
+                <div style="color:#888;font-size:0.82em;margin-bottom:10px">
+                    Clears the anomaly history used to calculate the rolling baseline for each sensor.
+                    Use this after a hardware change (new cooler, replaced fan, etc.) so the new readings
+                    are not flagged as anomalous.
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                    <select id="hw-baseline-sensor"
+                            style="background:#0d1117;border:1px solid #333;color:#eee;padding:5px 10px;border-radius:4px;font-size:0.85em">
+                        <option value="all">All sensors</option>
+                        <option value="cpu_temp">CPU temperature</option>
+                        <option value="gpu_temp">GPU temperature</option>
+                        <option value="ambient_temp">Ambient temperature</option>
+                        <option value="nvme_temp">NVMe temperature</option>
+                        <option value="cpu_percent">CPU load %</option>
+                        <option value="ram_used_gb">RAM used</option>
+                    </select>
+                    <button onclick="hwResetBaseline()"
+                            style="background:#333;border:1px solid #555;color:#eee;padding:5px 14px;cursor:pointer;border-radius:4px;font-size:0.85em">
+                        Reset baseline
+                    </button>
+                    <span id="hw-baseline-status" style="font-size:0.82em;color:#555"></span>
+                </div>
+            </div>
+            <div style="border-top:1px solid #1e2d4e;padding-top:16px">
+                <div style="color:#ccc;font-size:0.9em;margin-bottom:8px;font-weight:bold">Re-run Hardware Discovery</div>
+                <div style="color:#888;font-size:0.82em;margin-bottom:10px">
+                    Re-runs hw_discover.py to rebuild the sensor map (hw_map.json).
+                    Use this if sensors have changed or auto-discovery is picking up the wrong readings.
+                    hw_monitor will pick up the new map on its next sample cycle.
+                </div>
+                <div style="display:flex;align-items:center;gap:10px">
+                    <button onclick="hwRediscover()"
+                            style="background:#333;border:1px solid #555;color:#eee;padding:5px 14px;cursor:pointer;border-radius:4px;font-size:0.85em">
+                        Re-run discovery
+                    </button>
+                    <span id="hw-rediscover-status" style="font-size:0.82em;color:#555"></span>
+                </div>
+                <div id="hw-rediscover-output"
+                     style="display:none;margin-top:10px;background:#0d1117;border:1px solid #333;border-radius:4px;padding:10px;font-size:0.75em;color:#aaa;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
+            </div>
+        </div>
+    </div>
+
     <!-- Confirmation modal for dangerous toggles -->
     <div class="confirm-overlay" id="confirmOverlay">
         <div class="confirm-box">
@@ -2146,6 +2194,51 @@ def settings_page():
                 status.style.color = '#ff4444';
                 status.textContent = 'Request failed';
             }});
+        }}
+
+        function hwResetBaseline() {{
+            var sensor = document.getElementById('hw-baseline-sensor').value || 'all';
+            var status = document.getElementById('hw-baseline-status');
+            status.style.color = '#aaa';
+            status.textContent = 'Resetting…';
+            fetch('/api/hw/reset-baseline?sensor=' + encodeURIComponent(sensor), {{method: 'POST'}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                    status.textContent = d.ok
+                        ? '✓ Baseline cleared for ' + sensor
+                        : 'Error: ' + (d.error || 'unknown');
+                    setTimeout(function() {{ status.textContent = ''; }}, 4000);
+                }})
+                .catch(function() {{
+                    status.style.color = '#ff4444';
+                    status.textContent = 'Request failed';
+                }});
+        }}
+
+        function hwRediscover() {{
+            var status  = document.getElementById('hw-rediscover-status');
+            var outDiv  = document.getElementById('hw-rediscover-output');
+            status.style.color = '#aaa';
+            status.textContent = 'Running discovery…';
+            outDiv.style.display = 'none';
+            outDiv.textContent = '';
+            fetch('/api/hw/rediscover', {{method: 'POST'}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                    status.textContent = d.ok ? '✓ Discovery complete' : '✗ Discovery failed';
+                    var out = d.output || d.error || '';
+                    if (out) {{
+                        outDiv.textContent = out;
+                        outDiv.style.display = 'block';
+                    }}
+                    setTimeout(function() {{ status.textContent = ''; }}, 6000);
+                }})
+                .catch(function() {{
+                    status.style.color = '#ff4444';
+                    status.textContent = 'Request failed';
+                }});
         }}
 
         var _aiUsageCache = null;
@@ -3040,6 +3133,171 @@ def api_module_disable(name):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/hw/history")
+def api_hw_history():
+    """GET /api/hw/history?sensor=<key>&range=1h|6h|24h|7d|30d
+
+    Returns time-series data for one sensor plus any anomaly snapshots in range.
+    Sensor keys: cpu_temp, gpu_temp, ambient_temp, nvme_temp, cpu_percent,
+                 ram_used_gb, gpu_fan_percent, gpu_power_watts,
+                 fan/<unique_key>
+    """
+    sensor = request.args.get("sensor", "cpu_temp")
+    rng = request.args.get("range", "24h")
+    range_map = {"1h": "-1 hours", "6h": "-6 hours", "24h": "-24 hours",
+                 "7d": "-7 days", "30d": "-30 days"}
+    since = range_map.get(rng, "-24 hours")
+
+    # Determine whether it's a scalar column or a fan from fans_json
+    fan_key = None
+    if sensor.startswith("fan/"):
+        fan_key = sensor[4:]
+        col = None
+    else:
+        valid_cols = {"cpu_temp", "ambient_temp", "nvme_temp", "gpu_temp",
+                      "cpu_percent", "ram_used_gb", "gpu_fan_percent", "gpu_power_watts"}
+        col = sensor if sensor in valid_cols else "cpu_temp"
+
+    try:
+        conn = sqlite3.connect(hw_monitor.DB_PATH, timeout=5.0)
+        if fan_key:
+            rows = conn.execute(
+                f"SELECT timestamp, fans_json, is_anomalous FROM hw_metrics "
+                f"WHERE timestamp >= datetime('now',?) ORDER BY timestamp",
+                (since,),
+            ).fetchall()
+            samples = []
+            for ts, fans_json, is_anom in rows:
+                fans = json.loads(fans_json) if fans_json else []
+                rpm = next((f.get("rpm") for f in fans if f.get("unique_key") == fan_key), None)
+                if rpm is None:
+                    # fallback: match by label
+                    rpm = next((f.get("rpm") for f in fans if f.get("label") == fan_key), None)
+                samples.append({"timestamp": ts, "value": rpm, "is_anomalous": bool(is_anom)})
+        else:
+            rows = conn.execute(
+                f"SELECT timestamp, {col}, is_anomalous FROM hw_metrics "
+                f"WHERE timestamp >= datetime('now',?) ORDER BY timestamp",
+                (since,),
+            ).fetchall()
+            samples = [{"timestamp": r[0], "value": r[1], "is_anomalous": bool(r[2])} for r in rows]
+        conn.close()
+
+        # Anomaly snapshots in range
+        cutoff_iso = (datetime.now() -
+                      __import__("datetime").timedelta(
+                          hours={"1h": 1, "6h": 6, "24h": 24, "7d": 168, "30d": 720}.get(rng, 24)
+                      )).isoformat(timespec="seconds")
+        snapshots = hw_monitor.get_anomaly_snapshots(
+            sensor_key=(None if fan_key else sensor),
+            since_ts=cutoff_iso,
+            limit=100,
+        )
+        # Strip top_processes from list view (too large); keep for detail popup
+        for snap in snapshots:
+            snap.pop("top_processes", None)
+
+        # Throttle warning: any throttle_detected=1 snapshot in range
+        throttle_snaps = [s for s in
+                          hw_monitor.get_anomaly_snapshots(sensor_key=None, since_ts=cutoff_iso, limit=200)
+                          if s.get("throttle_detected")]
+        throttle_warning = None
+        if throttle_snaps:
+            freqs = [s["throttle_freq_mhz"] for s in throttle_snaps if s.get("throttle_freq_mhz")]
+            min_freq = min(freqs) if freqs else None
+            throttle_warning = {
+                "detected": True,
+                "min_freq_mhz": min_freq,
+                "event_count": len(throttle_snaps),
+            }
+
+        return jsonify({
+            "sensor": sensor,
+            "range": rng,
+            "samples": samples,
+            "anomaly_snapshots": snapshots,
+            "anomaly_count": sum(1 for s in samples if s.get("is_anomalous")),
+            "throttle_warning": throttle_warning,
+        })
+    except Exception as e:
+        log.exception("api_hw_history error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/hw/reset-baseline", methods=["POST"])
+def api_hw_reset_baseline():
+    sensor = request.args.get("sensor", "all")
+    try:
+        hw_monitor.reset_baseline(sensor if sensor != "all" else None)
+        return jsonify({"ok": True, "sensor": sensor})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/hw/rediscover", methods=["POST"])
+def api_hw_rediscover():
+    """Run hw_discover.py non-interactively to rebuild hw_map.json.
+
+    hw_discover.py is interactive; this endpoint runs it with --auto flag
+    (which we add to hw_discover.py) or falls back to hw_monitor auto-discovery
+    by deleting hw_map.json so the daemon picks up sensors fresh next cycle.
+    """
+    import subprocess as _sp
+    discover_path = os.path.join(os.path.dirname(hw_monitor.DB_PATH), "hw_discover.py")
+    try:
+        if os.path.exists(discover_path):
+            result = _sp.run(
+                [sys.executable, discover_path, "--auto"],
+                capture_output=True, text=True, timeout=30,
+                cwd=os.path.dirname(discover_path),
+            )
+            output = (result.stdout + result.stderr).strip()[:2000]
+            ok = result.returncode == 0
+        else:
+            output = "hw_discover.py not found — hardware map will be rebuilt from auto-discovery on next hw_monitor cycle."
+            ok = True
+        # Reset the in-memory cache so hw_monitor re-reads hw_map.json
+        hw_monitor._hw_map = None
+        hw_monitor._hw_map_loaded = False
+        hw_monitor._sensor_map_logged = False
+        return jsonify({"ok": ok, "output": output})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/hw/notifications")
+def api_hw_notifications():
+    try:
+        return jsonify({"notifications": hw_monitor.get_hw_notifications()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/hw/snapshots/<int:snap_id>")
+def api_hw_snapshot_detail(snap_id):
+    """Return a single hw_anomaly_snapshots row including top_processes."""
+    try:
+        conn = sqlite3.connect(hw_monitor.DB_PATH, timeout=5.0)
+        row = conn.execute(
+            """SELECT id, sensor_key, reading_value, baseline_avg, deviation,
+                      captured_at, top_processes, cpu_pct, ram_mb,
+                      net_mb_in, net_mb_out, disk_mb_read, disk_mb_write,
+                      throttle_detected, throttle_freq_mhz, sustained
+               FROM hw_anomaly_snapshots WHERE id=?""",
+            (snap_id,),
+        ).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        cols = ("id", "sensor_key", "reading_value", "baseline_avg", "deviation",
+                "captured_at", "top_processes", "cpu_pct", "ram_mb",
+                "net_mb_in", "net_mb_out", "disk_mb_read", "disk_mb_write",
+                "throttle_detected", "throttle_freq_mhz", "sustained")
+        return jsonify(dict(zip(cols, row)))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -3166,6 +3424,17 @@ def dashboard():
         .q-info {{ flex:1; min-width:200px; }}
         .q-actions {{ display:flex; gap:5px; }}
         .devices-table td {{ border-bottom: 1px solid #1e3a5f; }}
+        .hw-overview-btn {{ float:right; background:transparent; border:1px solid #00d4ff; color:#00d4ff; padding:3px 10px; border-radius:4px; cursor:pointer; font-size:0.75em; margin-top:2px; }}
+        .hw-overview-btn:hover {{ background:#00d4ff; color:#1a1a2e; }}
+        .sensor-popup-modal {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:720px; width:95%; max-height:90vh; overflow-y:auto; margin:40px auto; position:relative; }}
+        .sensor-range-btn {{ background:#0d1117; border:1px solid #333; color:#888; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:0.82em; margin-right:4px; }}
+        .sensor-range-btn.active {{ border-color:#00d4ff; color:#00d4ff; background:#0a1a2e; }}
+        .anomaly-banner {{ background:#2a1000; border-left:3px solid #ff8800; padding:8px 12px; border-radius:4px; margin:8px 0; font-size:0.85em; color:#ffaa00; }}
+        .throttle-banner {{ background:#2a0000; border-left:3px solid #ff4444; padding:8px 12px; border-radius:4px; margin:8px 0; font-size:0.85em; color:#ff6666; }}
+        .process-modal {{ background:#111; border:1px solid #333; border-radius:8px; padding:18px; max-width:700px; width:95%; max-height:85vh; overflow-y:auto; margin:50px auto; position:relative; }}
+        .process-modal pre {{ font-size:0.75em; color:#aaa; white-space:pre-wrap; word-break:break-all; background:#0d1117; padding:10px; border-radius:4px; max-height:350px; overflow-y:auto; }}
+        .hw-notification-bar {{ background:#1a1000; border:1px solid #ff8800; border-radius:6px; padding:8px 14px; margin-bottom:10px; font-size:0.85em; display:flex; align-items:center; gap:10px; }}
+        .hw-notification-bar button {{ background:transparent; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:3px; font-size:0.8em; }}
         .hw-card:hover {{ background:#1a2950; }}
         .hw-grid {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:8px; }}
         .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
@@ -3251,45 +3520,47 @@ def dashboard():
             <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>
         </div>
 
-        <div class="card full-width hw-card" onclick="openHwModal()" style="cursor:pointer">
+        <div class="card full-width hw-card">
             <h2>🌡️ <span class="tier-text" data-beginner="Hardware Health &amp; Temperatures" data-intermediate="Hardware Stats" data-pro="Hardware">Hardware Stats</span>
-                <span style="float:right;font-size:0.75em;color:#aaa"><span class="tier-text" data-beginner="click for 24-hour history graphs ▸" data-intermediate="click for 24h graphs ▸" data-pro="24h ▸">click for 24h graphs ▸</span></span>
+                <button onclick="openHwModal()" class="hw-overview-btn" title="Open 24-hour combined graphs">
+                    <span class="tier-text" data-beginner="Overview graphs ▸" data-intermediate="Overview ▸" data-pro="Overview ▸">Overview ▸</span>
+                </button>
             </h2>
             <div class="hw-grid">
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('cpu_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="CPU Temperature" data-intermediate="CPU Temp" data-pro="CPU °C">CPU Temp</span></div>
                     <div class="hw-value" id="hwCpuTemp">{_fmt(hw_cpu, "°C")}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('gpu_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="GPU Temperature" data-intermediate="GPU Temp" data-pro="GPU °C">GPU Temp</span></div>
                     <div class="hw-value" id="hwGpuTemp">{_fmt(hw_gpu, "°C")}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('ambient_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="Case / Ambient Temp" data-intermediate="Ambient" data-pro="Ambient °C">Ambient</span></div>
                     <div class="hw-value" id="hwAmbient">{_fmt(hw_ambient, "°C")}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('nvme_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="SSD Temperature (NVMe)" data-intermediate="NVMe" data-pro="NVMe °C">NVMe</span></div>
                     <div class="hw-value" id="hwNvme">{_fmt(hw_nvme, "°C")}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('cpu_percent')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="CPU Usage" data-intermediate="CPU Load" data-pro="CPU %">CPU Load</span></div>
                     <div class="hw-value" id="hwCpuPct">{_fmt(hw_cpu_pct, "%")}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('ram_used_gb')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="RAM / Memory Used" data-intermediate="RAM Used" data-pro="RAM %">RAM Used</span></div>
                     <div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div>
                     <div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div>
                 </div>
-                <div class="hw-stat">
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('gpu_fan_percent')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="GPU Fan Speed" data-intermediate="GPU Fan" data-pro="GPU Fan %">GPU Fan</span></div>
                     <div class="hw-value" id="hwGpuFan">{_fmt(hw_gpu_fan, "%")}</div>
                 </div>
-                <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openAlertBreakdownModal()">
+                <div class="hw-stat hw-clickable" onclick="openAlertBreakdownModal()">
                     <div class="hw-label"><span class="tier-text" data-beginner="System Alerts (last 24h)" data-intermediate="24h System Alerts" data-pro="24h Alerts">24h System Alerts</span></div>
                     <div class="hw-value" id="hwAlert24h" style="color:{alert_24h_color}">{alert_24h_total}</div>
                 </div>
-                <div class="hw-stat hw-clickable" onclick="event.stopPropagation(); openHealthModal()">
+                <div class="hw-stat hw-clickable" onclick="openHealthModal()">
                     <div class="hw-label"><span class="tier-text" data-beginner="Overall System Health" data-intermediate="System Health" data-pro="Health">System Health</span></div>
                     <div class="hw-value" id="hwHealthScore" style="color:{health_color}">{health_score}%</div>
                 </div>
@@ -3456,6 +3727,49 @@ def dashboard():
             <div class="chart-box"><h4><span class="tier-text" data-beginner="System Health Score over time (100% = fully healthy)" data-intermediate="System Health Score (24h)" data-pro="Health % 24h">System Health Score (24h)</span></h4><canvas id="chartHealth" height="120"></canvas></div>
             <div style="text-align:right">
                 <button class="btn btn-close" onclick="closeHwModal()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Per-sensor history popup -->
+    <div class="modal" id="sensorPopupModal" onclick="if(event.target.id==='sensorPopupModal')closeSensorPopup()">
+        <div class="sensor-popup-modal">
+            <button class="hw-close-x" onclick="closeSensorPopup()" title="Close (Esc)">✕</button>
+            <h3 id="sensorPopupTitle" style="color:#00d4ff;margin-top:0"></h3>
+            <div id="sensorNotificationBar"></div>
+            <div id="sensorThrottleBanner"></div>
+            <div id="sensorAnomalyBanner"></div>
+            <div style="margin:10px 0 14px 0">
+                <button class="sensor-range-btn" onclick="switchSensorRange('1h')">1h</button>
+                <button class="sensor-range-btn" onclick="switchSensorRange('6h')">6h</button>
+                <button class="sensor-range-btn active" onclick="switchSensorRange('24h')">24h</button>
+                <button class="sensor-range-btn" onclick="switchSensorRange('7d')">7d</button>
+                <button class="sensor-range-btn" onclick="switchSensorRange('30d')">30d</button>
+                <span id="sensorPopupStatus" style="margin-left:12px;color:#555;font-size:0.8em"></span>
+            </div>
+            <div class="chart-box" style="margin-bottom:10px">
+                <canvas id="sensorPopupChart" height="140"></canvas>
+            </div>
+            <div id="sensorAnomalyLink" style="display:none;margin-top:8px">
+                <a href="#" onclick="openProcessModal(); return false;"
+                   style="color:#ffaa00;font-size:0.85em;text-decoration:none">
+                    ⚠ What was running? (<span id="sensorAnomalyCount">0</span> anomalous events)
+                </a>
+            </div>
+            <div style="text-align:right;margin-top:14px">
+                <button class="btn btn-close" onclick="closeSensorPopup()">✕ Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- "What was running?" process detail popup -->
+    <div class="modal" id="processModal" onclick="if(event.target.id==='processModal')closeProcessModal()">
+        <div class="process-modal">
+            <button class="hw-close-x" onclick="closeProcessModal()" title="Close (Esc)">✕</button>
+            <h3 style="color:#ffaa00;margin-top:0">⚠ Anomaly Detail — What was running?</h3>
+            <div id="processModalBody" style="color:#aaa;font-size:0.85em">Loading…</div>
+            <div style="text-align:right;margin-top:12px">
+                <button class="btn btn-close" onclick="closeProcessModal()">✕ Close</button>
             </div>
         </div>
     </div>
@@ -4025,7 +4339,10 @@ def dashboard():
                     rpmText = rpm === 0 ? "0 RPM (idle)" : rpm + " RPM";
                     cls = "fan-rpm-idle"; nIdle++;
                 }}
-                tiles.push('<div class="fan-tile"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
+                var fanClickKey = ukey || lbl;
+                tiles.push('<div class="fan-tile hw-clickable" onclick="openSensorPopupFan(' +
+                           JSON.stringify(fanClickKey) + ',' + JSON.stringify(String(f.label || "Fan")) + ')" ' +
+                           'title="Click for fan history"><div class="fan-tile-lbl" title="' + lbl + '">' + lbl +
                            '</div><div class="fan-tile-rpm ' + cls + '">' + rpmText + '</div></div>');
             }});
             var grid = document.getElementById("fanDetailGrid");
@@ -4329,6 +4646,217 @@ def dashboard():
             document.getElementById("hwModal").style.display = "none";
         }}
 
+        // ── Per-sensor history popup ──────────────────────────────────────────
+        var _sensorPopupKey  = null;
+        var _sensorPopupRange = "24h";
+        var _sensorChart     = null;
+        var _sensorSnapshots = [];
+
+        var _SENSOR_META = {{
+            cpu_temp:        {{label: "CPU Temperature", unit: "°C",  color: "#ff4444"}},
+            gpu_temp:        {{label: "GPU Temperature", unit: "°C",  color: "#00ff88"}},
+            ambient_temp:    {{label: "Ambient Temp",    unit: "°C",  color: "#ffaa00"}},
+            nvme_temp:       {{label: "NVMe Temp",       unit: "°C",  color: "#00d4ff"}},
+            cpu_percent:     {{label: "CPU Load",        unit: "%",   color: "#ff4444"}},
+            ram_used_gb:     {{label: "RAM Used",        unit: " GB", color: "#00ff88"}},
+            gpu_fan_percent: {{label: "GPU Fan",         unit: "%",   color: "#8800ff"}},
+        }};
+
+        function openSensorPopup(key) {{
+            _sensorPopupKey   = key;
+            _sensorPopupRange = "24h";
+            document.getElementById("sensorPopupModal").style.display = "block";
+            var meta = _SENSOR_META[key] || {{label: key, unit: "", color: "#00d4ff"}};
+            document.getElementById("sensorPopupTitle").textContent = "📈 " + meta.label + " — History";
+            document.querySelectorAll(".sensor-range-btn").forEach(function(b) {{
+                b.classList.toggle("active", b.textContent.trim() === "24h");
+            }});
+            _loadSensorHistory();
+        }}
+
+        function openSensorPopupFan(fanKey, fanLabel) {{
+            _sensorPopupKey   = "fan/" + fanKey;
+            _sensorPopupRange = "24h";
+            document.getElementById("sensorPopupModal").style.display = "block";
+            document.getElementById("sensorPopupTitle").textContent = "📈 " + escapeHtml(fanLabel) + " — History";
+            document.querySelectorAll(".sensor-range-btn").forEach(function(b) {{
+                b.classList.toggle("active", b.textContent.trim() === "24h");
+            }});
+            _loadSensorHistory();
+        }}
+
+        function closeSensorPopup() {{
+            document.getElementById("sensorPopupModal").style.display = "none";
+            if (_sensorChart) {{ _sensorChart.destroy(); _sensorChart = null; }}
+        }}
+
+        function switchSensorRange(range) {{
+            _sensorPopupRange = range;
+            document.querySelectorAll(".sensor-range-btn").forEach(function(b) {{
+                b.classList.toggle("active", b.textContent.trim() === range);
+            }});
+            _loadSensorHistory();
+        }}
+
+        function _loadSensorHistory() {{
+            var statusEl = document.getElementById("sensorPopupStatus");
+            statusEl.textContent = "Loading…";
+            document.getElementById("sensorThrottleBanner").innerHTML = "";
+            document.getElementById("sensorAnomalyBanner").innerHTML = "";
+            document.getElementById("sensorAnomalyLink").style.display = "none";
+            document.getElementById("sensorNotificationBar").innerHTML = "";
+
+            fetch("/api/hw/history?sensor=" + encodeURIComponent(_sensorPopupKey) +
+                  "&range=" + _sensorPopupRange, {{cache: "no-store"}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    if (d.error) {{ statusEl.textContent = "Error: " + d.error; return; }}
+                    _sensorSnapshots = d.anomaly_snapshots || [];
+
+                    var meta = _SENSOR_META[_sensorPopupKey] || {{label: _sensorPopupKey, unit: "", color: "#00d4ff"}};
+                    var samples = d.samples || [];
+                    var labels  = samples.map(function(s) {{ return shortTs(s.timestamp); }});
+                    var values  = samples.map(function(s) {{ return s.value; }});
+                    var anomIdx = [];
+                    samples.forEach(function(s, i) {{ if (s.is_anomalous) anomIdx.push(i); }});
+
+                    // Destroy existing chart and draw new one
+                    var ctx = document.getElementById("sensorPopupChart").getContext("2d");
+                    if (_sensorChart) _sensorChart.destroy();
+                    _sensorChart = new Chart(ctx, {{
+                        type: "line",
+                        data: {{
+                            labels: labels,
+                            datasets: [
+                                {{
+                                    label: meta.label,
+                                    data: values,
+                                    borderColor: meta.color,
+                                    backgroundColor: meta.color.replace(")", ",0.1)").replace("rgb", "rgba"),
+                                    borderWidth: 1.5,
+                                    tension: 0.25,
+                                    pointRadius: values.map(function(_, i) {{
+                                        return anomIdx.indexOf(i) >= 0 ? 5 : 0;
+                                    }}),
+                                    pointBackgroundColor: values.map(function(_, i) {{
+                                        return anomIdx.indexOf(i) >= 0 ? "#ff4444" : meta.color;
+                                    }}),
+                                    pointBorderColor: values.map(function(_, i) {{
+                                        return anomIdx.indexOf(i) >= 0 ? "#ff4444" : meta.color;
+                                    }}),
+                                    fill: anomIdx.length === 0,
+                                }}
+                            ]
+                        }},
+                        options: {{
+                            responsive: true,
+                            interaction: {{mode: "index", intersect: false}},
+                            plugins: {{
+                                legend: {{labels: {{color: "#ccc", boxWidth: 12}}}},
+                                tooltip: {{enabled: true}}
+                            }},
+                            scales: {{
+                                x: {{ticks: {{color: "#888", maxTicksLimit: 8, autoSkip: true}}, grid: {{color: "#222"}}}},
+                                y: {{ticks: {{color: "#888"}}, grid: {{color: "#222"}},
+                                    title: {{display: true, text: meta.unit || "", color: "#888"}}}}
+                            }},
+                            elements: {{line: {{tension: 0.25}}}}
+                        }}
+                    }});
+
+                    var n = samples.length;
+                    statusEl.textContent = n + " sample" + (n !== 1 ? "s" : "") +
+                        (anomIdx.length ? " · " + anomIdx.length + " anomalous" : "");
+
+                    // Throttle banner
+                    var tw = d.throttle_warning;
+                    if (tw && tw.detected) {{
+                        document.getElementById("sensorThrottleBanner").innerHTML =
+                            '<div class="throttle-banner">⚡ CPU throttling detected during this period' +
+                            (tw.min_freq_mhz ? ' — clock dropped to ' + tw.min_freq_mhz.toFixed(0) + ' MHz' : '') +
+                            ' (' + tw.event_count + ' event' + (tw.event_count !== 1 ? 's' : '') + ')</div>';
+                    }}
+
+                    // Anomaly banner and link
+                    var ac = d.anomaly_count || 0;
+                    if (ac > 0) {{
+                        document.getElementById("sensorAnomalyBanner").innerHTML =
+                            '<div class="anomaly-banner">⚠ ' + ac + ' reading' + (ac !== 1 ? 's' : '') +
+                            ' outside normal baseline for this time-of-day were detected in this range.</div>';
+                        document.getElementById("sensorAnomalyLink").style.display = "block";
+                        document.getElementById("sensorAnomalyCount").textContent = ac;
+                    }}
+
+                    // Notifications for this sensor
+                    fetch("/api/hw/notifications")
+                        .then(function(r) {{ return r.json(); }})
+                        .then(function(nd) {{
+                            var notifs = (nd.notifications || []).filter(function(n) {{
+                                return n.sensor_key === _sensorPopupKey;
+                            }});
+                            if (notifs.length) {{
+                                document.getElementById("sensorNotificationBar").innerHTML =
+                                    notifs.map(function(n) {{
+                                        return '<div class="hw-notification-bar">🔔 ' + escapeHtml(n.message) +
+                                               ' <button onclick="dismissHwNotif(\'' + n.sensor_key + '\')">Dismiss & Reset</button></div>';
+                                    }}).join("");
+                            }}
+                        }}).catch(function() {{}});
+                }})
+                .catch(function(e) {{ statusEl.textContent = "Error: " + e; }});
+        }}
+
+        function dismissHwNotif(sensorKey) {{
+            fetch("/api/hw/reset-baseline?sensor=" + encodeURIComponent(sensorKey), {{method: "POST"}})
+                .then(function() {{ _loadSensorHistory(); }});
+        }}
+
+        function openProcessModal() {{
+            document.getElementById("processModal").style.display = "block";
+            var body = document.getElementById("processModalBody");
+            if (!_sensorSnapshots.length) {{
+                body.innerHTML = '<p style="color:#555">No anomaly snapshots in this range.</p>';
+                return;
+            }}
+            // Load full detail for all snapshots (fetch each individually, debounced)
+            body.innerHTML = '<span style="color:#444">Loading…</span>';
+            var fetches = _sensorSnapshots.slice(0, 10).map(function(snap) {{
+                return fetch("/api/hw/snapshots/" + snap.id).then(function(r) {{ return r.json(); }});
+            }});
+            Promise.all(fetches).then(function(details) {{
+                body.innerHTML = details.map(function(d) {{
+                    var throttleNote = d.throttle_detected
+                        ? '<span style="color:#ff4444">⚡ CPU throttled to ' + (d.throttle_freq_mhz || "?") + ' MHz</span><br>'
+                        : '';
+                    var sustained = d.sustained
+                        ? '<span style="color:#ff8800">🔴 Sustained anomaly (part of consecutive run)</span><br>'
+                        : '';
+                    return '<div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:14px">' +
+                        '<div style="color:#00d4ff;font-size:0.85em;margin-bottom:6px">' + escapeHtml(d.captured_at) + '</div>' +
+                        sustained + throttleNote +
+                        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:0.82em;margin-bottom:8px">' +
+                        '<span style="color:#888">Value:</span><span style="color:#eee">' + (d.reading_value !== null ? d.reading_value.toFixed(1) : "—") + '</span>' +
+                        '<span style="color:#888">Baseline avg:</span><span style="color:#eee">' + (d.baseline_avg !== null ? d.baseline_avg.toFixed(1) : "—") + '</span>' +
+                        '<span style="color:#888">Deviation:</span><span style="color:#ffaa00">' + (d.deviation !== null ? d.deviation.toFixed(2) + 'σ' : "—") + '</span>' +
+                        '<span style="color:#888">CPU%:</span><span style="color:#eee">' + (d.cpu_pct !== null ? d.cpu_pct.toFixed(1) + "%" : "—") + '</span>' +
+                        '<span style="color:#888">RAM:</span><span style="color:#eee">' + (d.ram_mb !== null ? (d.ram_mb / 1024).toFixed(1) + " GB" : "—") + '</span>' +
+                        '<span style="color:#888">Net in/out:</span><span style="color:#eee">' + (d.net_mb_in !== null ? d.net_mb_in.toFixed(1) : "—") + ' / ' + (d.net_mb_out !== null ? d.net_mb_out.toFixed(1) : "—") + ' MB</span>' +
+                        '</div>' +
+                        (d.top_processes
+                            ? '<div style="font-size:0.75em;color:#888;margin-bottom:4px">Top processes:</div><pre>' + escapeHtml(d.top_processes.substring(0, 1500)) + '</pre>'
+                            : '') +
+                        '</div>';
+                }}).join("") +
+                (_sensorSnapshots.length > 10 ? '<p style="color:#555;font-size:0.8em">Showing first 10 of ' + _sensorSnapshots.length + ' events.</p>' : '');
+            }}).catch(function(e) {{
+                body.innerHTML = '<p style="color:#ff4444">Error loading details: ' + escapeHtml(String(e)) + '</p>';
+            }});
+        }}
+
+        function closeProcessModal() {{
+            document.getElementById("processModal").style.display = "none";
+        }}
+
         function colorForCount(n) {{
             if (n === 0) return "#00ff88";
             if (n <= 5) return "#ffaa00";
@@ -4567,6 +5095,8 @@ def dashboard():
         document.addEventListener("keydown", function(e) {{
             if (e.key !== "Escape") return;
             if (document.getElementById("hwModal").style.display === "block") closeHwModal();
+            if (document.getElementById("sensorPopupModal").style.display === "block") closeSensorPopup();
+            if (document.getElementById("processModal").style.display === "block") closeProcessModal();
             if (document.getElementById("alertBreakdownModal").style.display === "block") closeAlertBreakdownModal();
             if (document.getElementById("healthModal").style.display === "block") closeHealthModal();
             if (document.getElementById("vpnModal").style.display === "block") closeVpnModal();

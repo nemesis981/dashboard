@@ -84,7 +84,8 @@ def init_db():
                           ("gpu_fan_percent", "INTEGER"),
                           ("gpu_power_watts", "REAL"),
                           ("fan4_rpm", "INTEGER"),
-                          ("fans_json", "TEXT")):
+                          ("fans_json", "TEXT"),
+                          ("is_anomalous", "INTEGER DEFAULT 0")):
             if col not in existing:
                 c.execute(f"ALTER TABLE hw_metrics ADD COLUMN {col} {decl}")
         conn.commit()
@@ -129,6 +130,57 @@ def init_db():
                 first_triggered_ts REAL NOT NULL,
                 last_triggered_ts  REAL NOT NULL,
                 resolved_ts        REAL
+            )
+        """)
+        conn.commit()
+
+        # hw_anomaly_snapshots: system context captured when a sensor reading
+        # deviates >2σ from its rolling same-hour-of-day 14-day baseline.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS hw_anomaly_snapshots (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                sensor_key        TEXT NOT NULL,
+                reading_value     REAL NOT NULL,
+                baseline_avg      REAL,
+                deviation         REAL,
+                captured_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                top_processes     TEXT,
+                cpu_pct           REAL,
+                ram_mb            REAL,
+                net_mb_in         REAL,
+                net_mb_out        REAL,
+                disk_mb_read      REAL,
+                disk_mb_write     REAL,
+                gpu_load          REAL,
+                throttle_detected INTEGER DEFAULT 0,
+                throttle_freq_mhz REAL,
+                sustained         INTEGER DEFAULT 0
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hw_anom_sensor "
+            "ON hw_anomaly_snapshots(sensor_key, captured_at)"
+        )
+
+        # correlation_events: fired when ≥2 sensors are simultaneously anomalous.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS correlation_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                sensor_keys TEXT NOT NULL,
+                captured_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                severity    TEXT NOT NULL DEFAULT 'HIGH'
+            )
+        """)
+
+        # hw_notifications: dashboard notifications for sustained baseline drift.
+        # Never auto-dismissed; user must call /api/hw/reset-baseline to clear.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS hw_notifications (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                sensor_key   TEXT NOT NULL UNIQUE,
+                message      TEXT NOT NULL,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                dismissed    INTEGER DEFAULT 0
             )
         """)
         conn.commit()
@@ -582,8 +634,8 @@ def insert_sample(s):
              fans_json,
              cpu_percent, ram_used_gb,
              disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
-             gpu_temp, gpu_fan_percent, gpu_power_watts)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+             gpu_temp, gpu_fan_percent, gpu_power_watts, is_anomalous)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
             (
                 s["timestamp"], s.get("cpu_temp"), s.get("ambient_temp"),
                 s.get("nvme_temp"),
@@ -594,8 +646,305 @@ def insert_sample(s):
                 s.get("gpu_temp"), s.get("gpu_fan_percent"), s.get("gpu_power_watts"),
             ),
         )
+        row_id = c.lastrowid
         _update_fan_status(c, s.get("fans", []))
         conn.commit()
+        # Run anomaly pipeline in the background after committing the sample.
+        try:
+            _run_anomaly_pipeline(s, row_id)
+        except Exception as e:
+            log.warning("anomaly pipeline error: %s", e)
+    finally:
+        conn.close()
+
+
+# ── Anomaly detection engine ──────────────────────────────────────────────────
+# Checks each new sample against a rolling same-hour-of-day baseline computed
+# from the past 14 days of hw_metrics rows.  Anomalous readings capture a
+# process/context snapshot; sustained (≥3 consecutive) anomalies are flagged;
+# simultaneous multi-sensor anomalies create a correlation_event.
+
+# Scalar columns we run anomaly detection on (fan RPMs handled separately).
+_ANOMALY_SENSORS = [
+    "cpu_temp", "ambient_temp", "nvme_temp",
+    "gpu_temp", "cpu_percent", "ram_used_gb",
+]
+
+
+def _get_scalar(sample: dict, key: str):
+    """Return numeric value from sample dict, or None."""
+    v = sample.get(key)
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_baseline(conn, sensor_col: str, ts_str: str):
+    """Rolling avg+stddev at the same hour-of-day over the past 14 days.
+
+    Returns (avg, stddev, n_samples) or (None, None, 0) if insufficient data.
+    """
+    try:
+        hour = datetime.fromisoformat(ts_str).hour
+    except Exception:
+        hour = datetime.now().hour
+
+    rows = conn.execute(
+        f"""SELECT {sensor_col}
+            FROM hw_metrics
+            WHERE {sensor_col} IS NOT NULL
+              AND is_anomalous = 0
+              AND strftime('%H', timestamp) = ?
+              AND timestamp >= datetime('now', '-14 days')
+            ORDER BY timestamp DESC""",
+        (f"{hour:02d}",),
+    ).fetchall()
+
+    vals = [r[0] for r in rows if r[0] is not None]
+    n = len(vals)
+    if n < 5:
+        return None, None, n
+    avg = sum(vals) / n
+    variance = sum((v - avg) ** 2 for v in vals) / n
+    stddev = variance ** 0.5
+    return avg, stddev, n
+
+
+def _read_throttle_info():
+    """Check /proc/cpuinfo for CPU throttling (current MHz vs nominal max).
+
+    Returns (throttle_detected: bool, current_freq_mhz: float | None).
+    """
+    try:
+        with open("/proc/cpuinfo") as f:
+            text = f.read()
+        freqs = []
+        for line in text.splitlines():
+            if line.startswith("cpu MHz"):
+                try:
+                    freqs.append(float(line.split(":")[1].strip()))
+                except (IndexError, ValueError):
+                    pass
+        if not freqs:
+            return False, None
+        current = sum(freqs) / len(freqs)
+        # Try to read max from scaling_max_freq (first CPU core)
+        try:
+            with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq") as f:
+                max_freq = float(f.read().strip()) / 1000.0
+        except Exception:
+            max_freq = max(freqs)
+        throttled = max_freq > 0 and (current < max_freq * 0.8)
+        return throttled, round(current, 1)
+    except Exception:
+        return False, None
+
+
+def _capture_process_list():
+    """Top processes by CPU — first 2000 chars of 'ps aux --sort=-%cpu'."""
+    try:
+        result = subprocess.run(
+            ["ps", "aux", "--sort=-%cpu"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return result.stdout[:2000]
+    except Exception:
+        return ""
+
+
+def _capture_snapshot(conn, sensor_key: str, value: float,
+                      baseline_avg, deviation: float, sample: dict):
+    """Write an hw_anomaly_snapshots row for one anomalous reading."""
+    throttled, freq_mhz = _read_throttle_info()
+    procs = _capture_process_list()
+    conn.execute(
+        """INSERT INTO hw_anomaly_snapshots
+           (sensor_key, reading_value, baseline_avg, deviation, captured_at,
+            top_processes, cpu_pct, ram_mb, net_mb_in, net_mb_out,
+            disk_mb_read, disk_mb_write, gpu_load,
+            throttle_detected, throttle_freq_mhz)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            sensor_key, value, baseline_avg, deviation,
+            sample.get("timestamp", datetime.now().isoformat(timespec="seconds")),
+            procs,
+            sample.get("cpu_percent"),
+            (sample.get("ram_used_gb") or 0) * 1024,
+            sample.get("net_in_mb"), sample.get("net_out_mb"),
+            sample.get("disk_read_mb"), sample.get("disk_write_mb"),
+            None,  # gpu_load — not separately tracked yet
+            1 if throttled else 0,
+            freq_mhz,
+        ),
+    )
+
+
+def _check_sustained_anomalies(conn, sensor_key: str, n_required: int = 3):
+    """Mark the last N snapshots for this sensor as sustained if all are consecutive."""
+    recent = conn.execute(
+        """SELECT id FROM hw_anomaly_snapshots
+           WHERE sensor_key = ? AND sustained = 0
+           ORDER BY captured_at DESC LIMIT ?""",
+        (sensor_key, n_required),
+    ).fetchall()
+    if len(recent) >= n_required:
+        ids = [r[0] for r in recent]
+        conn.execute(
+            f"UPDATE hw_anomaly_snapshots SET sustained=1 WHERE id IN ({','.join('?' * len(ids))})",
+            ids,
+        )
+        log.info("anomaly: sustained (%d consecutive) on %s", n_required, sensor_key)
+
+
+def _check_correlation(conn, anomalous_keys: list, ts_str: str):
+    """If ≥2 sensors anomalous in the same sample window, record a correlation_event."""
+    if len(anomalous_keys) < 2:
+        return
+    severity = "CRITICAL" if len(anomalous_keys) >= 3 else "HIGH"
+    conn.execute(
+        "INSERT INTO correlation_events (sensor_keys, captured_at, severity) VALUES (?,?,?)",
+        (json.dumps(sorted(anomalous_keys)), ts_str, severity),
+    )
+    log.info("anomaly: correlation event — %s (%s)", anomalous_keys, severity)
+
+
+def _check_baseline_drift(conn, sensor_key: str, baseline_avg, current_val: float):
+    """If sensor has been outside baseline for 48+ hours, create/update a notification."""
+    # Count consecutive anomalous samples in the past 48h for this sensor
+    cutoff = "datetime('now', '-48 hours')"
+    count = conn.execute(
+        f"""SELECT COUNT(*) FROM hw_anomaly_snapshots
+            WHERE sensor_key=? AND captured_at >= {cutoff}""",
+        (sensor_key,),
+    ).fetchone()[0]
+
+    # Require at least 12 anomalous samples in 48h (avg 1 per 4h) to flag drift
+    if count >= 12:
+        msg = (
+            f"Sensor '{sensor_key}' has been outside its historical baseline for 48+ hours "
+            f"(current: {current_val:.1f}, baseline avg: {baseline_avg:.1f}). "
+            "Hardware change? Click to reset baseline."
+        )
+        conn.execute(
+            """INSERT INTO hw_notifications (sensor_key, message, created_at)
+               VALUES (?,?,datetime('now'))
+               ON CONFLICT(sensor_key) DO UPDATE
+               SET message=excluded.message, created_at=excluded.created_at, dismissed=0""",
+            (sensor_key, msg),
+        )
+
+
+def _run_anomaly_pipeline(sample: dict, row_id: int):
+    """Run all anomaly checks for a newly-inserted sample row."""
+    ts = sample.get("timestamp", datetime.now().isoformat(timespec="seconds"))
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        anomalous_keys = []
+        any_anomalous = False
+
+        for key in _ANOMALY_SENSORS:
+            value = _get_scalar(sample, key)
+            if value is None:
+                continue
+            avg, stddev, n = _compute_baseline(conn, key, ts)
+            if avg is None or stddev is None or stddev < 0.5:
+                continue
+            deviation = (value - avg) / stddev
+            if abs(deviation) > 2.0:
+                _capture_snapshot(conn, key, value, avg, deviation, sample)
+                _check_sustained_anomalies(conn, key)
+                _check_baseline_drift(conn, key, avg, value)
+                anomalous_keys.append(key)
+                any_anomalous = True
+                log.info(
+                    "anomaly: %s=%.1f baseline=%.1f σ=%.1f (deviation=%.1fσ)",
+                    key, value, avg, stddev, deviation,
+                )
+
+        if any_anomalous:
+            conn.execute(
+                "UPDATE hw_metrics SET is_anomalous=1 WHERE id=?", (row_id,)
+            )
+
+        _check_correlation(conn, anomalous_keys, ts)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
+    """Return hw_anomaly_snapshots rows for the dashboard endpoint."""
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        clauses, params = [], []
+        if sensor_key:
+            clauses.append("sensor_key = ?")
+            params.append(sensor_key)
+        if since_ts:
+            clauses.append("captured_at >= ?")
+            params.append(since_ts)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.append(limit)
+        rows = conn.execute(
+            f"""SELECT id, sensor_key, reading_value, baseline_avg, deviation,
+                       captured_at, top_processes, cpu_pct, ram_mb,
+                       net_mb_in, net_mb_out, disk_mb_read, disk_mb_write,
+                       throttle_detected, throttle_freq_mhz, sustained
+                FROM hw_anomaly_snapshots {where}
+                ORDER BY captured_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+        cols = ("id", "sensor_key", "reading_value", "baseline_avg", "deviation",
+                "captured_at", "top_processes", "cpu_pct", "ram_mb",
+                "net_mb_in", "net_mb_out", "disk_mb_read", "disk_mb_write",
+                "throttle_detected", "throttle_freq_mhz", "sustained")
+        return [dict(zip(cols, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_hw_notifications(include_dismissed=False):
+    """Return active hardware baseline-drift notifications."""
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        where = "" if include_dismissed else "WHERE dismissed=0"
+        rows = conn.execute(
+            f"SELECT id, sensor_key, message, created_at FROM hw_notifications {where}"
+        ).fetchall()
+        return [{"id": r[0], "sensor_key": r[1], "message": r[2], "created_at": r[3]}
+                for r in rows]
+    finally:
+        conn.close()
+
+
+def reset_baseline(sensor_key=None):
+    """Clear anomaly data for one sensor or all sensors.
+
+    Called from /api/hw/reset-baseline.  Deletes hw_anomaly_snapshots rows
+    and dismisses the matching hw_notifications so the next cycle starts fresh.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        if sensor_key and sensor_key != "all":
+            conn.execute(
+                "DELETE FROM hw_anomaly_snapshots WHERE sensor_key=?", (sensor_key,)
+            )
+            conn.execute(
+                "UPDATE hw_notifications SET dismissed=1 WHERE sensor_key=?", (sensor_key,)
+            )
+            conn.execute(
+                "UPDATE hw_metrics SET is_anomalous=0 WHERE id IN ("
+                "  SELECT m.id FROM hw_metrics m "
+                "  WHERE NOT EXISTS (SELECT 1 FROM hw_anomaly_snapshots s "
+                "                   WHERE s.captured_at = m.timestamp))"
+            )
+        else:
+            conn.execute("DELETE FROM hw_anomaly_snapshots")
+            conn.execute("UPDATE hw_notifications SET dismissed=1")
+            conn.execute("UPDATE hw_metrics SET is_anomalous=0")
+        conn.commit()
+        log.info("baseline reset for sensor=%s", sensor_key or "all")
     finally:
         conn.close()
 
