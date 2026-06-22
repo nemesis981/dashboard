@@ -533,7 +533,7 @@ def render_quarantine_banner_html(quarantines):
             <div class="q-info">
                 <strong style="color:#ff4444">{html.escape(q['ip'])}</strong>{loc}
                 &mdash; rule {html.escape(str(q['rule_id']))} {html.escape(q['rule_name'][:60])}
-                <br><span style="color:#aaa;font-size:0.85em">Expires in {q['minutes_remaining']} min</span>
+                <br><span style="color:#ccc;font-size:0.85em">Expires in {q['minutes_remaining']} min</span>
             </div>
             <div class="q-actions">
                 <button class="btn btn-block" onclick="confirmQuarantine({q['id']})">✓ Confirm</button>
@@ -561,7 +561,7 @@ def render_alerts_html(active_alerts):
         onclick = html.escape(f"viewAlert({json.dumps(str(alert['rule_id']))}, {json.dumps(alert['raw'])})")
         parts.append(f"""<tr class="hw-clickable" style="cursor:pointer" onclick="{onclick}">
             <td><span style="color:{color}">{label}</span></td>
-            <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(timestamp)}</td>
+            <td style="font-size:0.8em;white-space:nowrap;color:#ccc">{html.escape(timestamp)}</td>
             <td style="font-size:0.8em">{html.escape(rule_name)}</td>
             <td style="font-size:0.8em">{html.escape(alert["src_ip"])}</td>
             <td style="color:#00d4ff;font-size:0.8em;padding-left:6px">▸</td>
@@ -584,10 +584,10 @@ def render_review_queue_html(items):
         src_ip = item["src_ip"] or "—"
         onclick = html.escape(f"viewAlert({json.dumps(str(item['rule_id']))}, {json.dumps('')})")
         parts.append(f"""<tr class="hw-clickable" style="cursor:pointer" onclick="{onclick}">
-            <td style="font-size:0.8em;white-space:nowrap;color:#aaa">{html.escape(ts)}</td>
+            <td style="font-size:0.8em;white-space:nowrap;color:#ccc">{html.escape(ts)}</td>
             <td style="font-size:0.8em">{html.escape(rule_name)}</td>
             <td style="font-size:0.8em">{html.escape(src_ip)}</td>
-            <td style="font-size:0.8em;color:#aaa">{html.escape(classification)}</td>
+            <td style="font-size:0.8em;color:#ccc">{html.escape(classification)}</td>
             <td style="font-size:0.8em;text-align:center">{html.escape(str(item['times_seen']))}</td>
             <td style="color:#ff8800;font-size:0.8em;padding-left:6px">▸</td>
         </tr>""")
@@ -720,7 +720,7 @@ def api_firewall_drilldown():
                 "monitor": "#00d4ff", "pending": "#ff8800",
             }.get(action, "#666")
             note_html = (
-                f'<div style="color:#aaa;font-size:0.8em;margin-top:2px;font-style:italic">'
+                f'<div style="color:#ccc;font-size:0.8em;margin-top:2px;font-style:italic">'
                 f'{html.escape(e["note"][:120])}</div>'
             ) if e.get("note") else ""
             rows_html.append(
@@ -728,7 +728,7 @@ def api_firewall_drilldown():
                 f'<td style="color:{pri_color};font-weight:bold">{pri_label}</td>'
                 f'<td style="font-family:monospace;color:#ccc">{html.escape(e["rule_id"])}</td>'
                 f'<td style="color:#eee">{html.escape(e["rule_name"][:60])}{note_html}</td>'
-                f'<td style="color:#aaa;font-size:0.85em">{html.escape(e["classification"][:40])}</td>'
+                f'<td style="color:#ccc;font-size:0.85em">{html.escape(e["classification"][:40])}</td>'
                 f'<td style="text-align:right;color:#00d4ff">{e["count"]}</td>'
                 f'<td style="color:{action_color};font-size:0.85em">{html.escape(reason_short)}'
                 f'<span class="tier-text" style="display:none" '
@@ -756,7 +756,7 @@ def api_firewall_drilldown():
             '</tr></thead>'
             '<tbody>' + "".join(rows_html) + '</tbody>'
             '</table>'
-        ) if page_rows else '<p style="color:#aaa">No rules found for today.</p>'
+        ) if page_rows else '<p style="color:#ccc">No rules found for today.</p>'
 
         return jsonify({
             "ok": True,
@@ -1526,7 +1526,7 @@ def settings_page():
                     </div>
                     <div style="display:flex;gap:20px;flex-wrap:wrap;margin-bottom:5px">
                         <div>
-                            <span style="color:#888">
+                            <span style="color:#bbb">
                                 <span class="tier-text"
                                     data-beginner="Cost per million tokens sent to AI:"
                                     data-intermediate="Input ($/MTok):"
@@ -1535,7 +1535,7 @@ def settings_page():
                             <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_input_price:.2f}")}</span>
                         </div>
                         <div>
-                            <span style="color:#888">
+                            <span style="color:#bbb">
                                 <span class="tier-text"
                                     data-beginner="Cost per million tokens received from AI:"
                                     data-intermediate="Output ($/MTok):"
@@ -1544,7 +1544,7 @@ def settings_page():
                             <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_output_price:.2f}")}</span>
                         </div>
                     </div>
-                    <div style="color:#555;font-size:0.88em;line-height:1.5">
+                    <div style="color:#bbb;font-size:0.88em;line-height:1.5">
                         <span class="tier-text"
                             data-beginner="Last verified: June 2026. If Anthropic changes their prices, update ANTHROPIC_INPUT_PRICE_PER_MTOK and ANTHROPIC_OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env. Check current pricing at"
                             data-intermediate="Last verified: June 2026 · Update in /etc/nemesis.env if pricing changes ·"
@@ -1563,7 +1563,7 @@ def settings_page():
                 </div>
                 <div style="display:flex;gap:24px;flex-wrap:wrap;margin-bottom:8px">
                     <div>
-                        <span style="color:#888">
+                        <span style="color:#bbb">
                             <span class="tier-text"
                                 data-beginner="Cost per check:"
                                 data-intermediate="Per analysis:"
@@ -1572,7 +1572,7 @@ def settings_page():
                         <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-per-call">~${html.escape(f"{(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.4f}")}</span>
                     </div>
                     <div>
-                        <span style="color:#888">
+                        <span style="color:#bbb">
                             <span class="tier-text"
                                 data-beginner="Max hourly cost:"
                                 data-intermediate="Max cost / hour:"
@@ -1581,7 +1581,7 @@ def settings_page():
                         <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~${html.escape(f"{float(_ad_rate_h)*(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.3f}")}</span>
                     </div>
                     <div>
-                        <span style="color:#888">
+                        <span style="color:#bbb">
                             <span class="tier-text"
                                 data-beginner="Max daily cost:"
                                 data-intermediate="Max cost / day:"
@@ -1601,35 +1601,35 @@ def settings_page():
                                 data-pro="Actual Usage">Actual AI Usage</span>
                         </span>
                         <span style="color:#333">|</span>
-                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                        <label style="color:#ccc;font-size:0.82em;cursor:pointer;white-space:nowrap">
                             <input type="radio" name="ai-usage-period" value="hour"
                                    style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
                                    onchange="switchUsagePeriod('hour')">
                             <span class="tier-text" data-beginner="By Hour (today)" data-intermediate="Hourly" data-pro="1h">Hourly</span>
                         </label>
-                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                        <label style="color:#ccc;font-size:0.82em;cursor:pointer;white-space:nowrap">
                             <input type="radio" name="ai-usage-period" value="day" checked
                                    style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
                                    onchange="switchUsagePeriod('day')">
                             <span class="tier-text" data-beginner="Today" data-intermediate="Today" data-pro="Today">Today</span>
                         </label>
-                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                        <label style="color:#ccc;font-size:0.82em;cursor:pointer;white-space:nowrap">
                             <input type="radio" name="ai-usage-period" value="week"
                                    style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
                                    onchange="switchUsagePeriod('week')">
                             <span class="tier-text" data-beginner="This Week" data-intermediate="7 days" data-pro="7d">7 days</span>
                         </label>
-                        <label style="color:#aaa;font-size:0.82em;cursor:pointer;white-space:nowrap">
+                        <label style="color:#ccc;font-size:0.82em;cursor:pointer;white-space:nowrap">
                             <input type="radio" name="ai-usage-period" value="month"
                                    style="accent-color:#00d4ff;cursor:pointer;margin-right:3px"
                                    onchange="switchUsagePeriod('month')">
                             <span class="tier-text" data-beginner="This Month" data-intermediate="30 days" data-pro="30d">30 days</span>
                         </label>
                     </div>
-                    <div id="ai-usage-display" style="color:#aaa;font-size:0.88em;min-height:1.4em">
+                    <div id="ai-usage-display" style="color:#ccc;font-size:0.88em;min-height:1.4em">
                         <span style="color:#444">Loading usage…</span>
                     </div>
-                    <div style="color:#555;font-size:0.8em;margin-top:4px">
+                    <div style="color:#bbb;font-size:0.8em;margin-top:4px">
                         <span class="tier-text"
                             data-beginner="Counts only real API calls — cache hits (where a previous analysis is reused) are free and not counted here."
                             data-intermediate="Cache hits excluded — only new API calls counted."
@@ -1638,8 +1638,8 @@ def settings_page():
                 </div>
 
                 <!-- Disclaimer -->
-                <div style="color:#666;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e22;padding-top:7px;margin-top:8px">
-                    <strong style="color:#888">⚠ Estimates only.</strong>
+                <div style="color:#bbb;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e22;padding-top:7px;margin-top:8px">
+                    <strong style="color:#bbb">⚠ Estimates only.</strong>
                     <span class="tier-text"
                         data-beginner="These are rough estimates. Actual cost depends on alert complexity. If Anthropic changes their prices, update ANTHROPIC_INPUT_PRICE_PER_MTOK and ANTHROPIC_OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env."
                         data-intermediate="Based on ~350 input / ~150 output tokens per call at configured prices. Actual varies ±50%. If pricing changes, update ANTHROPIC_INPUT/OUTPUT_PRICE_PER_MTOK in /etc/nemesis.env."
@@ -1663,7 +1663,7 @@ def settings_page():
             <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
                         letter-spacing:0.06em;margin:14px 0 6px;font-weight:bold">
                 AbuseIPDB Auto-Reporting Threshold
-                <span style="color:#555;font-weight:normal;font-size:0.88em;margin-left:6px;
+                <span style="color:#bbb;font-weight:normal;font-size:0.88em;margin-left:6px;
                              text-transform:none;letter-spacing:0">
                   — select which control is active (●)
                 </span>
@@ -1691,13 +1691,13 @@ def settings_page():
                 <input type="number" id="ad-abuseipdb-score" value="{html.escape(_ad_ab_score)}"
                        min="0" max="100" class="module-subsettings-input"
                        onchange="saveAnomalySettings()">
-                <span style="color:#555;font-size:0.82em">≥ score</span>
+                <span style="color:#bbb;font-size:0.82em">≥ score</span>
             </div>
 
             <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
                         letter-spacing:0.06em;margin:14px 0 6px;font-weight:bold">
                 CISA Button Threshold
-                <span style="color:#555;font-weight:normal;font-size:0.88em;margin-left:6px;
+                <span style="color:#bbb;font-weight:normal;font-size:0.88em;margin-left:6px;
                              text-transform:none;letter-spacing:0">
                   — sets when "CISA" button appears on incidents
                 </span>
@@ -1724,7 +1724,7 @@ def settings_page():
                 <input type="number" id="ad-cisa-score" value="{html.escape(_ad_cisa_score)}"
                        min="0" max="100" class="module-subsettings-input"
                        onchange="saveAnomalySettings()">
-                <span style="color:#555;font-size:0.82em">≥ score</span>
+                <span style="color:#bbb;font-size:0.82em">≥ score</span>
             </div>
 
             <div id="ad-settings-status"
@@ -1811,7 +1811,7 @@ def settings_page():
         </div>"""
 
     if not module_rows_html:
-        module_rows_html = '<p style="color:#555;font-style:italic">No modules found in modules/ directory.</p>'
+        module_rows_html = '<p style="color:#bbb;font-style:italic">No modules found in modules/ directory.</p>'
 
     return f"""<!DOCTYPE html>
 <html>
@@ -1838,10 +1838,10 @@ def settings_page():
                                           accent-color: #00d4ff; width: 16px; height: 16px; }}
         .tier-label {{ flex: 1; }}
         .tier-label strong {{ color: #eee; font-size: 1em; }}
-        .tier-label em {{ color: #888; font-size: 0.85em; margin-left: 6px; }}
-        .tier-label p {{ color: #aaa; font-size: 0.85em; margin: 4px 0 0 0; line-height: 1.5; }}
+        .tier-label em {{ color: #bbb; font-size: 0.85em; margin-left: 6px; }}
+        .tier-label p {{ color: #ccc; font-size: 0.85em; margin: 4px 0 0 0; line-height: 1.5; }}
         .save-note {{ color: #00ff88; font-size: 0.82em; margin-top: 6px; display: none; }}
-        .settings-intro {{ color: #aaa; font-size: 0.9em; margin: 0 0 18px 0; line-height: 1.6; }}
+        .settings-intro {{ color: #ccc; font-size: 0.9em; margin: 0 0 18px 0; line-height: 1.6; }}
         /* Module rows */
         .module-row {{ display: flex; align-items: center; gap: 14px;
                        padding: 14px 0; border-bottom: 1px solid #1e2d4e; }}
@@ -1852,7 +1852,7 @@ def settings_page():
                        background: rgba(0,212,255,0.1); padding: 1px 7px;
                        border-radius: 10px; margin-left: 8px; font-weight: normal;
                        vertical-align: middle; }}
-        .module-desc {{ color: #aaa; font-size: 0.84em; line-height: 1.5; margin-bottom: 4px; }}
+        .module-desc {{ color: #ccc; font-size: 0.84em; line-height: 1.5; margin-bottom: 4px; }}
         .module-status {{ font-size: 0.78em; font-weight: bold; }}
         /* Module sub-settings (e.g. anomaly detection AI config) */
         .module-subsettings {{ background: rgba(0,212,255,0.03);
@@ -1861,7 +1861,7 @@ def settings_page():
         .module-subsettings-row {{ display: flex; align-items: center; gap: 12px;
                                     padding: 7px 0; border-bottom: 1px solid #1e2d4e44; }}
         .module-subsettings-row:last-of-type {{ border-bottom: none; }}
-        .module-subsettings-label {{ color: #aaa; font-size: 0.86em; flex: 1; }}
+        .module-subsettings-label {{ color: #ccc; font-size: 0.86em; flex: 1; }}
         .module-subsettings-input {{ background: #1a1a2e; border: 1px solid #333; color: #eee;
                                       padding: 4px 8px; border-radius: 4px; width: 60px;
                                       text-align: center; font-size: 0.9em; }}
@@ -1903,7 +1903,7 @@ def settings_page():
 <body>
     <h1>⚙️ Settings
         <a href="/diagnostics" target="_blank" rel="noopener"
-           style="float:right;font-size:0.42em;color:#888;text-decoration:none;font-weight:normal;margin-top:10px"
+           style="float:right;font-size:0.42em;color:#bbb;text-decoration:none;font-weight:normal;margin-top:10px"
            title="Diagnostics &amp; Support">🔍 Diagnostics</a>
     </h1>
     <p><a class="back" href="/">← Back to Dashboard</a></p>
@@ -1915,10 +1915,11 @@ def settings_page():
                 style="background:#ff4444;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em">
                 🔄 Restart Dashboard
             </button>
+            <span id="dashUptimeLabel" style="color:#ccc;font-size:0.85em">Loading uptime…</span>
             <span id="restartDashMsg" style="color:#ffaa00;font-size:0.85em;display:none">Restarting — page will reload in 5 seconds…</span>
             {'<button id="restartAgentBtn" onclick="restartWindowsAgent()"style="background:#ff8800;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em;margin-left:4px">🖥️ Restart Windows Agent</button><span id="restartAgentMsg" style="color:#ffaa00;font-size:0.85em;display:none">Restart command sent…</span>' if _is_windows_agent else ''}
         </div>
-        <p style="color:#888;font-size:0.82em;margin:10px 0 0 0">Restart applies configuration changes and clears cached state. The page will auto-reload after 5 seconds.</p>
+        <p style="color:#ccc;font-size:0.82em;margin:10px 0 0 0">Restart applies configuration changes and clears cached state. The page will auto-reload after 5 seconds.</p>
     </div>
 
     <div class="settings-section">
@@ -1979,7 +1980,7 @@ def settings_page():
         <div style="display:flex;flex-direction:column;gap:16px">
             <div>
                 <div style="color:#ccc;font-size:0.9em;margin-bottom:8px;font-weight:bold">Reset Sensor Baselines</div>
-                <div style="color:#888;font-size:0.82em;margin-bottom:10px">
+                <div style="color:#bbb;font-size:0.82em;margin-bottom:10px">
                     Clears the anomaly history used to calculate the rolling baseline for each sensor.
                     Use this after a hardware change (new cooler, replaced fan, etc.) so the new readings
                     are not flagged as anomalous.
@@ -1999,12 +2000,12 @@ def settings_page():
                             style="background:#333;border:1px solid #555;color:#eee;padding:5px 14px;cursor:pointer;border-radius:4px;font-size:0.85em">
                         Reset baseline
                     </button>
-                    <span id="hw-baseline-status" style="font-size:0.82em;color:#555"></span>
+                    <span id="hw-baseline-status" style="font-size:0.82em;color:#bbb"></span>
                 </div>
             </div>
             <div style="border-top:1px solid #1e2d4e;padding-top:16px">
                 <div style="color:#ccc;font-size:0.9em;margin-bottom:8px;font-weight:bold">Re-run Hardware Discovery</div>
-                <div style="color:#888;font-size:0.82em;margin-bottom:10px">
+                <div style="color:#bbb;font-size:0.82em;margin-bottom:10px">
                     Re-runs hw_discover.py to rebuild the sensor map (hw_map.json).
                     Use this if sensors have changed or auto-discovery is picking up the wrong readings.
                     hw_monitor will pick up the new map on its next sample cycle.
@@ -2014,10 +2015,10 @@ def settings_page():
                             style="background:#333;border:1px solid #555;color:#eee;padding:5px 14px;cursor:pointer;border-radius:4px;font-size:0.85em">
                         Re-run discovery
                     </button>
-                    <span id="hw-rediscover-status" style="font-size:0.82em;color:#555"></span>
+                    <span id="hw-rediscover-status" style="font-size:0.82em;color:#bbb"></span>
                 </div>
                 <div id="hw-rediscover-output"
-                     style="display:none;margin-top:10px;background:#0d1117;border:1px solid #333;border-radius:4px;padding:10px;font-size:0.75em;color:#aaa;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
+                     style="display:none;margin-top:10px;background:#0d1117;border:1px solid #333;border-radius:4px;padding:10px;font-size:0.75em;color:#ccc;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
             </div>
         </div>
     </div>
@@ -2292,7 +2293,7 @@ def settings_page():
                 var cost = (count * (d.cost_per_call || 0)).toFixed(4);
                 display.innerHTML =
                     '<span style="color:#eee;font-weight:bold">' + count + '</span>'
-                    + ' <span style="color:#666">'
+                    + ' <span style="color:#bbb">'
                     + tierText('AI analysis calls', 'calls', 'calls')
                     + ' (' + label + ')</span>'
                     + ' — '
@@ -2323,6 +2324,17 @@ def settings_page():
                 }});
         }}
         switchUsagePeriod('day');
+
+        fetch('/api/dashboard/uptime')
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                var el = document.getElementById('dashUptimeLabel');
+                if (el) el.textContent = 'Last started: ' + d.started_at + '  (uptime ' + d.uptime + ')';
+            }})
+            .catch(function() {{
+                var el = document.getElementById('dashUptimeLabel');
+                if (el) el.textContent = '';
+            }});
 
         function restartDashboard() {{
             var btn = document.getElementById('restartDashBtn');
@@ -2449,30 +2461,30 @@ def diagnostics_page():
              border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }}
         a.back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
         a.back:hover {{ text-decoration: underline; }}
-        .intro {{ color: #aaa; font-size: 0.9em; margin: 0 0 20px 0; line-height: 1.6; }}
+        .intro {{ color: #ccc; font-size: 0.9em; margin: 0 0 20px 0; line-height: 1.6; }}
         .check-card {{ background: #0d1117; border: 1px solid #1e2d4e; border-radius: 8px;
                        padding: 14px 16px; margin-bottom: 12px; }}
         .check-header {{ display: flex; align-items: center; gap: 12px; }}
         .check-icon {{ font-size: 1.4em; flex-shrink: 0; }}
         .check-title {{ flex: 1; min-width: 0; }}
         .check-name {{ font-weight: bold; color: #eee; font-size: 1em; }}
-        .check-desc {{ color: #888; font-size: 0.83em; margin-top: 2px; line-height: 1.4; }}
+        .check-desc {{ color: #bbb; font-size: 0.83em; margin-top: 2px; line-height: 1.4; }}
         .check-status {{ font-size: 0.78em; font-weight: bold; padding: 3px 8px;
                          border-radius: 10px; flex-shrink: 0; white-space: nowrap; }}
         .status-ok    {{ background: rgba(0,255,136,0.15); color: #00ff88; }}
         .status-warn  {{ background: rgba(255,136,0,0.15);  color: #ff8800; }}
         .status-error {{ background: rgba(255,68,68,0.15);  color: #ff4444; }}
         .status-info  {{ background: rgba(0,212,255,0.1);   color: #00d4ff; }}
-        .status-idle  {{ background: rgba(100,100,100,0.15); color: #888; }}
+        .status-idle  {{ background: rgba(100,100,100,0.15); color: #bbb; }}
         .run-btn {{ background: #00d4ff; color: #1a1a2e; border: none;
                     padding: 6px 16px; border-radius: 4px; cursor: pointer;
                     font-weight: bold; font-size: 0.88em; flex-shrink: 0;
                     transition: background 0.15s; }}
         .run-btn:hover {{ background: #00b8d9; }}
-        .run-btn:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
+        .run-btn:disabled {{ background: #333; color: #bbb; cursor: not-allowed; }}
         .check-output {{ margin-top: 12px; display: none; }}
         .check-output.visible {{ display: block; }}
-        .check-summary {{ font-size: 0.85em; color: #aaa; margin: 4px 0 2px 0; }}
+        .check-summary {{ font-size: 0.85em; color: #ccc; margin: 4px 0 2px 0; }}
         .check-output pre {{ background: #060b12; border: 1px solid #1e2d4e; border-radius: 4px;
                               padding: 12px; font-size: 0.8em; line-height: 1.5;
                               color: #ccc; white-space: pre-wrap; word-break: break-word;
@@ -2483,12 +2495,12 @@ def diagnostics_page():
                         padding: 9px 20px; border-radius: 5px; cursor: pointer;
                         font-weight: bold; font-size: 0.95em; transition: background 0.15s; }}
         .btn-run-all:hover {{ background: rgba(0,212,255,0.1); }}
-        .btn-run-all:disabled {{ border-color: #444; color: #555; cursor: not-allowed; }}
+        .btn-run-all:disabled {{ border-color: #444; color: #bbb; cursor: not-allowed; }}
         .btn-submit {{ background: #00ff88; color: #1a1a2e; border: none;
                        padding: 9px 20px; border-radius: 5px; cursor: pointer;
                        font-weight: bold; font-size: 0.95em; transition: background 0.15s; }}
         .btn-submit:hover {{ background: #00cc6a; }}
-        .btn-submit:disabled {{ background: #333; color: #666; cursor: not-allowed; }}
+        .btn-submit:disabled {{ background: #333; color: #bbb; cursor: not-allowed; }}
         .notes-area {{ width: 100%; box-sizing: border-box; background: #0d1117;
                        border: 1px solid #333; color: #eee; border-radius: 6px;
                        padding: 10px 12px; font-size: 0.9em; resize: vertical;
@@ -2496,9 +2508,9 @@ def diagnostics_page():
         .notes-area:focus {{ outline: none; border-color: #00d4ff; }}
         .redact-notice {{ background: rgba(0,212,255,0.07); border: 1px solid rgba(0,212,255,0.2);
                           border-radius: 6px; padding: 10px 14px; font-size: 0.83em;
-                          color: #aaa; margin-bottom: 18px; }}
+                          color: #ccc; margin-bottom: 18px; }}
         .submit-status {{ font-size: 0.88em; margin-top: 8px; }}
-        #runAllProgress {{ font-size: 0.85em; color: #aaa; }}
+        #runAllProgress {{ font-size: 0.85em; color: #ccc; }}
     </style>
 </head>
 <body>
@@ -2544,7 +2556,7 @@ def diagnostics_page():
         data-beginner="Describe What&apos;s Happening (optional)"
         data-intermediate="Notes for Support"
         data-pro="Notes for Support">Notes for Support</span></h2>
-    <p style="color:#888;font-size:0.85em;margin:0 0 8px 0">
+    <p style="color:#bbb;font-size:0.85em;margin:0 0 8px 0">
         <span class="tier-text"
             data-beginner="Describe what&apos;s wrong, what you expected to happen, or any question you have. This will be included in your report alongside the diagnostic results."
             data-intermediate="Free-text description included with submitted reports. Sensitive values are redacted before sending."
@@ -2558,8 +2570,8 @@ def diagnostics_page():
     <div style="margin-top:16px;display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap">
         <button class="btn-submit" onclick="submitReport()">📧 Submit to Support</button>
         <div>
-            <div class="submit-status" id="submitStatus" style="color:#aaa"></div>
-            <div style="color:#666;font-size:0.78em;margin-top:4px">
+            <div class="submit-status" id="submitStatus" style="color:#ccc"></div>
+            <div style="color:#bbb;font-size:0.78em;margin-top:4px">
                 <span class="tier-text"
                     data-beginner="Sends an email with your notes and whichever diagnostic results you&apos;ve run. You&apos;ll get a copy at your configured alert email address."
                     data-intermediate="Sends to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP. CC&apos;d to WATCHDOG_EMAIL."
@@ -2822,7 +2834,7 @@ def firewall_db():
                 action_color = "color:#ffaa00;font-weight:bold"
             elif action_val == "ignore":
                 row_style = "opacity:0.55;"
-                action_color = "color:#555"
+                action_color = "color:#bbb"
             elif action_val == "block":
                 row_style = "background:rgba(255,68,68,0.08);border-left:3px solid #ff4444;"
                 action_color = "color:#ff4444;font-weight:bold"
@@ -2839,12 +2851,12 @@ def firewall_db():
             tip_p = html.escape(tip_p, quote=True)
 
             rows += f"""<tr class="db-row-click" style="{row_style}cursor:pointer" onclick="{row_notes_onclick}">
-                <td style="color:#888">{rule_id}</td>
+                <td style="color:#bbb">{rule_id}</td>
                 <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" title="{tip_m}">{rule_name}</td>
                 <td style="color:{'#00ff88' if a[6]=='LOW' else '#ffaa00' if a[6]=='MEDIUM' else '#ff4444'}">{risk_level}</td>
                 <td style="{action_color}">{action_val}</td>
-                <td style="color:#aaa;text-align:right">{times_seen}</td>
-                <td style="color:#aaa">{last_seen}</td>
+                <td style="color:#ccc;text-align:right">{times_seen}</td>
+                <td style="color:#ccc">{last_seen}</td>
                 <td onclick="event.stopPropagation()">
                     <select onchange="changeAction({aid}, this.value)">
                         <option {"selected" if a[7]=="pending" else ""}>pending</option>
@@ -2853,7 +2865,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
                 </td>
-                <td style="color:#555;font-size:0.85em;white-space:nowrap">Notes ▸</td>
+                <td style="color:#bbb;font-size:0.85em;white-space:nowrap">Notes ▸</td>
             </tr>"""
         return f"""<!DOCTYPE html>
 <html>
@@ -2874,7 +2886,7 @@ def firewall_db():
         .db-modal-inner h3 {{ color:#00d4ff; margin-top:0; }}
         .note-item {{ border-left:2px solid #333; padding:6px 10px; margin-bottom:8px; }}
         .note-text {{ color:#ddd; font-size:0.85em; white-space:pre-wrap; }}
-        .note-meta {{ color:#555; font-size:0.75em; margin-top:3px; }}
+        .note-meta {{ color:#bbb; font-size:0.75em; margin-top:3px; }}
     </style>
     <script>
         function escHtml(s) {{
@@ -2918,7 +2930,7 @@ def firewall_db():
             document.getElementById("dbNoteStatus").textContent = "";
             document.getElementById("dbNoteInput").value = "";
             document.getElementById("dbNotesList").innerHTML =
-                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+                "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
             fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
@@ -2942,10 +2954,10 @@ def firewall_db():
             var sorted = _dbNotesSortDesc ? _dbAllNotes : _dbAllNotes.slice().reverse();
             var visible = sorted.slice(0, (_dbNotesPage + 1) * perPage);
             if (_dbAllNotes.length === 0) {{
-                el.innerHTML = "<span style='color:#555;font-size:0.85em'>No notes yet. Add one below.</span>";
+                el.innerHTML = "<span style='color:#bbb;font-size:0.85em'>No notes yet. Add one below.</span>";
                 return;
             }}
-            var sortBtn = "<button onclick='_toggleDbNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+            var sortBtn = "<button onclick='_toggleDbNoteSort()' style='background:transparent;border:none;color:#ccc;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
                 (_dbNotesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
             var items = visible.map(function(n) {{
                 return '<div class="note-item"><div class="note-text">' + escHtml(n.note) + '</div>' +
@@ -2953,7 +2965,7 @@ def firewall_db():
             }}).join("");
             var moreCount = _dbAllNotes.length - visible.length;
             var moreBtn = moreCount > 0
-                ? '<button onclick="_showMoreDbNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                ? '<button onclick="_showMoreDbNotes()" style="background:transparent;border:1px solid #444;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
                 : "";
             el.innerHTML = sortBtn + items + moreBtn;
         }}
@@ -3003,18 +3015,18 @@ def firewall_db():
             if (!_dbNotesRuleId) {{ return; }}
             var el = document.getElementById("dbRelatedNotesList");
             el.style.display = "block";
-            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
+            el.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching for related notes…</span>";
             fetch("/api/tickets/related/" + encodeURIComponent(_dbNotesRuleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{
-                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>No related notes found (no other alerts share the same source IP with notes).</div>";
+                        el.innerHTML = "<div style='color:#bbb;font-size:0.85em'>No related notes found (no other alerts share the same source IP with notes).</div>";
                         return;
                     }}
-                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>Related Notes (same source IP)</div>";
+                    var header = "<div style='color:#ccc;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>Related Notes (same source IP)</div>";
                     var items = notes.map(function(n) {{
                         return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
-                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-bottom:2px">' + escHtml(n.rule_name || n.rule_id) + '</div>' +
                             '<div class="note-text">' + escHtml(n.note) + '</div>' +
                             '<div class="note-meta">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) + '</div></div>';
                     }}).join("");
@@ -3034,24 +3046,24 @@ def firewall_db():
                 return;
             }}
             resEl.style.display = "block";
-            resEl.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
+            resEl.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching…</span>";
             fetch("/api/tickets/search?q=" + encodeURIComponent(q))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(results) {{
                     if (results.length === 0) {{
-                        resEl.innerHTML = "<span style='color:#555;font-size:0.85em'>No notes match <em>" + escHtml(q) + "</em></span>";
+                        resEl.innerHTML = "<span style='color:#bbb;font-size:0.85em'>No notes match <em>" + escHtml(q) + "</em></span>";
                         return;
                     }}
                     var items = results.map(function(n) {{
                         return '<div style="border-left:2px solid #00d4ff;padding:6px 10px;margin-bottom:8px;background:#0d1117;border-radius:0 4px 4px 0">' +
-                            '<div style="color:#aaa;font-size:0.75em;margin-bottom:2px">' +
+                            '<div style="color:#ccc;font-size:0.75em;margin-bottom:2px">' +
                             'Rule ' + escHtml(n.rule_id) + (n.rule_name ? ' — ' + escHtml(n.rule_name) : '') + '</div>' +
                             '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escHtml(n.note) + '</div>' +
-                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) +
+                            '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' + escHtml(n.author) + ' · ' + escHtml(n.created_at) +
                             ' <button onclick="openDbNotes(' + JSON.stringify(n.rule_id) + ')" style="background:transparent;border:none;color:#00d4ff;cursor:pointer;font-size:0.85em;padding:0 4px">→ Notes</button></div>' +
                             '</div>';
                     }}).join("");
-                    resEl.innerHTML = '<div style="color:#aaa;font-size:0.8em;margin-bottom:8px">' + results.length + ' note(s) matching <em>' + escHtml(q) + '</em></div>' + items;
+                    resEl.innerHTML = '<div style="color:#ccc;font-size:0.8em;margin-bottom:8px">' + results.length + ' note(s) matching <em>' + escHtml(q) + '</em></div>' + items;
                 }})
                 .catch(function() {{
                     resEl.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Search failed</span>";
@@ -3067,8 +3079,8 @@ def firewall_db():
 </head>
 <body>
     <h1>🛡️ Nemesis - Alert Database</h1>
-    <p><a href="javascript:window.close()" style="color:#888">✕ Close this tab</a></p>
-    <p style="background:#0d1117;border-left:3px solid #00d4ff;padding:10px 14px;font-size:0.85em;color:#aaa;border-radius:0 4px 4px 0;margin-bottom:16px">
+    <p><a href="javascript:window.close()" style="color:#bbb">✕ Close this tab</a></p>
+    <p style="background:#0d1117;border-left:3px solid #00d4ff;padding:10px 14px;font-size:0.85em;color:#ccc;border-radius:0 4px 4px 0;margin-bottom:16px">
         ℹ️ <strong style="color:#00d4ff">This database shows P1/P2 alerts that required review or action.</strong>
         Routine informational (P3) traffic — DNS lookups, ET POLICY notices, protocol scans — is not individually logged here,
         but is counted in the dashboard's Total and can be inspected in Suricata's fast.log directly.
@@ -3088,7 +3100,7 @@ def firewall_db():
     <!-- Notes panel modal -->
     <div class="db-modal" id="dbNotesModal" onclick="if(event.target.id==='dbNotesModal')closeDbNotes()">
         <div class="db-modal-inner">
-            <h3>📝 Admin Notes — <span id="dbNoteRuleLabel" style="font-weight:normal;font-size:0.8em;color:#aaa"></span></h3>
+            <h3>📝 Admin Notes — <span id="dbNoteRuleLabel" style="font-weight:normal;font-size:0.8em;color:#ccc"></span></h3>
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
                 <div id="dbNotesList" style="flex:1;font-size:0.85em"></div>
             </div>
@@ -3100,10 +3112,10 @@ def firewall_db():
                     <button onclick="addDbNote()"
                         style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">Add Note</button>
                     <button onclick="loadDbRelatedNotes()"
-                        style="background:transparent;border:1px solid #555;color:#aaa;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em">Find Related Notes</button>
-                    <span id="dbNoteStatus" style="font-size:0.8em;color:#aaa"></span>
+                        style="background:transparent;border:1px solid #555;color:#ccc;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em">Find Related Notes</button>
+                    <span id="dbNoteStatus" style="font-size:0.8em;color:#ccc"></span>
                     <button onclick="closeDbNotes()"
-                        style="background:transparent;border:1px solid #555;color:#888;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em;margin-left:auto">✕ Close</button>
+                        style="background:transparent;border:1px solid #555;color:#bbb;padding:5px 10px;cursor:pointer;border-radius:3px;font-size:0.85em;margin-left:auto">✕ Close</button>
                 </div>
             </div>
         </div>
@@ -3344,6 +3356,34 @@ def api_restart():
     return jsonify({"status": "restarting"})
 
 
+@app.route("/api/dashboard/uptime")
+def api_dashboard_uptime():
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "dashboard", "--property=ActiveEnterTimestamp"],
+            capture_output=True, text=True, timeout=5,
+        )
+        raw = r.stdout.strip()
+        # raw is like: ActiveEnterTimestamp=Mon 2026-06-22 13:21:05 CDT
+        ts_str = raw.split("=", 1)[-1].strip()
+        # Parse: strip weekday prefix then parse
+        parts = ts_str.split(" ", 1)
+        ts_str_clean = parts[1] if len(parts) == 2 else ts_str
+        # Format: "2026-06-22 13:21:05 CDT" — strip timezone for strptime
+        ts_no_tz = " ".join(ts_str_clean.split()[:2])
+        started_dt = datetime.strptime(ts_no_tz, "%Y-%m-%d %H:%M:%S")
+        started_at = started_dt.strftime("%Y-%m-%d %H:%M:%S")
+        delta = datetime.now() - started_dt
+        total_s = int(delta.total_seconds())
+        h, remainder = divmod(total_s, 3600)
+        m = remainder // 60
+        uptime = f"{h}h {m}m" if h else f"{m}m"
+        return jsonify({"started_at": started_at, "uptime": uptime})
+    except Exception as e:
+        log.exception("api_dashboard_uptime failed: %s", e)
+        return jsonify({"started_at": "unknown", "uptime": "unknown"})
+
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -3473,18 +3513,18 @@ def dashboard():
         .hw-overview-btn {{ float:right; background:transparent; border:1px solid #00d4ff; color:#00d4ff; padding:3px 10px; border-radius:4px; cursor:pointer; font-size:0.75em; margin-top:2px; }}
         .hw-overview-btn:hover {{ background:#00d4ff; color:#1a1a2e; }}
         .sensor-popup-modal {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:720px; width:95%; max-height:90vh; overflow-y:auto; margin:40px auto; position:relative; }}
-        .sensor-range-btn {{ background:#0d1117; border:1px solid #333; color:#888; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:0.82em; margin-right:4px; }}
+        .sensor-range-btn {{ background:#0d1117; border:1px solid #333; color:#bbb; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:0.82em; margin-right:4px; }}
         .sensor-range-btn.active {{ border-color:#00d4ff; color:#00d4ff; background:#0a1a2e; }}
         .anomaly-banner {{ background:#2a1000; border-left:3px solid #ff8800; padding:8px 12px; border-radius:4px; margin:8px 0; font-size:0.85em; color:#ffaa00; }}
         .throttle-banner {{ background:#2a0000; border-left:3px solid #ff4444; padding:8px 12px; border-radius:4px; margin:8px 0; font-size:0.85em; color:#ff6666; }}
         .process-modal {{ background:#111; border:1px solid #333; border-radius:8px; padding:18px; max-width:700px; width:95%; max-height:85vh; overflow-y:auto; margin:50px auto; position:relative; }}
-        .process-modal pre {{ font-size:0.75em; color:#aaa; white-space:pre-wrap; word-break:break-all; background:#0d1117; padding:10px; border-radius:4px; max-height:350px; overflow-y:auto; }}
+        .process-modal pre {{ font-size:0.75em; color:#ccc; white-space:pre-wrap; word-break:break-all; background:#0d1117; padding:10px; border-radius:4px; max-height:350px; overflow-y:auto; }}
         .hw-notification-bar {{ background:#1a1000; border:1px solid #ff8800; border-radius:6px; padding:8px 14px; margin-bottom:10px; font-size:0.85em; display:flex; align-items:center; gap:10px; }}
-        .hw-notification-bar button {{ background:transparent; border:1px solid #555; color:#aaa; padding:2px 8px; cursor:pointer; border-radius:3px; font-size:0.8em; }}
+        .hw-notification-bar button {{ background:transparent; border:1px solid #555; color:#ccc; padding:2px 8px; cursor:pointer; border-radius:3px; font-size:0.8em; }}
         .hw-card:hover {{ background:#1a2950; }}
         .hw-grid {{ display:grid; grid-template-columns: repeat(4, 1fr); gap:10px; margin-top:8px; }}
         .hw-stat {{ background:#0d1117; border-radius:6px; padding:8px 10px; text-align:center; }}
-        .hw-label {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-label {{ color:#ccc; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-value {{ color:#00ff88; font-size:1.4em; font-weight:bold; margin-top:2px; }}
         .hw-clickable {{ cursor:pointer; transition:background 0.15s; }}
         .hw-clickable:hover {{ background:#1a2950; outline:1px solid #00d4ff; }}
@@ -3508,37 +3548,37 @@ def dashboard():
         .fan-summary-text {{ color:#ccc; font-size:0.85em; }}
         .fan-detail-grid {{ display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:8px; margin-top:8px; }}
         .fan-tile {{ background:#0d1117; border-radius:6px; padding:8px 6px; text-align:center; }}
-        .fan-tile-lbl {{ color:#aaa; font-size:0.65em; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+        .fan-tile-lbl {{ color:#ccc; font-size:0.65em; text-transform:uppercase; letter-spacing:0.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
         .fan-tile-rpm {{ font-size:1.15em; font-weight:bold; margin-top:3px; }}
         .fan-rpm-active {{ color:#00ff88; }}
         .fan-rpm-idle {{ color:#777; }}
         .fan-rpm-concern {{ color:#ff4444; }}
         .hw-alerts-section {{ margin-top:10px; border-top:1px solid #1e2d4e; padding-top:8px; }}
-        .hw-alerts-header {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }}
+        .hw-alerts-header {{ color:#ccc; font-size:0.75em; text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px; }}
         .hw-alert-row {{ display:flex; align-items:center; gap:10px; padding:7px 10px; border-radius:5px; cursor:pointer; background:rgba(255,68,68,0.08); border:1px solid rgba(255,68,68,0.3); margin-bottom:4px; }}
         .hw-alert-row:hover {{ background:rgba(255,68,68,0.16); border-color:rgba(255,68,68,0.5); }}
         .hw-alert-icon {{ font-size:1.1em; flex-shrink:0; }}
         .hw-alert-body {{ flex:1; min-width:0; }}
         .hw-alert-msg {{ color:#ff9999; font-size:0.85em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-        .hw-alert-meta {{ color:#999; font-size:0.72em; margin-top:2px; }}
+        .hw-alert-meta {{ color:#ccc; font-size:0.72em; margin-top:2px; }}
         .hw-alert-sev-CRITICAL {{ color:#ff4444; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
         .hw-alert-sev-HIGH {{ color:#ff8800; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
         .hw-alert-sev-MEDIUM {{ color:#ffcc00; font-weight:bold; font-size:0.72em; flex-shrink:0; }}
-        .hw-alert-empty {{ color:#888; font-size:0.82em; padding:5px 2px; }}
+        .hw-alert-empty {{ color:#bbb; font-size:0.82em; padding:5px 2px; }}
         .hw-alert-detail-modal {{ background:#16213e; border:1px solid #ff4444; border-radius:10px; padding:20px; max-width:600px; width:90%; max-height:85vh; overflow-y:auto; margin:60px auto; position:relative; }}
         .hw-alert-detail-modal h3 {{ color:#ff6666; margin-top:0; }}
         .hw-alert-detail-field {{ margin-bottom:12px; }}
-        .hw-alert-detail-label {{ color:#aaa; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
+        .hw-alert-detail-label {{ color:#ccc; font-size:0.75em; text-transform:uppercase; letter-spacing:0.05em; }}
         .hw-alert-detail-value {{ color:#ddd; font-size:0.9em; margin-top:3px; white-space:pre-wrap; }}
         /* Sticky jump menu */
         .jump-nav {{ position:sticky; top:0; z-index:50; background:#111827; border-bottom:1px solid #1e2d4e;
                      padding:6px 0; margin:0 -20px 12px -20px; display:flex; gap:4px; flex-wrap:wrap;
                      align-items:center; padding-left:20px; padding-right:20px; }}
-        .jump-nav a {{ color:#888; text-decoration:none; font-size:0.8em; padding:4px 10px;
+        .jump-nav a {{ color:#bbb; text-decoration:none; font-size:0.8em; padding:4px 10px;
                        border-radius:4px; border:1px solid #1e2d4e; white-space:nowrap; transition:all 0.15s; }}
         .jump-nav a:hover {{ color:#00d4ff; border-color:#00d4ff; background:rgba(0,212,255,0.07); }}
         /* Collapsible sections */
-        .section-chevron {{ font-size:0.7em; color:#555; flex-shrink:0; transition:transform 0.2s; }}
+        .section-chevron {{ font-size:0.7em; color:#bbb; flex-shrink:0; transition:transform 0.2s; }}
         .section-badge {{ display:none; background:#ff4444; color:#fff; border-radius:10px;
                           padding:2px 8px; font-size:0.7em; font-weight:bold; margin-left:6px; }}
         /* Pihole tooltip */
@@ -3549,7 +3589,7 @@ def dashboard():
         .ph-info:hover .ph-tooltip {{ display:block; }}
         .ph-tooltip {{ display:none; position:absolute; left:0; top:1.8em; background:#0d1117;
                         border:1px solid #00d4ff44; border-radius:6px; padding:8px 12px;
-                        font-size:0.82em; color:#aaa; width:260px; z-index:100;
+                        font-size:0.82em; color:#ccc; width:260px; z-index:100;
                         white-space:normal; line-height:1.5; font-style:normal;
                         box-shadow:0 4px 12px rgba(0,0,0,0.5); }}
     </style>
@@ -3558,11 +3598,11 @@ def dashboard():
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
-        <a href="/settings" target="_blank" rel="noopener" style="color:#888;text-decoration:none" title="Settings">⚙️ Settings</a>
+        <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
         &nbsp;|&nbsp;
-        <a href="/diagnostics" target="_blank" rel="noopener" style="color:#888;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
+        <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
     </span></h1>
-    <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
+    <p style="color:#ccc;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min | Uptime: <span id="dashUptime">…</span></p>
 
     <nav class="jump-nav">
         <a href="#" onclick="window.scrollTo(0,0);return false;" style="color:#00d4ff;border-color:#00d4ff">↑ Top</a>
@@ -3680,7 +3720,7 @@ def dashboard():
                 🔥 <span class="tier-text" data-beginner="AI Firewall — Security Events Detected Today" data-intermediate="AI Firewall — Today's Activity" data-pro="AI Firewall">AI Firewall — Today's Activity</span>
                 <span class="section-badge" id="badge-firewall"></span>
                 <span style="float:right;font-size:0.8em" onclick="event.stopPropagation()">
-                    <label style="color:#aaa;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
+                    <label style="color:#ccc;cursor:pointer;margin-right:15px" title="Show informational Priority-3 alerts (DNS lookups, ET POLICY notices, etc.)">
                         <input type="checkbox" id="showP3Toggle" onchange="toggleP3()" style="width:auto;margin-right:5px;vertical-align:middle">
                         <span class="tier-text"
                               data-beginner="Show background/informational traffic (P3)"
@@ -3694,7 +3734,7 @@ def dashboard():
             <div>
                 <div class="counter-box counter-clickable" onclick="openFwDrilldown('total')" title="Click to see all rules firing today"><div class="counter-num total" id="cntTotal">{initial_total}</div>
                     <div><span class="tier-text" data-beginner="All Alerts Today" data-intermediate="Total" data-pro="Total">Total</span></div>
-                    <div style="color:#888;font-size:0.65em;margin-top:2px"><span class="tier-text" data-beginner="includes routine traffic" data-intermediate="incl. P3 info" data-pro="P1+P2+P3">incl. P3 info</span></div>
+                    <div style="color:#bbb;font-size:0.65em;margin-top:2px"><span class="tier-text" data-beginner="includes routine traffic" data-intermediate="incl. P3 info" data-pro="P1+P2+P3">incl. P3 info</span></div>
                 </div>
                 <div class="counter-box counter-clickable" onclick="openFwDrilldown('p1')" title="Click to see all Critical P1 rules today"><div class="counter-num p1" id="cntP1">{alert_counts["p1"]}</div>
                     <div><span class="tier-text" data-beginner="Critical Threats" data-intermediate="Critical P1" data-pro="P1">Critical P1</span></div>
@@ -3709,7 +3749,7 @@ def dashboard():
                     <div style="color:#ff8800"><span class="tier-text" data-beginner="Needs Your Review" data-intermediate="Review Queue" data-pro="Queue">Review Queue</span></div>
                 </div>
             </div>
-            <div id="p3Note" style="display:none;color:#aaa;font-size:0.85em;margin-top:8px;padding:10px;background:#0d1117;border-radius:4px;border-left:3px solid #00d4ff">
+            <div id="p3Note" style="display:none;color:#ccc;font-size:0.85em;margin-top:8px;padding:10px;background:#0d1117;border-radius:4px;border-left:3px solid #00d4ff">
                 <span class="tier-text"
                     data-beginner="ℹ️ These are not threats. P3 alerts are routine background traffic your firewall notices but automatically ignores — things like DNS queries (when your devices look up website names), software checking for updates, or standard protocol handshakes. Your network is safe. Nothing here needs action; these events are filtered out of all security checks and email alerts."
                     data-intermediate="ℹ️ P3 alerts are informational only — not an issue. These are typically DNS queries, ET POLICY notices, common protocol scans, or device chatter that Suricata flags by convention. They do not represent threats and do not require any action. The watchdog, AI analysis, and auto-quarantine pipelines all ignore P3."
@@ -3752,7 +3792,7 @@ def dashboard():
                 <span class="section-chevron" id="chevron-devices">▼</span>
                 🖥️ <span class="tier-text" data-beginner="Devices on Your Network" data-intermediate="Network Devices" data-pro="Devices">Network Devices</span>
                 <span class="section-badge" id="badge-devices"></span>
-                <span style="float:right;font-size:0.8em;color:#aaa" onclick="event.stopPropagation()"><span class="tier-text" data-beginner="✅ You trust this device &nbsp; ❓ Not yet verified" data-intermediate="✅ Trusted &nbsp; ❓ Unverified" data-pro="✅ Trusted ❓ Unknown">✅ Trusted &nbsp; ❓ Unverified</span></span>
+                <span style="float:right;font-size:0.8em;color:#ccc" onclick="event.stopPropagation()"><span class="tier-text" data-beginner="✅ You trust this device &nbsp; ❓ Not yet verified" data-intermediate="✅ Trusted &nbsp; ❓ Unverified" data-pro="✅ Trusted ❓ Unknown">✅ Trusted &nbsp; ❓ Unverified</span></span>
             </h2>
             <div id="section-devices-body">
             <table class="devices-table">
@@ -3789,14 +3829,14 @@ def dashboard():
                               data-intermediate="Admin Notes (this rule)"
                               data-pro="Notes">Admin Notes</span>
                     </strong>
-                    <button onclick="loadRelatedNotes()" style="background:transparent;border:1px solid #555;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
+                    <button onclick="loadRelatedNotes()" style="background:transparent;border:1px solid #555;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
                         <span class="tier-text"
                               data-beginner="Find notes from the same source IP"
                               data-intermediate="Find Related Notes"
                               data-pro="Related Notes">Find Related Notes</span>
                     </button>
                 </div>
-                <div id="notesList" style="margin-bottom:12px;font-size:0.85em;color:#aaa"></div>
+                <div id="notesList" style="margin-bottom:12px;font-size:0.85em;color:#ccc"></div>
                 <div id="relatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
                 <div>
                     <textarea id="noteInput" placeholder="Add a note…" rows="3"
@@ -3809,7 +3849,7 @@ def dashboard():
                                   data-intermediate="Add Note"
                                   data-pro="Add">Add Note</span>
                         </button>
-                        <span id="noteStatus" style="font-size:0.8em;color:#aaa"></span>
+                        <span id="noteStatus" style="font-size:0.8em;color:#ccc"></span>
                     </div>
                 </div>
             </div>
@@ -3821,7 +3861,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHwModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0">🌡️ <span class="tier-text" data-beginner="Hardware History — last 24 hours" data-intermediate="Hardware — last 24 hours" data-pro="Hardware 24h">Hardware — last 24 hours</span></h3>
-            <div id="hwModalStatus" style="color:#aaa;font-size:0.85em">Loading…</div>
+            <div id="hwModalStatus" style="color:#ccc;font-size:0.85em">Loading…</div>
             <div class="chart-box"><h4><span class="tier-text" data-beginner="Temperatures — how hot each component is running (°C)" data-intermediate="Temperatures (°C)" data-pro="Temps °C">Temperatures (°C)</span></h4><canvas id="chartTemp" height="120"></canvas></div>
             <div class="chart-box"><h4><span class="tier-text" data-beginner="Fan Speeds — higher RPM = better cooling" data-intermediate="Fan Speeds (RPM)" data-pro="Fans RPM">Fan Speeds (RPM)</span></h4><canvas id="chartFans" height="120"></canvas></div>
             <div class="chart-box"><h4><span class="tier-text" data-beginner="CPU &amp; RAM Usage (%)" data-intermediate="CPU &amp; RAM (%)" data-pro="CPU/RAM %">CPU &amp; RAM (%)</span></h4><canvas id="chartUsage" height="120"></canvas></div>
@@ -3847,7 +3887,7 @@ def dashboard():
                 <button class="sensor-range-btn active" onclick="switchSensorRange('24h')">24h</button>
                 <button class="sensor-range-btn" onclick="switchSensorRange('7d')">7d</button>
                 <button class="sensor-range-btn" onclick="switchSensorRange('30d')">30d</button>
-                <span id="sensorPopupStatus" style="margin-left:12px;color:#555;font-size:0.8em"></span>
+                <span id="sensorPopupStatus" style="margin-left:12px;color:#bbb;font-size:0.8em"></span>
             </div>
             <div class="chart-box" style="margin-bottom:10px">
                 <canvas id="sensorPopupChart" height="140"></canvas>
@@ -3869,7 +3909,7 @@ def dashboard():
         <div class="process-modal">
             <button class="hw-close-x" onclick="closeProcessModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#ffaa00;margin-top:0">⚠ Anomaly Detail — What was running?</h3>
-            <div id="processModalBody" style="color:#aaa;font-size:0.85em">Loading…</div>
+            <div id="processModalBody" style="color:#ccc;font-size:0.85em">Loading…</div>
             <div style="text-align:right;margin-top:12px">
                 <button class="btn btn-close" onclick="closeProcessModal()">✕ Close</button>
             </div>
@@ -3881,7 +3921,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeAlertBreakdownModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0"><span class="tier-text" data-beginner="🛠️ What triggered alerts in the last 24 hours?" data-intermediate="🛠️ 24h System Alert Breakdown" data-pro="🛠️ 24h Alerts">🛠️ 24h System Alert Breakdown</span></h3>
-            <div id="alertBreakdownBody" style="color:#aaa;font-size:0.9em">Loading…</div>
+            <div id="alertBreakdownBody" style="color:#ccc;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeAlertBreakdownModal()">✕ Close</button>
             </div>
@@ -3893,7 +3933,7 @@ def dashboard():
         <div class="hw-modal-content">
             <button class="hw-close-x" onclick="closeHealthModal()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0"><span class="tier-text" data-beginner="💚 How healthy is your system right now?" data-intermediate="💚 System Health Score" data-pro="💚 Health Score">💚 System Health Score</span></h3>
-            <div id="healthModalBody" style="color:#aaa;font-size:0.9em">Loading…</div>
+            <div id="healthModalBody" style="color:#ccc;font-size:0.9em">Loading…</div>
             <div style="text-align:right;margin-top:10px">
                 <button class="btn btn-close" onclick="closeHealthModal()">✕ Close</button>
             </div>
@@ -3914,14 +3954,14 @@ def dashboard():
                               data-intermediate="Admin Notes (this alert key)"
                               data-pro="Notes">Admin Notes</span>
                     </strong>
-                    <button onclick="loadHwRelatedNotes()" style="background:transparent;border:1px solid #555;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
+                    <button onclick="loadHwRelatedNotes()" style="background:transparent;border:1px solid #555;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
                         <span class="tier-text"
                               data-beginner="Find notes from the same source"
                               data-intermediate="Find Related Notes"
                               data-pro="Related Notes">Find Related Notes</span>
                     </button>
                 </div>
-                <div id="hwNotesList" style="margin-bottom:12px;font-size:0.85em;color:#aaa"></div>
+                <div id="hwNotesList" style="margin-bottom:12px;font-size:0.85em;color:#ccc"></div>
                 <div id="hwRelatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
                 <div>
                     <textarea id="hwNoteInput" placeholder="Add a note…" rows="3"
@@ -3934,7 +3974,7 @@ def dashboard():
                                   data-intermediate="Add Note"
                                   data-pro="Add">Add Note</span>
                         </button>
-                        <span id="hwNoteStatus" style="font-size:0.8em;color:#aaa"></span>
+                        <span id="hwNoteStatus" style="font-size:0.8em;color:#ccc"></span>
                     </div>
                 </div>
             </div>
@@ -3962,11 +4002,11 @@ def dashboard():
         <div class="hw-modal-content" style="max-width:1100px">
             <button class="hw-close-x" onclick="closeFwDrilldown()" title="Close (Esc)">✕</button>
             <h3 style="color:#00d4ff;margin-top:0" id="fwDrillTitle">Loading…</h3>
-            <div id="fwDrillSubtitle" style="color:#aaa;font-size:0.85em;margin-bottom:12px"></div>
+            <div id="fwDrillSubtitle" style="color:#ccc;font-size:0.85em;margin-bottom:12px"></div>
             <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap">
-                <span style="color:#888;font-size:0.85em" id="fwDrillPagInfo"></span>
+                <span style="color:#bbb;font-size:0.85em" id="fwDrillPagInfo"></span>
                 <span style="flex:1"></span>
-                <label style="color:#aaa;font-size:0.85em">
+                <label style="color:#ccc;font-size:0.85em">
                     <span class="tier-text"
                         data-beginner="Rows per page:"
                         data-intermediate="Per page:"
@@ -4181,7 +4221,7 @@ def dashboard():
             var b = 'This alert has been seen ' + seen + ' time(s) and is currently marked as "' + action + '". Risk level: ' + risk + '.';
             var m = 'Seen ' + seen + '×. Action: ' + action + '. Risk: ' + risk + '.';
             var p = "seen=" + seen + " action=" + action + " risk=" + risk;
-            return "<div style='font-size:0.82em;color:#888;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
+            return "<div style='font-size:0.82em;color:#bbb;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
                 + tierText(b, m, p) + "</div>";
         }}
 
@@ -4211,14 +4251,14 @@ def dashboard():
                     if (seen > 1) {{
                         var lastTs = (data.last_seen || "").substring(0, 16).replace("T", " ");
                         prevInstances = "<details style='margin:4px 0 8px;font-size:0.82em'>"
-                            + "<summary style='cursor:pointer;color:#aaa'>"
+                            + "<summary style='cursor:pointer;color:#ccc'>"
                             + tierText(
                                 "Seen " + seen + " times — expand for details",
                                 "Previous instances (" + seen + ")",
                                 seen + "× seen"
                               )
                             + "</summary>"
-                            + "<div style='color:#666;padding:4px 0 0 10px'>"
+                            + "<div style='color:#bbb;padding:4px 0 0 10px'>"
                             + tierText(
                                 "This alert has triggered " + seen + " times. Last occurrence: " + (lastTs||"unknown") + ".",
                                 "Count: " + seen + " · Last seen: " + (lastTs||"—"),
@@ -4229,7 +4269,7 @@ def dashboard():
 
                     // 3. AI status indicator
                     var aiStatus = data.cached
-                        ? " <span style='color:#aaa;font-size:0.78em'>(" + tierText("previously analysed — from cache", "cached result", "cached") + ")</span>"
+                        ? " <span style='color:#ccc;font-size:0.78em'>(" + tierText("previously analysed — from cache", "cached result", "cached") + ")</span>"
                         : " <span style='color:#00ff88;font-size:0.78em'>(" + tierText("freshly analysed by AI just now", "AI analyzed", "fresh") + ")</span>";
 
                     var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
@@ -4307,7 +4347,7 @@ def dashboard():
             document.getElementById("relatedNotesList").style.display = "none";
             document.getElementById("noteStatus").textContent = "";
             document.getElementById("notesList").innerHTML =
-                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+                "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
             fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
@@ -4327,22 +4367,22 @@ def dashboard():
                 ? _allNotes.slice(0, (_notesPage + 1) * perPage)
                 : _allNotes.slice().reverse().slice(0, (_notesPage + 1) * perPage);
             if (_allNotes.length === 0) {{
-                el.innerHTML = "<span style='color:#555;font-size:0.85em'>" +
+                el.innerHTML = "<span style='color:#bbb;font-size:0.85em'>" +
                     tierText("No notes yet. Add the first one below.", "No notes yet.", "—") + "</span>";
                 return;
             }}
-            var sortBtn = "<button onclick='_toggleNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+            var sortBtn = "<button onclick='_toggleNoteSort()' style='background:transparent;border:none;color:#ccc;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
                 (_notesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
             var items = visible.map(function(n) {{
                 return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
                     '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                    '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                    '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
                     escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
                     '</div>';
             }}).join("");
             var moreCount = _allNotes.length - visible.length;
             var moreBtn = moreCount > 0
-                ? '<button onclick="_showMoreNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                ? '<button onclick="_showMoreNotes()" style="background:transparent;border:1px solid #444;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
                 : "";
             el.innerHTML = sortBtn + items + moreBtn;
         }}
@@ -4392,12 +4432,12 @@ def dashboard():
             if (!_currentNotesRuleId) {{ return; }}
             var el = document.getElementById("relatedNotesList");
             el.style.display = "block";
-            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching for related notes…</span>";
+            el.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching for related notes…</span>";
             fetch("/api/tickets/related/" + encodeURIComponent(_currentNotesRuleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{
-                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>" +
+                        el.innerHTML = "<div style='color:#bbb;font-size:0.85em'>" +
                             tierText(
                                 "No notes found for other alerts from the same source IP.",
                                 "No related notes found.",
@@ -4405,14 +4445,14 @@ def dashboard():
                             ) + "</div>";
                         return;
                     }}
-                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
+                    var header = "<div style='color:#ccc;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
                         tierText("Notes from other alerts by the same source", "Related Notes (same source IP)", "Related Notes") +
                         "</div>";
                     var items = notes.map(function(n) {{
                         return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
-                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
                             '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
                             escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
                             '</div>';
                     }}).join("");
@@ -4538,7 +4578,7 @@ def dashboard():
 
             var visibleCount = nActive + nIdle + nConcern;
             var hiddenNote = nHidden > 0
-                ? ' <span style="color:#666;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
+                ? ' <span style="color:#bbb;font-size:0.9em">(' + nHidden + ' unused header' + (nHidden > 1 ? 's' : '') + ' not shown)</span>'
                 : '';
             var el = document.getElementById("fanSummaryText");
             var summaryRow = document.getElementById("fanSummaryRow");
@@ -4557,7 +4597,7 @@ def dashboard():
                 if (nActive > 0) parts.push('<span style="color:#00ff88;font-weight:bold">' + nActive + ' active</span>');
                 if (nIdle   > 0) parts.push('<span style="color:#777">' + nIdle + ' idle</span>');
                 if (el) el.innerHTML = 'Fans (' + visibleCount + '):&ensp;' +
-                    (parts.length ? parts.join('&ensp;') : '<span style="color:#aaa">none configured</span>') +
+                    (parts.length ? parts.join('&ensp;') : '<span style="color:#ccc">none configured</span>') +
                     hiddenNote;
             }}
 
@@ -4612,7 +4652,7 @@ def dashboard():
                         '<div class="hw-alert-msg">' + (a.breach || "") + '</div>' +
                         '<div class="hw-alert-meta">Since ' + since + '</div>' +
                     '</span>' +
-                    '<span style="color:#888;font-size:0.8em">▸</span>' +
+                    '<span style="color:#bbb;font-size:0.8em">▸</span>' +
                 '</div>';
             }}).join("");
             _refreshSectionBadges();
@@ -4643,7 +4683,7 @@ def dashboard():
                 '</div>' +
                 '<div class="hw-alert-detail-field">' +
                     '<div class="hw-alert-detail-label">Alert key</div>' +
-                    '<div class="hw-alert-detail-value" style="color:#999;font-size:0.85em">' +
+                    '<div class="hw-alert-detail-value" style="color:#ccc;font-size:0.85em">' +
                         (a.alert_key || "—") +
                     '</div>' +
                 '</div>';
@@ -4676,7 +4716,7 @@ def dashboard():
             document.getElementById("hwRelatedNotesList").style.display = "none";
             document.getElementById("hwNoteStatus").textContent = "";
             document.getElementById("hwNotesList").innerHTML =
-                "<span style='color:#555;font-size:0.85em'>Loading notes…</span>";
+                "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
             fetch("/api/tickets/notes/" + encodeURIComponent(alertKey))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
@@ -4695,21 +4735,21 @@ def dashboard():
             var sorted = _hwNotesSortDesc ? _hwAllNotes : _hwAllNotes.slice().reverse();
             var visible = sorted.slice(0, (_hwNotesPage + 1) * perPage);
             if (_hwAllNotes.length === 0) {{
-                el.innerHTML = "<span style='color:#555;font-size:0.85em'>" +
+                el.innerHTML = "<span style='color:#bbb;font-size:0.85em'>" +
                     tierText("No notes yet. Add one below.", "No notes yet.", "—") + "</span>";
                 return;
             }}
-            var sortBtn = "<button onclick='_toggleHwNoteSort()' style='background:transparent;border:none;color:#aaa;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+            var sortBtn = "<button onclick='_toggleHwNoteSort()' style='background:transparent;border:none;color:#ccc;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
                 (_hwNotesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
             var items = visible.map(function(n) {{
                 return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
                     '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                    '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                    '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
                     escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div></div>';
             }}).join("");
             var moreCount = _hwAllNotes.length - visible.length;
             var moreBtn = moreCount > 0
-                ? '<button onclick="_showMoreHwNotes()" style="background:transparent;border:1px solid #444;color:#aaa;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                ? '<button onclick="_showMoreHwNotes()" style="background:transparent;border:1px solid #444;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
                 : "";
             el.innerHTML = sortBtn + items + moreBtn;
         }}
@@ -4759,12 +4799,12 @@ def dashboard():
             if (!_hwNotesKey) {{ return; }}
             var el = document.getElementById("hwRelatedNotesList");
             el.style.display = "block";
-            el.innerHTML = "<span style='color:#aaa;font-size:0.85em'>Searching…</span>";
+            el.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching…</span>";
             fetch("/api/tickets/related/" + encodeURIComponent(_hwNotesKey))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
                     if (notes.length === 0) {{
-                        el.innerHTML = "<div style='color:#555;font-size:0.85em'>" +
+                        el.innerHTML = "<div style='color:#bbb;font-size:0.85em'>" +
                             tierText(
                                 "No related notes found — hardware alert keys are not linked to source IPs.",
                                 "No related notes found.",
@@ -4772,13 +4812,13 @@ def dashboard():
                             ) + "</div>";
                         return;
                     }}
-                    var header = "<div style='color:#aaa;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
+                    var header = "<div style='color:#ccc;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
                         tierText("Notes from other alerts by same source", "Related Notes", "Related Notes") + "</div>";
                     var items = notes.map(function(n) {{
                         return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
-                            '<div style="color:#888;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
                             '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                            '<div style="color:#555;font-size:0.75em;margin-top:3px">' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
                             escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div></div>';
                     }}).join("");
                     el.innerHTML = header + items;
@@ -5004,7 +5044,7 @@ def dashboard():
             document.getElementById("processModal").style.display = "block";
             var body = document.getElementById("processModalBody");
             if (!_sensorSnapshots.length) {{
-                body.innerHTML = '<p style="color:#555">No anomaly snapshots in this range.</p>';
+                body.innerHTML = '<p style="color:#bbb">No anomaly snapshots in this range.</p>';
                 return;
             }}
             // Load full detail for all snapshots (fetch each individually, debounced)
@@ -5024,19 +5064,19 @@ def dashboard():
                         '<div style="color:#00d4ff;font-size:0.85em;margin-bottom:6px">' + escapeHtml(d.captured_at) + '</div>' +
                         sustained + throttleNote +
                         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:0.82em;margin-bottom:8px">' +
-                        '<span style="color:#888">Value:</span><span style="color:#eee">' + (d.reading_value !== null ? d.reading_value.toFixed(1) : "—") + '</span>' +
-                        '<span style="color:#888">Baseline avg:</span><span style="color:#eee">' + (d.baseline_avg !== null ? d.baseline_avg.toFixed(1) : "—") + '</span>' +
-                        '<span style="color:#888">Deviation:</span><span style="color:#ffaa00">' + (d.deviation !== null ? d.deviation.toFixed(2) + 'σ' : "—") + '</span>' +
-                        '<span style="color:#888">CPU%:</span><span style="color:#eee">' + (d.cpu_pct !== null ? d.cpu_pct.toFixed(1) + "%" : "—") + '</span>' +
-                        '<span style="color:#888">RAM:</span><span style="color:#eee">' + (d.ram_mb !== null ? (d.ram_mb / 1024).toFixed(1) + " GB" : "—") + '</span>' +
-                        '<span style="color:#888">Net in/out:</span><span style="color:#eee">' + (d.net_mb_in !== null ? d.net_mb_in.toFixed(1) : "—") + ' / ' + (d.net_mb_out !== null ? d.net_mb_out.toFixed(1) : "—") + ' MB</span>' +
+                        '<span style="color:#bbb">Value:</span><span style="color:#eee">' + (d.reading_value !== null ? d.reading_value.toFixed(1) : "—") + '</span>' +
+                        '<span style="color:#bbb">Baseline avg:</span><span style="color:#eee">' + (d.baseline_avg !== null ? d.baseline_avg.toFixed(1) : "—") + '</span>' +
+                        '<span style="color:#bbb">Deviation:</span><span style="color:#ffaa00">' + (d.deviation !== null ? d.deviation.toFixed(2) + 'σ' : "—") + '</span>' +
+                        '<span style="color:#bbb">CPU%:</span><span style="color:#eee">' + (d.cpu_pct !== null ? d.cpu_pct.toFixed(1) + "%" : "—") + '</span>' +
+                        '<span style="color:#bbb">RAM:</span><span style="color:#eee">' + (d.ram_mb !== null ? (d.ram_mb / 1024).toFixed(1) + " GB" : "—") + '</span>' +
+                        '<span style="color:#bbb">Net in/out:</span><span style="color:#eee">' + (d.net_mb_in !== null ? d.net_mb_in.toFixed(1) : "—") + ' / ' + (d.net_mb_out !== null ? d.net_mb_out.toFixed(1) : "—") + ' MB</span>' +
                         '</div>' +
                         (d.top_processes
-                            ? '<div style="font-size:0.75em;color:#888;margin-bottom:4px">Top processes:</div><pre>' + escapeHtml(d.top_processes.substring(0, 1500)) + '</pre>'
+                            ? '<div style="font-size:0.75em;color:#bbb;margin-bottom:4px">Top processes:</div><pre>' + escapeHtml(d.top_processes.substring(0, 1500)) + '</pre>'
                             : '') +
                         '</div>';
                 }}).join("") +
-                (_sensorSnapshots.length > 10 ? '<p style="color:#555;font-size:0.8em">Showing first 10 of ' + _sensorSnapshots.length + ' events.</p>' : '');
+                (_sensorSnapshots.length > 10 ? '<p style="color:#bbb;font-size:0.8em">Showing first 10 of ' + _sensorSnapshots.length + ' events.</p>' : '');
             }}).catch(function(e) {{
                 body.innerHTML = '<p style="color:#ff4444">Error loading details: ' + escapeHtml(String(e)) + '</p>';
             }});
@@ -5067,7 +5107,7 @@ def dashboard():
                     window._breakdown24h = d.breakdown || [];
                     var rows = window._breakdown24h.map(function(b, idx) {{
                         var nc = b.note_count || 0;
-                        var noteStyle = nc > 0 ? 'color:#00d4ff;font-weight:bold' : 'color:#555';
+                        var noteStyle = nc > 0 ? 'color:#00d4ff;font-weight:bold' : 'color:#bbb';
                         var noteLabel = nc > 0 ? String(nc) : 'None';
                         return '<tr class="hw-clickable" style="cursor:pointer" onclick="open24hAlertDetail(' + idx + ')">' +
                                '<td>' + escapeHtml(b.type) + '</td>' +
@@ -5088,11 +5128,11 @@ def dashboard():
                         "Watchdog alerts (thermal/fan/service). Click row for detail. Network alerts → AI Firewall."
                     );
                     document.getElementById("alertBreakdownBody").innerHTML = `
-                        <p style="color:#aaa;font-size:0.85em;margin:0 0 10px 0">${{intro}}</p>
+                        <p style="color:#ccc;font-size:0.85em;margin:0 0 10px 0">${{intro}}</p>
                         <div style="display:flex;gap:20px;margin:10px 0">
-                            <div><span style="color:#aaa">${{tierText("Total alerts:","Total:","Total:")}}</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
-                            <div><span style="color:#aaa">${{tierText("Overheating / fan:","Thermal/Fan:","Thermal:")}}</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
-                            <div><span style="color:#aaa">${{tierText("Service went down:","Service down:","Svc down:")}}</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
+                            <div><span style="color:#ccc">${{tierText("Total alerts:","Total:","Total:")}}</span> <strong style="color:${{colorForCount(d.total || 0)}};font-size:1.2em">${{d.total || 0}}</strong></div>
+                            <div><span style="color:#ccc">${{tierText("Overheating / fan:","Thermal/Fan:","Thermal:")}}</span> <strong style="color:${{colorForCount(ct)}}">${{ct}}</strong></div>
+                            <div><span style="color:#ccc">${{tierText("Service went down:","Service down:","Svc down:")}}</span> <strong style="color:${{colorForCount(cs)}}">${{cs}}</strong></div>
                         </div>
                         <table class="breakdown-table">
                             <thead><tr><th>${{tierText("What triggered it","Alert type","Type")}}</th><th style="text-align:right">${{tierText("How many times","Count","#")}}</th><th>${{tierText("Notes","Notes","Notes")}}</th><th></th></tr></thead>
@@ -5137,15 +5177,15 @@ def dashboard():
                 return '<div style="padding:4px 0;border-bottom:1px solid #1e2d4e;font-size:0.88em">' +
                        '<span style="color:#00d4ff">' + escapeHtml(o.ts) + '</span>' +
                        (o.breach ? ' &mdash; <span style="color:#ddd">' + escapeHtml(o.breach) + '</span>'
-                                 : ' <span style="color:#555">(email delivery failed — breach detail not logged)</span>') +
+                                 : ' <span style="color:#bbb">(email delivery failed — breach detail not logged)</span>') +
                        '</div>';
-            }}).join("") || '<div style="color:#555;font-size:0.88em">No occurrence detail captured in log</div>';
+            }}).join("") || '<div style="color:#bbb;font-size:0.88em">No occurrence detail captured in log</div>';
 
             document.getElementById("hwAlertDetailBody").innerHTML =
                 '<div class="hw-alert-detail-field">' +
                     '<div class="hw-alert-detail-label">Alert key</div>' +
                     '<div class="hw-alert-detail-value">' + escapeHtml(b.type) +
-                        ' <span style="color:#888;font-size:0.85em">(' + b.count +
+                        ' <span style="color:#bbb;font-size:0.85em">(' + b.count +
                         ' occurrence' + (b.count !== 1 ? 's' : '') + ' in last 24h)</span></div>' +
                 '</div>' +
                 (rec ?
@@ -5175,8 +5215,8 @@ def dashboard():
                     var rows = (d.components || []).map(c => {{
                         var barColor = colorForScore(c.score);
                         return `<tr>
-                            <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#aaa;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
-                            <td style="width:100px"><div class="health-bar"><div class="health-bar-fill" style="width:${{c.score}}%;background:${{barColor}}"></div></div><div style="text-align:right;color:#aaa;font-size:0.8em">${{c.score}}%</div></td>
+                            <td><strong>${{escapeHtml(c.name)}}</strong><br><span style="color:#ccc;font-size:0.85em">${{escapeHtml(c.detail)}}</span></td>
+                            <td style="width:100px"><div class="health-bar"><div class="health-bar-fill" style="width:${{c.score}}%;background:${{barColor}}"></div></div><div style="text-align:right;color:#ccc;font-size:0.8em">${{c.score}}%</div></td>
                             <td style="text-align:right;width:60px" title="${{tierText('How much this factor contributes to the total score','Weight','Weight')}}">${{c.weight}}%</td>
                             <td style="text-align:right;width:80px;color:${{barColor}};font-weight:bold">${{c.contribution}}</td>
                         </tr>`;
@@ -5188,7 +5228,7 @@ def dashboard():
                     var noAlerts = `<tr><td colspan=2 style="color:#00ff88">${{tierText("✓ No system alerts in the last 24 hours — all clear","No system alerts in the last 24 hours.","No alerts (24h)")}}</td></tr>`;
                     document.getElementById("healthModalBody").innerHTML = `
                         <div style="margin:10px 0">
-                            <div style="font-size:0.85em;color:#aaa">${{overallLabel}}</div>
+                            <div style="font-size:0.85em;color:#ccc">${{overallLabel}}</div>
                             <div style="font-size:2.5em;font-weight:bold;color:${{totalColor}}">${{d.score}}%</div>
                         </div>
                         <table class="breakdown-table">
@@ -5201,7 +5241,7 @@ def dashboard():
                             <tbody>${{rows}}</tbody>
                         </table>
                         <div style="margin-top:15px">
-                            <div style="color:#aaa;font-size:0.85em;margin-bottom:4px">${{tierText("Security services running","Services","Services")}}</div>
+                            <div style="color:#ccc;font-size:0.85em;margin-bottom:4px">${{tierText("Security services running","Services","Services")}}</div>
                             ${{svcList}}
                         </div>
                     `;
@@ -5239,11 +5279,11 @@ def dashboard():
                         <p><strong>${{tierText("Encryption Protocol:","Protocol:","Protocol:")}}</strong> ${{escapeHtml(d.protocol || "—")}}</p>
                     `;
                     if (d.split_tunnel_apps && d.split_tunnel_apps.length) {{
-                        html += `<p style="margin-bottom:2px"><strong>${{tierText("Apps bypassing VPN (split tunnel):","Split Tunnel Apps:","Split tunnel:")}}</strong></p><ul style="font-size:0.85em;color:#aaa;margin:4px 0 0 18px">`;
+                        html += `<p style="margin-bottom:2px"><strong>${{tierText("Apps bypassing VPN (split tunnel):","Split Tunnel Apps:","Split tunnel:")}}</strong></p><ul style="font-size:0.85em;color:#ccc;margin:4px 0 0 18px">`;
                         d.split_tunnel_apps.forEach(function(app) {{ html += `<li>${{escapeHtml(app)}}</li>`; }});
                         html += `</ul>`;
                     }} else if (d.provider && d.provider.toLowerCase().includes("pia")) {{
-                        html += `<p style="color:#aaa;font-size:0.85em">${{tierText("Split tunnel: no apps are bypassing the VPN","Split tunnel: none configured","Split tunnel: none")}}</p>`;
+                        html += `<p style="color:#ccc;font-size:0.85em">${{tierText("Split tunnel: no apps are bypassing the VPN","Split tunnel: none configured","Split tunnel: none")}}</p>`;
                     }}
                     document.getElementById("vpnModalContent").innerHTML = html;
                     // Hide action buttons if no supported CLI
@@ -5553,7 +5593,7 @@ def dashboard():
             document.getElementById("fwDrillTitle").textContent = t[0];
             document.getElementById("fwDrillSubtitle").textContent = t[1];
             document.getElementById("fwDrillBody").innerHTML =
-                "<p style='color:#aaa'>Loading…</p>";
+                "<p style='color:#ccc'>Loading…</p>";
             document.getElementById("fwDrillPagin").innerHTML = "";
             document.getElementById("fwDrillPagInfo").textContent = "";
             _fwDrillFetch();
@@ -5597,7 +5637,7 @@ def dashboard():
             var html = "";
             var btnStyle = "padding:4px 10px;border-radius:4px;border:1px solid #333;cursor:pointer;font-size:0.85em;";
             var activStyle = btnStyle + "background:#00d4ff;color:#1a1a2e;font-weight:bold;border-color:#00d4ff;";
-            var normStyle  = btnStyle + "background:#0d1117;color:#aaa;";
+            var normStyle  = btnStyle + "background:#0d1117;color:#ccc;";
             html += "<button style='" + normStyle + "' " + (currentPage===1?"disabled":"") +
                     " onclick='fwGoPage(1)'>&laquo;</button>";
             html += "<button style='" + normStyle + "' " + (currentPage===1?"disabled":"") +
@@ -5618,7 +5658,7 @@ def dashboard():
         function fwGoPage(p) {{
             _fwDrillPage = p;
             document.getElementById("fwDrillBody").innerHTML =
-                "<p style='color:#aaa'>Loading…</p>";
+                "<p style='color:#ccc'>Loading…</p>";
             _fwDrillFetch();
         }}
 
@@ -5639,9 +5679,16 @@ def dashboard():
             }}
         }});
 
-        // Initialize collapsible sections on load
+        // Initialize collapsible sections on load and fetch uptime once
         document.addEventListener("DOMContentLoaded", function() {{
             _initCollapseSections();
+            fetch('/api/dashboard/uptime')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    var el = document.getElementById('dashUptime');
+                    if (el) el.textContent = d.uptime;
+                }})
+                .catch(function() {{}});
         }});
     </script>
 </body>

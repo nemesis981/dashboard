@@ -524,7 +524,7 @@ def _page_tickets():
     <style>
         body {{ font-family: Arial, sans-serif; background:#1a1a2e; color:#eee; padding:20px; }}
         h1 {{ color:#00d4ff; margin-bottom:4px; }}
-        .sub {{ color:#555; font-size:0.85em; margin-bottom:20px; }}
+        .sub {{ color:#bbb; font-size:0.85em; margin-bottom:20px; }}
         table {{ width:100%; border-collapse:collapse; font-size:0.88em; }}
         th {{ background:#16213e; color:#00d4ff; padding:9px 10px; text-align:left; }}
         td {{ padding:8px 10px; border-bottom:1px solid #1e2d4e; vertical-align:top; }}
@@ -533,8 +533,8 @@ def _page_tickets():
         .badge-open        {{ background:#16213e; color:#ffaa00; border:1px solid #ffaa0055; }}
         .badge-investigating {{ background:#16213e; color:#00d4ff; border:1px solid #00d4ff55; }}
         .badge-resolved    {{ background:#16213e; color:#00ff88; border:1px solid #00ff8855; }}
-        .badge-closed      {{ background:#16213e; color:#555;    border:1px solid #333; }}
-        .badge-note        {{ background:#16213e; color:#888;    border:1px solid #333; }}
+        .badge-closed      {{ background:#16213e; color:#bbb;    border:1px solid #333; }}
+        .badge-note        {{ background:#16213e; color:#bbb;    border:1px solid #333; }}
         .btn {{ background:#00d4ff; color:#1a1a2e; border:none; padding:6px 14px; border-radius:4px;
                 cursor:pointer; font-weight:bold; font-size:0.85em; }}
         .btn-sm {{ padding:3px 9px; font-size:0.78em; }}
@@ -550,12 +550,12 @@ def _page_tickets():
                       max-height:85vh; overflow-y:auto; }}
         .modal-box h3 {{ color:#00d4ff; margin-top:0; }}
         .filter-row {{ display:flex; gap:10px; align-items:center; margin-bottom:14px; flex-wrap:wrap; }}
-        .filter-row label {{ color:#aaa; font-size:0.85em; }}
+        .filter-row label {{ color:#ccc; font-size:0.85em; }}
         a {{ color:#00d4ff; }}
     </style>
 </head>
 <body>
-<a href="/" style="color:#555;font-size:0.85em;text-decoration:none">← Back to dashboard</a>
+<a href="/" style="color:#bbb;font-size:0.85em;text-decoration:none">← Back to dashboard</a>
 <h1>🎫 <span class="tier-text"
     data-beginner="Tickets &amp; Notes — Track issues and add notes to alerts"
     data-intermediate="Tickets &amp; Notes"
@@ -596,7 +596,7 @@ def _page_tickets():
             <th></th>
         </tr>
     </thead>
-    <tbody id="ticketRows"><tr><td colspan="7" style="color:#555">Loading…</td></tr></tbody>
+    <tbody id="ticketRows"><tr><td colspan="7" style="color:#bbb">Loading…</td></tr></tbody>
 </table>
 
 <!-- New Ticket Modal -->
@@ -605,20 +605,20 @@ def _page_tickets():
         <h3>New Ticket</h3>
         <div style="display:grid;gap:10px">
             <div>
-                <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Title</label>
+                <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Title</label>
                 <input type="text" id="ntTitle" placeholder="Brief description" style="width:100%;box-sizing:border-box">
             </div>
             <div>
-                <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Body</label>
+                <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Body</label>
                 <textarea id="ntBody" rows="4" placeholder="Details…" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
             </div>
             <div style="display:flex;gap:10px;flex-wrap:wrap">
                 <div>
-                    <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Rule ID</label>
+                    <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Rule ID</label>
                     <input type="text" id="ntRuleId" placeholder="optional" style="width:140px">
                 </div>
                 <div>
-                    <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Priority</label>
+                    <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Priority</label>
                     <select id="ntPriority">
                         <option value="">—</option>
                         <option value="LOW">LOW</option>
@@ -628,14 +628,14 @@ def _page_tickets():
                     </select>
                 </div>
                 <div>
-                    <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Source IP</label>
+                    <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Source IP</label>
                     <input type="text" id="ntSrcIp" placeholder="optional" style="width:140px">
                 </div>
             </div>
             <div style="display:flex;gap:10px;align-items:center;margin-top:4px">
                 <button class="btn" onclick="submitNewTicket()">Create Ticket</button>
                 <button class="btn" style="background:#333;color:#eee" onclick="closeNewTicketModal()">Cancel</button>
-                <span id="ntStatus" style="font-size:0.85em;color:#aaa"></span>
+                <span id="ntStatus" style="font-size:0.85em;color:#ccc"></span>
             </div>
         </div>
     </div>
@@ -648,7 +648,7 @@ def _page_tickets():
         <input type="hidden" id="editTicketId">
         <div style="display:grid;gap:10px">
             <div>
-                <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Status</label>
+                <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Status</label>
                 <select id="editStatus">
                     <option value="Open">Open</option>
                     <option value="Investigating">Investigating</option>
@@ -657,13 +657,13 @@ def _page_tickets():
                 </select>
             </div>
             <div>
-                <label style="color:#aaa;font-size:0.85em;display:block;margin-bottom:3px">Resolution Notes</label>
+                <label style="color:#ccc;font-size:0.85em;display:block;margin-bottom:3px">Resolution Notes</label>
                 <textarea id="editResolution" rows="3" style="width:100%;box-sizing:border-box;resize:vertical"></textarea>
             </div>
             <div style="display:flex;gap:10px;align-items:center">
                 <button class="btn" onclick="saveTicket()">Save</button>
                 <button class="btn" style="background:#333;color:#eee" onclick="closeEditModal()">Cancel</button>
-                <span id="editStatus2" style="font-size:0.85em;color:#aaa"></span>
+                <span id="editStatus2" style="font-size:0.85em;color:#ccc"></span>
             </div>
         </div>
     </div>
@@ -685,22 +685,22 @@ function doSearch() {{
     var res = document.getElementById("searchResults");
     if (!q) {{ res.style.display="none"; return; }}
     res.style.display = "block";
-    res.innerHTML = "<span style='color:#555;font-size:0.85em'>Searching…</span>";
+    res.innerHTML = "<span style='color:#bbb;font-size:0.85em'>Searching…</span>";
     fetch("/api/tickets/search?q="+encodeURIComponent(q))
         .then(function(r){{return r.json();}})
         .then(function(items){{
             if (!items.length) {{
-                res.innerHTML="<span style='color:#555;font-size:0.85em'>No results for <em>"+escH(q)+"</em></span>";
+                res.innerHTML="<span style='color:#bbb;font-size:0.85em'>No results for <em>"+escH(q)+"</em></span>";
                 return;
             }}
-            res.innerHTML = "<div style='color:#aaa;font-size:0.8em;margin-bottom:8px'>"+items.length+" result(s)</div>"
+            res.innerHTML = "<div style='color:#ccc;font-size:0.8em;margin-bottom:8px'>"+items.length+" result(s)</div>"
                 + items.map(function(i){{
                     var badge = i.ticket_number
                         ? "<span style='color:#ffaa00;font-size:0.78em'>"+escH(i.ticket_number)+"</span> "
-                        : "<span style='color:#555;font-size:0.78em'>note</span> ";
+                        : "<span style='color:#bbb;font-size:0.78em'>note</span> ";
                     return "<div style='border-left:2px solid #00d4ff;padding:5px 10px;margin-bottom:6px;background:#0d1117'>"
                         + badge + "<span style='color:#ddd;font-size:0.85em'>"+escH((i.note||"").substring(0,120))+"</span>"
-                        + "<div style='color:#555;font-size:0.75em;margin-top:2px'>"+escH(i.rule_id)+" · "+escH(i.created_at)+"</div></div>";
+                        + "<div style='color:#bbb;font-size:0.75em;margin-top:2px'>"+escH(i.rule_id)+" · "+escH(i.created_at)+"</div></div>";
                 }}).join("");
         }}).catch(function(){{res.innerHTML="<span style='color:#ff4444'>Search failed</span>";}});
 }}
@@ -720,7 +720,7 @@ function loadTickets() {{
 function renderTickets(items) {{
     if (!items.length) {{
         document.getElementById("ticketRows").innerHTML =
-            "<tr><td colspan='7' style='color:#555'>No tickets found.</td></tr>";
+            "<tr><td colspan='7' style='color:#bbb'>No tickets found.</td></tr>";
         return;
     }}
     var statusColors = {{Open:"#ffaa00",Investigating:"#00d4ff",Resolved:"#00ff88",Closed:"#555"}};
@@ -728,13 +728,13 @@ function renderTickets(items) {{
         var sc = statusColors[t.status] || "#888";
         var titleText = escH(t.title || (t.body||"").substring(0,60));
         return "<tr>"
-            +"<td style='color:#555;font-size:0.8em;white-space:nowrap'>"+escH(t.ticket_number||"—")+"</td>"
+            +"<td style='color:#bbb;font-size:0.8em;white-space:nowrap'>"+escH(t.ticket_number||"—")+"</td>"
             +"<td><span style='color:#eee'>"+titleText+"</span>"
-            +"<div style='color:#555;font-size:0.75em;margin-top:2px;white-space:pre-wrap'>"+escH((t.body||"").substring(0,100))+"</div></td>"
-            +"<td style='color:#aaa;font-size:0.8em'>"+escH(t.rule_id||t.sensor_key||"")+"</td>"
+            +"<div style='color:#bbb;font-size:0.75em;margin-top:2px;white-space:pre-wrap'>"+escH((t.body||"").substring(0,100))+"</div></td>"
+            +"<td style='color:#ccc;font-size:0.8em'>"+escH(t.rule_id||t.sensor_key||"")+"</td>"
             +"<td style='font-size:0.8em'><span style='color:"+(t.priority==="HIGH"||t.priority==="CRITICAL"?"#ff4444":t.priority==="MEDIUM"?"#ffaa00":"#aaa")+"'>"+escH(t.priority||"—")+"</span></td>"
             +"<td><span style='color:"+sc+";font-size:0.82em;font-weight:bold'>"+escH(t.status||"")+"</span></td>"
-            +"<td style='color:#555;font-size:0.78em;white-space:nowrap'>"+escH((t.created_at||"").substring(0,16).replace("T"," "))+"</td>"
+            +"<td style='color:#bbb;font-size:0.78em;white-space:nowrap'>"+escH((t.created_at||"").substring(0,16).replace("T"," "))+"</td>"
             +"<td><button class='btn btn-sm' onclick='openEditModal("+t.id+","+JSON.stringify(t.status||"")+","+JSON.stringify(t.resolution_notes||"")+")'>Edit</button></td>"
             +"</tr>";
     }}).join("");
@@ -860,7 +860,7 @@ class Module(NemesisModule):
             f'  </h2>'
             f'  <div id="section-tickets-body" style="cursor:pointer" onclick="window.open(\'/tickets\',\'_blank\')">'
             f'    <div style="color:{color};font-size:1.3em;font-weight:bold">{n}</div>'
-            f'    <div style="color:#555;font-size:0.78em;margin-top:2px">{label}</div>'
+            f'    <div style="color:#bbb;font-size:0.78em;margin-top:2px">{label}</div>'
             f'    <div style="color:#333;font-size:0.72em;margin-top:4px">click to open ↗</div>'
             f'  </div>'
             f'</div>'

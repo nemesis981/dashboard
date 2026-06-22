@@ -1255,22 +1255,22 @@ def _format_ai_report_html(report: dict, from_cache: bool = False,
         else:
             age_str = f"{cache_age_h/24:.0f}d ago"
         cache_note = (
-            f'<div style="color:#555;font-size:0.78em;margin-top:10px;font-style:italic">'
+            f'<div style="color:#bbb;font-size:0.78em;margin-top:10px;font-style:italic">'
             f'Analysis generated {age_str} · reused from cache</div>'
         )
 
     return f"""
 <div style="font-size:0.88em">
   <div style="margin-bottom:10px">
-    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Explanation</span>
+    <span style="color:#ccc;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Explanation</span>
     <div style="color:#ddd;margin-top:4px;line-height:1.5">{explanation}</div>
   </div>
   <div style="margin-bottom:10px">
-    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Threat Assessment</span>
+    <span style="color:#ccc;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Threat Assessment</span>
     <div style="color:#ccc;margin-top:4px;line-height:1.5">{threat}</div>
   </div>
   <div style="margin-bottom:6px">
-    <span style="color:#aaa;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Recommended Action</span>
+    <span style="color:#ccc;font-size:0.8em;text-transform:uppercase;letter-spacing:0.05em">Recommended Action</span>
     <div style="margin-top:4px">
       <span style="color:#00d4ff;font-weight:bold">{action}</span>
       &nbsp;&nbsp;
@@ -1387,7 +1387,7 @@ def _render_card(building: bool, built: bool) -> str:
         status_badge = ('<span style="font-size:0.78em;color:#ffaa00;margin-left:10px">'
                         '⏳ Building baseline…</span>')
     elif not built:
-        status_badge = ('<span style="font-size:0.78em;color:#888;margin-left:10px">'
+        status_badge = ('<span style="font-size:0.78em;color:#bbb;margin-left:10px">'
                         '(starting)</span>')
 
     stats_html = ""
@@ -1405,11 +1405,11 @@ def _render_card(building: bool, built: bool) -> str:
         ).fetchone()[0]
         conn.close()
         stats_html = (
-            f'<span style="color:#aaa;font-size:0.82em;margin-right:14px">'
+            f'<span style="color:#ccc;font-size:0.82em;margin-right:14px">'
             f'Open: <strong style="color:#00d4ff">{total_open}</strong></span>'
-            f'<span style="color:#aaa;font-size:0.82em;margin-right:14px">'
+            f'<span style="color:#ccc;font-size:0.82em;margin-right:14px">'
             f'High/Critical: <strong style="color:#ff8800">{high_open}</strong></span>'
-            f'<span style="color:#aaa;font-size:0.82em">'
+            f'<span style="color:#ccc;font-size:0.82em">'
             f'Baseline domains: <strong style="color:#00d4ff">{total_baseline}</strong></span>'
         )
     except Exception:
@@ -1441,7 +1441,7 @@ def _render_card(building: bool, built: bool) -> str:
     empty_html = ""
     if not incident_rows:
         empty_html = (
-            '<p style="color:#555;font-style:italic;padding:12px 0;margin:0">'
+            '<p style="color:#bbb;font-style:italic;padding:12px 0;margin:0">'
             'No anomalies detected yet'
             + (' — building baseline…' if building else
                ' — monitoring active' if built else '') + '</p>'
@@ -1550,7 +1550,7 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
         has_ai = bool(r["ai_report"])
         ai_btn_style = (
             "color:#00ff88;border-color:#00ff8844" if has_ai
-            else "color:#888;border-color:#444"
+            else "color:#bbb;border-color:#444"
         )
         ai_btn_title = "View AI analysis" if has_ai else "Generate AI incident report"
         ai_btn = (
@@ -1585,18 +1585,18 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
   <td style="padding:8px 10px;font-family:monospace;font-size:0.9em;
              color:#eee;max-width:200px;overflow:hidden;text-overflow:ellipsis;
              white-space:nowrap" title="{domain}">{domain}</td>
-  <td style="padding:8px 10px;color:#aaa;font-size:0.82em">
+  <td style="padding:8px 10px;color:#ccc;font-size:0.82em">
     {icon} {itype_display}
   </td>
-  <td style="padding:8px 10px;text-align:center;color:#aaa">{ndevs}</td>
-  <td style="padding:8px 10px;color:#666;font-size:0.82em">{rel}</td>
+  <td style="padding:8px 10px;text-align:center;color:#ccc">{ndevs}</td>
+  <td style="padding:8px 10px;color:#bbb;font-size:0.82em">{rel}</td>
   <td style="padding:8px 10px;white-space:nowrap">
     <button onclick="typeof _adToggleDetail===\'function\' ? _adToggleDetail({inc_id}) : location.reload()"
             style="background:transparent;color:#00d4ff;border:1px solid #00d4ff;
                    padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em">Details</button>
     {ai_btn}
     <button onclick="typeof _adCloseInc===\'function\' ? _adCloseInc({inc_id}) : location.reload()"
-            style="background:transparent;color:#555;border:1px solid #555;
+            style="background:transparent;color:#bbb;border:1px solid #555;
                    padding:3px 8px;border-radius:4px;cursor:pointer;font-size:0.8em;
                    margin-left:4px" title="Dismiss / mark reviewed">✓</button>
     {cisa_btn}
@@ -1604,7 +1604,7 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
 </tr>
 <tr id="_adDetail{inc_id}" style="display:none;background:#0d1117">
   <td colspan="6" style="padding:0 10px 10px">
-    <div id="_adDetailContent{inc_id}" style="color:#aaa;font-size:0.82em;padding:8px 0">
+    <div id="_adDetailContent{inc_id}" style="color:#ccc;font-size:0.82em;padding:8px 0">
       Loading…
     </div>
   </td>
@@ -1682,9 +1682,9 @@ def _cisa_modal_html() -> str:
         Cancel — do not report
       </button>
     </div>
-    <p style="color:#555;font-size:0.78em;margin-top:12px;margin-bottom:0">
+    <p style="color:#bbb;font-size:0.78em;margin-top:12px;margin-bottom:0">
       CISA 24/7 reporting: <a href="https://www.cisa.gov/report" target="_blank"
-      rel="noopener" style="color:#666">cisa.gov/report</a> ·
+      rel="noopener" style="color:#bbb">cisa.gov/report</a> ·
       Phone: 1-888-282-0870
     </p>
   </div>
@@ -1755,7 +1755,7 @@ def _card_js() -> str:
     var btn     = document.getElementById('_adAIBtn' + id);
     if (!overlay) return;
     overlay.style.display = 'block';
-    if (body)  body.innerHTML  = '<span style="color:#aaa">Generating AI analysis…</span>';
+    if (body)  body.innerHTML  = '<span style="color:#ccc">Generating AI analysis…</span>';
     if (title) title.textContent = '🤖 AI Incident Analysis';
     if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}
     fetch('/api/anomaly/incident/' + id + '/analyze', {{method:'POST'}})
@@ -1870,11 +1870,11 @@ def _api_incident_detail(inc_id: int):
             ip   = _html.escape(d.get("ip", ""))
             qc   = d.get("query_count", 1)
             prop_html += (f'<tr style="border-top:1px solid #1e2d4e">'
-                          f'<td style="padding:4px 8px;color:#666">{i}</td>'
+                          f'<td style="padding:4px 8px;color:#bbb">{i}</td>'
                           f'<td style="padding:4px 8px">{name}<br>'
-                          f'<span style="color:#555;font-size:0.85em">{ip}</span></td>'
-                          f'<td style="padding:4px 8px;color:#aaa">{ts_str}</td>'
-                          f'<td style="padding:4px 8px;text-align:right;color:#aaa">{qc}</td></tr>')
+                          f'<span style="color:#bbb;font-size:0.85em">{ip}</span></td>'
+                          f'<td style="padding:4px 8px;color:#ccc">{ts_str}</td>'
+                          f'<td style="padding:4px 8px;text-align:right;color:#ccc">{qc}</td></tr>')
         prop_html += "</table>"
 
     label, color = _severity_label(row["score"])
@@ -1930,24 +1930,24 @@ def _api_incident_detail(inc_id: int):
     detail_html = f"""
 <div style="font-size:0.88em">
   <div style="margin-bottom:10px">
-    <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">Target</span>
+    <span style="color:#ccc;font-size:0.82em;text-transform:uppercase">Target</span>
     <div style="font-family:monospace;color:#eee;margin-top:2px">{domain_esc}</div>
   </div>
   <div style="margin-bottom:10px">
-    <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">Score / Severity</span>
+    <span style="color:#ccc;font-size:0.82em;text-transform:uppercase">Score / Severity</span>
     <div style="margin-top:2px">
       <span style="color:{color};font-weight:bold">{row['score']:.0f} — {label}</span>
       &nbsp;·&nbsp; {itype_display} &nbsp;·&nbsp; {created}
     </div>
   </div>
   <div style="margin-bottom:10px">
-    <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">Score signals</span>
-    <div style="margin-top:4px">{sig_html or '<span style="color:#555">No signal detail</span>'}</div>
+    <span style="color:#ccc;font-size:0.82em;text-transform:uppercase">Score signals</span>
+    <div style="margin-top:4px">{sig_html or '<span style="color:#bbb">No signal detail</span>'}</div>
   </div>
   <div>
-    <span style="color:#aaa;font-size:0.82em;text-transform:uppercase">
+    <span style="color:#ccc;font-size:0.82em;text-transform:uppercase">
       Device propagation order</span>
-    {prop_html or '<div style="color:#555;padding:4px 0">Single device</div>'}
+    {prop_html or '<div style="color:#bbb;padding:4px 0">Single device</div>'}
   </div>
 </div>"""
 
