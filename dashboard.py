@@ -3542,13 +3542,16 @@ def dashboard():
         .section-badge {{ display:none; background:#ff4444; color:#fff; border-radius:10px;
                           padding:2px 8px; font-size:0.7em; font-weight:bold; margin-left:6px; }}
         /* Pihole tooltip */
-        .ph-info {{ display:inline-block; color:#555; cursor:help; font-size:0.8em;
-                    margin-left:4px; vertical-align:middle; position:relative; }}
+        .ph-info {{ display:inline-block; color:#00d4ff; cursor:help; font-size:0.85em;
+                    margin-left:6px; vertical-align:middle; position:relative;
+                    border:1px solid #1e2d4e; border-radius:50%; width:16px; height:16px;
+                    text-align:center; line-height:14px; font-style:normal; }}
         .ph-info:hover .ph-tooltip {{ display:block; }}
-        .ph-tooltip {{ display:none; position:absolute; left:0; top:1.4em; background:#0d1117;
-                        border:1px solid #1e2d4e; border-radius:6px; padding:8px 12px;
-                        font-size:0.82em; color:#aaa; width:260px; z-index:20;
-                        white-space:normal; line-height:1.5; }}
+        .ph-tooltip {{ display:none; position:absolute; left:0; top:1.8em; background:#0d1117;
+                        border:1px solid #00d4ff44; border-radius:6px; padding:8px 12px;
+                        font-size:0.82em; color:#aaa; width:260px; z-index:100;
+                        white-space:normal; line-height:1.5; font-style:normal;
+                        box-shadow:0 4px 12px rgba(0,0,0,0.5); }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
@@ -3562,12 +3565,16 @@ def dashboard():
     <p style="color:#aaa;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min</p>
 
     <nav class="jump-nav">
-        <span style="color:#555;font-size:0.75em;margin-right:4px">Jump:</span>
+        <a href="#" onclick="window.scrollTo(0,0);return false;" style="color:#00d4ff;border-color:#00d4ff">↑ Top</a>
+        <span style="color:#333;margin:0 2px">|</span>
         <a href="#section-hw">🌡️ Hardware</a>
         <a href="#section-firewall">🔥 AI Firewall</a>
         <a href="#section-devices">🖥️ Devices</a>
         <a href="#section-anomaly">🔍 Anomaly</a>
         <a href="#section-tickets">🎫 Tickets</a>
+        <span style="color:#333;margin:0 2px">|</span>
+        <a href="/settings" target="_blank" rel="noopener">⚙️ Settings</a>
+        <a href="/diagnostics" target="_blank" rel="noopener">🔍 Diagnostics</a>
     </nav>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
@@ -3576,12 +3583,14 @@ def dashboard():
     </div>
 
     <div class="grid">
+        <!-- Pi-hole and System Status cards are always-visible at-a-glance status widgets;
+             intentionally excluded from collapsible sections. -->
         <div class="card">
             <h2><span class="tier-text" data-beginner="Pi-hole — DNS Ad &amp; Tracker Blocker" data-intermediate="Pi-hole DNS Protection" data-pro="Pi-hole DNS">Pi-hole DNS Protection</span></h2>
             <p>
                 <span class="tier-text" data-beginner="DNS Queries Today (all devices):" data-intermediate="Queries Today:" data-pro="Queries:">Queries Today:</span>
                 <span class="stat" id="phTotal">{total}</span>
-                <span class="ph-info">ℹ<span class="ph-tooltip" id="phResetTooltip">Loading reset time…</span></span>
+                <span class="ph-info" title="Pi-hole resets daily stats at UTC midnight">i<span class="ph-tooltip" id="phResetTooltip">Pi-hole resets at UTC midnight — calculating local time…</span></span>
             </p>
             <p><span class="tier-text" data-beginner="Blocked (ads, trackers, malware domains):" data-intermediate="Blocked:" data-pro="Blocked:">Blocked:</span> <span class="stat" id="phBlocked">{blocked}</span></p>
             <p><span class="tier-text" data-beginner="Block Rate (higher = more protection):" data-intermediate="Percent Blocked:" data-pro="Block %:">Percent Blocked:</span> <span class="stat" id="phPercent">{percent}%</span></p>
@@ -4010,20 +4019,21 @@ def dashboard():
 
     <script>
         // ── Pi-hole UTC reset tooltip ──────────────────────────────────────────
-        (function() {{
+        function _initPhTooltip() {{
             var now = new Date();
             var nextUtcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
             var opts = {{hour: '2-digit', minute: '2-digit', timeZoneName: 'short'}};
             var localStr = nextUtcMidnight.toLocaleTimeString(undefined, opts);
             var tier = localStorage.getItem('nemesisTier') || 'intermediate';
             var msgs = {{
-                beginner: "Pi-hole's daily count resets at a set time each night — next reset at " + localStr,
-                intermediate: "Pi-hole resets stats at UTC midnight. In your timezone that's " + localStr,
+                beginner: "Pi-hole's daily count resets at a set time each night. Next reset at " + localStr,
+                intermediate: "Pi-hole resets stats at UTC midnight. In your timezone: " + localStr,
                 pro: "Pi-hole FTL resets at UTC 00:00. Next reset: " + nextUtcMidnight.toLocaleString()
             }};
             var tip = document.getElementById('phResetTooltip');
             if (tip) tip.textContent = msgs[tier] || msgs.intermediate;
-        }})();
+        }}
+        document.addEventListener('DOMContentLoaded', _initPhTooltip);
 
         // ── Collapsible sections ───────────────────────────────────────────────
         var _sectionIds = ['hw', 'firewall', 'devices', 'anomaly', 'tickets'];

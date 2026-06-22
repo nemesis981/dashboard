@@ -848,14 +848,21 @@ class Module(NemesisModule):
             n = get_open_ticket_count()
         except Exception:
             n = 0
-        color   = "#ffaa00" if n > 0 else "#555"
-        label   = f"{n} open ticket{'s' if n != 1 else ''}"
+        color = "#ffaa00" if n > 0 else "#555"
+        label = f"{n} open ticket{'s' if n != 1 else ''}"
         return (
-            f'<div class="card" id="section-tickets" style="cursor:pointer" onclick="window.open(\'/tickets\',\'_blank\')">'
-            f'  <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;'
-            f'letter-spacing:0.06em;margin-bottom:4px">🎫 Tickets</div>'
-            f'  <div style="color:{color};font-size:1.3em;font-weight:bold">{n}</div>'
-            f'  <div style="color:#555;font-size:0.78em;margin-top:2px">{label}</div>'
+            f'<div class="card" id="section-tickets">'
+            f'  <h2 style="cursor:pointer;margin:0 0 8px 0;font-size:1em;display:flex;align-items:center;gap:6px"'
+            f'      onclick="toggleSection(\'tickets\')" data-section-badge="{n}">'
+            f'    <span class="section-chevron" id="chevron-tickets">▼</span>'
+            f'    🎫 <span style="color:#00d4ff">Tickets</span>'
+            f'    <span class="section-badge" id="badge-tickets"></span>'
+            f'  </h2>'
+            f'  <div id="section-tickets-body" style="cursor:pointer" onclick="window.open(\'/tickets\',\'_blank\')">'
+            f'    <div style="color:{color};font-size:1.3em;font-weight:bold">{n}</div>'
+            f'    <div style="color:#555;font-size:0.78em;margin-top:2px">{label}</div>'
+            f'    <div style="color:#333;font-size:0.72em;margin-top:4px">click to open ↗</div>'
+            f'  </div>'
             f'</div>'
         )
 
