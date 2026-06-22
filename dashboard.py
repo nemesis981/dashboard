@@ -3581,17 +3581,7 @@ def dashboard():
         .section-chevron {{ font-size:0.7em; color:#bbb; flex-shrink:0; transition:transform 0.2s; }}
         .section-badge {{ display:none; background:#ff4444; color:#fff; border-radius:10px;
                           padding:2px 8px; font-size:0.7em; font-weight:bold; margin-left:6px; }}
-        /* Pihole tooltip */
-        .ph-info {{ display:inline-block; color:#00d4ff; cursor:help; font-size:0.85em;
-                    margin-left:6px; vertical-align:middle; position:relative;
-                    border:1px solid #1e2d4e; border-radius:50%; width:16px; height:16px;
-                    text-align:center; line-height:14px; font-style:normal; }}
-        .ph-info:hover .ph-tooltip {{ display:block; }}
-        .ph-tooltip {{ display:none; position:absolute; left:0; top:1.8em; background:#0d1117;
-                        border:1px solid #00d4ff44; border-radius:6px; padding:8px 12px;
-                        font-size:0.82em; color:#ccc; width:260px; z-index:100;
-                        white-space:normal; line-height:1.5; font-style:normal;
-                        box-shadow:0 4px 12px rgba(0,0,0,0.5); }}
+        .ph-reset-times {{ font-size:0.72em; font-weight:normal; color:#bbb; margin-left:10px; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
@@ -3626,11 +3616,10 @@ def dashboard():
         <!-- Pi-hole and System Status cards are always-visible at-a-glance status widgets;
              intentionally excluded from collapsible sections. -->
         <div class="card">
-            <h2><span class="tier-text" data-beginner="Pi-hole — DNS Ad &amp; Tracker Blocker" data-intermediate="Pi-hole DNS Protection" data-pro="Pi-hole DNS">Pi-hole DNS Protection</span></h2>
+            <h2><span class="tier-text" data-beginner="Pi-hole — DNS Ad &amp; Tracker Blocker" data-intermediate="Pi-hole DNS Protection" data-pro="Pi-hole DNS">Pi-hole DNS Protection</span><span class="ph-reset-times" id="phResetTimes"></span></h2>
             <p>
                 <span class="tier-text" data-beginner="DNS Queries Today (all devices):" data-intermediate="Queries Today:" data-pro="Queries:">Queries Today:</span>
                 <span class="stat" id="phTotal">{total}</span>
-                <span class="ph-info" title="Pi-hole resets daily stats at UTC midnight">i<span class="ph-tooltip" id="phResetTooltip">Pi-hole resets at UTC midnight — calculating local time…</span></span>
             </p>
             <p><span class="tier-text" data-beginner="Blocked (ads, trackers, malware domains):" data-intermediate="Blocked:" data-pro="Blocked:">Blocked:</span> <span class="stat" id="phBlocked">{blocked}</span></p>
             <p><span class="tier-text" data-beginner="Block Rate (higher = more protection):" data-intermediate="Percent Blocked:" data-pro="Block %:">Percent Blocked:</span> <span class="stat" id="phPercent">{percent}%</span></p>
@@ -4058,22 +4047,15 @@ def dashboard():
     </div>
 
     <script>
-        // ── Pi-hole UTC reset tooltip ──────────────────────────────────────────
-        function _initPhTooltip() {{
+        // ── Pi-hole reset times (shown inline next to card title) ─────────────
+        function _initPhResetTimes() {{
             var now = new Date();
             var nextUtcMidnight = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1));
-            var opts = {{hour: '2-digit', minute: '2-digit', timeZoneName: 'short'}};
-            var localStr = nextUtcMidnight.toLocaleTimeString(undefined, opts);
-            var tier = localStorage.getItem('nemesisTier') || 'intermediate';
-            var msgs = {{
-                beginner: "Pi-hole's daily count resets at a set time each night. Next reset at " + localStr,
-                intermediate: "Pi-hole resets stats at UTC midnight. In your timezone: " + localStr,
-                pro: "Pi-hole FTL resets at UTC 00:00. Next reset: " + nextUtcMidnight.toLocaleString()
-            }};
-            var tip = document.getElementById('phResetTooltip');
-            if (tip) tip.textContent = msgs[tier] || msgs.intermediate;
+            var localStr = nextUtcMidnight.toLocaleTimeString(undefined, {{hour: '2-digit', minute: '2-digit', timeZoneName: 'short'}});
+            var el = document.getElementById('phResetTimes');
+            if (el) el.textContent = '— resets UTC 00:00 / local ' + localStr;
         }}
-        document.addEventListener('DOMContentLoaded', _initPhTooltip);
+        document.addEventListener('DOMContentLoaded', _initPhResetTimes);
 
         // ── Collapsible sections ───────────────────────────────────────────────
         var _sectionIds = ['hw', 'firewall', 'devices', 'anomaly', 'tickets'];
