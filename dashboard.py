@@ -3581,7 +3581,7 @@ def dashboard():
         .section-chevron {{ font-size:0.7em; color:#bbb; flex-shrink:0; transition:transform 0.2s; }}
         .section-badge {{ display:none; background:#ff4444; color:#fff; border-radius:10px;
                           padding:2px 8px; font-size:0.7em; font-weight:bold; margin-left:6px; }}
-        .ph-reset-times {{ font-size:0.72em; font-weight:normal; color:#bbb; margin-left:10px; }}
+        .ph-reset-times {{ font-size:0.82em; font-weight:normal; color:#bbb; margin-left:10px; }}
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
