@@ -54,6 +54,12 @@ fi
 
 REAL_USER="$SUDO_USER"
 
+# --yes flag: skip interactive confirmation (used by the dashboard /api/uninstall endpoint)
+NON_INTERACTIVE=false
+for _arg in "$@"; do
+    [[ "$_arg" == "--yes" ]] && NON_INTERACTIVE=true
+done
+
 ###############################################################################
 # WARNING BANNER & CONFIRMATION
 ###############################################################################
@@ -81,8 +87,15 @@ echo "  You will be asked individually about Pi-hole, Suricata, and ClamAV."
 echo ""
 echo -e "${RED}${BOLD}═══════════════════════════════════════════════════════════════════════${NC}"
 echo ""
-echo -ne "  Type ${BOLD}YES${NC} to confirm and proceed, or anything else to cancel: "
-read -r CONFIRM
+
+if [[ "$NON_INTERACTIVE" == true ]]; then
+    echo "  Running in non-interactive mode (--yes) — skipping confirmation prompt."
+    CONFIRM="YES"
+else
+    echo -ne "  Type ${BOLD}YES${NC} to confirm and proceed, or anything else to cancel: "
+    read -r CONFIRM
+fi
+
 if [[ "$CONFIRM" != "YES" ]]; then
     echo ""
     info "Cancelled — nothing was changed."
@@ -240,7 +253,7 @@ fi
 step_header "5/7" "Optional Component — Pi-hole"
 
 if command -v pihole &>/dev/null || systemctl is-active --quiet pihole-FTL 2>/dev/null; then
-    if ask_yes_no "Remove Pi-hole?"; then
+    if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove Pi-hole?"; then
         info "Running Pi-hole uninstaller..."
         if pihole uninstall --unattended 2>/dev/null; then
             ok "Pi-hole removed"
@@ -267,7 +280,7 @@ step_header "6/7" "Optional Component — Suricata"
 if dpkg -l suricata 2>/dev/null | grep -q '^ii'; then
     echo "  Note: /etc/suricata (your rules and config) will NOT be deleted."
     echo ""
-    if ask_yes_no "Remove Suricata packages?"; then
+    if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove Suricata packages?"; then
         systemctl stop suricata 2>/dev/null
         systemctl disable suricata 2>/dev/null
         apt-get purge -y suricata 2>/dev/null
@@ -290,7 +303,7 @@ fi
 step_header "7/7" "Optional Component — ClamAV"
 
 if dpkg -l clamav 2>/dev/null | grep -q '^ii'; then
-    if ask_yes_no "Remove ClamAV?"; then
+    if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove ClamAV?"; then
         systemctl stop clamav-daemon 2>/dev/null
         systemctl disable clamav-daemon 2>/dev/null
         apt-get purge -y clamav clamav-daemon 2>/dev/null

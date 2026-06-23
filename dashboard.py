@@ -1901,6 +1901,48 @@ def settings_page():
         .btn-confirm.ready {{ opacity: 1; cursor: pointer; }}
         .btn-cancel {{ padding: 9px 20px; background: #333; color: #eee;
                         border: none; border-radius: 5px; cursor: pointer; }}
+        /* Danger zone */
+        .danger-zone {{ margin-top: 40px; border: 1px solid #8b0000;
+                         border-radius: 8px; padding: 16px 20px;
+                         background: #0d0608; }}
+        .danger-zone h2 {{ margin-top: 0; color: #ff4444; font-size: 1em;
+                            letter-spacing: 0.05em; text-transform: uppercase; }}
+        .danger-zone p {{ color: #aaa; font-size: 0.85em; margin: 6px 0 14px; }}
+        .btn-uninstall {{ background: transparent; color: #ff4444;
+                           border: 1px solid #8b0000; padding: 9px 20px;
+                           border-radius: 6px; cursor: pointer; font-size: 0.9em;
+                           font-weight: bold; }}
+        .btn-uninstall:hover {{ background: #8b0000; color: #fff; }}
+        /* Uninstall modal */
+        .uninstall-overlay {{ display: none; position: fixed; inset: 0;
+                               background: rgba(0,0,0,0.9); z-index: 200; }}
+        .uninstall-box {{ background: #0d0608; border: 1px solid #8b0000;
+                           border-radius: 10px; padding: 28px; max-width: 520px;
+                           margin: 80px auto; }}
+        .uninstall-box h3 {{ color: #ff4444; margin-top: 0; }}
+        .uninstall-box p {{ color: #ccc; font-size: 0.88em; line-height: 1.6;
+                             margin: 6px 0; }}
+        .uninstall-box .safe-note {{ color: #4caf50; font-size: 0.85em;
+                                      margin-top: 10px; }}
+        .uninstall-yes-row {{ margin: 18px 0 8px; }}
+        .uninstall-yes-row label {{ color: #eee; font-size: 0.85em;
+                                     display: block; margin-bottom: 6px; }}
+        .uninstall-yes-input {{ background: #1a0608; border: 1px solid #8b0000;
+                                  color: #ff4444; padding: 8px 12px; border-radius: 4px;
+                                  font-size: 1em; font-family: monospace; width: 100px;
+                                  letter-spacing: 0.1em; }}
+        .uninstall-yes-input:focus {{ outline: none; border-color: #ff4444; }}
+        .uninstall-actions {{ display: flex; gap: 10px; margin-top: 18px; }}
+        .btn-uninstall-confirm {{ padding: 9px 20px; background: #8b0000;
+                                   color: #fff; border: none; border-radius: 5px;
+                                   cursor: pointer; font-weight: bold;
+                                   opacity: 0.35; pointer-events: none; }}
+        .btn-uninstall-confirm.ready {{ opacity: 1; pointer-events: auto; }}
+        .btn-uninstall-confirm.ready:hover {{ background: #cc0000; }}
+        .uninstall-result {{ margin-top: 14px; padding: 12px;
+                              background: #111; border-radius: 4px;
+                              color: #ffaa00; font-size: 0.83em;
+                              line-height: 1.6; display: none; }}
     </style>
 </head>
 <body>
@@ -2023,6 +2065,38 @@ def settings_page():
                 <div id="hw-rediscover-output"
                      style="display:none;margin-top:10px;background:#0d1117;border:1px solid #333;border-radius:4px;padding:10px;font-size:0.75em;color:#ccc;white-space:pre-wrap;max-height:200px;overflow-y:auto"></div>
             </div>
+        </div>
+    </div>
+
+    <!-- Danger Zone -->
+    <div class="danger-zone">
+        <h2>⚠ Danger Zone</h2>
+        <p>Permanently remove Nemesis Firewall from this system. All services will be
+           stopped and system configuration will be deleted.</p>
+        <button class="btn-uninstall" onclick="openUninstallModal()">
+            Uninstall Nemesis Firewall
+        </button>
+    </div>
+
+    <!-- Uninstall confirmation modal -->
+    <div class="uninstall-overlay" id="uninstallOverlay">
+        <div class="uninstall-box">
+            <h3>⚠ Uninstall Nemesis Firewall</h3>
+            <p>This will permanently remove Nemesis Firewall from this system.
+               All services will be stopped and configuration will be deleted.</p>
+            <p class="safe-note">✓ Your ~/dashboard directory and data will NOT be deleted.</p>
+            <div class="uninstall-yes-row">
+                <label for="uninstallYesInput">Type <strong>YES</strong> to confirm:</label>
+                <input id="uninstallYesInput" class="uninstall-yes-input"
+                       type="text" autocomplete="off" spellcheck="false"
+                       oninput="uninstallTypingCheck()" placeholder="YES">
+            </div>
+            <div class="uninstall-actions">
+                <button class="btn-uninstall-confirm" id="btnUninstallConfirm"
+                        onclick="doUninstall()">Confirm Uninstall</button>
+                <button class="btn-cancel" onclick="closeUninstallModal()">Cancel</button>
+            </div>
+            <div class="uninstall-result" id="uninstallResult"></div>
         </div>
     </div>
 
@@ -2349,6 +2423,52 @@ def settings_page():
             fetch('/api/restart', {{method: 'POST'}})
                 .catch(function() {{}});
             setTimeout(function() {{ location.reload(); }}, 5000);
+        }}
+
+        function openUninstallModal() {{
+            document.getElementById('uninstallYesInput').value = '';
+            document.getElementById('btnUninstallConfirm').classList.remove('ready');
+            document.getElementById('uninstallResult').style.display = 'none';
+            document.getElementById('uninstallResult').textContent = '';
+            document.getElementById('uninstallOverlay').style.display = 'block';
+            document.getElementById('uninstallYesInput').focus();
+        }}
+
+        function closeUninstallModal() {{
+            document.getElementById('uninstallOverlay').style.display = 'none';
+        }}
+
+        function uninstallTypingCheck() {{
+            var val = document.getElementById('uninstallYesInput').value;
+            var btn = document.getElementById('btnUninstallConfirm');
+            if (val === 'YES') {{
+                btn.classList.add('ready');
+            }} else {{
+                btn.classList.remove('ready');
+            }}
+        }}
+
+        function doUninstall() {{
+            var btn = document.getElementById('btnUninstallConfirm');
+            var cancelBtn = document.querySelector('#uninstallOverlay .btn-cancel');
+            var result = document.getElementById('uninstallResult');
+            if (document.getElementById('uninstallYesInput').value !== 'YES') return;
+            btn.classList.remove('ready');
+            btn.textContent = 'Uninstalling…';
+            cancelBtn.disabled = true;
+            result.style.display = 'none';
+            fetch('/api/uninstall', {{method: 'POST'}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(data) {{
+                    result.textContent = data.message || 'Uninstall started.';
+                    result.style.display = 'block';
+                    // Stop any auto-refresh — page will go offline shortly
+                    if (window._refreshTimer) clearInterval(window._refreshTimer);
+                }})
+                .catch(function() {{
+                    result.textContent = 'Request sent — services stopping now.';
+                    result.style.display = 'block';
+                }});
         }}
 
         {'function restartWindowsAgent() {var btn=document.getElementById("restartAgentBtn");var msg=document.getElementById("restartAgentMsg");btn.disabled=true;btn.style.opacity="0.6";msg.style.display="inline";fetch("http://' + _agent_ip + ':5001/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"restart"})}).then(function(){msg.textContent="Restart command sent.";}).catch(function(e){msg.textContent="Error: "+e;msg.style.color="#ff4444";});}' if _is_windows_agent else ''}
@@ -3357,6 +3477,22 @@ def api_restart():
         subprocess.run(["sudo", "systemctl", "restart", "dashboard"])
     threading.Thread(target=_do_restart, daemon=True).start()
     return jsonify({"status": "restarting"})
+
+
+@app.route("/api/uninstall", methods=["POST"])
+def api_uninstall():
+    uninstall_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uninstall.sh")
+    def _do_uninstall():
+        time.sleep(3)
+        subprocess.run(["sudo", "bash", uninstall_script, "--yes"])
+    threading.Thread(target=_do_uninstall, daemon=True).start()
+    return jsonify({
+        "status": "uninstalling",
+        "message": (
+            "Nemesis Firewall is being removed. This page will go offline shortly — "
+            "that means it worked. To reinstall, run:  sudo bash ~/dashboard/install.sh"
+        ),
+    })
 
 
 @app.route("/api/dashboard/uptime")
