@@ -691,6 +691,21 @@ ufw_and_finish() {
     ufw --force enable
     ok "UFW enabled with local-network-only rules"
 
+    # Port redirect: Flask runs on 5000 as a non-root user; redirect port 80 → 5000
+    # so the dashboard is reachable at http://<ip> without a reverse proxy.
+    info "Redirecting port 80 → 5000 for dashboard access..."
+    iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
+        || iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
+    iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
+        || iptables -t nat -A OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
+    if apt-get install -y iptables-persistent 2>/dev/null; then
+        netfilter-persistent save 2>/dev/null || true
+        ok "Port redirect 80 → 5000 saved (persists across reboots)"
+    else
+        warn "iptables-persistent not available — port redirect will not survive reboot"
+        warn "Re-run:  sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000"
+    fi
+
     # ── Pi-hole password ─────────────────────────────────────────────────────
     if [[ -z "$CFG_PIHOLE_PASSWORD" ]]; then
         echo ""
