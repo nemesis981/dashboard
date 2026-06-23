@@ -235,8 +235,9 @@ sudo rm /etc/systemd/system/alert-watcher.service
 sudo rm /etc/systemd/system/device-scanner.service
 sudo systemctl daemon-reload
 
-# Remove config
+# Remove config and sudoers rule
 sudo rm /etc/nemesis.env
+sudo rm -f /etc/sudoers.d/nemesis
 
 # Remove the dashboard directory
 rm -rf ~/dashboard
