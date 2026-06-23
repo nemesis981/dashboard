@@ -661,6 +661,7 @@ hardware_discovery() {
     else
         warn "Hardware discovery returned an error."
         warn "You can re-run it from Settings → Hardware → Re-run hardware discovery."
+        info "Note: No sensors found is normal on virtual machines. On physical hardware, sensors are detected automatically."
     fi
 }
 

@@ -26,7 +26,7 @@ Installation and configuration reference for native Linux installs.
 
 | Component | Minimum | Recommended |
 |---|---|---|
-| OS | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS |
+| OS | Ubuntu 22.04 LTS | Ubuntu 24.04 LTS or 26.04 LTS |
 | RAM | 2GB | 4GB |
 | CPU | Dual-core, any modern | Quad-core |
 | Storage | 20GB free | 50GB+ (logs grow over time) |
@@ -82,6 +82,8 @@ The install script will:
 5. Deploy and start all Nemesis services
 
 > **Note on Suricata and VMs:** Suricata inspects live network traffic and requires direct access to a physical or bridged network interface. If you are running Nemesis in a VM with NAT networking, Suricata will install but packet inspection will not function. Use a bridged adapter or install on bare metal for full IDS functionality.
+
+> **Note on Pi-hole installation:** The install script handles Pi-hole automatically — no separate prompts or dialog boxes to navigate. When running interactively at a terminal, Pi-hole's configuration UI is shown. When running over SSH or a non-interactive session, it installs silently with sensible defaults (Google DNS, standard blocklist). Either way, all Pi-hole settings can be changed afterward via its admin UI at `http://<your-ip>:8080`.
 
 **Installation takes approximately 10-15 minutes** depending on your internet speed (Pi-hole and Suricata have large downloads).
 
