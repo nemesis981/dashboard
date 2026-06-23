@@ -2975,7 +2975,7 @@ def settings_page():
                         h += '<div class="fs-browser-item" onclick="_fsBrowse(' + JSON.stringify(inputId) + ',' + JSON.stringify(browserId) + ',' + JSON.stringify(d.parent) + ')">&#x1F4C2; ..</div>';
                     }}
                     (d.dirs || []).forEach(function(dir) {{
-                        var full = d.path.replace(/\/+$/,'') + '/' + dir;
+                        var full = d.path.replace(/[/]+$/,'') + '/' + dir;
                         h += '<div class="fs-browser-item" onclick="_fsBrowse(' + JSON.stringify(inputId) + ',' + JSON.stringify(browserId) + ',' + JSON.stringify(full) + ')">&#x1F4C1; ' + dir + '</div>';
                     }});
                     h += '<div style="border-top:1px solid #2a3a5a;margin-top:6px;padding-top:8px">'
