@@ -3197,7 +3197,7 @@ def settings_page():
               + ' data-pro="NIC binding and CIDR. Read-only IP/subnet — set static via router DHCP. Override interface name if auto-detection is wrong.">'
               + 'Network interface and address configuration for this machine.</p>';
             h += _wizField('NETWORK_IFACE', 'Network interface name', n.interface||'', 'text', false, 'Auto-detected — override only if Nemesis is monitoring the wrong interface');
-            h += _wizField('_NET_IP',       'This machine\'s IP address', n.ip||'', 'text', true,
+            h += _wizField('_NET_IP',       'This machine&#39;s IP address', n.ip||'', 'text', true,
                            'Read-only — to assign a permanent IP, set a DHCP reservation on your router using the MAC address of this machine');
             h += _wizField('_NET_SUBNET',   'Local subnet (CIDR)',         n.subnet||'', 'text', true,
                            'Auto-derived from network interface — read-only');
