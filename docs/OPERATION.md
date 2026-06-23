@@ -13,6 +13,7 @@ Day-to-day usage reference for Nemesis Firewall. This guide covers what you'll s
 - [Hardware Monitor](#hardware-monitor)
 - [AI Firewall (Suricata Alerts)](#ai-firewall-suricata-alerts)
 - [Zero-Day / Anomaly Detection](#zero-day--anomaly-detection)
+- [AI Engine](#ai-engine)
 - [Tickets & Notes](#tickets--notes)
 - [Diagnostics & Support](#diagnostics--support)
 - [Settings](#settings)
@@ -105,6 +106,36 @@ Click any counter to see exactly what's behind that number and why each item is 
 
 ---
 
+## AI Engine
+
+🟢 **Beginner:** Nemesis Firewall can use Claude AI (made by Anthropic) to help explain security alerts, analyze suspicious network patterns, and guide you through fixing issues. To enable it, you need a free Anthropic API key — get one at console.anthropic.com. Once configured, a green "AI ●" indicator appears in the dashboard header confirming it's active.
+
+🔵 **Intermediate:** The AI Engine module centralizes all Anthropic API interactions across the dashboard. When enabled, it powers: automatic incident analysis in the anomaly detection module, "Get AI Advice" on P1/P2 alerts, AI pre-sorting of the community submission queue, and AI-assisted troubleshooting in other features. Rate limits (hourly/daily caps) and cost tracking are configurable in Settings → AI Engine. Actual usage and estimated costs are shown with per-hour/day/week/month breakdowns.
+
+🔴 **Pro:** All API calls route through `ai_engine.analyze()` with a unified cache (`ai_engine.db`: `ai_cache`, `ai_usage`, `ai_settings`, `ai_rate_state` tables). Cache keys are caller-defined; anomaly detection uses 24h cache for new targets and 30-day for recurrence. Sliding-window rate limiting. Model: `claude-sonnet-4-6`. Pricing configurable via `ANTHROPIC_INPUT_PRICE_PER_MTOK` and `ANTHROPIC_OUTPUT_PRICE_PER_MTOK` in `/etc/nemesis.env` (defaults 3.00/15.00 per MTok).
+
+### AI Status Indicator
+
+The header shows your AI status at a glance:
+- 🟢 **AI ●** — enabled, API key valid, ready
+- ⚪ **AI ○** — disabled or no API key configured
+- 🔴 **AI ✕** — API key present but invalid
+
+Click the indicator to go directly to AI Engine settings.
+
+### Teaching Mode vs Automated Mode
+
+**Teaching Mode** (recommended for new Linux users): When AI recommends an action, it shows you the exact terminal command in a copyable code block. You open your own terminal (Ctrl+Alt+T on Ubuntu), paste and run the command yourself, then click "I ran it — what next?" to advance. AI confirms what you should have seen in the output. This builds real Linux knowledge through hands-on practice.
+
+**Automated Mode**: AI identifies the needed action and executes it automatically with tiered approval gates:
+- Low-risk actions (reading logs, checking status) → simple "OK to continue" click
+- Medium-risk actions (restarting services, blocking IPs) → confirmation dialog explaining what will happen
+- High-risk/destructive actions (removing rules, uninstalling) → type YES to confirm
+
+Switch between modes in Settings → AI Engine. Your explanation tier (Beginner/Intermediate/Pro) also affects how AI responses are worded — Beginner gets plain English, Pro gets technical detail.
+
+---
+
 ## Tickets & Notes
 
 🟢 **Beginner:** Tickets and notes are your investigation log. A **note** is a quick observation attached to any alert ("this is normal software updating itself"). A **ticket** is a formal investigation you're tracking, with a status (Open → Investigating → Resolved → Closed). The ticket counter in the header shows how many open tickets need attention.
@@ -150,9 +181,13 @@ Key settings areas:
 - Enable/disable each module independently
 - Each module has its own settings section when enabled
 
+**AI Engine** (when enabled)
+- API key status and rate limits (hourly/daily caps)
+- Actual usage tracking with estimated cost breakdown
+- Teaching Mode vs Automated Mode toggle
+
 **Anomaly Detection** (when enabled)
-- AI analysis rate limits (hourly/daily caps)
-- Actual usage tracking with estimated cost
+- Allow manual AI analysis when rate limit is reached
 - AbuseIPDB auto-reporting threshold
 - CISA reporting threshold
 

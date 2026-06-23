@@ -218,7 +218,9 @@ guided_mode() {
     echo ""
 
     echo "  ${BOLD}Anthropic API key${NC}"
-    echo "  Enables AI-powered analysis of security incidents."
+    echo "  Enables the AI Engine module — powers Teaching Mode (step-by-step terminal"
+    echo "  guidance), Automated Mode (AI executes actions with your approval), automatic"
+    echo "  anomaly incident analysis, and 'Get AI Advice' on P1/P2 alerts."
     echo "  Free key at: console.anthropic.com"
     prompt CFG_ANTHROPIC_API_KEY "Anthropic API key" ""
     echo ""
@@ -325,7 +327,8 @@ SMTP_PORT=587
 
 # ── Optional API Keys (leave blank to skip) ───────────────────────────────────
 
-# Anthropic API key — enables AI analysis of security incidents.
+# Anthropic API key — enables the AI Engine module: Teaching Mode, Automated Mode,
+# anomaly incident analysis, and "Get AI Advice" on P1/P2 alerts.
 # Free key at: console.anthropic.com
 ANTHROPIC_API_KEY=
 
@@ -822,6 +825,11 @@ SVCEOF
     echo "     → Run:  newgrp nemesis"
     echo "     → Or log out and back in"
     echo ""
+    if [[ -n "$CFG_ANTHROPIC_API_KEY" ]]; then
+        echo "  AI Engine: Look for the AI ● indicator in the dashboard header — green means AI is active and ready."
+        echo ""
+    fi
+
     echo -e "  ${BOLD}Your configuration has been saved to /etc/nemesis.env${NC}"
     echo "  To change any setting later, edit that file with:"
     echo "    sudo nano /etc/nemesis.env"

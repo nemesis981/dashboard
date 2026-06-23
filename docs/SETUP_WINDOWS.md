@@ -15,6 +15,7 @@ Installation and configuration reference for Windows users running Nemesis via a
 - [Installation](#installation)
 - [Windows Agent Setup](#windows-agent-setup)
 - [First-Run Configuration](#first-run-configuration)
+- [Environment Variables Reference](#environment-variables-reference)
 - [Network Configuration](#network-configuration)
 - [Managing the Windows Agent](#managing-the-windows-agent)
 - [Updating Nemesis](#updating-nemesis)
@@ -151,6 +152,36 @@ After the VM setup wizard completes:
 **3. Open the dashboard** at `http://<vm-ip>` and complete the same steps as a Linux install: set your tier level, trust your devices, review alert settings.
 
 **4. Verify the Windows Agent card** appears on the dashboard — it shows agent health (green = healthy, red = no data received). If it's red, check that LibreHardwareMonitor is running and the agent is running.
+
+---
+
+## Environment Variables Reference
+
+All Nemesis configuration lives inside the VM at `/etc/nemesis.env`. To edit it, SSH into the VM or use the VirtualBox console:
+
+```bash
+sudo nano /etc/nemesis.env
+```
+
+Restart services after changes:
+
+```bash
+sudo systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner
+```
+
+| Variable | Required | Description | Example |
+|---|---|---|---|
+| `WATCHDOG_EMAIL` | Yes | Email address used to SEND alerts | `alerts@yourdomain.com` |
+| `WATCHDOG_PASSWORD` | Yes | SMTP password for sending email | your app password |
+| `WATCHDOG_TO` | Yes | Email address to RECEIVE alerts | `you@email.com` |
+| `SMTP_HOST` | Yes | SMTP server hostname | `smtp.hostinger.com` |
+| `SMTP_PORT` | Yes | SMTP port (587 for STARTTLS, 465 for SSL) | `587` |
+| `ANTHROPIC_API_KEY` | No | Enables AI anomaly analysis and alert advice | `sk-ant-...` |
+| `ABUSEIPDB_KEY` | No | Enables IP abuse lookups and reporting | your key |
+| `IPINFO_TOKEN` | No | Enables IP geolocation | your token |
+| `PIHOLE_PASSWORD` | No | Pi-hole admin password for API access | your password |
+| `ANTHROPIC_INPUT_PRICE_PER_MTOK` | No | Input token price for AI cost estimates ($/M tokens) — update if Anthropic changes pricing, see claude.com/pricing | `3.00` |
+| `ANTHROPIC_OUTPUT_PRICE_PER_MTOK` | No | Output token price for AI cost estimates ($/M tokens) — update if Anthropic changes pricing, see claude.com/pricing | `15.00` |
 
 ---
 

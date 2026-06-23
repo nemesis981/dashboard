@@ -133,8 +133,8 @@ sudo systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanne
 | `ABUSEIPDB_KEY` | No | Enables IP abuse lookups and reporting | your key |
 | `IPINFO_TOKEN` | No | Enables IP geolocation | your token |
 | `PIHOLE_PASSWORD` | No | Pi-hole admin password for API access | your password |
-| `ANTHROPIC_INPUT_PRICE_PER_MTOK` | No | Input token price for cost estimates ($/M) | `3.00` |
-| `ANTHROPIC_OUTPUT_PRICE_PER_MTOK` | No | Output token price for cost estimates ($/M) | `15.00` |
+| `ANTHROPIC_INPUT_PRICE_PER_MTOK` | No | Input token price for AI cost estimates ($/M tokens) — update if Anthropic changes pricing, see claude.com/pricing | `3.00` |
+| `ANTHROPIC_OUTPUT_PRICE_PER_MTOK` | No | Output token price for AI cost estimates ($/M tokens) — update if Anthropic changes pricing, see claude.com/pricing | `15.00` |
 
 > **Security note:** `/etc/nemesis.env` is readable only by root and the `nemesis` group. Never commit this file to git — it's in `.gitignore` by default.
 
