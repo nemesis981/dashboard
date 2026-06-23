@@ -8,6 +8,7 @@ import threading
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
+from database import init_db as init_alerts_db
 from ip_enrichment import enrich_ip
 from email_utils import send_email
 from firewall import (
@@ -282,6 +283,7 @@ def tail(path):
 
 def main():
     log.info("alert_watcher starting (log=%s db=%s)", LOG_FILE, DB_PATH)
+    init_alerts_db()
     init_quarantines_db()
     blocked_cache = load_blocked_ips()
     log.info("loaded %d already-blocked IPs from ufw", len(blocked_cache))

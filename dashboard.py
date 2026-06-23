@@ -45,6 +45,7 @@ _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
+from database import init_db as init_alerts_db
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -52,6 +53,7 @@ import modules_loader
 import diagnostics as _diag
 import email_utils
 
+init_alerts_db()
 hw_monitor.init_db()
 
 app = Flask(__name__)
@@ -61,7 +63,7 @@ PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
-MODULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "modules")
+MODULES_DIR = os.path.join(_HERE, "modules")
 
 modules_loader.init(app, DB_PATH, MODULES_DIR)
 
