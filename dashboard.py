@@ -10,6 +10,7 @@ import sys
 import time
 import logging
 import threading
+import tarfile
 from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
@@ -64,6 +65,7 @@ DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
+_BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
 
 modules_loader.init(app, DB_PATH, MODULES_DIR)
 
@@ -1943,6 +1945,50 @@ def settings_page():
                               background: #111; border-radius: 4px;
                               color: #ffaa00; font-size: 0.83em;
                               line-height: 1.6; display: none; }}
+        /* Backup UI */
+        .btn-backup {{ background: transparent; color: #4ca1ff;
+                       border: 1px solid #1e4a80; padding: 9px 20px;
+                       border-radius: 6px; cursor: pointer; font-size: 0.9em;
+                       font-weight: bold; }}
+        .btn-backup:hover {{ background: #1e3060; color: #7cc8ff; }}
+        .dz-field-label {{ color: #aaa; font-size: 0.78em;
+                           display: block; margin-bottom: 4px; }}
+        .schedule-toggle {{ display: flex; align-items: center; gap: 8px;
+                            cursor: pointer; color: #aaa; font-size: 0.85em;
+                            margin-top: 14px; user-select: none; }}
+        .schedule-toggle input {{ accent-color: #4ca1ff; cursor: pointer; }}
+        .schedule-select {{ background: #1a1a2e; border: 1px solid #333;
+                            color: #eee; padding: 7px 10px; border-radius: 4px;
+                            font-size: 0.88em; }}
+        .backup-path-input {{ background: #1a1a2e; border: 1px solid #333;
+                              color: #eee; padding: 7px 10px; border-radius: 4px;
+                              font-size: 0.88em; }}
+        .btn-save-sched {{ background: transparent; color: #4ca1ff;
+                           border: 1px solid #1e4a80; padding: 7px 16px;
+                           border-radius: 4px; cursor: pointer; font-size: 0.85em; }}
+        .btn-save-sched:hover {{ background: #1e3060; }}
+        .backup-overlay {{ display: none; position: fixed; inset: 0;
+                           background: rgba(0,0,0,0.88); z-index: 200; }}
+        .backup-box {{ background: #080d1a; border: 1px solid #1e4a80;
+                       border-radius: 10px; padding: 28px; max-width: 520px;
+                       margin: 80px auto; }}
+        .backup-box h3 {{ color: #4ca1ff; margin-top: 0; }}
+        .backup-box p {{ color: #ccc; font-size: 0.88em; line-height: 1.6;
+                         margin: 6px 0; }}
+        .backup-file-list {{ list-style: none; padding: 0; margin: 8px 0 14px; }}
+        .backup-file-list li {{ color: #bbb; font-size: 0.84em; padding: 3px 0; }}
+        .backup-file-list li::before {{ content: "✓  "; color: #4ca1ff; }}
+        .file-hint {{ color: #555; font-size: 0.88em; font-family: monospace; }}
+        .backup-size-text {{ color: #aaa; font-size: 0.82em; margin: 10px 0 4px; }}
+        .backup-path-row {{ margin-top: 14px; }}
+        .backup-result {{ padding: 10px 12px; background: #111; border-radius: 4px;
+                          font-size: 0.82em; line-height: 1.6; color: #4ca1ff; }}
+        .backup-result.error {{ color: #ff6666; }}
+        @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+        .backup-spinner {{ display: inline-block; width: 14px; height: 14px;
+                           border: 2px solid #222; border-top-color: #4ca1ff;
+                           border-radius: 50%; animation: spin 0.8s linear infinite;
+                           vertical-align: middle; margin-right: 6px; }}
     </style>
 </head>
 <body>
@@ -2071,32 +2117,131 @@ def settings_page():
     <!-- Danger Zone -->
     <div class="danger-zone">
         <h2>⚠ Danger Zone</h2>
-        <p>Permanently remove Nemesis Firewall from this system. All services will be
-           stopped and system configuration will be deleted.</p>
+
+        <!-- Backup sub-section -->
+        <div style="margin-bottom:20px;padding-bottom:20px;border-bottom:1px solid #2a1010">
+            <p style="margin:0 0 10px">
+                <span class="tier-text"
+                      data-beginner="Save a copy of your alerts history, tickets, and settings. Store it on a USB drive or cloud folder so you can restore everything if this machine needs to be reinstalled."
+                      data-intermediate="Back up alerts.db, tickets.db, hw_map.json, and /etc/nemesis.env to a timestamped local archive."
+                      data-pro="tar.gz snapshot: alerts.db, tickets.db, hw_map.json, anomaly DBs, /etc/nemesis.env.">Back up alerts history, tickets, sensor map, and configuration to a local archive.</span>
+            </p>
+            <button class="btn-backup" onclick="openBackupModal()">Back Up Nemesis Data</button>
+
+            <!-- Scheduled backups -->
+            <div style="margin-top:16px">
+                <label class="schedule-toggle">
+                    <input type="checkbox" id="scheduleToggle" onchange="toggleScheduleForm()">
+                    <span class="tier-text"
+                          data-beginner="Automatically back up on a schedule (recommended — set it and forget it)"
+                          data-intermediate="Enable scheduled automatic backups"
+                          data-pro="Scheduled backups">Enable automatic backups</span>
+                </label>
+                <div id="scheduleForm" style="display:none;margin-top:12px">
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end">
+                        <div>
+                            <label class="dz-field-label" for="scheduleFreq">Frequency</label>
+                            <select id="scheduleFreq" class="schedule-select">
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                                <option value="monthly">Monthly</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="dz-field-label" for="scheduleDestPath">Destination folder</label>
+                            <input id="scheduleDestPath" type="text" class="backup-path-input"
+                                   value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                                   style="width:220px">
+                        </div>
+                        <button class="btn-save-sched" onclick="saveSchedule()">Save Schedule</button>
+                    </div>
+                    <div id="scheduleResult" style="display:none;margin-top:8px;font-size:0.82em;color:#aaa"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Uninstall sub-section -->
+        <p style="margin:0 0 10px;color:#aaa;font-size:0.85em">
+            Permanently remove Nemesis Firewall from this system. All services will be
+            stopped and system configuration will be deleted.
+        </p>
         <button class="btn-uninstall" onclick="openUninstallModal()">
             Uninstall Nemesis Firewall
         </button>
     </div>
 
-    <!-- Uninstall confirmation modal -->
+    <!-- Backup modal -->
+    <div class="backup-overlay" id="backupOverlay">
+        <div class="backup-box">
+            <h3>Back Up Nemesis Data</h3>
+            <div id="backupLoadingDiv" style="color:#aaa;font-size:0.88em;padding:8px 0">
+                <span class="backup-spinner"></span>Calculating backup size&hellip;
+            </div>
+            <div id="backupContentDiv" style="display:none">
+                <p class="tier-text"
+                   data-beginner="The following files will be saved — they contain your security history, tickets, and settings. Logs are not included because they are large and regenerate automatically."
+                   data-intermediate="Archive contents (logs excluded — they regenerate):"
+                   data-pro="Archive contents (no logs):">The following will be included in the backup:</p>
+                <ul class="backup-file-list">
+                    <li>Alert history <span class="file-hint">(alert_manager/alerts.db)</span></li>
+                    <li>Tickets &amp; notes <span class="file-hint">(modules/tickets/tickets.db)</span></li>
+                    <li>Hardware sensor map <span class="file-hint">(alert_manager/hw_map.json)</span></li>
+                    <li>Configuration &amp; API keys <span class="file-hint">(/etc/nemesis.env)</span></li>
+                </ul>
+                <p class="backup-size-text">Estimated size: <strong id="backupSizeDisplay">&mdash;</strong></p>
+                <p class="tier-text"
+                   data-beginner="&#x1F4A1; Tip: choose a USB drive or cloud folder (e.g. ~/Dropbox/) so the backup survives if this machine is wiped or fails."
+                   data-intermediate="Recommended: a removable drive or cloud-synced path."
+                   data-pro="Store off-machine for durability.">Store backups on removable media or a cloud-synced path.</p>
+                <div class="backup-path-row">
+                    <label class="dz-field-label" for="backupDestPath">Destination folder</label>
+                    <input id="backupDestPath" type="text" class="backup-path-input"
+                           value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                           style="width:100%;box-sizing:border-box">
+                </div>
+                <div class="uninstall-actions" style="margin-top:18px">
+                    <button class="btn-backup" id="btnCreateBackup" onclick="createBackup()">Create Backup</button>
+                    <button class="btn-cancel" onclick="closeBackupModal()">Cancel</button>
+                </div>
+                <div id="backupResult" class="backup-result" style="display:none;margin-top:12px"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Uninstall confirmation modal (2-step: backup prompt → YES confirmation) -->
     <div class="uninstall-overlay" id="uninstallOverlay">
         <div class="uninstall-box">
-            <h3>⚠ Uninstall Nemesis Firewall</h3>
-            <p>This will permanently remove Nemesis Firewall from this system.
-               All services will be stopped and configuration will be deleted.</p>
-            <p class="safe-note">✓ Your ~/dashboard directory and data will NOT be deleted.</p>
-            <div class="uninstall-yes-row">
-                <label for="uninstallYesInput">Type <strong>YES</strong> to confirm:</label>
-                <input id="uninstallYesInput" class="uninstall-yes-input"
-                       type="text" autocomplete="off" spellcheck="false"
-                       oninput="uninstallTypingCheck()" placeholder="YES">
+            <!-- Step 1: Backup prompt -->
+            <div id="uninstallStep1">
+                <h3>Back Up Before Uninstalling?</h3>
+                <p>Your alerts history, tickets, and configuration can be saved now and
+                   restored after a fresh reinstall.</p>
+                <p class="safe-note">&#x1F4BE; Backup will be saved to ~/nemesis-backup/</p>
+                <div id="preBackupResult" class="backup-result" style="display:none;margin-bottom:12px"></div>
+                <div class="uninstall-actions">
+                    <button class="btn-backup" id="btnPreBackup" onclick="doPreUninstallBackup()">Back Up Now</button>
+                    <button class="btn-cancel" onclick="goToUninstallStep2()">Skip Backup</button>
+                </div>
             </div>
-            <div class="uninstall-actions">
-                <button class="btn-uninstall-confirm" id="btnUninstallConfirm"
-                        onclick="doUninstall()">Confirm Uninstall</button>
-                <button class="btn-cancel" onclick="closeUninstallModal()">Cancel</button>
+            <!-- Step 2: YES confirmation -->
+            <div id="uninstallStep2" style="display:none">
+                <h3>&#x26A0; Uninstall Nemesis Firewall</h3>
+                <p>This will permanently remove Nemesis Firewall from this system.
+                   All services will be stopped and configuration will be deleted.</p>
+                <p class="safe-note">&#x2713; Your ~/dashboard directory and data will NOT be deleted.</p>
+                <div class="uninstall-yes-row">
+                    <label for="uninstallYesInput">Type <strong>YES</strong> to confirm:</label>
+                    <input id="uninstallYesInput" class="uninstall-yes-input"
+                           type="text" autocomplete="off" spellcheck="false"
+                           oninput="uninstallTypingCheck()" placeholder="YES">
+                </div>
+                <div class="uninstall-actions">
+                    <button class="btn-uninstall-confirm" id="btnUninstallConfirm"
+                            onclick="doUninstall()">Confirm Uninstall</button>
+                    <button class="btn-cancel" onclick="closeUninstallModal()">Cancel</button>
+                </div>
+                <div class="uninstall-result" id="uninstallResult"></div>
             </div>
-            <div class="uninstall-result" id="uninstallResult"></div>
         </div>
     </div>
 
@@ -2425,17 +2570,65 @@ def settings_page():
             setTimeout(function() {{ location.reload(); }}, 5000);
         }}
 
+        // --- Uninstall modal ---
         function openUninstallModal() {{
+            document.getElementById('uninstallStep1').style.display = 'block';
+            document.getElementById('uninstallStep2').style.display = 'none';
+            document.getElementById('preBackupResult').style.display = 'none';
+            document.getElementById('preBackupResult').textContent = '';
+            var preBtn = document.getElementById('btnPreBackup');
+            preBtn.disabled = false;
+            preBtn.textContent = 'Back Up Now';
             document.getElementById('uninstallYesInput').value = '';
             document.getElementById('btnUninstallConfirm').classList.remove('ready');
             document.getElementById('uninstallResult').style.display = 'none';
             document.getElementById('uninstallResult').textContent = '';
             document.getElementById('uninstallOverlay').style.display = 'block';
-            document.getElementById('uninstallYesInput').focus();
         }}
 
         function closeUninstallModal() {{
             document.getElementById('uninstallOverlay').style.display = 'none';
+        }}
+
+        function goToUninstallStep2() {{
+            document.getElementById('uninstallStep1').style.display = 'none';
+            document.getElementById('uninstallStep2').style.display = 'block';
+            document.getElementById('uninstallYesInput').focus();
+        }}
+
+        function doPreUninstallBackup() {{
+            var btn = document.getElementById('btnPreBackup');
+            var result = document.getElementById('preBackupResult');
+            btn.disabled = true;
+            btn.textContent = 'Backing up…';
+            result.className = 'backup-result';
+            result.style.display = 'none';
+            fetch('/api/backup/create', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{dest_path: '~/nemesis-backup/'}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(data) {{
+                if (data.status === 'ok') {{
+                    result.textContent = '✓ Backup saved to: ' + data.path + ' (' + data.size_mb.toFixed(1) + ' MB) — continuing to uninstall…';
+                    result.style.display = 'block';
+                    setTimeout(goToUninstallStep2, 2000);
+                }} else {{
+                    result.textContent = '✗ Backup failed: ' + (data.error || 'Unknown error');
+                    result.className = 'backup-result error';
+                    result.style.display = 'block';
+                    btn.disabled = false;
+                    btn.textContent = 'Try Again';
+                }}
+            }})
+            .catch(function() {{
+                result.textContent = '✗ Request failed — check that the dashboard service is running.';
+                result.className = 'backup-result error';
+                result.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Try Again';
+            }});
         }}
 
         function uninstallTypingCheck() {{
@@ -2450,19 +2643,18 @@ def settings_page():
 
         function doUninstall() {{
             var btn = document.getElementById('btnUninstallConfirm');
-            var cancelBtn = document.querySelector('#uninstallOverlay .btn-cancel');
+            var cancelBtn = document.querySelector('#uninstallStep2 .btn-cancel');
             var result = document.getElementById('uninstallResult');
             if (document.getElementById('uninstallYesInput').value !== 'YES') return;
             btn.classList.remove('ready');
             btn.textContent = 'Uninstalling…';
-            cancelBtn.disabled = true;
+            if (cancelBtn) cancelBtn.disabled = true;
             result.style.display = 'none';
             fetch('/api/uninstall', {{method: 'POST'}})
                 .then(function(r) {{ return r.json(); }})
                 .then(function(data) {{
                     result.textContent = data.message || 'Uninstall started.';
                     result.style.display = 'block';
-                    // Stop any auto-refresh — page will go offline shortly
                     if (window._refreshTimer) clearInterval(window._refreshTimer);
                 }})
                 .catch(function() {{
@@ -2470,6 +2662,132 @@ def settings_page():
                     result.style.display = 'block';
                 }});
         }}
+
+        // --- Backup modal ---
+        function openBackupModal() {{
+            var overlay = document.getElementById('backupOverlay');
+            document.getElementById('backupLoadingDiv').style.display = 'block';
+            document.getElementById('backupContentDiv').style.display = 'none';
+            document.getElementById('backupResult').style.display = 'none';
+            overlay.style.display = 'block';
+            fetch('/api/backup/size')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(data) {{
+                    var mb = data.size_mb || 0;
+                    document.getElementById('backupSizeDisplay').textContent =
+                        mb < 1 ? Math.round(mb * 1024) + ' KB' : mb.toFixed(1) + ' MB';
+                    document.getElementById('backupLoadingDiv').style.display = 'none';
+                    document.getElementById('backupContentDiv').style.display = 'block';
+                    if (typeof applyTierText === 'function') applyTierText();
+                }})
+                .catch(function() {{
+                    document.getElementById('backupSizeDisplay').textContent = '(unknown)';
+                    document.getElementById('backupLoadingDiv').style.display = 'none';
+                    document.getElementById('backupContentDiv').style.display = 'block';
+                }});
+        }}
+
+        function closeBackupModal() {{
+            document.getElementById('backupOverlay').style.display = 'none';
+        }}
+
+        function createBackup() {{
+            var btn = document.getElementById('btnCreateBackup');
+            var result = document.getElementById('backupResult');
+            var dest = (document.getElementById('backupDestPath').value || '').trim()
+                       || '~/nemesis-backup/';
+            btn.disabled = true;
+            btn.textContent = 'Creating…';
+            result.className = 'backup-result';
+            result.style.display = 'none';
+            fetch('/api/backup/create', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{dest_path: dest}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(data) {{
+                if (data.status === 'ok') {{
+                    result.textContent = '✓ Backup created: ' + data.path
+                                       + ' (' + data.size_mb.toFixed(1) + ' MB)';
+                }} else {{
+                    result.textContent = '✗ ' + (data.error || 'Backup failed');
+                    result.className = 'backup-result error';
+                }}
+                result.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Create Backup';
+            }})
+            .catch(function() {{
+                result.textContent = '✗ Request failed — check that the dashboard service is running.';
+                result.className = 'backup-result error';
+                result.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = 'Create Backup';
+            }});
+        }}
+
+        // --- Scheduled backups ---
+        function loadScheduleConfig() {{
+            fetch('/api/backup/schedule')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(cfg) {{
+                    if (cfg.enabled) {{
+                        document.getElementById('scheduleToggle').checked = true;
+                        document.getElementById('scheduleForm').style.display = 'block';
+                    }}
+                    if (cfg.schedule) document.getElementById('scheduleFreq').value = cfg.schedule;
+                    if (cfg.destination) document.getElementById('scheduleDestPath').value = cfg.destination;
+                }})
+                .catch(function() {{}});
+        }}
+
+        function toggleScheduleForm() {{
+            var on = document.getElementById('scheduleToggle').checked;
+            document.getElementById('scheduleForm').style.display = on ? 'block' : 'none';
+            if (!on) {{
+                fetch('/api/backup/schedule', {{
+                    method: 'POST',
+                    headers: {{'Content-Type': 'application/json'}},
+                    body: JSON.stringify({{enabled: false}})
+                }});
+                var r = document.getElementById('scheduleResult');
+                r.textContent = 'Automatic backups disabled.';
+                r.style.color = '#aaa';
+                r.style.display = 'block';
+            }}
+        }}
+
+        function saveSchedule() {{
+            var result = document.getElementById('scheduleResult');
+            var freq = document.getElementById('scheduleFreq').value;
+            var dest = (document.getElementById('scheduleDestPath').value || '').trim()
+                       || '~/nemesis-backup/';
+            result.textContent = 'Saving…';
+            result.style.color = '#aaa';
+            result.style.display = 'block';
+            fetch('/api/backup/schedule', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{enabled: true, schedule: freq, destination: dest}})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(data) {{
+                if (data.status === 'ok') {{
+                    result.textContent = '✓ Schedule saved — ' + freq + ' backups to ' + dest;
+                    result.style.color = '#4ca1ff';
+                }} else {{
+                    result.textContent = '✗ ' + (data.error || 'Failed to save schedule');
+                    result.style.color = '#ff6666';
+                }}
+            }})
+            .catch(function() {{
+                result.textContent = '✗ Request failed';
+                result.style.color = '#ff6666';
+            }});
+        }}
+
+        loadScheduleConfig();
 
         {'function restartWindowsAgent() {var btn=document.getElementById("restartAgentBtn");var msg=document.getElementById("restartAgentMsg");btn.disabled=true;btn.style.opacity="0.6";msg.style.display="inline";fetch("http://' + _agent_ip + ':5001/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"restart"})}).then(function(){msg.textContent="Restart command sent.";}).catch(function(e){msg.textContent="Error: "+e;msg.style.color="#ff4444";});}' if _is_windows_agent else ''}
     </script>
@@ -3493,6 +3811,102 @@ def api_uninstall():
             "that means it worked. To reinstall, run:  sudo bash ~/dashboard/install.sh"
         ),
     })
+
+
+def _backup_candidates():
+    """Return list of (src_path, archive_name) tuples for backup."""
+    files = [
+        (os.path.join(_HERE, "alert_manager", "alerts.db"), "alerts.db"),
+        (os.path.join(_HERE, "modules", "tickets", "tickets.db"), "modules/tickets/tickets.db"),
+        (os.path.join(_HERE, "alert_manager", "hw_map.json"), "alert_manager/hw_map.json"),
+        ("/etc/nemesis.env", "etc_nemesis.env"),
+    ]
+    anomaly_dir = os.path.join(_HERE, "modules", "anomaly_detection")
+    if os.path.isdir(anomaly_dir):
+        for fn in sorted(os.listdir(anomaly_dir)):
+            fp = os.path.join(anomaly_dir, fn)
+            if os.path.isfile(fp) and fn.endswith(".db"):
+                files.append((fp, f"modules/anomaly_detection/{fn}"))
+    return files
+
+
+@app.route("/api/backup/size")
+def api_backup_size():
+    total = sum(
+        os.path.getsize(src) for src, _ in _backup_candidates() if os.path.isfile(src)
+    )
+    return jsonify({"size_mb": round(total / (1024 * 1024), 2)})
+
+
+@app.route("/api/backup/create", methods=["POST"])
+def api_backup_create():
+    data = request.get_json(force=True, silent=True) or {}
+    dest_raw = (data.get("dest_path") or "~/nemesis-backup/").strip()
+    dest = os.path.expanduser(dest_raw)
+    try:
+        os.makedirs(dest, exist_ok=True)
+    except OSError as e:
+        return jsonify({"status": "error", "error": f"Cannot create directory: {e}"})
+
+    ts = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    archive_path = os.path.join(dest, f"nemesis-backup-{ts}.tar.gz")
+
+    try:
+        with tarfile.open(archive_path, "w:gz") as tar:
+            for src, arcname in _backup_candidates():
+                if os.path.isfile(src):
+                    tar.add(src, arcname=arcname)
+        os.chmod(archive_path, 0o600)
+        size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+        return jsonify({"status": "ok", "path": archive_path, "size_mb": round(size_mb, 2)})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)})
+
+
+@app.route("/api/backup/schedule", methods=["GET", "POST"])
+def api_backup_schedule():
+    default_cfg = {"enabled": False, "schedule": "daily", "destination": "~/nemesis-backup/"}
+
+    if request.method == "GET":
+        try:
+            with open(_BACKUP_CFG_PATH) as f:
+                return jsonify(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return jsonify(default_cfg)
+
+    data = request.get_json(force=True, silent=True) or {}
+    enabled = bool(data.get("enabled", False))
+    schedule = data.get("schedule", "daily")
+    destination = (data.get("destination") or "~/nemesis-backup/").strip()
+    cfg = {"enabled": enabled, "schedule": schedule, "destination": destination}
+
+    try:
+        with open(_BACKUP_CFG_PATH, "w") as f:
+            json.dump(cfg, f)
+    except OSError as e:
+        return jsonify({"status": "error", "error": f"Cannot save config: {e}"})
+
+    cron_marker = "# nemesis-backup-scheduled"
+    cron_exprs = {"daily": "0 3 * * *", "weekly": "0 3 * * 0", "monthly": "0 3 1 * *"}
+
+    try:
+        r = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        existing = r.stdout if r.returncode == 0 else ""
+        lines = [ln for ln in existing.splitlines() if cron_marker not in ln]
+        if enabled:
+            dest_exp = os.path.expanduser(destination)
+            expr = cron_exprs.get(schedule, "0 3 * * *")
+            lines.append(
+                f'{expr} curl -sf -X POST http://localhost:5000/api/backup/create'
+                f' -H "Content-Type: application/json"'
+                f' -d \'{{"dest_path":"{dest_exp}"}}\''
+                f' >> /tmp/nemesis-backup.log 2>&1 {cron_marker}'
+            )
+        new_crontab = "\n".join(lines) + ("\n" if lines else "")
+        subprocess.run(["crontab", "-"], input=new_crontab, text=True, check=True)
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"status": "error", "error": f"Failed to update crontab: {e}"})
 
 
 @app.route("/api/dashboard/uptime")

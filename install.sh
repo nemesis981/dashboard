@@ -57,6 +57,9 @@ DETECTED_IP=""
 DETECTED_SUBNET=""
 DASHBOARD_DIR=""
 
+# Set by check_for_backup if user wants to restore after install
+RESTORE_BACKUP_FILE=""
+
 # Config file path used by config-first mode
 CONF_FILE="./nemesis-install.conf"
 
@@ -837,6 +840,103 @@ SVCEOF
 }
 
 ###############################################################################
+# BACKUP RESTORE (Parts 4 of 4 — check before install, restore after deploy)
+###############################################################################
+
+check_for_backup() {
+    local backup_dir="/home/$SUDO_USER/nemesis-backup"
+    [[ -d "$backup_dir" ]] || return 0
+
+    local latest
+    latest=$(ls -t "$backup_dir"/nemesis-backup-*.tar.gz 2>/dev/null | head -1)
+    [[ -n "$latest" ]] || return 0
+
+    echo ""
+    echo -e "  ${GREEN}${BOLD}A Nemesis backup was found:${NC}"
+    echo "    $(basename "$latest")  (in $backup_dir)"
+    echo ""
+    echo "  Your alerts history, tickets, and configuration can be restored"
+    echo "  automatically after installation completes."
+    echo ""
+    echo -ne "  ${BOLD}Restore data from this backup after install? [y/N]:${NC} "
+    local resp
+    read -r resp
+    if [[ "${resp,,}" == "y" || "${resp,,}" == "yes" ]]; then
+        RESTORE_BACKUP_FILE="$latest"
+        ok "Restore scheduled — will run after services are deployed."
+    else
+        info "Skipping restore — starting with a clean configuration."
+    fi
+}
+
+restore_from_backup() {
+    [[ -n "$RESTORE_BACKUP_FILE" ]] || return 0
+
+    step_header "Restore" "Restoring Data from Backup"
+
+    info "Archive: $RESTORE_BACKUP_FILE"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    if ! tar -xzf "$RESTORE_BACKUP_FILE" -C "$tmp_dir" 2>/dev/null; then
+        warn "Failed to extract backup archive — skipping restore."
+        rm -rf "$tmp_dir"
+        return 0
+    fi
+
+    # alerts.db
+    if [[ -f "$tmp_dir/alerts.db" ]]; then
+        cp "$tmp_dir/alerts.db" "$DASHBOARD_DIR/alert_manager/alerts.db"
+        chown "$SUDO_USER:nemesis" "$DASHBOARD_DIR/alert_manager/alerts.db" 2>/dev/null || true
+        ok "Restored: alert_manager/alerts.db"
+    fi
+
+    # tickets.db
+    if [[ -f "$tmp_dir/modules/tickets/tickets.db" ]]; then
+        mkdir -p "$DASHBOARD_DIR/modules/tickets"
+        cp "$tmp_dir/modules/tickets/tickets.db" "$DASHBOARD_DIR/modules/tickets/tickets.db"
+        chown "$SUDO_USER" "$DASHBOARD_DIR/modules/tickets/tickets.db" 2>/dev/null || true
+        ok "Restored: modules/tickets/tickets.db"
+    fi
+
+    # hw_map.json
+    if [[ -f "$tmp_dir/alert_manager/hw_map.json" ]]; then
+        cp "$tmp_dir/alert_manager/hw_map.json" "$DASHBOARD_DIR/alert_manager/hw_map.json"
+        chown "$SUDO_USER" "$DASHBOARD_DIR/alert_manager/hw_map.json" 2>/dev/null || true
+        ok "Restored: alert_manager/hw_map.json"
+    fi
+
+    # anomaly detection DBs
+    if [[ -d "$tmp_dir/modules/anomaly_detection" ]]; then
+        mkdir -p "$DASHBOARD_DIR/modules/anomaly_detection"
+        for db in "$tmp_dir/modules/anomaly_detection/"*.db; do
+            [[ -f "$db" ]] || continue
+            cp "$db" "$DASHBOARD_DIR/modules/anomaly_detection/$(basename "$db")"
+            chown "$SUDO_USER" "$DASHBOARD_DIR/modules/anomaly_detection/$(basename "$db")" 2>/dev/null || true
+            ok "Restored: modules/anomaly_detection/$(basename "$db")"
+        done
+    fi
+
+    # /etc/nemesis.env — restores API keys and all configuration
+    if [[ -f "$tmp_dir/etc_nemesis.env" ]]; then
+        cp "$tmp_dir/etc_nemesis.env" /etc/nemesis.env
+        chown root:nemesis /etc/nemesis.env
+        chmod 640 /etc/nemesis.env
+        ok "Restored: /etc/nemesis.env (API keys and configuration)"
+        warn "Review /etc/nemesis.env if your IP address or email settings changed since the backup."
+        warn "Edit with:  sudo nano /etc/nemesis.env"
+    fi
+
+    rm -rf "$tmp_dir"
+
+    info "Restarting services to load restored data..."
+    systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner 2>/dev/null || true
+    ok "Services restarted"
+    echo ""
+    ok "Data restored from: $(basename "$RESTORE_BACKUP_FILE")"
+}
+
+###############################################################################
 # MAIN
 ###############################################################################
 
@@ -884,6 +984,7 @@ main() {
 
     # Preflight always runs first — it populates DETECTED_* vars
     preflight_checks
+    check_for_backup
 
     case "$mode_choice" in
         1) guided_mode ;;
@@ -902,6 +1003,7 @@ main() {
     setup_nemesis_group   # writes /etc/nemesis.env and sets permissions
     hardware_discovery
     deploy_services
+    restore_from_backup
     ufw_and_finish
 }
 
