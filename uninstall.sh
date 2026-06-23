@@ -73,7 +73,7 @@ echo ""
 echo -e "  ${RED}${BOLD}Will be removed:${NC}"
 echo "    All 5 Nemesis systemd services"
 echo "    /etc/nemesis.env     (runtime configuration)"
-echo "    /etc/sudoers.d/nemesis"
+echo "    /etc/sudoers.d/nemesis, nemesis-restart"
 echo "    iptables port-80 redirect rule"
 echo "    nemesis system group"
 echo ""
@@ -163,15 +163,17 @@ else
     SKIPPED+=("/etc/nemesis.env")
 fi
 
-# /etc/sudoers.d/nemesis
-if [[ -f /etc/sudoers.d/nemesis ]]; then
-    rm -f /etc/sudoers.d/nemesis
-    ok "Removed /etc/sudoers.d/nemesis"
-    REMOVED+=("/etc/sudoers.d/nemesis")
-else
-    skipped "/etc/sudoers.d/nemesis"
-    SKIPPED+=("/etc/sudoers.d/nemesis")
-fi
+# /etc/sudoers.d/nemesis and nemesis-restart
+for _sf in nemesis nemesis-restart; do
+    if [[ -f "/etc/sudoers.d/$_sf" ]]; then
+        rm -f "/etc/sudoers.d/$_sf"
+        ok "Removed /etc/sudoers.d/$_sf"
+        REMOVED+=("/etc/sudoers.d/$_sf")
+    else
+        skipped "/etc/sudoers.d/$_sf"
+        SKIPPED+=("/etc/sudoers.d/$_sf")
+    fi
+done
 
 # nemesis group
 if getent group nemesis &>/dev/null; then

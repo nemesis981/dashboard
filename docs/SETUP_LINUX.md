@@ -237,7 +237,7 @@ sudo systemctl daemon-reload
 
 # Remove config and sudoers rule
 sudo rm /etc/nemesis.env
-sudo rm -f /etc/sudoers.d/nemesis
+sudo rm -f /etc/sudoers.d/nemesis /etc/sudoers.d/nemesis-restart
 
 # Remove the dashboard directory
 rm -rf ~/dashboard
