@@ -2109,6 +2109,19 @@ def settings_page():
     </h1>
     <p><a class="back" href="/">← Back to Dashboard</a></p>
 
+    <div id="moduleRestartBanner" style="display:none;background:#2a1800;border:1px solid #ffaa00;border-radius:8px;padding:12px 16px;margin-bottom:16px;align-items:center;gap:12px;flex-wrap:wrap">
+        <span class="tier-text"
+            data-beginner="⚠️ The Nemesis dashboard needs to restart to apply this change — this only takes a few seconds and won't affect your other running programs."
+            data-intermediate="⚠️ Dashboard restart required for module changes to take effect."
+            data-pro="⚠️ Module route changes require Flask restart.">⚠️ Dashboard restart required for module changes to take effect.</span>
+        <span style="display:flex;gap:8px;flex-shrink:0;margin-left:auto">
+            <button onclick="restartFromModuleBanner()"
+                style="background:#ff4444;color:#fff;border:none;padding:7px 16px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.9em">Restart Dashboard</button>
+            <button onclick="dismissModuleRestartBanner()"
+                style="background:#333;color:#ccc;border:1px solid #555;padding:7px 14px;border-radius:5px;cursor:pointer;font-size:0.9em">Later</button>
+        </span>
+    </div>
+
     <div class="settings-section" style="background:#0d1117;border:1px solid #1e2d4e;border-radius:8px;padding:16px 20px">
         <h2 style="margin-top:0;color:#00d4ff">System Control</h2>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
@@ -2482,6 +2495,7 @@ def settings_page():
                             var sub = document.getElementById(subId);
                             if (sub) sub.style.display = enabled ? 'block' : 'none';
                         }}
+                        showModuleRestartBanner();
                     }}
                 }})
                 .catch(function(e) {{
@@ -2724,6 +2738,35 @@ def settings_page():
                 .catch(function() {{}});
             setTimeout(function() {{ location.reload(); }}, 5000);
         }}
+
+        // --- Module restart banner ---
+        var _MODULE_RESTART_KEY = 'nemesisModuleRestartPending';
+
+        function showModuleRestartBanner() {{
+            try {{ localStorage.setItem(_MODULE_RESTART_KEY, '1'); }} catch(e) {{}}
+            var el = document.getElementById('moduleRestartBanner');
+            if (el) {{ el.style.display = 'flex'; applyTierText(); }}
+        }}
+
+        function dismissModuleRestartBanner() {{
+            try {{ localStorage.removeItem(_MODULE_RESTART_KEY); }} catch(e) {{}}
+            var el = document.getElementById('moduleRestartBanner');
+            if (el) el.style.display = 'none';
+        }}
+
+        function restartFromModuleBanner() {{
+            try {{ localStorage.removeItem(_MODULE_RESTART_KEY); }} catch(e) {{}}
+            restartDashboard();
+        }}
+
+        (function() {{
+            try {{
+                if (localStorage.getItem(_MODULE_RESTART_KEY)) {{
+                    var el = document.getElementById('moduleRestartBanner');
+                    if (el) el.style.display = 'flex';
+                }}
+            }} catch(e) {{}}
+        }})();
 
         // --- Uninstall modal ---
         function openUninstallModal() {{
