@@ -7023,23 +7023,44 @@ def dashboard():
                 }})
                 .catch(function() {{}});
             // AI status badge
-            fetch('/api/ai/status')
-                .then(function(r) {{ return r.json(); }})
-                .then(function(d) {{
-                    var badge = document.getElementById('ai-status-badge');
-                    if (!badge) return;
-                    if (d.state === 'running') {{
+            (function() {{
+                var badge = document.getElementById('ai-status-badge');
+                if (!badge) return;
+                function _setAiBadge(state) {{
+                    if (state === 'active') {{
                         badge.textContent = 'AI ●';
                         badge.style.color = '#00ff88';
-                    }} else if (d.state === 'error') {{
+                        badge.title = tierText(
+                            'AI Engine is active — your firewall can analyse threats automatically',
+                            'AI Engine: active',
+                            'AI: active'
+                        );
+                    }} else if (state === 'no_key') {{
                         badge.textContent = 'AI ✕';
                         badge.style.color = '#ff4444';
+                        badge.title = tierText(
+                            'AI Engine is on but has no API key — go to Settings → AI Engine to add one',
+                            'AI Engine: enabled, no API key',
+                            'AI: no key'
+                        );
                     }} else {{
                         badge.textContent = 'AI ○';
                         badge.style.color = '#888';
+                        badge.title = tierText(
+                            'AI Engine is turned off — enable it in Settings → Modules to use AI features',
+                            'AI Engine: disabled',
+                            'AI: off'
+                        );
                     }}
-                }})
-                .catch(function() {{}});
+                }}
+                fetch('/api/ai/status')
+                    .then(function(r) {{
+                        if (!r.ok) {{ _setAiBadge('disabled'); return null; }}
+                        return r.json();
+                    }})
+                    .then(function(d) {{ if (d) _setAiBadge(d.state); }})
+                    .catch(function() {{ _setAiBadge('disabled'); }});
+            }})();
         }});
     </script>
 </body>

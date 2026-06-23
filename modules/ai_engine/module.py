@@ -195,19 +195,27 @@ def is_enabled() -> bool:
 
 
 def get_status() -> dict:
-    """Return {"state": "running"|"disabled"|"error", "detail": str}."""
+    """Return state: 'active'|'disabled'|'no_key', plus enabled/has_key/key_valid fields."""
+    import modules_loader  # lazy import to avoid circular reference at module load time
+    enabled = modules_loader.is_enabled("ai_engine")
     key = _api_key()
-    if not key:
-        return {"state": "disabled", "detail": "ANTHROPIC_API_KEY not configured"}
+    has_key = bool(key)
+    if not enabled:
+        return {"state": "disabled", "enabled": False, "has_key": has_key,
+                "key_valid": False, "detail": "AI Engine module is disabled"}
+    if not has_key:
+        return {"state": "no_key", "enabled": True, "has_key": False,
+                "key_valid": False, "detail": "ANTHROPIC_API_KEY not configured"}
     try:
         conn = _conn()
         limited, reason = _check_rate_limit(conn)
         conn.close()
-        if limited:
-            return {"state": "running", "detail": f"Rate limited: {reason}"}
-        return {"state": "running", "detail": "Ready"}
+        detail = f"Rate limited: {reason}" if limited else "Ready"
+        return {"state": "active", "enabled": True, "has_key": True,
+                "key_valid": True, "detail": detail}
     except Exception as exc:
-        return {"state": "error", "detail": str(exc)}
+        return {"state": "active", "enabled": True, "has_key": True,
+                "key_valid": True, "detail": str(exc)}
 
 
 def get_pricing() -> dict:
