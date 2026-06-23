@@ -7047,9 +7047,9 @@ def dashboard():
                         badge.textContent = 'AI ○';
                         badge.style.color = '#888';
                         badge.title = tierText(
-                            'AI Engine is turned off — enable it in Settings → Modules to use AI features',
-                            'AI Engine: disabled',
-                            'AI: off'
+                            'AI Engine is turned off — click here to go to Settings and toggle it on under Modules',
+                            'AI Engine: disabled — click to enable in Settings → Modules',
+                            'AI: off — enable in Settings'
                         );
                     }}
                 }}
