@@ -458,6 +458,14 @@ def _detection_cycle() -> None:
     finally:
         conn.close()
 
+    # Community queue integration — runs after commit
+    for inc_id, domain, itype, final_score in abuseipdb_candidates:
+        try:
+            _try_add_community_queue(inc_id, domain, itype, final_score,
+                                      by_domain.get(domain, {}), now)
+        except Exception:
+            log.debug("anomaly_detection: community_queue skip for %s", domain)
+
     # Auto AI analysis — runs after commit, outside the detection conn
     for item in ai_queue:
         try:
@@ -902,6 +910,37 @@ def _attach_ai_to_incident(conn, inc_id: int, report_json: str, generated_at: fl
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Community queue integration
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _try_add_community_queue(inc_id: int, domain: str, itype: str,
+                              score: float, data: dict, now: float) -> None:
+    """Add a HIGH+ incident to community_queue if that module is enabled."""
+    try:
+        import modules_loader
+        if not modules_loader.is_enabled("community_queue"):
+            return
+        from modules.community_queue.module import add_to_queue
+        device_count = len(data.get("clients", {})) if data else 1
+        first_detected = datetime.fromtimestamp(now - 3600).isoformat()
+        last_detected  = datetime.fromtimestamp(now).isoformat()
+        add_to_queue(
+            source_type     = "anomaly",
+            domain_or_ip    = domain,
+            detection_type  = itype.replace("_", " ").title(),
+            confidence_score= int(score),
+            device_count    = device_count,
+            first_detected  = first_detected,
+            last_detected   = last_detected,
+            incident_detail = {"inc_id": inc_id, "score": score, "type": itype},
+        )
+    except ImportError:
+        pass
+    except Exception:
+        log.debug("anomaly_detection: community_queue add failed for %s", domain)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Phase 3: AbuseIPDB auto-reporting
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1195,7 +1234,7 @@ def _render_card(building: bool, built: bool) -> str:
     # Rate limit notice
     rate_notice = ""
     limited, limit_reason = _is_currently_rate_limited()
-    if limited and _get_api_key():
+    if limited and ai_is_enabled():
         rate_notice = (
             '<div style="background:rgba(255,170,0,0.08);border:1px solid #ffaa0044;'
             'border-radius:6px;padding:7px 12px;margin-bottom:12px;font-size:0.82em;color:#ffaa00">'

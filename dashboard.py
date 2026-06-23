@@ -672,7 +672,15 @@ def api_stats():
             "vpn_ip": vpn.get("vpn_ip"),
         },
         "module_cards_html": "".join(
-            h for _, h in modules_loader.get_module_cards()
+            h for name, h in modules_loader.get_module_cards()
+            if name != "community_queue"
+        ),
+        "community_queue_badge": (
+            (lambda m: m.get_dashboard_card() or "")(
+                modules_loader.get_loaded_modules().get("community_queue")
+            )
+            if modules_loader.get_loaded_modules().get("community_queue")
+            else ""
         ),
     })
 
@@ -2023,6 +2031,74 @@ def settings_page():
                            border: 2px solid #222; border-top-color: #4ca1ff;
                            border-radius: 50%; animation: spin 0.8s linear infinite;
                            vertical-align: middle; margin-right: 6px; }}
+        /* Filesystem browser */
+        .fs-browse-btn {{ background: #1a2a4a; border: 1px solid #2a4a7a; color: #7cc8ff;
+                          padding: 5px 12px; border-radius: 4px; cursor: pointer;
+                          font-size: 0.85em; white-space: nowrap; }}
+        .fs-browse-btn:hover {{ background: #1e3060; border-color: #00d4ff; color: #eee; }}
+        .fs-browser {{ background: #0d1117; border: 1px solid #2a3a5a; border-radius: 6px;
+                       padding: 10px; max-height: 220px; overflow-y: auto; }}
+        .fs-browser-path {{ color: #00d4ff; font-size: 0.8em; font-family: monospace;
+                            margin-bottom: 8px; word-break: break-all; }}
+        .fs-browser-item {{ display: block; padding: 5px 8px; color: #ccc; cursor: pointer;
+                            border-radius: 4px; font-size: 0.84em; font-family: monospace; }}
+        .fs-browser-item:hover {{ background: rgba(0,212,255,0.08); color: #00d4ff; }}
+        .fs-browser-select {{ background: #00d4ff; color: #1a1a2e; border: none;
+                              padding: 5px 14px; border-radius: 4px; cursor: pointer;
+                              font-size: 0.82em; font-weight: bold; margin-top: 8px; }}
+        /* Config Wizard */
+        .wizard-overlay {{ display: none; position: fixed; inset: 0;
+                           background: rgba(0,0,0,0.88); z-index: 300; overflow-y: auto; }}
+        .wizard-box {{ background: #080d1a; border: 1px solid #00d4ff; border-radius: 10px;
+                       padding: 28px; max-width: 640px; width: 90%; margin: 60px auto; }}
+        .wizard-box h3 {{ color: #00d4ff; margin-top: 0; }}
+        .wizard-steps {{ display: flex; gap: 4px; margin-bottom: 20px; flex-wrap: wrap; }}
+        .wizard-step-dot {{ padding: 3px 10px; border-radius: 10px; font-size: 0.78em;
+                            font-weight: bold; cursor: default; white-space: nowrap; }}
+        .wizard-step-dot.active {{ background: #00d4ff; color: #1a1a2e; }}
+        .wizard-step-dot.done {{ background: #00ff8833; color: #00ff88;
+                                 border: 1px solid #00ff8855; }}
+        .wizard-step-dot.idle {{ background: #1a2a3a; color: #666;
+                                 border: 1px solid #2a3a5a; }}
+        .wizard-field {{ margin-bottom: 14px; }}
+        .wizard-label {{ display: block; color: #ccc; font-size: 0.85em; margin-bottom: 4px; }}
+        .wizard-input {{ background: #1a1a2e; border: 1px solid #333; color: #eee;
+                         padding: 7px 10px; border-radius: 4px; width: 100%;
+                         box-sizing: border-box; font-size: 0.9em; }}
+        .wizard-input:focus {{ outline: none; border-color: #00d4ff; }}
+        .wizard-input[readonly] {{ color: #888; cursor: default; }}
+        .wizard-row {{ display: flex; gap: 8px; align-items: center; }}
+        .wizard-row .wizard-input {{ flex: 1; }}
+        .wizard-show-btn {{ background: transparent; border: 1px solid #444; color: #bbb;
+                            padding: 6px 10px; border-radius: 4px; cursor: pointer;
+                            font-size: 0.8em; white-space: nowrap; flex-shrink: 0; }}
+        .wizard-validate-btn {{ background: #1a2a4a; border: 1px solid #2a4a7a;
+                                color: #7cc8ff; padding: 6px 12px; border-radius: 4px;
+                                cursor: pointer; font-size: 0.8em; white-space: nowrap;
+                                flex-shrink: 0; }}
+        .wizard-validate-btn:hover {{ background: #1e3060; }}
+        .wizard-key-status {{ font-size: 0.78em; margin-top: 4px; }}
+        .wizard-nav {{ display: flex; gap: 10px; margin-top: 20px; flex-wrap: wrap; }}
+        .wizard-btn-next {{ background: #00d4ff; color: #1a1a2e; border: none;
+                            padding: 10px 24px; border-radius: 5px; cursor: pointer;
+                            font-weight: bold; font-size: 0.95em; }}
+        .wizard-btn-back {{ background: #333; color: #eee; border: none;
+                            padding: 10px 20px; border-radius: 5px; cursor: pointer; }}
+        .wizard-btn-save {{ background: #00ff88; color: #1a1a2e; border: none;
+                            padding: 10px 24px; border-radius: 5px; cursor: pointer;
+                            font-weight: bold; font-size: 0.95em; }}
+        .wizard-status {{ font-size: 0.82em; margin-left: 10px; }}
+        .wizard-test-btn {{ background: transparent; border: 1px solid #4ca1ff;
+                            color: #4ca1ff; padding: 7px 14px; border-radius: 4px;
+                            cursor: pointer; font-size: 0.85em; }}
+        .wizard-test-btn:hover {{ background: #1e3060; }}
+        .wizard-review-row {{ display: flex; gap: 10px; padding: 6px 0;
+                              border-bottom: 1px solid #1e2d4e; font-size: 0.88em; }}
+        .wizard-review-key {{ color: #00d4ff; font-family: monospace; min-width: 180px;
+                              flex-shrink: 0; }}
+        .wizard-review-val {{ color: #eee; word-break: break-all; }}
+        .wizard-section-title {{ color: #00d4ff; font-size: 0.8em; text-transform: uppercase;
+                                 letter-spacing: 0.06em; margin: 14px 0 8px; }}
     </style>
 </head>
 <body>
@@ -2039,6 +2115,10 @@ def settings_page():
             <button id="restartDashBtn" onclick="restartDashboard()"
                 style="background:#ff4444;color:#fff;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em">
                 🔄 Restart Dashboard
+            </button>
+            <button onclick="openConfigWizard()"
+                style="background:#00d4ff;color:#1a1a2e;border:none;padding:10px 20px;border-radius:6px;cursor:pointer;font-weight:bold;font-size:0.95em">
+                ⚙️ Configuration Wizard
             </button>
             <span id="dashUptimeLabel" style="color:#ccc;font-size:0.85em">Loading uptime…</span>
             <span id="restartDashMsg" style="color:#ffaa00;font-size:0.85em;display:none">Restarting — page will reload in 5 seconds…</span>
@@ -2183,9 +2263,14 @@ def settings_page():
                         </div>
                         <div>
                             <label class="dz-field-label" for="scheduleDestPath">Destination folder</label>
-                            <input id="scheduleDestPath" type="text" class="backup-path-input"
-                                   value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
-                                   style="width:220px">
+                            <div style="display:flex;gap:6px;align-items:center">
+                                <input id="scheduleDestPath" type="text" class="backup-path-input"
+                                       value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                                       style="width:200px">
+                                <button onclick="openFsBrowser('scheduleDestPath','schedFsBrowser')"
+                                        class="fs-browse-btn">Browse</button>
+                            </div>
+                            <div id="schedFsBrowser" class="fs-browser" style="display:none;margin-top:6px;width:300px"></div>
                         </div>
                         <button class="btn-save-sched" onclick="saveSchedule()">Save Schedule</button>
                     </div>
@@ -2229,9 +2314,14 @@ def settings_page():
                    data-pro="Store off-machine for durability.">Store backups on removable media or a cloud-synced path.</p>
                 <div class="backup-path-row">
                     <label class="dz-field-label" for="backupDestPath">Destination folder</label>
-                    <input id="backupDestPath" type="text" class="backup-path-input"
-                           value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
-                           style="width:100%;box-sizing:border-box">
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <input id="backupDestPath" type="text" class="backup-path-input"
+                               value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                               style="flex:1;min-width:0;box-sizing:border-box">
+                        <button onclick="openFsBrowser('backupDestPath','backupFsBrowser')"
+                                class="fs-browse-btn">Browse</button>
+                    </div>
+                    <div id="backupFsBrowser" class="fs-browser" style="display:none"></div>
                 </div>
                 <div class="uninstall-actions" style="margin-top:18px">
                     <button class="btn-backup" id="btnCreateBackup" onclick="createBackup()">Create Backup</button>
@@ -2294,6 +2384,17 @@ def settings_page():
                 </button>
                 <button class="btn-cancel" onclick="cancelConfirm()">Cancel</button>
             </div>
+        </div>
+    </div>
+
+    <!-- Config Wizard modal -->
+    <div class="wizard-overlay" id="wizardOverlay"
+         onclick="if(event.target===this)closeConfigWizard()">
+        <div class="wizard-box">
+            <h3 id="wizardTitle">&#x2699;&#xFE0F; Configuration Wizard</h3>
+            <div class="wizard-steps" id="wizardStepDots"></div>
+            <div id="wizardBody"></div>
+            <div class="wizard-nav" id="wizardNav"></div>
         </div>
     </div>
 
@@ -2838,6 +2939,379 @@ def settings_page():
             .catch(function() {{
                 result.textContent = '✗ Request failed';
                 result.style.color = '#ff6666';
+            }});
+        }}
+
+        loadScheduleConfig();
+
+        {'function restartWindowsAgent() {var btn=document.getElementById("restartAgentBtn");var msg=document.getElementById("restartAgentMsg");btn.disabled=true;btn.style.opacity="0.6";msg.style.display="inline";fetch("http://' + _agent_ip + ':5001/control",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action:"restart"})}).then(function(){msg.textContent="Restart command sent.";}).catch(function(e){msg.textContent="Error: "+e;msg.style.color="#ff4444";});}' if _is_windows_agent else ''}
+
+        // ═══════════════════════════════════════════════════════
+        // Filesystem browser (used by backup modal & scheduled backup)
+        // ═══════════════════════════════════════════════════════
+        function openFsBrowser(inputId, browserId) {{
+            var browser = document.getElementById(browserId);
+            if (!browser) return;
+            if (browser.style.display !== 'none') {{
+                browser.style.display = 'none';
+                return;
+            }}
+            var input = document.getElementById(inputId);
+            var startPath = ((input ? input.value : '') || '~/nemesis-backup/').trim();
+            browser.style.display = 'block';
+            _fsBrowse(inputId, browserId, startPath);
+        }}
+
+        function _fsBrowse(inputId, browserId, path) {{
+            var browser = document.getElementById(browserId);
+            if (!browser) return;
+            browser.innerHTML = '<div style="color:#aaa;font-size:0.82em;padding:4px">Loading&hellip;</div>';
+            fetch('/api/filesystem/browse?path=' + encodeURIComponent(path))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    var h = '<div class="fs-browser-path">&#x1F4C1; ' + d.path + '</div>';
+                    if (d.error) h += '<div style="color:#ff6666;font-size:0.82em">' + d.error + '</div>';
+                    if (d.parent && d.parent !== d.path) {{
+                        h += '<div class="fs-browser-item" onclick="_fsBrowse(\'' + inputId + '\',\'' + browserId + '\',\'' + d.parent.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x1F4C2; ..</div>';
+                    }}
+                    (d.dirs || []).forEach(function(dir) {{
+                        var full = d.path.replace(/\\/+$/,'') + '/' + dir;
+                        h += '<div class="fs-browser-item" onclick="_fsBrowse(\'' + inputId + '\',\'' + browserId + '\',\'' + full.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x1F4C1; ' + dir + '</div>';
+                    }});
+                    h += '<div style="border-top:1px solid #2a3a5a;margin-top:6px;padding-top:8px">'
+                       + '<button class="fs-browser-select" onclick="_fsSelect(\'' + inputId + '\',\'' + browserId + '\',\'' + d.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x2713; Select This Folder</button>'
+                       + '<button onclick="document.getElementById(\'' + browserId + '\').style.display=\'none\'"'
+                       + ' style="background:transparent;color:#888;border:none;cursor:pointer;font-size:0.82em;margin-left:10px">Cancel</button>'
+                       + '</div>';
+                    browser.innerHTML = h;
+                }})
+                .catch(function() {{
+                    browser.innerHTML = '<div style="color:#ff4444;font-size:0.82em;padding:4px">Failed to load directory</div>';
+                }});
+        }}
+
+        function _fsSelect(inputId, browserId, path) {{
+            var inp = document.getElementById(inputId);
+            if (inp) inp.value = path + '/';
+            var b = document.getElementById(browserId);
+            if (b) b.style.display = 'none';
+        }}
+
+        // ═══════════════════════════════════════════════════════
+        // Configuration Wizard
+        // ═══════════════════════════════════════════════════════
+        var _wiz = {{
+            step: 1,
+            totalSteps: 5,
+            cfg: {{}},      // loaded from /api/config/current
+            changes: {{}},  // key → new value (only fields user changed)
+            stepTitles: ['Email & Alerts','API Keys','Network','Pi-hole','Review & Save'],
+        }};
+
+        function openConfigWizard() {{
+            _wiz.step = 1;
+            _wiz.changes = {{}};
+            document.getElementById('wizardOverlay').style.display = 'block';
+            fetch('/api/config/current')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(cfg) {{
+                    _wiz.cfg = cfg;
+                    _wizRender();
+                }})
+                .catch(function() {{
+                    document.getElementById('wizardBody').innerHTML =
+                        '<p style="color:#ff4444">Failed to load current configuration.</p>';
+                }});
+        }}
+
+        function closeConfigWizard() {{
+            document.getElementById('wizardOverlay').style.display = 'none';
+        }}
+
+        function _wizRender() {{
+            _wizRenderDots();
+            document.getElementById('wizardTitle').textContent = '⚙️ Configuration Wizard — Step ' + _wiz.step + ' of ' + _wiz.totalSteps + ': ' + _wiz.stepTitles[_wiz.step-1];
+            var body = '';
+            if (_wiz.step === 1) body = _wizStep1();
+            else if (_wiz.step === 2) body = _wizStep2();
+            else if (_wiz.step === 3) body = _wizStep3();
+            else if (_wiz.step === 4) body = _wizStep4();
+            else if (_wiz.step === 5) body = _wizStep5();
+            document.getElementById('wizardBody').innerHTML = body;
+            _wizRenderNav();
+            if (typeof applyTierText === 'function') applyTierText();
+        }}
+
+        function _wizRenderDots() {{
+            var h = '';
+            for (var i = 1; i <= _wiz.totalSteps; i++) {{
+                var cls = i === _wiz.step ? 'active' : (i < _wiz.step ? 'done' : 'idle');
+                h += '<span class="wizard-step-dot ' + cls + '">' + i + '. ' + _wiz.stepTitles[i-1] + '</span>';
+            }}
+            document.getElementById('wizardStepDots').innerHTML = h;
+        }}
+
+        function _wizRenderNav() {{
+            var h = '';
+            if (_wiz.step < _wiz.totalSteps) {{
+                h += '<button class="wizard-btn-next" onclick="_wizNext()">Next &rarr;</button>';
+            }} else {{
+                h += '<button class="wizard-btn-save" onclick="_wizSave()" id="wizSaveBtn">Save Changes &amp; Restart</button>';
+                h += '<span class="wizard-status" id="wizSaveStatus"></span>';
+            }}
+            if (_wiz.step > 1) {{
+                h += '<button class="wizard-btn-back" onclick="_wizBack()">&larr; Back</button>';
+            }}
+            h += '<button class="wizard-btn-back" onclick="closeConfigWizard()" style="margin-left:auto">Cancel</button>';
+            document.getElementById('wizardNav').innerHTML = h;
+        }}
+
+        function _wizNext() {{
+            _wizCollectChanges();
+            if (_wiz.step < _wiz.totalSteps) {{ _wiz.step++; _wizRender(); }}
+        }}
+        function _wizBack() {{
+            _wizCollectChanges();
+            if (_wiz.step > 1) {{ _wiz.step--; _wizRender(); }}
+        }}
+
+        function _wizField(id, label, value, type, readonly, hint, linkText, linkUrl) {{
+            type = type || 'text';
+            readonly = readonly ? 'readonly' : '';
+            var inputStyle = readonly ? 'color:#888' : '';
+            var h = '<div class="wizard-field">';
+            h += '<label class="wizard-label" for="wf_' + id + '">' + label;
+            if (linkText) h += ' <a href="' + linkUrl + '" target="_blank" rel="noopener" style="color:#7cc8ff;font-size:0.9em">' + linkText + '</a>';
+            h += '</label>';
+            if (type === 'password') {{
+                h += '<div class="wizard-row">'
+                   + '<input class="wizard-input" id="wf_' + id + '" type="password" value="' + (value||'') + '" ' + readonly + ' style="' + inputStyle + '">'
+                   + '<button class="wizard-show-btn" onclick="_wizToggleShow(\'wf_' + id + '\',this)">Show</button>'
+                   + '</div>';
+            }} else {{
+                h += '<input class="wizard-input" id="wf_' + id + '" type="' + type + '" value="' + (value||'') + '" ' + readonly + ' style="' + inputStyle + '">';
+            }}
+            if (hint) h += '<div style="color:#888;font-size:0.78em;margin-top:3px">' + hint + '</div>';
+            h += '</div>';
+            return h;
+        }}
+
+        function _wizToggleShow(inputId, btn) {{
+            var inp = document.getElementById(inputId);
+            if (!inp) return;
+            if (inp.type === 'password') {{ inp.type = 'text'; btn.textContent = 'Hide'; }}
+            else {{ inp.type = 'password'; btn.textContent = 'Show'; }}
+        }}
+
+        function _wizApiKeyField(id, label, linkText, linkUrl) {{
+            var status = _wiz.cfg[id] || '(not set)';
+            var statusColor = status === '(not set)' ? '#ff4444' : '#00ff88';
+            var h = '<div class="wizard-field">';
+            h += '<label class="wizard-label">' + label;
+            if (linkText) h += ' <a href="' + linkUrl + '" target="_blank" rel="noopener" style="color:#7cc8ff;font-size:0.9em">' + linkText + '</a>';
+            h += '</label>';
+            h += '<div class="wizard-row">'
+               + '<input class="wizard-input" id="wf_' + id + '" type="password" placeholder="Paste new key here (leave blank to keep current)" autocomplete="off">'
+               + '<button class="wizard-show-btn" onclick="_wizToggleShow(\'wf_' + id + '\',this)">Show</button>'
+               + '<button class="wizard-validate-btn" onclick="_wizValidate(\'' + id + '\')">Validate</button>'
+               + '</div>';
+            h += '<div class="wizard-key-status" id="ws_' + id + '">'
+               + 'Current: <span style="color:' + statusColor + '">' + status + '</span></div>';
+            h += '</div>';
+            return h;
+        }}
+
+        function _wizValidate(keyName) {{
+            var inp = document.getElementById('wf_' + keyName);
+            var statusEl = document.getElementById('ws_' + keyName);
+            var keyVal = inp ? inp.value.trim() : '';
+            if (statusEl) statusEl.innerHTML = 'Validating&hellip;';
+            fetch('/api/config/validate-key', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{ key_name: keyName, key_value: keyVal }})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (statusEl) statusEl.innerHTML = d.ok
+                    ? '<span style="color:#00ff88">&#x2713; ' + (d.detail||'Valid') + '</span>'
+                    : '<span style="color:#ff4444">&#x2717; ' + (d.error||'Invalid') + '</span>';
+            }})
+            .catch(function() {{
+                if (statusEl) statusEl.innerHTML = '<span style="color:#ff4444">Request failed</span>';
+            }});
+        }}
+
+        function _wizStep1() {{
+            var c = _wiz.cfg;
+            var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
+              + ' data-beginner="These are the email settings Nemesis uses to send you security alerts. WATCHDOG_EMAIL is the address that sends the emails. WATCHDOG_TO is where they are delivered."'
+              + ' data-intermediate="SMTP credentials and recipient for alert emails."'
+              + ' data-pro="SMTP send/receive config for alert notifications.">'
+              + 'Email address and SMTP settings for security alert notifications.</p>';
+            h += _wizField('WATCHDOG_EMAIL',    'Outbound sender email',     c.WATCHDOG_EMAIL||'', 'email', false, 'The address Nemesis sends alerts from (must match your SMTP credentials)');
+            h += _wizField('WATCHDOG_PASSWORD', 'Email password / app password', '', 'password', false, 'Use an app-specific password if your provider supports 2FA (recommended)');
+            h += _wizField('WATCHDOG_TO',       'Alert recipient email',      c.WATCHDOG_TO||'', 'email', false, 'Where security alerts are delivered — can be the same as sender or a different address');
+            h += _wizField('SMTP_HOST', 'SMTP server',  c.SMTP_HOST||'smtp.gmail.com', 'text', false, 'e.g. smtp.gmail.com, smtp-mail.outlook.com, mail.example.com');
+            h += _wizField('SMTP_PORT', 'SMTP port',    c.SMTP_PORT||'587', 'number', false, '587 for STARTTLS (recommended), 465 for implicit SSL');
+            h += '<div style="margin-top:12px">'
+               + '<button class="wizard-test-btn" onclick="_wizTestEmail()">&#x2709; Send Test Email</button>'
+               + '<span id="wizEmailStatus" class="wizard-status"></span>'
+               + '</div>';
+            return h;
+        }}
+
+        function _wizTestEmail() {{
+            _wizCollectChanges();
+            var status = document.getElementById('wizEmailStatus');
+            if (status) status.textContent = 'Sending…';
+            fetch('/api/config/test-email', {{method:'POST'}})
+                .then(function(r){{ return r.json(); }})
+                .then(function(d){{
+                    if (status) status.innerHTML = d.ok
+                        ? '<span style="color:#00ff88">&#x2713; Sent! Check your inbox.</span>'
+                        : '<span style="color:#ff4444">&#x2717; ' + (d.error||'Failed') + '</span>';
+                }})
+                .catch(function(){{
+                    if (status) status.innerHTML = '<span style="color:#ff4444">Request failed</span>';
+                }});
+        }}
+
+        function _wizStep2() {{
+            var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
+              + ' data-beginner="API keys let Nemesis connect to external services. Anthropic enables the AI analysis features. AbuseIPDB and IPInfo help identify threats. Leave a field blank to keep the current key."'
+              + ' data-intermediate="Third-party API keys for AI, threat intel, and IP lookup features. Paste a new key to update; leave blank to keep current."'
+              + ' data-pro="API credentials: Anthropic (AI), AbuseIPDB (threat reporting), IPInfo (geo/ASN lookup).">'
+              + 'API keys for AI and threat intelligence features. Each key is stored in /etc/nemesis.env.</p>';
+            h += _wizApiKeyField('ANTHROPIC_API_KEY', 'Anthropic API key (AI features)', '↗ console.anthropic.com', 'https://console.anthropic.com/');
+            h += _wizApiKeyField('ABUSEIPDB_KEY',     'AbuseIPDB key (threat reporting)', '↗ abuseipdb.com', 'https://www.abuseipdb.com/');
+            h += _wizApiKeyField('IPINFO_TOKEN',      'IPInfo token (IP geo lookup)',     '↗ ipinfo.io', 'https://ipinfo.io/');
+            return h;
+        }}
+
+        function _wizStep3() {{
+            var n = _wiz.cfg.network || {{}};
+            var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
+              + ' data-beginner="These settings identify this machine on your home network. The IP address and subnet are read-only — to change your IP permanently, set a DHCP reservation on your router."'
+              + ' data-intermediate="Network interface and IP configuration. IP/subnet auto-detected — use router DHCP reservation to make static."'
+              + ' data-pro="NIC binding and CIDR. Read-only IP/subnet — set static via router DHCP. Override interface name if auto-detection is wrong.">'
+              + 'Network interface and address configuration for this machine.</p>';
+            h += _wizField('NETWORK_IFACE', 'Network interface name', n.interface||'', 'text', false, 'Auto-detected — override only if Nemesis is monitoring the wrong interface');
+            h += _wizField('_NET_IP',       'This machine\'s IP address', n.ip||'', 'text', true,
+                           'Read-only — to assign a permanent IP, set a DHCP reservation on your router using the MAC address of this machine');
+            h += _wizField('_NET_SUBNET',   'Local subnet (CIDR)',         n.subnet||'', 'text', true,
+                           'Auto-derived from network interface — read-only');
+            return h;
+        }}
+
+        function _wizStep4() {{
+            var c = _wiz.cfg;
+            var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
+              + ' data-beginner="Pi-hole is the DNS ad-blocker running on your network. Nemesis connects to it to show stats and control blocklists."'
+              + ' data-intermediate="Pi-hole admin credentials for the stats API and dashboard integration."'
+              + ' data-pro="PIHOLE_PASSWORD for /api/auth. Pi-hole URL auto-detected from PIHOLE_IP env var.">'
+              + 'Pi-hole credentials for dashboard integration and stats display.</p>';
+            h += _wizField('PIHOLE_PASSWORD', 'Pi-hole admin password', '', 'password', false, 'The password set in Pi-hole settings → admin password');
+            h += '<div class="wizard-field"><div class="wizard-label">Pi-hole admin URL</div>'
+               + '<div style="font-family:monospace;color:#ccc;padding:7px 0;font-size:0.9em">' + (c.pihole_url||'(auto-detected)') + '</div>'
+               + '<div style="color:#888;font-size:0.78em">Auto-detected from PIHOLE_IP — update that env var if your Pi-hole is at a different address</div>'
+               + '</div>';
+            h += '<div style="margin-top:8px">'
+               + '<button class="wizard-test-btn" onclick="_wizTestPihole()">Test Pi-hole Connection</button>'
+               + '<span id="wizPiholeStatus" class="wizard-status"></span>'
+               + '</div>';
+            return h;
+        }}
+
+        function _wizTestPihole() {{
+            _wizCollectChanges();
+            var status = document.getElementById('wizPiholeStatus');
+            if (status) status.textContent = 'Testing…';
+            var pw = (document.getElementById('wf_PIHOLE_PASSWORD')||{{}}).value || '';
+            var keyName = 'PIHOLE_PASSWORD';
+            fetch('/api/config/validate-key', {{
+                method: 'POST',
+                headers: {{'Content-Type':'application/json'}},
+                body: JSON.stringify({{ key_name: keyName, key_value: pw }})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (status) status.innerHTML = d.ok
+                    ? '<span style="color:#00ff88">&#x2713; ' + (d.detail||'Connected') + '</span>'
+                    : '<span style="color:#ff4444">&#x2717; ' + (d.error||'Failed') + '</span>';
+            }})
+            .catch(function() {{
+                if (status) status.innerHTML = '<span style="color:#ff4444">Request failed</span>';
+            }});
+        }}
+
+        function _wizStep5() {{
+            var keys = Object.keys(_wiz.changes);
+            var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
+              + ' data-beginner="Review the changes you have made. Click Save Changes to write them to /etc/nemesis.env. The dashboard will restart automatically so the new settings take effect."'
+              + ' data-intermediate="Summary of changed values. Save writes to /etc/nemesis.env and triggers a dashboard restart."'
+              + ' data-pro="Diff of /etc/nemesis.env changes. Save → write + systemctl restart dashboard.">'
+              + 'Review all changes before saving. Saving restarts the dashboard.</p>';
+            if (keys.length === 0) {{
+                h += '<div style="color:#bbb;padding:12px;font-style:italic;background:#0d1117;border-radius:6px">No changes made — nothing to save.</div>';
+            }} else {{
+                h += '<div style="margin-bottom:4px;color:#888;font-size:0.78em;text-transform:uppercase;letter-spacing:0.05em">' + keys.length + ' value(s) to update:</div>';
+                keys.forEach(function(k) {{
+                    if (k.startsWith('_')) return;
+                    h += '<div class="wizard-review-row">'
+                       + '<span class="wizard-review-key">' + k + '</span>'
+                       + '<span class="wizard-review-val">' + (k.toLowerCase().includes('password')||k.toLowerCase().includes('key')||k.toLowerCase().includes('token') ? '••••••••' : _wiz.changes[k]) + '</span>'
+                       + '</div>';
+                }});
+            }}
+            return h;
+        }}
+
+        function _wizCollectChanges() {{
+            var fields = [
+                'WATCHDOG_EMAIL','WATCHDOG_PASSWORD','WATCHDOG_TO','SMTP_HOST','SMTP_PORT',
+                'ANTHROPIC_API_KEY','ABUSEIPDB_KEY','IPINFO_TOKEN',
+                'NETWORK_IFACE','PIHOLE_PASSWORD'
+            ];
+            fields.forEach(function(k) {{
+                var el = document.getElementById('wf_' + k);
+                if (!el) return;
+                var v = el.value.trim();
+                if (v) _wiz.changes[k] = v;
+            }});
+        }}
+
+        function _wizSave() {{
+            _wizCollectChanges();
+            var toSave = {{}};
+            Object.keys(_wiz.changes).forEach(function(k) {{
+                if (!k.startsWith('_')) toSave[k] = _wiz.changes[k];
+            }});
+            if (Object.keys(toSave).length === 0) {{
+                closeConfigWizard(); return;
+            }}
+            var btn = document.getElementById('wizSaveBtn');
+            var status = document.getElementById('wizSaveStatus');
+            if (btn) {{ btn.disabled = true; btn.textContent = 'Saving…'; }}
+            if (status) status.textContent = '';
+            fetch('/api/config/update', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify(toSave)
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (d.ok) {{
+                    if (status) status.innerHTML = '<span style="color:#00ff88">&#x2713; Saved ' + (d.updated||[]).length + ' value(s) — restarting in 5s&hellip;</span>';
+                    setTimeout(function() {{ location.reload(); }}, 5000);
+                }} else {{
+                    if (btn) {{ btn.disabled = false; btn.textContent = 'Save Changes & Restart'; }}
+                    if (status) status.innerHTML = '<span style="color:#ff4444">&#x2717; ' + (d.error||'Save failed') + '</span>';
+                }}
+            }})
+            .catch(function() {{
+                if (btn) {{ btn.disabled = false; btn.textContent = 'Save Changes & Restart'; }}
+                if (status) status.innerHTML = '<span style="color:#ff4444">Request failed</span>';
             }});
         }}
 
@@ -3884,6 +4358,255 @@ def _backup_candidates():
     return files
 
 
+@app.route("/api/filesystem/browse")
+def api_filesystem_browse():
+    import getpass
+    path_raw = request.args.get("path", "~").strip() or "~"
+    path = os.path.realpath(os.path.expanduser(path_raw))
+
+    user = getpass.getuser()
+    allowed_roots = [f"/home/{user}", "/media", "/mnt"]
+    if not any(path.startswith(r) for r in allowed_roots):
+        path = os.path.expanduser("~")
+
+    parent = os.path.dirname(path)
+    if not any(parent.startswith(r) for r in allowed_roots):
+        parent = path
+
+    try:
+        entries = [
+            d for d in os.listdir(path)
+            if os.path.isdir(os.path.join(path, d)) and not d.startswith(".")
+        ]
+        dirs = sorted(entries)
+        return jsonify({"path": path, "parent": parent, "dirs": dirs, "error": None})
+    except PermissionError:
+        return jsonify({"path": path, "parent": parent, "dirs": [], "error": "Permission denied"})
+    except Exception as e:
+        return jsonify({"path": path, "parent": parent, "dirs": [], "error": str(e)})
+
+
+def _read_nemesis_env() -> dict:
+    """Read /etc/nemesis.env and return key→value dict (comments stripped)."""
+    env = {}
+    try:
+        with open("/etc/nemesis.env") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    env[k.strip()] = v.strip()
+    except Exception:
+        pass
+    return env
+
+
+def _update_nemesis_env(updates: dict) -> list:
+    """Write updated keys to /etc/nemesis.env, preserving comments and order.
+
+    Returns list of updated key names. Raises on failure.
+    """
+    try:
+        with open("/etc/nemesis.env") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    updated_keys: set = set()
+    new_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k in updates:
+                new_lines.append(f"{k}={updates[k]}\n")
+                updated_keys.add(k)
+                continue
+        new_lines.append(line)
+
+    for k, v in updates.items():
+        if k not in updated_keys:
+            new_lines.append(f"{k}={v}\n")
+            updated_keys.add(k)
+
+    tmp = "/tmp/nemesis_env_update.tmp"
+    with open(tmp, "w") as f:
+        f.writelines(new_lines)
+    subprocess.run(["sudo", "cp", tmp, "/etc/nemesis.env"], check=True)
+    subprocess.run(["sudo", "chown", "root:nemesis", "/etc/nemesis.env"], check=True)
+    subprocess.run(["sudo", "chmod", "640", "/etc/nemesis.env"], check=True)
+    os.unlink(tmp)
+    return list(updated_keys)
+
+
+@app.route("/api/config/current")
+def api_config_current():
+    """Return current config values (secrets masked) and auto-detected network info."""
+    env = _read_nemesis_env()
+
+    def _masked(key):
+        v = env.get(key, "")
+        return "(set)" if v else "(not set)"
+
+    def _val(key, default=""):
+        return env.get(key, default)
+
+    # Auto-detect network
+    iface = ip_addr = subnet = ""
+    try:
+        r = subprocess.run(
+            ["ip", "route", "get", "8.8.8.8"],
+            capture_output=True, text=True, timeout=3,
+        )
+        parts = r.stdout.split()
+        for i, p in enumerate(parts):
+            if p == "dev" and i + 1 < len(parts):
+                iface = parts[i + 1]
+            if p == "src" and i + 1 < len(parts):
+                ip_addr = parts[i + 1]
+    except Exception:
+        pass
+    if iface:
+        try:
+            r2 = subprocess.run(
+                ["ip", "addr", "show", iface],
+                capture_output=True, text=True, timeout=3,
+            )
+            import re as _re
+            m = _re.search(r"inet (\S+)", r2.stdout)
+            if m:
+                subnet = m.group(1)
+        except Exception:
+            pass
+
+    pihole_url = f"http://{PIHOLE_IP}/admin"
+
+    return jsonify({
+        "WATCHDOG_EMAIL":    _val("WATCHDOG_EMAIL"),
+        "WATCHDOG_PASSWORD": _masked("WATCHDOG_PASSWORD"),
+        "WATCHDOG_TO":       _val("WATCHDOG_TO"),
+        "SMTP_HOST":         _val("SMTP_HOST", "smtp.gmail.com"),
+        "SMTP_PORT":         _val("SMTP_PORT", "587"),
+        "ANTHROPIC_API_KEY": _masked("ANTHROPIC_API_KEY"),
+        "ABUSEIPDB_KEY":     _masked("ABUSEIPDB_KEY"),
+        "IPINFO_TOKEN":      _masked("IPINFO_TOKEN"),
+        "PIHOLE_PASSWORD":   _masked("PIHOLE_PASSWORD"),
+        "network": {
+            "interface": iface or env.get("NETWORK_IFACE", ""),
+            "ip":        ip_addr,
+            "subnet":    subnet,
+        },
+        "pihole_url": pihole_url,
+    })
+
+
+@app.route("/api/config/update", methods=["POST"])
+def api_config_update():
+    """Update specified keys in /etc/nemesis.env then restart services."""
+    data = request.get_json(force=True, silent=True) or {}
+    updates = {k: str(v) for k, v in data.items() if v is not None and str(v).strip()}
+    if not updates:
+        return jsonify({"ok": False, "error": "No values provided"}), 400
+    try:
+        updated = _update_nemesis_env(updates)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    def _restart():
+        time.sleep(2)
+        subprocess.run(["sudo", "systemctl", "restart", "dashboard"])
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"ok": True, "updated": updated})
+
+
+@app.route("/api/config/test-email", methods=["POST"])
+def api_config_test_email():
+    """Send a test email using current SMTP settings."""
+    sender   = os.environ.get("WATCHDOG_EMAIL", "")
+    password = os.environ.get("WATCHDOG_PASSWORD", "")
+    to_addr  = os.environ.get("WATCHDOG_TO", sender)
+    host     = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    try:
+        port = int(os.environ.get("SMTP_PORT", "587"))
+    except ValueError:
+        port = 587
+    if not sender or not password:
+        return jsonify({"ok": False, "error": "WATCHDOG_EMAIL / WATCHDOG_PASSWORD not configured"})
+    ok = email_utils.send_email(
+        subject="[Nemesis] Test email from Configuration Wizard",
+        body=(
+            "This is a test email sent from the Nemesis Firewall Configuration Wizard.\n\n"
+            "If you received this, your email settings are working correctly.\n"
+        ),
+        to=to_addr or sender,
+    )
+    if ok:
+        return jsonify({"ok": True})
+    return jsonify({"ok": False,
+                    "error": "Send failed — check SMTP settings and credentials"})
+
+
+@app.route("/api/config/validate-key", methods=["POST"])
+def api_config_validate_key():
+    """Basic validation that a given API key appears functional."""
+    data   = request.get_json(force=True, silent=True) or {}
+    key_name = data.get("key_name", "")
+    key_val  = data.get("key_value", os.environ.get(key_name, "")).strip()
+    if not key_val:
+        return jsonify({"ok": False, "error": "Key is not set"})
+
+    if key_name == "ANTHROPIC_API_KEY":
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=key_val)
+            client.models.list()
+            return jsonify({"ok": True, "detail": "Key is valid"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:120]})
+
+    if key_name == "ABUSEIPDB_KEY":
+        try:
+            from urllib import request as _urlreq
+            req = _urlreq.Request(
+                "https://api.abuseipdb.com/api/v2/check?ipAddress=127.0.0.1",
+                headers={"Key": key_val, "Accept": "application/json"},
+            )
+            with _urlreq.urlopen(req, timeout=8) as resp:
+                body = json.loads(resp.read())
+                if "data" in body:
+                    return jsonify({"ok": True, "detail": "Key is valid"})
+                return jsonify({"ok": False, "error": "Unexpected response"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:120]})
+
+    if key_name == "IPINFO_TOKEN":
+        try:
+            from urllib import request as _urlreq
+            req = _urlreq.Request(
+                f"https://ipinfo.io/8.8.8.8?token={key_val}",
+                headers={"Accept": "application/json"},
+            )
+            with _urlreq.urlopen(req, timeout=8) as resp:
+                body = json.loads(resp.read())
+                if "ip" in body:
+                    return jsonify({"ok": True, "detail": "Key is valid"})
+                return jsonify({"ok": False, "error": "Unexpected response"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:120]})
+
+    if key_name == "PIHOLE_PASSWORD":
+        try:
+            r = requests.post(f"http://{PIHOLE_IP}/api/auth",
+                              json={"password": key_val}, timeout=5)
+            if r.json().get("session", {}).get("valid"):
+                return jsonify({"ok": True, "detail": "Pi-hole connection successful"})
+            return jsonify({"ok": False, "error": "Authentication failed — check password"})
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)[:120]})
+
+    return jsonify({"ok": False, "error": f"No validator for {key_name}"})
+
+
 @app.route("/api/backup/size")
 def api_backup_size():
     total = sum(
@@ -4061,8 +4784,18 @@ def dashboard():
     quarantine_banner_display = "block" if quarantines else "none"
 
     module_cards_html = "".join(
-        card_html for _, card_html in modules_loader.get_module_cards()
+        card_html for name, card_html in modules_loader.get_module_cards()
+        if name != "community_queue"
     )
+
+    # Community queue header badge (injected into h1, not the grid)
+    cq_badge_html = ""
+    try:
+        cq_mod = modules_loader.get_loaded_modules().get("community_queue")
+        if cq_mod:
+            cq_badge_html = cq_mod.get_dashboard_card() or ""
+    except Exception:
+        pass
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -4199,6 +4932,7 @@ def dashboard():
            title="AI Engine status — click to configure"
            style="font-size:0.42em;font-weight:normal;margin-left:12px;vertical-align:middle;
                   text-decoration:none;color:#888;cursor:pointer">AI ○</a>
+        <span id="cq-badge-container">{cq_badge_html}</span>
         <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
             <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
             &nbsp;|&nbsp;
@@ -6075,6 +6809,10 @@ def dashboard():
                             : "VPN — " + d.vpn.status;
                         vpnEl.textContent = vpnLabel;
                         vpnEl.style.color = vpnStatusColor(d.vpn.status);
+                    }}
+                    if (d.community_queue_badge !== undefined) {{
+                        var cqEl = document.getElementById("cq-badge-container");
+                        if (cqEl) cqEl.innerHTML = d.community_queue_badge || '';
                     }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{

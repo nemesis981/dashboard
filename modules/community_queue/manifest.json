@@ -1,0 +1,12 @@
+{
+  "name": "community_queue",
+  "display_name": "Community Threat Intelligence Queue",
+  "version": "1.0.0",
+  "description": "Queues high-confidence anomaly detections for submission to the Nemesis community threat intelligence feed. Provides AI-assisted batch review before submission. Contributes to collective defence against emerging threats.",
+  "category": "intelligence",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false
+}
