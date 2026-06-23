@@ -74,7 +74,7 @@ echo -e "  ${RED}${BOLD}Will be removed:${NC}"
 echo "    All 5 Nemesis systemd services"
 echo "    /etc/nemesis.env     (runtime configuration)"
 echo "    /etc/sudoers.d/nemesis, nemesis-restart"
-echo "    iptables port-80 redirect rule"
+echo "    nemesis-port-redirect.service + iptables rules"
 echo "    nemesis system group"
 echo ""
 echo "  You will be asked individually about Pi-hole, Suricata, and ClamAV."
@@ -198,7 +198,19 @@ step_header "4/7" "Removing iptables Port Redirect (80 → 5000)"
 
 _removed_ipt=false
 
-# PREROUTING rule
+# Stop/disable the systemd persistence service (preferred method as of current install.sh)
+if [[ -f /etc/systemd/system/nemesis-port-redirect.service ]]; then
+    systemctl stop nemesis-port-redirect 2>/dev/null || true
+    systemctl disable nemesis-port-redirect 2>/dev/null || true
+    rm -f /etc/systemd/system/nemesis-port-redirect.service
+    systemctl daemon-reload 2>/dev/null || true
+    ok "Removed nemesis-port-redirect.service"
+    _removed_ipt=true
+else
+    skipped "nemesis-port-redirect.service (not found)"
+fi
+
+# Remove live iptables rules whether or not the service existed
 if iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
     iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
     ok "Removed PREROUTING rule (port 80 → 5000)"
@@ -207,7 +219,6 @@ else
     skipped "PREROUTING rule (not present)"
 fi
 
-# OUTPUT rule (localhost redirect)
 if iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
     iptables -t nat -D OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
     ok "Removed OUTPUT rule (localhost port 80 → 5000)"
@@ -216,12 +227,7 @@ else
     skipped "OUTPUT rule (not present)"
 fi
 
-# Persist the removal so it survives reboot
 if [[ "$_removed_ipt" == true ]]; then
-    if command -v netfilter-persistent &>/dev/null; then
-        netfilter-persistent save 2>/dev/null
-        ok "Saved updated iptables rules (iptables-persistent)"
-    fi
     REMOVED+=("iptables port-80 redirect")
 else
     SKIPPED+=("iptables port-80 redirect")

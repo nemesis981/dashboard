@@ -453,6 +453,11 @@ dashboard_path = os.environ.get('DASHBOARD_PY', '')
 if not dashboard_path or not os.path.exists(dashboard_path):
     sys.exit(0)
 
+# Add the project's own directories to sys.path so local modules
+# (database, firewall, hw_monitor, etc.) are found and not flagged as missing.
+sys.path.insert(0, os.path.join(os.path.dirname(dashboard_path), 'alert_manager'))
+sys.path.insert(0, os.path.dirname(dashboard_path))
+
 try:
     with open(dashboard_path) as f:
         tree = ast.parse(f.read())
@@ -509,19 +514,30 @@ install_pihole() {
     echo -e "  ${YELLOW}${BOLD}Pi-hole will now install.${NC}"
     echo ""
 
+    local pihole_script
+    pihole_script=$(mktemp /tmp/pihole-install-XXXXXX.sh)
+    info "Downloading Pi-hole installer..."
+    if ! curl -sSL https://install.pi-hole.net -o "$pihole_script"; then
+        rm -f "$pihole_script"
+        die "Failed to download Pi-hole installer. Check your internet connection."
+    fi
+
     if [ -t 1 ]; then
         # Interactive terminal — show Pi-hole's full dialog UI
         echo "  Follow its prompts — when it finishes, this script will continue automatically."
         echo "  When asked to choose a network interface, select:  ${BOLD}$DETECTED_IFACE${NC}"
         echo ""
-        curl -sSL https://install.pi-hole.net | bash
+        bash "$pihole_script"
     else
-        # Non-interactive (SSH pipe, CI, etc.) — install with defaults, no dialogs
+        # Non-interactive (SSH pipe, CI, etc.) — install with defaults, no dialogs.
+        # TERM=xterm is required: Pi-hole uses ncurses even in --unattended mode
+        # for a "static IP" notice, and it aborts if $TERM is unset or "unknown".
         info "Non-interactive session detected — installing Pi-hole with defaults."
         info "DNS: Google (8.8.8.8) — change via Pi-hole admin UI at http://$DETECTED_IP:8080"
         echo ""
-        curl -sSL https://install.pi-hole.net | bash -s -- --unattended
+        TERM=xterm bash "$pihole_script" --unattended
     fi
+    rm -f "$pihole_script"
 
     ok "Pi-hole installation complete"
 }
@@ -719,18 +735,33 @@ ufw_and_finish() {
 
     # Port redirect: Flask runs on 5000 as a non-root user; redirect port 80 → 5000
     # so the dashboard is reachable at http://<ip> without a reverse proxy.
+    # A systemd oneshot service is used for persistence — iptables-persistent conflicts
+    # with ufw on Ubuntu 22.04+ and would remove it if installed.
     info "Redirecting port 80 → 5000 for dashboard access..."
     iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
         || iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
     iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
         || iptables -t nat -A OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
-    if apt-get install -y iptables-persistent 2>/dev/null; then
-        netfilter-persistent save 2>/dev/null || true
-        ok "Port redirect 80 → 5000 saved (persists across reboots)"
-    else
-        warn "iptables-persistent not available — port redirect will not survive reboot"
-        warn "Re-run:  sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000"
-    fi
+
+    cat > /etc/systemd/system/nemesis-port-redirect.service <<'SVCEOF'
+[Unit]
+Description=Nemesis port 80 → 5000 redirect
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
+ExecStart=/usr/sbin/iptables -t nat -A OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
+ExecStop=/usr/sbin/iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
+ExecStop=/usr/sbin/iptables -t nat -D OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+    systemctl daemon-reload
+    systemctl enable nemesis-port-redirect 2>/dev/null
+    ok "Port redirect 80 → 5000 installed as systemd service (persists across reboots)"
 
     # ── Pi-hole password ─────────────────────────────────────────────────────
     if [[ -z "$CFG_PIHOLE_PASSWORD" ]]; then
