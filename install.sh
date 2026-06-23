@@ -507,11 +507,21 @@ install_pihole() {
 
     echo ""
     echo -e "  ${YELLOW}${BOLD}Pi-hole will now install.${NC}"
-    echo "  Follow its prompts — when it finishes, this script will continue automatically."
-    echo "  When asked to choose a network interface, select:  ${BOLD}$DETECTED_IFACE${NC}"
     echo ""
 
-    curl -sSL https://install.pi-hole.net | bash
+    if [ -t 1 ]; then
+        # Interactive terminal — show Pi-hole's full dialog UI
+        echo "  Follow its prompts — when it finishes, this script will continue automatically."
+        echo "  When asked to choose a network interface, select:  ${BOLD}$DETECTED_IFACE${NC}"
+        echo ""
+        curl -sSL https://install.pi-hole.net | bash
+    else
+        # Non-interactive (SSH pipe, CI, etc.) — install with defaults, no dialogs
+        info "Non-interactive session detected — installing Pi-hole with defaults."
+        info "DNS: Google (8.8.8.8) — change via Pi-hole admin UI at http://$DETECTED_IP:8080"
+        echo ""
+        curl -sSL https://install.pi-hole.net | bash -s -- --unattended
+    fi
 
     ok "Pi-hole installation complete"
 }
