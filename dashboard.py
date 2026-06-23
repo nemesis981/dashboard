@@ -2972,15 +2972,15 @@ def settings_page():
                     var h = '<div class="fs-browser-path">&#x1F4C1; ' + d.path + '</div>';
                     if (d.error) h += '<div style="color:#ff6666;font-size:0.82em">' + d.error + '</div>';
                     if (d.parent && d.parent !== d.path) {{
-                        h += '<div class="fs-browser-item" onclick="_fsBrowse(\'' + inputId + '\',\'' + browserId + '\',\'' + d.parent.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x1F4C2; ..</div>';
+                        h += '<div class="fs-browser-item" onclick="_fsBrowse(' + JSON.stringify(inputId) + ',' + JSON.stringify(browserId) + ',' + JSON.stringify(d.parent) + ')">&#x1F4C2; ..</div>';
                     }}
                     (d.dirs || []).forEach(function(dir) {{
-                        var full = d.path.replace(/\\/+$/,'') + '/' + dir;
-                        h += '<div class="fs-browser-item" onclick="_fsBrowse(\'' + inputId + '\',\'' + browserId + '\',\'' + full.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x1F4C1; ' + dir + '</div>';
+                        var full = d.path.replace(/\/+$/,'') + '/' + dir;
+                        h += '<div class="fs-browser-item" onclick="_fsBrowse(' + JSON.stringify(inputId) + ',' + JSON.stringify(browserId) + ',' + JSON.stringify(full) + ')">&#x1F4C1; ' + dir + '</div>';
                     }});
                     h += '<div style="border-top:1px solid #2a3a5a;margin-top:6px;padding-top:8px">'
-                       + '<button class="fs-browser-select" onclick="_fsSelect(\'' + inputId + '\',\'' + browserId + '\',\'' + d.path.replace(/\\/g,'\\\\').replace(/'/g,"\\'") + '\')">&#x2713; Select This Folder</button>'
-                       + '<button onclick="document.getElementById(\'' + browserId + '\').style.display=\'none\'"'
+                       + '<button class="fs-browser-select" onclick="_fsSelect(' + JSON.stringify(inputId) + ',' + JSON.stringify(browserId) + ',' + JSON.stringify(d.path) + ')">&#x2713; Select This Folder</button>'
+                       + '<button data-bid="' + browserId + '" onclick="document.getElementById(this.dataset.bid).style.display=\\'none\\'"'
                        + ' style="background:transparent;color:#888;border:none;cursor:pointer;font-size:0.82em;margin-left:10px">Cancel</button>'
                        + '</div>';
                     browser.innerHTML = h;
@@ -3086,7 +3086,7 @@ def settings_page():
             if (type === 'password') {{
                 h += '<div class="wizard-row">'
                    + '<input class="wizard-input" id="wf_' + id + '" type="password" value="' + (value||'') + '" ' + readonly + ' style="' + inputStyle + '">'
-                   + '<button class="wizard-show-btn" onclick="_wizToggleShow(\'wf_' + id + '\',this)">Show</button>'
+                   + '<button class="wizard-show-btn" data-key="' + id + '" onclick="_wizToggleShow(&#39;wf_&#39;+this.dataset.key,this)">Show</button>'
                    + '</div>';
             }} else {{
                 h += '<input class="wizard-input" id="wf_' + id + '" type="' + type + '" value="' + (value||'') + '" ' + readonly + ' style="' + inputStyle + '">';
@@ -3112,8 +3112,8 @@ def settings_page():
             h += '</label>';
             h += '<div class="wizard-row">'
                + '<input class="wizard-input" id="wf_' + id + '" type="password" placeholder="Paste new key here (leave blank to keep current)" autocomplete="off">'
-               + '<button class="wizard-show-btn" onclick="_wizToggleShow(\'wf_' + id + '\',this)">Show</button>'
-               + '<button class="wizard-validate-btn" onclick="_wizValidate(\'' + id + '\')">Validate</button>'
+               + '<button class="wizard-show-btn" data-key="' + id + '" onclick="_wizToggleShow(&#39;wf_&#39;+this.dataset.key,this)">Show</button>'
+               + '<button class="wizard-validate-btn" data-key="' + id + '" onclick="_wizValidate(this.dataset.key)">Validate</button>'
                + '</div>';
             h += '<div class="wizard-key-status" id="ws_' + id + '">'
                + 'Current: <span style="color:' + statusColor + '">' + status + '</span></div>';
