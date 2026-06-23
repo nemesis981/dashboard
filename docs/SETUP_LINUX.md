@@ -66,20 +66,22 @@ You'll need the following before starting — gather these first:
 
 ```bash
 # Step 1: Clone the repository
+# (If you already have a ~/dashboard directory, skip this and just: cd dashboard)
 git clone https://github.com/nemesis981/dashboard.git
 cd dashboard
 
-# Step 2: Run the install script (requires sudo)
+# Step 2: Run the install script (requires sudo — you'll be prompted for your password)
 sudo bash install.sh
 ```
 
 The install script will:
-1. Install system dependencies (Pi-hole, Suricata, ClamAV, Python packages)
-2. Ask for your network interface name (run `ip link show` if unsure — look for `enp...` or `eth0`)
-3. Ask for your static IP address
+1. Auto-detect your network interface and IP address
+2. Walk you through configuration (email alerts, optional API keys)
+3. Install system dependencies (Pi-hole, Suricata, ClamAV, Python packages)
 4. Create `/etc/nemesis.env` with your configuration
 5. Deploy and start all Nemesis services
-6. Open the dashboard in your browser
+
+> **Note on Suricata and VMs:** Suricata inspects live network traffic and requires direct access to a physical or bridged network interface. If you are running Nemesis in a VM with NAT networking, Suricata will install but packet inspection will not function. Use a bridged adapter or install on bare metal for full IDS functionality.
 
 **Installation takes approximately 10-15 minutes** depending on your internet speed (Pi-hole and Suricata have large downloads).
 
