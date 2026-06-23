@@ -100,6 +100,14 @@ preflight_checks() {
         warn "Cannot read /etc/os-release — OS check skipped."
     fi
 
+    # Detect if running inside a virtual machine
+    INSTALL_MODE="linux_native"
+    VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
+    if echo "$VIRT" | grep -qiE "oracle|vmware|kvm|virtualbox"; then
+        INSTALL_MODE="windows_vm"
+        warn "Virtual machine detected ($VIRT) — configuring for Windows/VM mode"
+    fi
+
     # Internet connectivity
     info "Checking internet connectivity..."
     if ! ping -c 1 -W 5 8.8.8.8 &>/dev/null; then
@@ -636,6 +644,17 @@ setup_nemesis_group() {
 hardware_discovery() {
     step_header "7/9" "Hardware Discovery"
 
+    local hw_map="$DASHBOARD_DIR/alert_manager/hw_map.json"
+
+    if [[ "$INSTALL_MODE" == "windows_vm" ]]; then
+        info "VM mode: skipping lm-sensors — hardware data will come from the Windows agent running on your host PC"
+        mkdir -p "$DASHBOARD_DIR/alert_manager"
+        echo '{"source": "windows_agent", "nemesis_vm_port": 5001}' > "$hw_map"
+        chown "$SUDO_USER" "$hw_map" 2>/dev/null || true
+        ok "Hardware map set to Windows agent mode (alert_manager/hw_map.json)"
+        return 0
+    fi
+
     local discover_script="$DASHBOARD_DIR/alert_manager/hw_discover.py"
 
     if [[ ! -f "$discover_script" ]]; then
@@ -647,7 +666,6 @@ hardware_discovery() {
     info "Running hardware discovery — takes about 30 seconds..."
     if sudo -u "$SUDO_USER" python3 "$discover_script"; then
         ok "Hardware discovery complete"
-        local hw_map="$DASHBOARD_DIR/alert_manager/hw_map.json"
         if [[ -f "$hw_map" ]]; then
             ok "Sensor map saved to alert_manager/hw_map.json"
         fi
@@ -724,6 +742,12 @@ ufw_and_finish() {
     ufw allow from "$DETECTED_SUBNET" to any port 53   comment "Pi-hole DNS"        2>/dev/null || true
     ufw allow from "$DETECTED_SUBNET" to any port 8080 comment "Pi-hole Admin"      2>/dev/null || true
     ufw allow from "$DETECTED_SUBNET" to any port 22   comment "SSH"                2>/dev/null || true
+    if [[ "$INSTALL_MODE" == "windows_vm" ]]; then
+        ufw allow from any to any port 5001 comment "Nemesis Windows Agent" 2>/dev/null || true
+        ok "UFW: port 5001 open for Windows agent"
+        warn "Remember to restrict port 5001 to your host PC's IP only after install:"
+        warn "  sudo ufw delete allow 5001 && sudo ufw allow from <host-ip> to any port 5001"
+    fi
     ufw --force enable
     ok "UFW enabled with local-network-only rules"
 
@@ -812,6 +836,12 @@ SVCEOF
     echo "     → Run:  newgrp nemesis"
     echo "     → Or log out and back in"
     echo ""
+    if [[ "$INSTALL_MODE" == "windows_vm" ]]; then
+        echo "  4. Install the Windows agent on your host PC:"
+        echo "     → See windows_agent/README.md for instructions"
+        echo "     → Your dashboard will show hardware data once the Windows agent is running and connected"
+        echo ""
+    fi
     if [[ -n "$CFG_ANTHROPIC_API_KEY" ]]; then
         echo "  AI Engine: Look for the AI ● indicator in the dashboard header — green means AI is active and ready."
         echo ""
