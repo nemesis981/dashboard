@@ -30,6 +30,11 @@ import html as _html
 from datetime import datetime, timedelta
 
 from modules import NemesisModule
+from modules.ai_engine import (
+    is_enabled as ai_is_enabled,
+    analyze as ai_analyze,
+    get_usage_stats as ai_get_usage_stats,
+)
 
 log = logging.getLogger("nemesis.anomaly")
 
@@ -51,9 +56,7 @@ PAGE_SIZE           = 10        # incidents shown per page in the card
 INITIAL_BASELINE_MAX_DAYS = 7
 
 # ── Phase 2 AI constants ─────────────────────────────────────────────────────
-AI_DEDUP_HOURS       = 24   # don't re-call API for same target within this window
-AI_RATE_HOUR_DEFAULT = 10   # default max auto AI calls per hour
-AI_RATE_DAY_DEFAULT  = 50   # default max auto AI calls per day
+AI_DEDUP_HOURS = 24   # don't re-call API for same target within this window
 
 # ── Phase 3 AbuseIPDB constants ──────────────────────────────────────────────
 ABUSEIPDB_DEDUP_HOURS    = 24   # matches AI cache window
@@ -239,12 +242,6 @@ def _init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_ar_target
             ON anomaly_recurrence(offending_target);
 
-        CREATE TABLE IF NOT EXISTS anomaly_ai_cache (
-            offending_target TEXT PRIMARY KEY,
-            ai_report_json   TEXT NOT NULL,
-            generated_at     REAL NOT NULL
-        );
-
         CREATE TABLE IF NOT EXISTS anomaly_state (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -255,14 +252,6 @@ def _init_db() -> None:
             reported_at      REAL NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS anomaly_ai_usage (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            date       TEXT    NOT NULL,
-            hour       INTEGER NOT NULL,
-            call_count INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(date, hour)
-        );
-        CREATE INDEX IF NOT EXISTS idx_aau_date ON anomaly_ai_usage(date);
     """)
     conn.commit()
     conn.close()
@@ -748,15 +737,8 @@ def _expire_recurrence(conn, now: float) -> None:
 # Phase 2: AI analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_api_key() -> str:
-    """Return ANTHROPIC_API_KEY from environment (loaded by systemd from nemesis.env)."""
-    return os.environ.get("ANTHROPIC_API_KEY", "")
-
-
 def _get_ai_settings() -> dict:
     return {
-        "rate_per_hour":        int(_get_state("ai_rate_per_hour", str(AI_RATE_HOUR_DEFAULT))),
-        "rate_per_day":         int(_get_state("ai_rate_per_day",  str(AI_RATE_DAY_DEFAULT))),
         "allow_manual_override": _get_state("ai_allow_manual_override", "1") == "1",
     }
 
@@ -793,151 +775,6 @@ def _get_cisa_settings() -> dict:
             "slider_score": score, "threshold": threshold}
 
 
-def _get_ai_pricing() -> dict:
-    """Read AI pricing from environment ($/MTok). Defaults: Claude Sonnet 4.6 as of June 2026."""
-    try:
-        input_p = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK", "3.00"))
-    except (ValueError, TypeError):
-        input_p = 3.00
-    try:
-        output_p = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00"))
-    except (ValueError, TypeError):
-        output_p = 15.00
-    return {"input_per_mtok": input_p, "output_per_mtok": output_p}
-
-
-def _cost_per_call(pricing: dict | None = None) -> float:
-    """Estimated cost per AI analysis call (~350 input tokens, ~150 output tokens)."""
-    if pricing is None:
-        pricing = _get_ai_pricing()
-    return (350 * pricing["input_per_mtok"] / 1_000_000 +
-            150 * pricing["output_per_mtok"] / 1_000_000)
-
-
-def _increment_usage_counter(conn) -> None:
-    """Record one actual AI API call in the persistent usage table."""
-    now = datetime.now()
-    conn.execute(
-        """INSERT INTO anomaly_ai_usage(date, hour, call_count)
-           VALUES(?, ?, 1)
-           ON CONFLICT(date, hour) DO UPDATE SET call_count = call_count + 1""",
-        (now.strftime("%Y-%m-%d"), now.hour)
-    )
-
-
-def _get_usage_stats() -> dict:
-    """Return actual AI call counts for today/week/month and current pricing."""
-    try:
-        conn = _conn()
-        now = datetime.now()
-        today = now.strftime("%Y-%m-%d")
-        week_start  = (now - timedelta(days=7)).strftime("%Y-%m-%d")
-        month_start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
-
-        today_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date=?", (today,)
-        ).fetchone()[0] or 0)
-        week_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date>=?", (week_start,)
-        ).fetchone()[0] or 0)
-        month_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM anomaly_ai_usage WHERE date>=?", (month_start,)
-        ).fetchone()[0] or 0)
-
-        hourly_rows = conn.execute(
-            "SELECT hour, call_count FROM anomaly_ai_usage WHERE date=? ORDER BY hour",
-            (today,)
-        ).fetchall()
-        conn.close()
-
-        pricing = _get_ai_pricing()
-        cpc     = _cost_per_call(pricing)
-        return {
-            "today":         int(today_calls),
-            "week":          int(week_calls),
-            "month":         int(month_calls),
-            "hourly":        {r["hour"]: r["call_count"] for r in hourly_rows},
-            "pricing":       pricing,
-            "cost_per_call": round(cpc, 6),
-        }
-    except Exception:
-        log.exception("anomaly_detection: _get_usage_stats failed")
-        pricing = _get_ai_pricing()
-        return {
-            "today": 0, "week": 0, "month": 0, "hourly": {},
-            "pricing": pricing, "cost_per_call": round(_cost_per_call(pricing), 6),
-        }
-
-
-def _check_auto_rate_limit(conn) -> tuple:
-    """Return (is_limited: bool, reason: str)."""
-    settings = _get_ai_settings()
-    now = time.time()
-
-    def _st(k, d="0"):
-        r = conn.execute("SELECT value FROM anomaly_state WHERE key=?", (k,)).fetchone()
-        return r[0] if r else d
-
-    # Hourly window
-    h_start = float(_st("ai_hour_window_start", "0"))
-    h_count = int(_st("ai_hour_count", "0"))
-    window_age_h = now - h_start
-    if window_age_h > 3600 or h_start == 0:
-        h_count = 0   # window expired or never started
-
-    if h_count >= settings["rate_per_hour"]:
-        if h_start == 0 or window_age_h > 3600:
-            reset_str = "immediately on reset"
-        else:
-            mins_left = max(1, int((3600 - window_age_h) / 60) + 1)
-            reset_str = f"resets in ~{mins_left}m"
-        return True, f"{h_count}/{settings['rate_per_hour']} per hour ({reset_str})"
-
-    # Daily window
-    d_start = float(_st("ai_day_window_start", "0"))
-    d_count = int(_st("ai_day_count", "0"))
-    window_age_d = now - d_start
-    if window_age_d > 86400 or d_start == 0:
-        d_count = 0   # window expired or never started
-
-    if d_count >= settings["rate_per_day"]:
-        if d_start == 0 or window_age_d > 86400:
-            reset_str = "immediately on reset"
-        else:
-            hrs_left = max(1, int((86400 - window_age_d) / 3600) + 1)
-            reset_str = f"resets in ~{hrs_left}h"
-        return True, f"{d_count}/{settings['rate_per_day']} per day ({reset_str})"
-
-    return False, ""
-
-
-def _increment_auto_rate(conn) -> None:
-    now = time.time()
-
-    def _st(k, d="0"):
-        r = conn.execute("SELECT value FROM anomaly_state WHERE key=?", (k,)).fetchone()
-        return r[0] if r else d
-
-    def _save(k, v):
-        conn.execute("INSERT OR REPLACE INTO anomaly_state(key,value) VALUES(?,?)", (k, str(v)))
-
-    # Hour
-    h_start = float(_st("ai_hour_window_start", "0"))
-    h_count = int(_st("ai_hour_count", "0"))
-    if now - h_start > 3600:
-        h_start = now
-        h_count = 0
-    _save("ai_hour_window_start", h_start)
-    _save("ai_hour_count", h_count + 1)
-
-    # Day
-    d_start = float(_st("ai_day_window_start", "0"))
-    d_count = int(_st("ai_day_count", "0"))
-    if now - d_start > 86400:
-        d_start = now
-        d_count = 0
-    _save("ai_day_window_start", d_start)
-    _save("ai_day_count", d_count + 1)
 
 
 def _build_ai_prompt(domain: str, itype: str, score: float, label: str,
@@ -991,131 +828,70 @@ Devices that queried this domain:
 }}"""
 
 
-def _do_ai_call(api_key: str, domain: str, itype: str, score: float,
-                label: str, sig_dict: dict, device_list: list) -> dict | None:
-    """Call Claude API. Returns parsed dict or None on failure."""
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        prompt = _build_ai_prompt(domain, itype, score, label, sig_dict, device_list)
-        msg = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=600,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        text = msg.content[0].text.strip()
-        # Strip markdown fences if model adds them
-        if text.startswith("```"):
-            parts = text.split("```", 2)
-            text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
-        try:
-            return json.loads(text)
-        except Exception:
-            return {
-                "explanation": text,
-                "threat_assessment": "(could not parse structured response)",
-                "recommended_action": "Review manually",
-                "confidence": "LOW",
-            }
-    except Exception:
-        log.exception("anomaly_detection: AI call failed for %s", domain)
-        return None
-
-
 def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,
                           sig_dict: dict, device_list: list,
                           is_auto: bool = True) -> dict | None:
     """
-    Full AI analysis flow with dedup, rate limiting, and caching.
+    AI analysis via ai_engine module.
 
-    Dedup rules:
-      • Target analyzed in last 24h  → always reuse (both auto and manual)
-      • Target in recurrence window (>24h, <30d), is_auto=True → reuse original
-      • Otherwise → generate fresh (subject to rate limit for auto)
-
-    Returns the parsed AI report dict, or None if skipped/failed.
+    For auto incidents: 24h cache; 30-day cache for known recurrences.
+    For manual incidents: force=True (bypasses rate limit) if allow_manual_override is on.
     """
-    api_key = _get_api_key()
-    if not api_key:
+    if not ai_is_enabled():
         return None
 
-    label = _severity_label(score)[0]
-    now   = time.time()
+    label  = _severity_label(score)[0]
+    prompt = _build_ai_prompt(domain, itype, score, label, sig_dict, device_list)
 
-    conn = _conn()
+    if is_auto:
+        # Reuse cached report for up to 30 days for recurring targets
+        try:
+            conn_tmp = _conn()
+            in_recurrence = conn_tmp.execute(
+                "SELECT 1 FROM anomaly_recurrence WHERE offending_target=? AND last_seen>?",
+                (domain, time.time() - RECURRENCE_DAYS * 86400)
+            ).fetchone()
+            conn_tmp.close()
+        except Exception:
+            in_recurrence = None
+        cache_hours = RECURRENCE_DAYS * 24 if in_recurrence else AI_DEDUP_HOURS
+        result = ai_analyze(prompt, max_tokens=600, cache_key=domain, cache_hours=cache_hours)
+    else:
+        settings = _get_ai_settings()
+        force = settings["allow_manual_override"]
+        result = ai_analyze(prompt, max_tokens=600, cache_key=domain,
+                            cache_hours=AI_DEDUP_HOURS, force=force)
+
+    if not result.get("ok"):
+        log.info("anomaly_detection: AI skipped for %s — %s", domain, result.get("reason", ""))
+        return None
+
+    text = result["text"]
+    if text.startswith("```"):
+        parts = text.split("```", 2)
+        text = parts[1].lstrip("json").strip() if len(parts) > 1 else text
     try:
-        # ── Dedup / recurrence cache check ────────────────────────────────────
-        cached = conn.execute(
-            "SELECT ai_report_json, generated_at FROM anomaly_ai_cache "
-            "WHERE offending_target=?", (domain,)
-        ).fetchone()
-
-        if cached:
-            age_h = (now - cached["generated_at"]) / 3600
-            if age_h < AI_DEDUP_HOURS:
-                # Within 24h: always reuse
-                _attach_ai_to_incident(conn, inc_id, cached["ai_report_json"],
-                                       cached["generated_at"])
-                conn.commit()
-                log.info("anomaly_detection: AI reused from 24h cache for %s", domain)
-                return json.loads(cached["ai_report_json"])
-
-            if is_auto:
-                # Past 24h: check recurrence — if still in 30-day window, reuse for auto
-                in_recurrence = conn.execute(
-                    "SELECT 1 FROM anomaly_recurrence "
-                    "WHERE offending_target=? AND last_seen>?",
-                    (domain, now - RECURRENCE_DAYS * 86400)
-                ).fetchone()
-                if in_recurrence:
-                    _attach_ai_to_incident(conn, inc_id, cached["ai_report_json"],
-                                           cached["generated_at"])
-                    conn.commit()
-                    log.info("anomaly_detection: AI reused from recurrence cache for %s", domain)
-                    return json.loads(cached["ai_report_json"])
-
-        # ── Rate limit check ──────────────────────────────────────────────────
-        if is_auto:
-            limited, reason = _check_auto_rate_limit(conn)
-            if limited:
-                log.info("anomaly_detection: auto AI rate limited — %s", reason)
-                return None
-        else:
-            settings = _get_ai_settings()
-            if not settings["allow_manual_override"]:
-                limited, reason = _check_auto_rate_limit(conn)
-                if limited:
-                    log.info("anomaly_detection: manual AI blocked (override disabled) — %s", reason)
-                    return None
-
-        # ── Make the API call ─────────────────────────────────────────────────
-        report = _do_ai_call(api_key, domain, itype, score, label, sig_dict, device_list)
-        if report is None:
-            return None
-
-        report_json = json.dumps(report)
-
-        # Store in cache and on the incident
-        conn.execute(
-            "INSERT OR REPLACE INTO anomaly_ai_cache "
-            "(offending_target, ai_report_json, generated_at) VALUES (?,?,?)",
-            (domain, report_json, now)
-        )
-        _attach_ai_to_incident(conn, inc_id, report_json, now)
-        _increment_usage_counter(conn)
-
-        if is_auto:
-            _increment_auto_rate(conn)
-
-        conn.commit()
-        log.info("anomaly_detection: AI report generated for %s (score %.0f)", domain, score)
-        return report
-
+        report = json.loads(text)
     except Exception:
-        log.exception("anomaly_detection: _ai_analyze_incident failed for %s", domain)
-        return None
-    finally:
+        report = {
+            "explanation": text,
+            "threat_assessment": "(could not parse structured response)",
+            "recommended_action": "Review manually",
+            "confidence": "LOW",
+        }
+
+    report_json = json.dumps(report)
+    try:
+        conn = _conn()
+        _attach_ai_to_incident(conn, inc_id, report_json, time.time())
+        conn.commit()
         conn.close()
+    except Exception:
+        log.exception("anomaly_detection: failed to attach AI report to incident %s", inc_id)
+
+    log.info("anomaly_detection: AI report %s for %s (score %.0f)",
+             "from cache" if result.get("from_cache") else "generated", domain, score)
+    return report
 
 
 def _attach_ai_to_incident(conn, inc_id: int, report_json: str, generated_at: float) -> None:
@@ -1285,10 +1061,11 @@ def _format_ai_report_html(report: dict, from_cache: bool = False,
 
 
 def _is_currently_rate_limited() -> tuple:
-    """Returns (is_limited: bool, reason: str) without raising."""
+    """Returns (is_limited: bool, reason: str) by proxying to ai_engine."""
     try:
-        conn = _conn()
-        limited, reason = _check_auto_rate_limit(conn)
+        from modules.ai_engine.module import _conn as _ai_conn, _check_rate_limit
+        conn = _ai_conn()
+        limited, reason = _check_rate_limit(conn)
         conn.close()
         return limited, reason
     except Exception:
@@ -1995,7 +1772,7 @@ def _api_incident_close(inc_id: int):
 
 
 def _api_incident_analyze(inc_id: int):
-    """Manual AI analysis endpoint. Not subject to rate cap by default."""
+    """Manual AI analysis endpoint. Bypasses rate limit when allow_manual_override is on."""
     from flask import jsonify
     try:
         conn = _conn()
@@ -2019,55 +1796,32 @@ def _api_incident_analyze(inc_id: int):
     sig_dict = signals.get("signals", signals) if isinstance(signals, dict) else {}
     devices  = json.loads(row["devices_json"] or "[]")
 
-    # Check settings for manual override
     settings = _get_ai_settings()
 
-    # Check rate limit if manual override is disabled
+    # Check rate limit proactively when manual override is disabled
     if not settings["allow_manual_override"]:
-        try:
-            conn2 = _conn()
-            limited, reason = _check_auto_rate_limit(conn2)
-            conn2.close()
-            if limited:
-                return jsonify({
-                    "rate_limited": True,
-                    "manual_blocked": True,
-                    "message": f"Rate limit active ({reason}) and manual override is disabled in Settings."
-                })
-        except Exception:
-            pass
+        limited, reason = _is_currently_rate_limited()
+        if limited:
+            return jsonify({
+                "rate_limited": True,
+                "manual_blocked": True,
+                "message": f"Rate limit active ({reason}) and manual override is disabled in Settings."
+            })
 
-    # Check cache state BEFORE calling AI so from_cache reflects a prior analysis
-    pre_gen_at = None
-    try:
-        cpre = _conn()
-        cpre_row = cpre.execute(
-            "SELECT generated_at FROM anomaly_ai_cache WHERE offending_target=?",
-            (domain,)
-        ).fetchone()
-        cpre.close()
-        if cpre_row:
-            pre_gen_at = cpre_row["generated_at"]
-    except Exception:
-        pass
+    # Note pre_gen_at from incident row (not from anomaly_ai_cache which is removed)
+    pre_gen_at = row["ai_generated_at"]
 
-    # Call AI analysis (is_auto=False bypasses rate limit by default)
+    # Call AI analysis (is_auto=False — force=True when override enabled)
     report = _ai_analyze_incident(
         inc_id, domain, itype, score, sig_dict, devices, is_auto=False
     )
 
     if report is None:
-        if not _get_api_key():
+        if not ai_is_enabled():
             return jsonify({"error": "ANTHROPIC_API_KEY not configured in nemesis.env"})
-        try:
-            conn3 = _conn()
-            limited, reason = _check_auto_rate_limit(conn3)
-            conn3.close()
-            if limited and not settings["allow_manual_override"]:
-                return jsonify({"rate_limited": True, "manual_blocked": True,
-                                "message": reason})
-        except Exception:
-            pass
+        limited, reason = _is_currently_rate_limited()
+        if limited and not settings["allow_manual_override"]:
+            return jsonify({"rate_limited": True, "manual_blocked": True, "message": reason})
         return jsonify({"error": "AI analysis failed — check server logs"})
 
     # from_cache = True only if this result came from a pre-existing cache entry
@@ -2091,18 +1845,13 @@ def _api_anomaly_settings():
     from flask import request, jsonify
     if request.method == "GET":
         return jsonify({
-            **_get_ai_settings(),
+            "allow_manual_override": _get_ai_settings()["allow_manual_override"],
             "abuseipdb": _get_abuseipdb_settings(),
             "cisa":      _get_cisa_settings(),
         })
 
     data = request.get_json(silent=True) or {}
     try:
-        # AI settings
-        if "rate_per_hour" in data:
-            _set_state("ai_rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
-        if "rate_per_day" in data:
-            _set_state("ai_rate_per_day",  str(max(0, int(data["rate_per_day"]))))
         if "allow_manual_override" in data:
             val = data["allow_manual_override"]
             _set_state("ai_allow_manual_override", "1" if val in (True, "1", 1) else "0")
@@ -2140,4 +1889,4 @@ def _api_anomaly_settings():
 
 def _api_anomaly_usage():
     from flask import jsonify
-    return jsonify(_get_usage_stats())
+    return jsonify(ai_get_usage_stats())

@@ -62,7 +62,6 @@ app = Flask(__name__)
 PIHOLE_IP = "192.168.4.69:8080"
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 _BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
@@ -1298,14 +1297,9 @@ def analyze_alert(rule_id):
                 "src_ip": src_ip,
                 "enrichment": enrichment
             })
-        import anthropic
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        message = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=500,
-            messages=[{
-                "role": "user",
-                "content": f"""You are Nemesis, an AI security assistant for a home network firewall.
+        from modules.ai_engine import analyze as ai_analyze
+        ai_result = ai_analyze(
+            f"""You are Nemesis, an AI security assistant for a home network firewall.
 Analyze this Suricata alert and respond in JSON only, no markdown:
 
 Alert: {raw_alert}
@@ -1316,10 +1310,14 @@ Alert: {raw_alert}
     "is_threat": true/false,
     "recommended_action": "Block/Ignore/Monitor",
     "reason": "Brief reason"
-}}"""
-            }]
+}}""",
+            max_tokens=500,
+            cache_key=f"alert_{rule_id}",
+            cache_hours=24,
         )
-        response_text = message.content[0].text
+        if not ai_result.get("ok"):
+            return jsonify({"error": ai_result.get("reason", "AI unavailable")}), 503
+        response_text = ai_result["text"]
         try:
             analysis = json.loads(response_text)
         except Exception as e:
@@ -1425,12 +1423,35 @@ def settings_page():
         _is_windows_agent = False
         _agent_ip = ""
 
-    # Read anomaly_detection AI settings from DB (best-effort; fall back to defaults)
-    _ad_rate_h = "10"
-    _ad_rate_d = "50"
+    # Read AI Engine settings from ai_engine.db
+    _ai_rate_h   = "10"
+    _ai_rate_d   = "50"
+    _ai_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
+    _ai_output_price = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
+    try:
+        _ai_db_path = os.path.join(_HERE, "modules", "ai_engine", "ai_engine.db")
+        _ai_conn = sqlite3.connect(_ai_db_path, timeout=5)
+        def _ai_st(k, d=""):
+            r = _ai_conn.execute("SELECT value FROM ai_settings WHERE key=?", (k,)).fetchone()
+            return r[0] if r else d
+        _ai_rate_h = _ai_st("rate_per_hour", "10")
+        _ai_rate_d = _ai_st("rate_per_day",  "50")
+        _ai_conn.close()
+    except Exception:
+        pass
+    _ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if len(_ai_key) >= 8:
+        _ai_key_display = "…" + _ai_key[-8:]
+        _ai_key_color   = "#00ff88"
+    elif _ai_key:
+        _ai_key_display = "(set — too short to display)"
+        _ai_key_color   = "#ffaa00"
+    else:
+        _ai_key_display = "(not configured)"
+        _ai_key_color   = "#ff4444"
+
+    # Read anomaly_detection settings from DB
     _ad_manual = True
-    _ad_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
-    _ad_output_price = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
     try:
         _ad_conn = sqlite3.connect(DB_PATH, timeout=5)
         def _ad_st(k, d=""):
@@ -1438,8 +1459,6 @@ def settings_page():
                 "SELECT value FROM anomaly_state WHERE key=?", (k,)
             ).fetchone()
             return r[0] if r else d
-        _ad_rate_h = _ad_st("ai_rate_per_hour", "10")
-        _ad_rate_d = _ad_st("ai_rate_per_day",  "50")
         _ad_manual = _ad_st("ai_allow_manual_override", "1") == "1"
         # Phase 3: AbuseIPDB + CISA threshold settings
         _ad_ab_active  = _ad_st("abuseipdb_active_control", "dropdown")
@@ -1483,45 +1502,41 @@ def settings_page():
             </label>
         </div>"""
 
-        # Anomaly detection: inject AI + Phase 3 settings sub-section below module row
-        if name == "anomaly_detection":
-            _manual_checked  = "checked" if _ad_manual else ""
-            # AbuseIPDB radio states
-            _ab_drop_chk   = "checked" if _ad_ab_active  == "dropdown" else ""
-            _ab_score_chk  = "checked" if _ad_ab_active  == "slider"   else ""
-            _ab_off_sel    = "selected" if _ad_ab_mode   == "off"         else ""
-            _ab_med_sel    = "selected" if _ad_ab_mode   == "medium_plus" else ""
-            _ab_hi_sel     = "selected" if _ad_ab_mode   == "high_only"   else ""
-            # CISA radio states
-            _ci_drop_chk   = "checked" if _ad_cisa_active == "dropdown" else ""
-            _ci_score_chk  = "checked" if _ad_cisa_active == "slider"   else ""
-            _ci_hi_sel     = "selected" if _ad_cisa_mode  == "high_only"    else ""
-            _ci_crit_sel   = "selected" if _ad_cisa_mode  == "critical_only" else ""
+        # AI Engine: inject rate limits, cost estimates, usage, and key status
+        if name == "ai_engine":
             module_rows_html += f"""
-        <div id="ad-subsettings" class="module-subsettings"
+        <div id="ai-engine-subsettings" class="module-subsettings"
              style="display:{'block' if enabled else 'none'}">
+            <div id="ai-engine" style="scroll-margin-top:20px"></div>
 
-            <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
-                        letter-spacing:0.06em;margin-bottom:10px;font-weight:bold">
-                AI Analysis Settings
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Anthropic API Key — required for all AI features"
+                        data-intermediate="ANTHROPIC_API_KEY"
+                        data-pro="API key">Anthropic API Key</span>
+                </span>
+                <span style="color:{_ai_key_color};font-family:monospace;font-size:0.88em">{html.escape(_ai_key_display)}</span>
+                <span style="color:#888;font-size:0.78em;margin-left:10px">
+                    Edit: <code style="color:#bbb">sudo nano /etc/nemesis.env</code>
+                </span>
             </div>
             <div class="module-subsettings-row">
                 <span class="module-subsettings-label">Max automatic AI analyses per hour</span>
-                <input type="number" id="ad-rate-hour" value="{html.escape(_ad_rate_h)}"
+                <input type="number" id="ai-rate-hour" value="{html.escape(_ai_rate_h)}"
                        min="0" max="100" class="module-subsettings-input"
-                       onchange="saveAnomalySettings()" oninput="updateAICostEstimate()">
+                       onchange="saveAIEngineSettings()" oninput="updateAICostEstimate()">
             </div>
             <div class="module-subsettings-row">
                 <span class="module-subsettings-label">Max automatic AI analyses per day</span>
-                <input type="number" id="ad-rate-day" value="{html.escape(_ad_rate_d)}"
+                <input type="number" id="ai-rate-day" value="{html.escape(_ai_rate_d)}"
                        min="0" max="1000" class="module-subsettings-input"
-                       onchange="saveAnomalySettings()" oninput="updateAICostEstimate()">
+                       onchange="saveAIEngineSettings()" oninput="updateAICostEstimate()">
             </div>
 
             <div id="ai-cost-estimate" style="background:#060b12;border:1px solid #1e2d4e;
                  border-radius:6px;padding:10px 14px;margin:8px 0 10px 0;font-size:0.83em">
 
-                <!-- Pricing configuration -->
                 <div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #1e2d4e22">
                     <div style="color:#00d4ff;font-weight:bold;margin-bottom:6px;font-size:0.92em">
                         <span class="tier-text"
@@ -1537,7 +1552,7 @@ def settings_page():
                                     data-intermediate="Input ($/MTok):"
                                     data-pro="In $/MTok:">Input ($/MTok):</span>
                             </span>
-                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_input_price:.2f}")}</span>
+                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ai_input_price:.2f}")}</span>
                         </div>
                         <div>
                             <span style="color:#bbb">
@@ -1546,7 +1561,7 @@ def settings_page():
                                     data-intermediate="Output ($/MTok):"
                                     data-pro="Out $/MTok:">Output ($/MTok):</span>
                             </span>
-                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ad_output_price:.2f}")}</span>
+                            <span style="color:#eee;margin-left:6px;font-weight:bold">${html.escape(f"{_ai_output_price:.2f}")}</span>
                         </div>
                     </div>
                     <div style="color:#bbb;font-size:0.88em;line-height:1.5">
@@ -1559,7 +1574,6 @@ def settings_page():
                     </div>
                 </div>
 
-                <!-- Max cost estimates (rate-limit based) -->
                 <div style="color:#00d4ff;font-weight:bold;margin-bottom:6px">
                     <span class="tier-text"
                         data-beginner="Estimated Max AI Cost (based on your rate limits)"
@@ -1574,7 +1588,7 @@ def settings_page():
                                 data-intermediate="Per analysis:"
                                 data-pro="Per call (~350in/150out tok):">Per analysis:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-per-call">~${html.escape(f"{(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.4f}")}</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-per-call">~${html.escape(f"{(350*_ai_input_price/1e6 + 150*_ai_output_price/1e6):.4f}")}</span>
                     </div>
                     <div>
                         <span style="color:#bbb">
@@ -1583,7 +1597,7 @@ def settings_page():
                                 data-intermediate="Max cost / hour:"
                                 data-pro="Max cost/hr:">Max cost / hour:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~${html.escape(f"{float(_ad_rate_h)*(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.3f}")}</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-hour">~${html.escape(f"{float(_ai_rate_h)*(350*_ai_input_price/1e6 + 150*_ai_output_price/1e6):.3f}")}</span>
                     </div>
                     <div>
                         <span style="color:#bbb">
@@ -1592,11 +1606,10 @@ def settings_page():
                                 data-intermediate="Max cost / day:"
                                 data-pro="Max cost/day:">Max cost / day:</span>
                         </span>
-                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-day">~${html.escape(f"{float(_ad_rate_d)*(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.3f}")}</span>
+                        <span style="color:#eee;margin-left:6px;font-weight:bold" id="ai-cost-day">~${html.escape(f"{float(_ai_rate_d)*(350*_ai_input_price/1e6 + 150*_ai_output_price/1e6):.3f}")}</span>
                     </div>
                 </div>
 
-                <!-- Actual usage tracking -->
                 <div style="margin-top:8px;padding-top:8px;border-top:1px solid #1e2d4e22">
                     <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px;flex-wrap:wrap">
                         <span style="color:#00d4ff;font-weight:bold;font-size:0.92em">
@@ -1642,7 +1655,6 @@ def settings_page():
                     </div>
                 </div>
 
-                <!-- Disclaimer -->
                 <div style="color:#bbb;font-size:0.9em;line-height:1.5;border-top:1px solid #1e2d4e22;padding-top:7px;margin-top:8px">
                     <strong style="color:#bbb">⚠ Estimates only.</strong>
                     <span class="tier-text"
@@ -1653,6 +1665,28 @@ def settings_page():
                     </span>
                 </div>
             </div>
+
+            <div id="ai-engine-settings-status"
+                 style="height:1.2em;font-size:0.8em;margin-top:8px;color:#00ff88"></div>
+        </div>"""
+
+        # Anomaly detection: manual override toggle + AbuseIPDB + CISA thresholds
+        elif name == "anomaly_detection":
+            _manual_checked  = "checked" if _ad_manual else ""
+            # AbuseIPDB radio states
+            _ab_drop_chk   = "checked" if _ad_ab_active  == "dropdown" else ""
+            _ab_score_chk  = "checked" if _ad_ab_active  == "slider"   else ""
+            _ab_off_sel    = "selected" if _ad_ab_mode   == "off"         else ""
+            _ab_med_sel    = "selected" if _ad_ab_mode   == "medium_plus" else ""
+            _ab_hi_sel     = "selected" if _ad_ab_mode   == "high_only"   else ""
+            # CISA radio states
+            _ci_drop_chk   = "checked" if _ad_cisa_active == "dropdown" else ""
+            _ci_score_chk  = "checked" if _ad_cisa_active == "slider"   else ""
+            _ci_hi_sel     = "selected" if _ad_cisa_mode  == "high_only"    else ""
+            _ci_crit_sel   = "selected" if _ad_cisa_mode  == "critical_only" else ""
+            module_rows_html += f"""
+        <div id="ad-subsettings" class="module-subsettings"
+             style="display:{'block' if enabled else 'none'}">
 
             <div class="module-subsettings-row">
                 <span class="module-subsettings-label">
@@ -2356,10 +2390,32 @@ def settings_page():
                 }});
         }}
 
+        function saveAIEngineSettings() {{
+            var rateH = parseInt(document.getElementById('ai-rate-hour').value) || 10;
+            var rateD = parseInt(document.getElementById('ai-rate-day').value) || 50;
+            var status = document.getElementById('ai-engine-settings-status');
+            if (status) {{ status.style.color = '#aaa'; status.textContent = 'Saving…'; }}
+            fetch('/api/ai/settings', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{ rate_per_hour: rateH, rate_per_day: rateD }})
+            }})
+            .then(function(r) {{ return r.json(); }})
+            .then(function(d) {{
+                if (status) {{
+                    status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                    status.textContent = d.ok ? '✓ Saved' : 'Error: ' + (d.error || 'unknown');
+                    clearTimeout(status._t);
+                    status._t = setTimeout(function() {{ status.textContent = ''; }}, 3000);
+                }}
+            }})
+            .catch(function() {{
+                if (status) {{ status.style.color = '#ff4444'; status.textContent = 'Request failed'; }}
+            }});
+        }}
+
         function saveAnomalySettings() {{
-            var rateH  = parseInt(document.getElementById('ad-rate-hour').value) || 10;
-            var rateD  = parseInt(document.getElementById('ad-rate-day').value) || 50;
-            var manual = document.getElementById('ad-allow-manual').checked ? '1' : '0';
+            var manual = (document.getElementById('ad-allow-manual') || {{}}).checked ? '1' : '0';
             // AbuseIPDB
             var abCtrlEl = document.querySelector('input[name="ad-ab-ctrl"]:checked');
             var abCtrl   = abCtrlEl ? abCtrlEl.value : 'dropdown';
@@ -2372,14 +2428,11 @@ def settings_page():
             var ciScore  = parseInt((document.getElementById('ad-cisa-score') || {{}}).value) || 60;
 
             var status = document.getElementById('ad-settings-status');
-            status.style.color = '#aaa';
-            status.textContent = 'Saving…';
+            if (status) {{ status.style.color = '#aaa'; status.textContent = 'Saving…'; }}
             fetch('/api/anomaly/settings', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
                 body: JSON.stringify({{
-                    rate_per_hour: rateH,
-                    rate_per_day: rateD,
                     allow_manual_override: manual,
                     abuseipdb_active_control: abCtrl,
                     abuseipdb_dropdown_mode: abMode,
@@ -2391,21 +2444,22 @@ def settings_page():
             }})
             .then(function(r) {{ return r.json(); }})
             .then(function(d) {{
-                status.style.color = d.ok ? '#00ff88' : '#ff4444';
-                status.textContent = d.ok ? '✓ Saved' : 'Error: ' + (d.error || 'unknown');
-                clearTimeout(status._t);
-                status._t = setTimeout(function() {{ status.textContent = ''; }}, 3000);
+                if (status) {{
+                    status.style.color = d.ok ? '#00ff88' : '#ff4444';
+                    status.textContent = d.ok ? '✓ Saved' : 'Error: ' + (d.error || 'unknown');
+                    clearTimeout(status._t);
+                    status._t = setTimeout(function() {{ status.textContent = ''; }}, 3000);
+                }}
             }})
             .catch(function() {{
-                status.style.color = '#ff4444';
-                status.textContent = 'Request failed';
+                if (status) {{ status.style.color = '#ff4444'; status.textContent = 'Request failed'; }}
             }});
         }}
 
-        var _COST_PER_ANALYSIS = {(350*_ad_input_price/1e6 + 150*_ad_output_price/1e6):.6f};
+        var _COST_PER_ANALYSIS = {(350*_ai_input_price/1e6 + 150*_ai_output_price/1e6):.6f};
         function updateAICostEstimate() {{
-            var h = parseFloat(document.getElementById('ad-rate-hour').value) || 0;
-            var d = parseFloat(document.getElementById('ad-rate-day').value) || 0;
+            var h = parseFloat((document.getElementById('ai-rate-hour') || {{}}).value) || 0;
+            var d = parseFloat((document.getElementById('ai-rate-day') || {{}}).value) || 0;
             var hEl = document.getElementById('ai-cost-hour');
             var dEl = document.getElementById('ai-cost-day');
             if (hEl) hEl.textContent = '~$' + (h * _COST_PER_ANALYSIS).toFixed(3);
@@ -2531,7 +2585,7 @@ def settings_page():
             display.innerHTML = '<span style="color:#444">'
                 + tierText('Loading usage data…', 'Loading…', '…')
                 + '</span>';
-            fetch('/api/anomaly/usage')
+            fetch('/api/ai/usage')
                 .then(function(r) {{ return r.json(); }})
                 .then(function(d) {{
                     _aiUsageCache = d;
@@ -4140,11 +4194,17 @@ def dashboard():
     <script src="/static/tier.js"></script>
 </head>
 <body>
-    <h1>🛡️ Nemesis Firewall <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
-        <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
-        &nbsp;|&nbsp;
-        <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
-    </span></h1>
+    <h1>🛡️ Nemesis Firewall
+        <a id="ai-status-badge" href="/settings#ai-engine" target="_blank" rel="noopener"
+           title="AI Engine status — click to configure"
+           style="font-size:0.42em;font-weight:normal;margin-left:12px;vertical-align:middle;
+                  text-decoration:none;color:#888;cursor:pointer">AI ○</a>
+        <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
+            <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
+            &nbsp;|&nbsp;
+            <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
+        </span>
+    </h1>
     <p style="color:#ccc;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min | Uptime: <span id="dashUptime">…</span></p>
 
     <nav class="jump-nav">
@@ -6222,6 +6282,24 @@ def dashboard():
                 .then(function(d) {{
                     var el = document.getElementById('dashUptime');
                     if (el) el.textContent = d.uptime;
+                }})
+                .catch(function() {{}});
+            // AI status badge
+            fetch('/api/ai/status')
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    var badge = document.getElementById('ai-status-badge');
+                    if (!badge) return;
+                    if (d.state === 'running') {{
+                        badge.textContent = 'AI ●';
+                        badge.style.color = '#00ff88';
+                    }} else if (d.state === 'error') {{
+                        badge.textContent = 'AI ✕';
+                        badge.style.color = '#ff4444';
+                    }} else {{
+                        badge.textContent = 'AI ○';
+                        badge.style.color = '#888';
+                    }}
                 }})
                 .catch(function() {{}});
         }});

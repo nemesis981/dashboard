@@ -1,0 +1,8 @@
+{
+    "name": "ai_engine",
+    "display_name": "AI Engine",
+    "version": "1.0.0",
+    "description": "Anthropic Claude integration — centralised AI analysis, caching, rate limiting, and usage tracking for all Nemesis modules.",
+    "category": "intelligence",
+    "enabled_by_default": true
+}
