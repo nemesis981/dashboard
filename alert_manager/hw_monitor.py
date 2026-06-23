@@ -20,9 +20,10 @@ from logging.handlers import RotatingFileHandler
 
 import psutil
 
-DB_PATH      = "/home/paul/dashboard/alert_manager/alerts.db"
-LOG_FILE     = "/home/paul/dashboard/alert_manager/hw_monitor.log"
-HW_MAP_PATH  = "/home/paul/dashboard/alert_manager/hw_map.json"
+_HERE        = os.path.dirname(os.path.abspath(__file__))
+DB_PATH      = os.path.join(_HERE, "alerts.db")
+LOG_FILE     = os.path.join(_HERE, "hw_monitor.log")
+HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
 NET_IFACE    = "enp131s0"
 SAMPLE_INTERVAL  = 300
 WA_LISTEN_PORT   = 5001   # port for Windows-agent POST receiver

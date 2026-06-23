@@ -13,6 +13,7 @@ Usage:  python3 hw_discover.py
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -28,7 +29,8 @@ D = "\033[2m"     # dim     — secondary info
 R = "\033[31m"    # red     — errors
 X = "\033[0m"     # reset
 
-HW_MAP_PATH  = "/home/paul/dashboard/alert_manager/hw_map.json"
+_HERE        = os.path.dirname(os.path.abspath(__file__))
+HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
 NEMESIS_ENV  = "/etc/nemesis.env"
 SERVICE_NAME = "hw-monitor.service"
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"

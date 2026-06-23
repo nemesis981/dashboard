@@ -19,8 +19,9 @@ from firewall import (
 )
 
 LOG_FILE = "/var/log/suricata/fast.log"
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
-WATCHER_LOG = "/home/paul/dashboard/alert_manager/alert_watcher.log"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_HERE, "alerts.db")
+WATCHER_LOG = os.path.join(_HERE, "alert_watcher.log")
 POLL_INTERVAL = 1.0
 SWEEP_INTERVAL = 30.0
 QUARANTINE_HOURS = 1

@@ -6,7 +6,8 @@ from datetime import datetime, timedelta
 from urllib import request as urlrequest, parse as urlparse
 from urllib.error import URLError, HTTPError
 
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_HERE, "alerts.db")
 CACHE_TTL_HOURS = 24
 
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY")

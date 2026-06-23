@@ -1,7 +1,9 @@
+import os
 import sqlite3
 from datetime import datetime
 
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_HERE, "alerts.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

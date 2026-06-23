@@ -6,7 +6,8 @@ import time
 import os
 from datetime import datetime
 
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_HERE, "alerts.db")
 
 def lookup_mac_vendor(mac):
     try:
