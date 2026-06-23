@@ -5,6 +5,7 @@ After=network.target
 [Service]
 User=paul
 WorkingDirectory=/home/paul/dashboard
+Environment=PYTHONPATH=/home/paul/dashboard/alert_manager
 EnvironmentFile=-/etc/watchdog.env
 EnvironmentFile=/etc/nemesis.env
 ExecStart=/usr/bin/python3 /home/paul/dashboard/dashboard.py
