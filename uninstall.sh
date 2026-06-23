@@ -256,7 +256,7 @@ fi
 
 step_header "6/7" "Optional Component — Suricata"
 
-if dpkg -l suricata &>/dev/null 2>&1 | grep -q '^ii'; then
+if dpkg -l suricata 2>/dev/null | grep -q '^ii'; then
     echo "  Note: /etc/suricata (your rules and config) will NOT be deleted."
     echo ""
     if ask_yes_no "Remove Suricata packages?"; then
@@ -281,7 +281,7 @@ fi
 
 step_header "7/7" "Optional Component — ClamAV"
 
-if dpkg -l clamav &>/dev/null 2>&1 | grep -q '^ii'; then
+if dpkg -l clamav 2>/dev/null | grep -q '^ii'; then
     if ask_yes_no "Remove ClamAV?"; then
         systemctl stop clamav-daemon 2>/dev/null
         systemctl disable clamav-daemon 2>/dev/null
