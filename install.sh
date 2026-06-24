@@ -61,8 +61,10 @@ DASHBOARD_DIR=""
 # Set by check_for_backup if user wants to restore after install
 RESTORE_BACKUP_FILE=""
 
-# Config file path used by config-first mode
-CONF_FILE="./nemesis-install.conf"
+# Config file path used by config-first mode.
+# Anchored to the script's own directory so it works regardless of CWD
+# when invoked as 'sudo bash ~/dashboard/install.sh'.
+CONF_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nemesis-install.conf"
 
 ###############################################################################
 # STEP 1/9 — PREFLIGHT CHECKS
@@ -315,6 +317,13 @@ config_first_mode() {
     echo "  Edit it, save (Ctrl+O, Enter), then exit nano (Ctrl+X)."
     echo "  The install will begin automatically after you exit."
     echo ""
+
+    # If the config file already exists and has content, skip template generation
+    # and nano so the install can be driven non-interactively (CI/automated use).
+    if [[ -s "$CONF_FILE" ]]; then
+        info "Found existing config: $CONF_FILE — skipping editor"
+    else
+
     info "Generating $CONF_FILE ..."
 
     cat > "$CONF_FILE" <<EOF
@@ -388,6 +397,8 @@ EOF
     info "Opening in nano — edit your settings, then Ctrl+O to save and Ctrl+X to exit."
     sleep 1
     nano "$CONF_FILE"
+
+    fi  # end of "no pre-existing config" block
 
     # Read values back from the file
     info "Reading configuration from $CONF_FILE ..."
@@ -1040,23 +1051,33 @@ main() {
     echo ""
 
     # ── Mode selection ────────────────────────────────────────────────────────
-    echo -e "  ${BOLD}Choose a setup mode:${NC}"
-    echo ""
-    echo "    [1]  Guided Setup  (recommended for first-time installs)"
-    echo "         I'll ask each question one at a time with plain-English"
-    echo "         explanations. Good if you want to understand what each"
-    echo "         setting does as you go."
-    echo ""
-    echo "    [2]  Config-First Setup"
-    echo "         A config file is generated with all options and comments."
-    echo "         Edit everything at once in a text editor, then the install"
-    echo "         runs automatically. Good if you prefer to review it all"
-    echo "         before committing."
-    echo ""
-    local mode_choice
-    echo -ne "  ${BOLD}Enter 1 or 2 [default: 1]:${NC} "
-    read -r mode_choice
-    mode_choice="${mode_choice:-1}"
+    # --mode=1 or --mode=2 on the command line bypasses the interactive prompt
+    # (useful for CI, automated deploys, and SSH-driven installs).
+    local mode_choice=""
+    for _a in "$@"; do
+        [[ "$_a" == --mode=* ]] && mode_choice="${_a#--mode=}"
+    done
+
+    if [[ -z "$mode_choice" ]]; then
+        echo -e "  ${BOLD}Choose a setup mode:${NC}"
+        echo ""
+        echo "    [1]  Guided Setup  (recommended for first-time installs)"
+        echo "         I'll ask each question one at a time with plain-English"
+        echo "         explanations. Good if you want to understand what each"
+        echo "         setting does as you go."
+        echo ""
+        echo "    [2]  Config-First Setup"
+        echo "         A config file is generated with all options and comments."
+        echo "         Edit everything at once in a text editor, then the install"
+        echo "         runs automatically. Good if you prefer to review it all"
+        echo "         before committing."
+        echo ""
+        echo -ne "  ${BOLD}Enter 1 or 2 [default: 1]:${NC} "
+        read -r mode_choice
+        mode_choice="${mode_choice:-1}"
+    else
+        info "Mode set via --mode flag: $mode_choice"
+    fi
 
     # Preflight always runs first — it populates DETECTED_* vars
     preflight_checks
