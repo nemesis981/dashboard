@@ -34,6 +34,8 @@ from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
     get_usage_stats as ai_get_usage_stats,
+    get_upsell_prompt_html as _ai_upsell_html,
+    get_upsell_js as _ai_upsell_js,
 )
 
 log = logging.getLogger("nemesis.anomaly")
@@ -1267,6 +1269,8 @@ def _render_card(building: bool, built: bool) -> str:
                ' — monitoring active' if built else '') + '</p>'
         )
 
+    upsell_html = _ai_upsell_html(350, 150) if incident_rows else ""
+
     cisa_modal  = _cisa_modal_html()
     ai_modal    = _ai_modal_html()
     detail_modal = (
@@ -1321,10 +1325,13 @@ def _render_card(building: bool, built: bool) -> str:
 
   <div id="_adMoreContainer">{more_btn}</div>
 
+  {upsell_html}
+
   {detail_modal}
   {ai_modal}
   {cisa_modal}
   <script>{js}</script>
+  {_ai_upsell_js()}
   </div><!-- end section-anomaly-body -->
 </div>"""
 
@@ -1529,6 +1536,10 @@ def _card_js() -> str:
       .then(function(r){{return r.json();}})
       .then(function(d){{
         if (el) el.innerHTML = d.html || '<em>No detail</em>';
+        if (el && d.upsell_html) {{
+          el.innerHTML += d.upsell_html;
+          if (typeof applyTierText === 'function') applyTierText();
+        }}
       }})
       .catch(function(){{ if(el) el.textContent = 'Failed to load details.'; }});
   }};
@@ -1796,7 +1807,8 @@ def _api_incident_detail(inc_id: int):
     )
 
     from flask import jsonify
-    return jsonify({"html": detail_html, "cisa_text": cisa_text})
+    return jsonify({"html": detail_html, "cisa_text": cisa_text,
+                    "upsell_html": _ai_upsell_html(350, 150)})
 
 
 def _api_incident_close(inc_id: int):

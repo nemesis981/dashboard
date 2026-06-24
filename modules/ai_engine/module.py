@@ -231,6 +231,73 @@ def get_pricing() -> dict:
     return {"input_per_mtok": inp, "output_per_mtok": out}
 
 
+def get_upsell_prompt_html(tokens_in: int = 350, tokens_out: int = 150) -> str:
+    """Returns a compact 3-tier AI-suggest prompt, or '' if AI is active or dismissed.
+    Call at render time — reads live state from DB each call."""
+    if _get_setting("ai_upsell_dismissed", "0") == "1":
+        return ""
+    status = get_status()
+    if status["state"] == "active":
+        return ""
+    pricing = get_pricing()
+    cost = (tokens_in * pricing["input_per_mtok"] / 1_000_000 +
+            tokens_out * pricing["output_per_mtok"] / 1_000_000)
+    if cost < 0.001:
+        cost_str = "<$0.001"
+    elif cost < 0.10:
+        cost_str = f"~${cost:.3f}"
+    else:
+        cost_str = f"~${cost:.2f}"
+    return (
+        '<div class="ai-upsell-prompt" '
+        'style="display:flex;align-items:center;gap:8px;'
+        'background:rgba(0,212,255,0.04);border:1px solid #00d4ff22;border-radius:6px;'
+        'padding:6px 10px;margin:6px 0;font-size:0.81em;line-height:1.4">'
+        '<span style="color:#00d4ff;flex-shrink:0">&#128161;</span>'
+        '<span class="tier-text" style="color:#888;flex:1" '
+        f'data-beginner="This was checked by the built-in engines &#8212; that part&#39;s working. '
+        f'AI could explain this result in plain English and help you prioritize it. '
+        f'Turn it on in Settings (about {cost_str} for this)." '
+        f'data-intermediate="Local analysis complete. AI verdict adds context + '
+        f'prioritization for this item &#8212; est. {cost_str}. Enable in Settings." '
+        f'data-pro="AI second-opinion available ({cost_str}). Enable in Settings.">'
+        f'Local analysis complete. AI verdict adds context &#8212; est. {cost_str}. '
+        f'Enable in Settings.</span>'
+        '<button onclick="_aiUpsellDismissOnce(this)" title="Dismiss" '
+        'style="background:none;border:none;color:#444;cursor:pointer;padding:0 3px;'
+        'line-height:1;font-size:1.1em;flex-shrink:0">&#215;</button>'
+        '<a href="#" onclick="_aiUpsellDismissPermanent(event)" '
+        'style="color:#555;font-size:0.85em;white-space:nowrap;flex-shrink:0;'
+        'text-decoration:underline">don&#39;t&nbsp;remind&nbsp;me</a>'
+        '</div>'
+    )
+
+
+def get_upsell_js() -> str:
+    """Guarded <script> block defining _aiUpsellDismissOnce + _aiUpsellDismissPermanent.
+    Include once per page (guard prevents double-definition across multiple cards)."""
+    return (
+        '<script>'
+        '(function(){'
+        'if(window._aiUpsellJsLoaded)return;'
+        'window._aiUpsellJsLoaded=true;'
+        'window._aiUpsellDismissOnce=function(btn){'
+        'var p=btn.closest(".ai-upsell-prompt");'
+        'if(p)p.style.display="none";'
+        '};'
+        'window._aiUpsellDismissPermanent=function(e){'
+        'e.preventDefault();'
+        'fetch("/api/ai/upsell_dismiss",{method:"POST"})'
+        '.then(function(){'
+        'document.querySelectorAll(".ai-upsell-prompt")'
+        '.forEach(function(el){el.style.display="none";});'
+        '});'
+        '};'
+        '})();'
+        '</script>'
+    )
+
+
 def get_usage_stats() -> dict:
     try:
         conn = _conn()
@@ -380,8 +447,9 @@ def _route_settings():
     from flask import request, jsonify
     if request.method == "GET":
         return jsonify({
-            "rate_per_hour": int(_get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT))),
-            "rate_per_day":  int(_get_setting("rate_per_day",  str(_RATE_DAY_DEFAULT))),
+            "rate_per_hour":       int(_get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT))),
+            "rate_per_day":        int(_get_setting("rate_per_day",  str(_RATE_DAY_DEFAULT))),
+            "ai_upsell_dismissed": _get_setting("ai_upsell_dismissed", "0") == "1",
         })
     data = request.get_json(silent=True) or {}
     try:
@@ -389,9 +457,23 @@ def _route_settings():
             _set_setting("rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
         if "rate_per_day" in data:
             _set_setting("rate_per_day",  str(max(0, int(data["rate_per_day"]))))
+        if "ai_upsell_dismissed" in data:
+            _set_setting("ai_upsell_dismissed", "1" if data["ai_upsell_dismissed"] else "0")
         return jsonify({"ok": True})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
+
+
+def _route_upsell_dismiss():
+    from flask import jsonify
+    _set_setting("ai_upsell_dismissed", "1")
+    return jsonify({"ok": True})
+
+
+def _route_upsell_restore():
+    from flask import jsonify
+    _set_setting("ai_upsell_dismissed", "0")
+    return jsonify({"ok": True})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,7 +497,9 @@ class Module(NemesisModule):
 
     def get_routes(self):
         return [
-            ("/api/ai/status",   _route_status,   {"methods": ["GET"]}),
-            ("/api/ai/usage",    _route_usage,    {"methods": ["GET"]}),
-            ("/api/ai/settings", _route_settings, {"methods": ["GET", "POST"]}),
+            ("/api/ai/status",         _route_status,         {"methods": ["GET"]}),
+            ("/api/ai/usage",          _route_usage,          {"methods": ["GET"]}),
+            ("/api/ai/settings",       _route_settings,       {"methods": ["GET", "POST"]}),
+            ("/api/ai/upsell_dismiss", _route_upsell_dismiss, {"methods": ["POST"]}),
+            ("/api/ai/upsell_restore", _route_upsell_restore, {"methods": ["POST"]}),
         ]

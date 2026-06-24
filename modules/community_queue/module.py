@@ -17,6 +17,8 @@ from modules import NemesisModule
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
+    get_upsell_prompt_html as _ai_upsell_html,
+    get_upsell_js as _ai_upsell_js,
 )
 
 log = logging.getLogger("nemesis.community_queue")
@@ -332,8 +334,9 @@ def _page_community_queue():
     except Exception:
         rows = []
 
-    ai_enabled  = ai_is_enabled()
-    table_html  = _render_table(rows)
+    ai_enabled     = ai_is_enabled()
+    table_html     = _render_table(rows)
+    upsell_js_html = "" if ai_enabled else _ai_upsell_js()
     total       = len(rows)
     reviewed    = sum(1 for r in rows if r["ai_reviewed"])
     unreviewed  = total - reviewed
@@ -356,10 +359,7 @@ def _page_community_queue():
             f'AI reviews each item and rates it: High (submit), Uncertain (review), or Low (false positive).</p>'
         )
     else:
-        analyse_tip = (
-            '<p style="color:#888;font-size:0.85em;margin:8px 0 0 0">'
-            'Enable the AI Engine module and add an ANTHROPIC_API_KEY to unlock batch analysis.</p>'
-        )
+        analyse_tip = _ai_upsell_html(300, 100)
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -367,6 +367,7 @@ def _page_community_queue():
     <title>Community Threat Queue — Nemesis</title>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <script src="/static/tier.js"></script>
+    {upsell_js_html}
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee;
                 padding: 20px; margin: 0; }}

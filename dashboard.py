@@ -1437,6 +1437,7 @@ def settings_page():
     # Read AI Engine settings from ai_engine.db
     _ai_rate_h   = "10"
     _ai_rate_d   = "50"
+    _ai_upsell_dismissed = False
     _ai_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
     _ai_output_price = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
     try:
@@ -1447,6 +1448,7 @@ def settings_page():
             return r[0] if r else d
         _ai_rate_h = _ai_st("rate_per_hour", "10")
         _ai_rate_d = _ai_st("rate_per_day",  "50")
+        _ai_upsell_dismissed = _ai_st("ai_upsell_dismissed", "0") == "1"
         _ai_conn.close()
     except Exception:
         pass
@@ -1694,6 +1696,20 @@ def settings_page():
                         Based on typical prompt size. Actual costs vary. Update /etc/nemesis.env if pricing changes.
                     </span>
                 </div>
+            </div>
+
+            <div class="module-subsettings-row" style="margin-top:8px">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Show AI suggestions on scan results (a hint to enable AI when it could add context)"
+                        data-intermediate="Show AI upsell prompts on findings and incidents when AI is off"
+                        data-pro="ai_upsell_dismissed &#8212; 0=show suggestions, 1=hidden">Show AI suggestions on results</span>
+                </span>
+                <input type="checkbox" id="ai-upsell-show"
+                       {'checked' if not _ai_upsell_dismissed else ''}
+                       onchange="toggleAIUpsell(this.checked)"
+                       style="accent-color:#00d4ff;width:16px;height:16px;cursor:pointer"
+                       title="When checked, a small prompt appears on findings suggesting you enable AI for context">
             </div>
 
             <div id="ai-engine-settings-status"
@@ -2549,6 +2565,10 @@ def settings_page():
             .catch(function() {{
                 if (status) {{ status.style.color = '#ff4444'; status.textContent = 'Request failed'; }}
             }});
+        }}
+
+        function toggleAIUpsell(show) {{
+            fetch(show ? '/api/ai/upsell_restore' : '/api/ai/upsell_dismiss', {{method: 'POST'}});
         }}
 
         function saveAnomalySettings() {{
