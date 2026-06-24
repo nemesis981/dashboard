@@ -6935,7 +6935,7 @@ def dashboard():
         document.addEventListener('DOMContentLoaded', _initPhResetTimes);
 
         // ── Collapsible sections ───────────────────────────────────────────────
-        var _sectionIds = ['hw', 'firewall', 'devices', 'anomaly', 'tickets'];
+        var _sectionIds = ['hw', 'firewall', 'devices', 'anomaly', 'tickets', 'malware'];
 
         function toggleSection(id) {{
             var body = document.getElementById('section-' + id + '-body');
