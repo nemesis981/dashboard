@@ -61,6 +61,8 @@ def set_enabled(name: str, enabled: bool) -> None:
     """Toggle a module.  Updates DB and starts/stops the module immediately."""
     if name not in _manifests:
         raise ValueError(f"Unknown module: {name!r}")
+    if not enabled and _manifests[name].get("required"):
+        raise ValueError(f"Module {name!r} is required and cannot be disabled")
     _set_enabled_in_db(name, enabled)
     if enabled:
         _load_module(name)
@@ -134,7 +136,11 @@ def _discover() -> None:
 
 
 def _load_all_enabled() -> None:
-    for name in list(_manifests):
+    # Required modules load first so their Python APIs are importable when
+    # optional modules execute their top-level imports (e.g. anomaly_detection
+    # imports modules.ai_engine at module level).
+    ordered = sorted(_manifests, key=lambda n: (0 if _manifests[n].get("required") else 1, n))
+    for name in ordered:
         if _is_enabled(name):
             try:
                 _load_module(name)

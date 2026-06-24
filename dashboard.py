@@ -1493,11 +1493,30 @@ def settings_page():
         category = html.escape(m.get("category", ""))
         confirm_required = "true" if m.get("confirmation_required") else "false"
         confirm_msg = html.escape(m.get("confirmation_message", ""), quote=True)
+        is_required = m.get("required", False)
         toggle_checked = "checked" if enabled else ""
-        toggle_color = "#00ff88" if enabled else "#444"
         status_label = "Enabled" if enabled else "Disabled"
         status_color = "#00ff88" if enabled else "#666"
-        module_rows_html += f"""
+        if is_required:
+            module_rows_html += f"""
+        <div class="module-row" id="mod-row-{name}">
+            <div class="module-info">
+                <div class="module-name">{display_name}
+                    <span class="module-cat">{category}</span>
+                    <span class="tier-text" style="background:#0a2a1a;color:#00ff88;border:1px solid #00ff8844;border-radius:8px;padding:1px 7px;font-size:0.72em;margin-left:6px;font-weight:bold"
+                        data-beginner="Required &#8212; cannot be disabled; other modules depend on it"
+                        data-intermediate="Required &#8212; hard-imported by other modules at startup"
+                        data-pro="required: true &#8212; load-order guaranteed; set_enabled raises ValueError">core</span>
+                </div>
+                <div class="module-desc">{description}</div>
+                <div class="module-status" id="mod-status-{name}" style="color:{status_color}">{status_label}</div>
+            </div>
+            <span title="Required module &#8212; cannot be disabled"
+                  style="color:#556;font-size:1.4em;cursor:not-allowed;user-select:none"
+                  aria-label="Required module">&#128274;</span>
+        </div>"""
+        else:
+            module_rows_html += f"""
         <div class="module-row" id="mod-row-{name}">
             <div class="module-info">
                 <div class="module-name">{display_name}
