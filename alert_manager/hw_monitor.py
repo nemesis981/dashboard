@@ -251,6 +251,64 @@ def init_db():
         """)
         conn.commit()
 
+        # agent_devices migrations: add columns introduced after initial schema.
+        existing_ag = {row[1] for row in c.execute("PRAGMA table_info(agent_devices)").fetchall()}
+        for col, decl in (("ip_address",        "TEXT"),
+                          ("known_users_json",   "TEXT DEFAULT '[]'"),
+                          ("known_usb_json",     "TEXT DEFAULT '[]'")):
+            if col not in existing_ag:
+                c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
+        conn.commit()
+
+        # scan_queue: pending, executing and completed auto-triggered scans.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_queue (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT NOT NULL,
+                trigger_type    TEXT NOT NULL,
+                trigger_detail  TEXT,
+                scan_path       TEXT DEFAULT '/',
+                queued_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status          TEXT DEFAULT 'pending',
+                executed_at     TIMESTAMP,
+                scan_job_id     TEXT
+            )
+        """)
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scan_queue_device "
+            "ON scan_queue(device_id, status)"
+        )
+
+        # scan_conditions: configurable rules that auto-queue scans.
+        # NULL device_id means applies to all devices.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_conditions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT,
+                condition_type  TEXT NOT NULL,
+                condition_value TEXT,
+                enabled         INTEGER DEFAULT 1,
+                scan_path       TEXT DEFAULT '/'
+            )
+        """)
+        conn.commit()
+
+        # Seed default conditions if the table is empty.
+        if c.execute("SELECT COUNT(*) FROM scan_conditions").fetchone()[0] == 0:
+            defaults = [
+                (None, "first_connect",      None,  1, "/"),
+                (None, "return_from_remote", None,  1, "/"),
+                (None, "extended_absence",   "24",  1, "/"),
+            ]
+            c.executemany(
+                "INSERT INTO scan_conditions "
+                "(device_id, condition_type, condition_value, enabled, scan_path) "
+                "VALUES (?, ?, ?, ?, ?)",
+                defaults,
+            )
+            conn.commit()
+            log.info("init_db: seeded 3 default scan conditions")
+
         # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
         # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
         fan_labels = {}
@@ -1208,7 +1266,7 @@ def _nemesis_payload_to_metrics(payload):
     }
 
 
-def _update_agent_device(payload):
+def _update_agent_device(payload, remote_ip=None):
     """Upsert agent_devices row from a nemesis_agent POST."""
     device_id   = payload.get("device_id", "local")
     device_name = payload.get("device_name", device_id)
@@ -1221,30 +1279,432 @@ def _update_agent_device(payload):
     last_scan   = ah.get("last_scan_at") or ""
     last_result = ah.get("last_scan_result") or ""
 
-    # best-effort IP from request — not available in this context, skip
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
-        conn.execute("""
-            INSERT INTO agent_devices
-                (device_id, device_name, device_type, connection_type,
-                 agent_last_seen, suricata_running, suricata_profile,
-                 last_scan_at, last_scan_result)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(device_id) DO UPDATE SET
-                device_name     = excluded.device_name,
-                device_type     = excluded.device_type,
-                connection_type = excluded.connection_type,
-                agent_last_seen = excluded.agent_last_seen,
-                suricata_running= excluded.suricata_running,
-                suricata_profile= excluded.suricata_profile,
-                last_scan_at    = excluded.last_scan_at,
-                last_scan_result= excluded.last_scan_result
-        """, (device_id, device_name, device_type, conn_type,
-              ts, suri_run, suri_prof, last_scan, last_result))
+        if remote_ip:
+            conn.execute("""
+                INSERT INTO agent_devices
+                    (device_id, device_name, device_type, ip_address, connection_type,
+                     agent_last_seen, suricata_running, suricata_profile,
+                     last_scan_at, last_scan_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    device_name     = excluded.device_name,
+                    device_type     = excluded.device_type,
+                    ip_address      = excluded.ip_address,
+                    connection_type = excluded.connection_type,
+                    agent_last_seen = excluded.agent_last_seen,
+                    suricata_running= excluded.suricata_running,
+                    suricata_profile= excluded.suricata_profile,
+                    last_scan_at    = excluded.last_scan_at,
+                    last_scan_result= excluded.last_scan_result
+            """, (device_id, device_name, device_type, remote_ip, conn_type,
+                  ts, suri_run, suri_prof, last_scan, last_result))
+        else:
+            conn.execute("""
+                INSERT INTO agent_devices
+                    (device_id, device_name, device_type, connection_type,
+                     agent_last_seen, suricata_running, suricata_profile,
+                     last_scan_at, last_scan_result)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id) DO UPDATE SET
+                    device_name     = excluded.device_name,
+                    device_type     = excluded.device_type,
+                    connection_type = excluded.connection_type,
+                    agent_last_seen = excluded.agent_last_seen,
+                    suricata_running= excluded.suricata_running,
+                    suricata_profile= excluded.suricata_profile,
+                    last_scan_at    = excluded.last_scan_at,
+                    last_scan_result= excluded.last_scan_result
+            """, (device_id, device_name, device_type, conn_type,
+                  ts, suri_run, suri_prof, last_scan, last_result))
         conn.commit()
         conn.close()
     except Exception as e:
         log.warning("_update_agent_device failed: %s", e)
+
+
+# ── Scan queue trigger engine ─────────────────────────────────────────────────
+
+import re as _re
+import uuid as _uuid_mod
+import urllib.request as _urllib_req
+
+
+_LOGIN_USER_RE = _re.compile(
+    r"for user (\w+)|session opened for (\w+)|Accepted \w+ for (\w+)"
+)
+
+
+def _extract_usernames(login_events):
+    """Best-effort username extraction from login_events list."""
+    users = set()
+    for ev in login_events:
+        raw = ev.get("raw", "") if isinstance(ev, dict) else str(ev)
+        for m in _LOGIN_USER_RE.finditer(raw):
+            u = next(g for g in m.groups() if g)
+            if u not in ("root", "uid=0", "session"):
+                users.add(u)
+    return users
+
+
+def _extract_usb_names(usb_events):
+    """Return a set of short USB device identifiers from usb_events list."""
+    names = set()
+    for ev in usb_events:
+        raw = ev.get("raw", "") if isinstance(ev, dict) else str(ev)
+        raw = raw.strip()
+        if raw:
+            # Use first 80 chars as a stable key
+            names.add(raw[:80])
+    return names
+
+
+def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
+    """Insert into scan_queue if no pending entry already exists for this device."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        existing = conn.execute(
+            "SELECT id FROM scan_queue WHERE device_id=? AND status='pending'",
+            (device_id,),
+        ).fetchone()
+        if not existing:
+            conn.execute(
+                "INSERT INTO scan_queue "
+                "(device_id, trigger_type, trigger_detail, scan_path) "
+                "VALUES (?, ?, ?, ?)",
+                (device_id, trigger_type, trigger_detail or "", scan_path or "/"),
+            )
+            conn.commit()
+            log.info(
+                "scan queued: device=%s trigger=%s detail=%s",
+                device_id, trigger_type, trigger_detail,
+            )
+        conn.close()
+    except Exception as e:
+        log.warning("_queue_scan failed: %s", e)
+
+
+def _check_and_queue_scan_triggers(payload):
+    """Evaluate all enabled scan_conditions against the incoming payload.
+
+    Must be called BEFORE _update_agent_device so the previous device state
+    is still in the database.
+    """
+    device_id = payload.get("device_id", "local")
+    conn_type = payload.get("connection_type", "")
+    security  = payload.get("security", {}) or {}
+
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+
+        # Previous device state (before this payload)
+        prev = conn.execute(
+            "SELECT connection_type, agent_last_seen, known_users_json, known_usb_json "
+            "FROM agent_devices WHERE device_id=?",
+            (device_id,),
+        ).fetchone()
+        is_first_connect = prev is None
+        prev_conn_type   = prev[0] if prev else None
+        prev_last_seen   = prev[1] if prev else None
+        known_users      = set(json.loads(prev[2] or "[]")) if prev else set()
+        known_usb        = set(json.loads(prev[3] or "[]")) if prev else set()
+
+        # Active conditions: device-specific overrides globals, NULL = all devices
+        cond_rows = conn.execute(
+            "SELECT condition_type, condition_value, scan_path FROM scan_conditions "
+            "WHERE enabled=1 AND (device_id IS NULL OR device_id=?) "
+            "ORDER BY device_id NULLS LAST",   # device-specific takes precedence
+            (device_id,),
+        ).fetchall()
+        conn.close()
+
+        # Build map: keep last (most-specific) entry per condition_type
+        conditions = {}
+        for ctype, cval, cpath in cond_rows:
+            conditions[ctype] = (cval, cpath or "/")
+
+        # ── 1. first_connect ─────────────────────────────────────────────────
+        if is_first_connect and "first_connect" in conditions:
+            _, cpath = conditions["first_connect"]
+            _queue_scan(device_id, "first_connect", None, cpath)
+
+        # ── 2. return_from_remote ────────────────────────────────────────────
+        if (prev_conn_type == "vpn_remote" and conn_type == "local"
+                and "return_from_remote" in conditions):
+            _, cpath = conditions["return_from_remote"]
+            _queue_scan(device_id, "return_from_remote", None, cpath)
+
+        # ── 3. extended_absence ──────────────────────────────────────────────
+        if prev_last_seen and "extended_absence" in conditions:
+            threshold_h, cpath = conditions["extended_absence"]
+            try:
+                threshold_h = float(threshold_h or 24)
+                last_dt     = datetime.fromisoformat(prev_last_seen)
+                hours_absent = (datetime.now() - last_dt).total_seconds() / 3600
+                if hours_absent >= threshold_h:
+                    detail = f"absent {int(hours_absent)}h"
+                    _queue_scan(device_id, "extended_absence", detail, cpath)
+            except Exception:
+                pass
+
+        # ── 4. new_login ─────────────────────────────────────────────────────
+        if "new_login" in conditions:
+            _, cpath = conditions["new_login"]
+            current_users = _extract_usernames(security.get("login_events", []))
+            new_users = current_users - known_users
+            if new_users:
+                detail = "new user: " + ", ".join(sorted(new_users))
+                _queue_scan(device_id, "new_login", detail, cpath)
+                _persist_known_set(device_id, "known_users_json",
+                                   known_users | current_users)
+
+        # ── 5. usb_inserted ──────────────────────────────────────────────────
+        if "usb_inserted" in conditions:
+            _, cpath = conditions["usb_inserted"]
+            current_usb = _extract_usb_names(security.get("usb_events", []))
+            new_usb = current_usb - known_usb
+            if new_usb:
+                detail = "USB: " + list(new_usb)[0][:60]
+                _queue_scan(device_id, "usb_inserted", detail, cpath)
+                _persist_known_set(device_id, "known_usb_json",
+                                   known_usb | current_usb)
+
+    except Exception as e:
+        log.warning("_check_and_queue_scan_triggers failed for %s: %s", device_id, e)
+
+
+def _persist_known_set(device_id, column, values):
+    """Write an updated known-users/usb set back to agent_devices."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        # Cap at 500 entries to avoid unbounded growth
+        trimmed = list(values)[-500:]
+        conn.execute(
+            f"UPDATE agent_devices SET {column}=? WHERE device_id=?",
+            (json.dumps(trimmed), device_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.debug("_persist_known_set failed: %s", e)
+
+
+def _dispatch_pending_scans(device_id, agent_ip):
+    """Send the oldest pending queued scan to the agent right now.
+
+    Called immediately after a payload is processed so reconnecting devices
+    execute their queued scans without needing a manual trigger.
+    For device_id='local' the scan runs in-process via subprocess.
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute(
+            "SELECT id, scan_path FROM scan_queue "
+            "WHERE device_id=? AND status='pending' "
+            "ORDER BY queued_at LIMIT 1",
+            (device_id,),
+        ).fetchall()
+        conn.close()
+
+        for queue_id, scan_path in rows:
+            scan_id = str(_uuid_mod.uuid4())
+
+            # Record in scan_jobs
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn.execute(
+                "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
+                "VALUES (?, ?, ?, 'running', ?)",
+                (device_id, scan_id, scan_path or "/", datetime.now().isoformat()),
+            )
+            conn.execute(
+                "UPDATE scan_queue SET status='executing', executed_at=?, scan_job_id=? "
+                "WHERE id=?",
+                (datetime.now().isoformat(), scan_id, queue_id),
+            )
+            conn.commit()
+            conn.close()
+
+            if device_id == "local":
+                # Import lazily to avoid circular dependency; dashboard.py owns this fn
+                # but hw_monitor.py runs as a daemon too.  Use subprocess directly.
+                import shutil as _shutil
+                import threading as _threading
+                if _shutil.which("clamscan"):
+                    _t = _threading.Thread(
+                        target=_local_clamscan_thread,
+                        args=(scan_id, scan_path or "/"),
+                        daemon=True,
+                    )
+                    _t.start()
+                    log.info("dispatched local clamscan: queue_id=%d scan_id=%s", queue_id, scan_id)
+            elif agent_ip:
+                try:
+                    import urllib.request as _ur
+                    import urllib.error
+                    body = json.dumps({
+                        "action": "scan",
+                        "path":    scan_path or "/",
+                        "scan_id": scan_id,
+                    }).encode()
+                    req = _ur.Request(
+                        f"http://{agent_ip}:5002",
+                        data=body,
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    _ur.urlopen(req, timeout=5)
+                    log.info(
+                        "dispatched queued scan to agent %s: queue_id=%d scan_id=%s",
+                        agent_ip, queue_id, scan_id,
+                    )
+                except Exception as e:
+                    log.warning("could not dispatch scan to agent %s: %s", agent_ip, e)
+
+    except Exception as e:
+        log.warning("_dispatch_pending_scans failed for %s: %s", device_id, e)
+
+
+def _local_clamscan_thread(scan_id, path):
+    """Minimal local clamscan runner for hw_monitor daemon context."""
+    import shutil as _shutil
+    import subprocess as _sp
+    import os as _os
+    log_file = f"/tmp/nemesis-scan-{scan_id}.log"
+    try:
+        proc = _sp.Popen(
+            ["clamscan", "-r", path, "--no-summary", f"--log={log_file}"],
+            stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+        )
+        proc.wait()
+        threats = []
+        files_scanned = 0
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    if ": " in line:
+                        files_scanned += 1
+                    if "FOUND" in line:
+                        threats.append(line.strip())
+        except Exception:
+            pass
+        status = "threats_found" if threats else "clean"
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "UPDATE scan_jobs SET status=?, files_scanned=?, threats_found=?, "
+            "progress_pct=100, completed_at=? WHERE scan_id=?",
+            (status, files_scanned, len(threats), datetime.now().isoformat(), scan_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning("_local_clamscan_thread failed: %s", e)
+    finally:
+        try:
+            _os.unlink(log_file)
+        except Exception:
+            pass
+
+
+# ── Public scan-queue / scan-conditions accessors ────────────────────────────
+
+def get_scan_queue(status=None):
+    """Return scan_queue rows as list of dicts, optionally filtered by status."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        if status:
+            rows = conn.execute(
+                "SELECT id, device_id, trigger_type, trigger_detail, scan_path, "
+                "queued_at, status, executed_at, scan_job_id "
+                "FROM scan_queue WHERE status=? ORDER BY queued_at",
+                (status,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, device_id, trigger_type, trigger_detail, scan_path, "
+                "queued_at, status, executed_at, scan_job_id "
+                "FROM scan_queue ORDER BY queued_at DESC LIMIT 200"
+            ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    cols = ["id", "device_id", "trigger_type", "trigger_detail", "scan_path",
+            "queued_at", "status", "executed_at", "scan_job_id"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_scan_conditions():
+    """Return all scan_conditions rows as list of dicts."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute(
+            "SELECT id, device_id, condition_type, condition_value, enabled, scan_path "
+            "FROM scan_conditions ORDER BY id"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    cols = ["id", "device_id", "condition_type", "condition_value", "enabled", "scan_path"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def add_scan_condition(device_id, condition_type, condition_value, enabled, scan_path):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "INSERT INTO scan_conditions "
+            "(device_id, condition_type, condition_value, enabled, scan_path) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (device_id or None, condition_type, condition_value or None,
+             1 if enabled else 0, scan_path or "/"),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log.warning("add_scan_condition failed: %s", e)
+        return False
+
+
+def delete_scan_condition(condition_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute("DELETE FROM scan_conditions WHERE id=?", (condition_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log.warning("delete_scan_condition failed: %s", e)
+        return False
+
+
+def cancel_queue_item(queue_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "UPDATE scan_queue SET status='cancelled' WHERE id=? AND status='pending'",
+            (queue_id,),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        log.warning("cancel_queue_item failed: %s", e)
+        return False
+
+
+def get_pending_count_per_device():
+    """Return {device_id: pending_count} for all devices with pending queue items."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute(
+            "SELECT device_id, COUNT(*) FROM scan_queue "
+            "WHERE status='pending' GROUP BY device_id"
+        ).fetchall()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception:
+        return {}
 
 
 def get_agent_devices():
@@ -1368,13 +1828,17 @@ def _start_windows_agent_listener():
                 return
 
             try:
+                remote_ip = self.client_address[0]
                 if source == "nemesis_agent":
                     metrics = _nemesis_payload_to_metrics(payload)
-                    _update_agent_device(payload)
+                    _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
+                    _update_agent_device(payload, remote_ip=remote_ip)
                     insert_sample(metrics)
+                    device_id = payload.get("device_id", "local")
+                    _dispatch_pending_scans(device_id, remote_ip)
                     log.info(
                         "nemesis_agent: sample device=%s cpu=%s°C gpu=%s°C conn=%s",
-                        payload.get("device_id"), metrics.get("cpu_temp"),
+                        device_id, metrics.get("cpu_temp"),
                         metrics.get("gpu_temp"), payload.get("connection_type"),
                     )
                 else:

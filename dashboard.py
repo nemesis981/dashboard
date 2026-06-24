@@ -4851,10 +4851,11 @@ def api_scan_devices():
     device regardless of agent deployment.
     """
     try:
-        hw_devs  = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
-        ag_devs  = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
-        net_devs = get_network_devices()
-        now_ts   = datetime.now()
+        hw_devs      = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
+        ag_devs      = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
+        net_devs     = get_network_devices()
+        pending_map  = hw_monitor.get_pending_count_per_device()
+        now_ts       = datetime.now()
 
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
 
@@ -4887,6 +4888,7 @@ def api_scan_devices():
             "hw_health":        _hw_health_from_temp(local_cpu),
             "cpu_temp":         local_cpu,
             "clamav_available": bool(shutil.which("clamscan")),
+            "pending_scans":    pending_map.get("local", 0),
         }
 
         # ── Remote / network devices ──────────────────────────────────────────
@@ -4936,6 +4938,7 @@ def api_scan_devices():
                 "hw_health":        _hw_health_from_temp(cpu_t),
                 "cpu_temp":         cpu_t,
                 "clamav_available": False,
+                "pending_scans":    pending_map.get(did, 0),
             })
 
         conn.close()
@@ -5077,13 +5080,14 @@ def api_scan_trigger():
                                  daemon=True, name=f"clamscan-{scan_id[:8]}")
             t.start()
         else:
-            # Send command to remote agent
+            # Send command to remote agent; queue if offline
             conn = sqlite3.connect(DB_PATH, timeout=5.0)
             row = conn.execute(
                 "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
             ).fetchone()
             conn.close()
             agent_ip = row[0] if row and row[0] else None
+            agent_reachable = False
             if agent_ip:
                 try:
                     requests.post(
@@ -5091,10 +5095,22 @@ def api_scan_trigger():
                         json={"action": "scan", "path": path, "scan_id": scan_id},
                         timeout=5,
                     )
+                    agent_reachable = True
                 except Exception as e:
                     log.warning("Could not reach agent %s: %s", agent_ip, e)
+            if not agent_reachable:
+                # Agent offline — delete the eager scan_job and queue instead
+                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                conn.execute("DELETE FROM scan_jobs WHERE scan_id=?", (scan_id,))
+                conn.commit()
+                conn.close()
+                hw_monitor._queue_scan(device_id, "manual", "manual scan while offline", path)
+                return jsonify({
+                    "ok": True, "queued": True,
+                    "message": "Agent offline — scan queued for next reconnect",
+                })
 
-        return jsonify({"ok": True, "scan_id": scan_id})
+        return jsonify({"ok": True, "scan_id": scan_id, "queued": False})
     except Exception as e:
         log.exception("api_scan_trigger failed: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -5279,6 +5295,57 @@ def api_update_friendly_name():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Scan queue & conditions API ──────────────────────────────────────────────
+
+@app.route("/api/scan/queue")
+def api_scan_queue_get():
+    """GET /api/scan/queue?status=pending|executing|completed — list queue entries."""
+    status = request.args.get("status", "")
+    items = hw_monitor.get_scan_queue(status=status or None)
+    return jsonify({"queue": items})
+
+
+@app.route("/api/scan/queue/cancel", methods=["POST"])
+def api_scan_queue_cancel():
+    """POST {queue_id} → cancel a pending queue entry."""
+    data = request.get_json(force=True) or {}
+    queue_id = data.get("queue_id")
+    if not queue_id:
+        return jsonify({"error": "queue_id required"}), 400
+    ok = hw_monitor.cancel_queue_item(int(queue_id))
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/scan/conditions")
+def api_scan_conditions_get():
+    """GET — list all scan conditions."""
+    return jsonify({"conditions": hw_monitor.get_scan_conditions()})
+
+
+@app.route("/api/scan/conditions", methods=["POST"])
+def api_scan_conditions_post():
+    """POST {condition_type, condition_value?, device_id?, enabled, scan_path} — add condition."""
+    data = request.get_json(force=True) or {}
+    ctype = data.get("condition_type", "")
+    if not ctype:
+        return jsonify({"error": "condition_type required"}), 400
+    ok = hw_monitor.add_scan_condition(
+        device_id       = data.get("device_id") or None,
+        condition_type  = ctype,
+        condition_value = data.get("condition_value") or None,
+        enabled         = data.get("enabled", True),
+        scan_path       = data.get("scan_path") or "/",
+    )
+    return jsonify({"ok": ok})
+
+
+@app.route("/api/scan/conditions/<int:condition_id>", methods=["DELETE"])
+def api_scan_conditions_delete(condition_id):
+    """DELETE /api/scan/conditions/<id>"""
+    ok = hw_monitor.delete_scan_condition(condition_id)
+    return jsonify({"ok": ok})
+
+
 # ── Scan page (/scan) ─────────────────────────────────────────────────────────
 
 @app.route("/scan")
@@ -5339,6 +5406,20 @@ def scan_page():
             padding:8px; border-radius:4px; width:100%; box-sizing:border-box; margin:6px 0; }}
         .progress-bar {{ height:8px; background:#1a1a2e; border-radius:4px; overflow:hidden; }}
         .progress-fill {{ height:100%; background:#00d4ff; transition:width 0.3s; }}
+        .badge-purple {{ background:#1a0030; color:#cc88ff; border: 1px solid #cc88ff; }}
+        .toast {{ position:fixed; bottom:24px; right:24px; background:#1e2d4e;
+            border:1px solid #00d4ff; border-radius:8px; padding:14px 20px;
+            color:#eee; font-size:0.9em; z-index:2000; opacity:0; transition:opacity 0.3s;
+            max-width:360px; pointer-events:none; }}
+        .toast.show {{ opacity:1; pointer-events:auto; }}
+        .conditions-table {{ width:100%; border-collapse:collapse; font-size:0.83em; }}
+        .conditions-table th {{ color:#888; padding:6px 8px; border-bottom:1px solid #222;
+            text-align:left; }}
+        .conditions-table td {{ padding:6px 8px; border-bottom:1px solid #111; }}
+        details summary {{ cursor:pointer; color:#00d4ff; font-size:1em;
+            padding:6px 0; user-select:none; list-style:none; }}
+        details summary::before {{ content:'▶ '; }}
+        details[open] summary::before {{ content:'▼ '; }}
     </style>
 </head>
 <body>
@@ -5355,6 +5436,11 @@ def scan_page():
 <h2>Device Overview</h2>
 <div class="device-grid" id="deviceGrid">
     <div style="color:#888">Loading devices…</div>
+</div>
+
+<h2>Pending Scans <span id="pendingBadge" style="font-size:0.75em;color:#cc88ff;font-weight:normal"></span></h2>
+<div class="panel" id="pendingScansPanel">
+    <div style="color:#888;font-size:0.85em">No pending scans.</div>
 </div>
 
 <h2>Active Scans</h2>
@@ -5374,6 +5460,59 @@ def scan_page():
 <div class="panel" id="schedulesPanel">
     <div style="color:#888;font-size:0.85em">No scheduled scans.</div>
 </div>
+
+<!-- Scan Conditions Section -->
+<div class="panel" style="margin-top:24px">
+    <details>
+    <summary><strong>Scan Conditions</strong></summary>
+    <p style="color:#888;font-size:0.82em;margin:8px 0">
+        Conditions that automatically queue a scan when an agent payload is received.
+        <span data-beginner="These are rules that tell Nemesis when to automatically run a security scan. For example, 'first_connect' means scan a device the very first time it checks in.">ℹ️</span>
+        <span data-intermediate="Trigger logic runs on every nemesis_agent payload POST. Conditions fire only once per trigger event — duplicate pending scans are suppressed."></span>
+        <span data-pro="Evaluated in _check_and_queue_scan_triggers() in hw_monitor.py. Known users/USB sets are persisted in agent_devices.known_users_json / known_usb_json columns."></span>
+    </p>
+    <table class="conditions-table" id="conditionsTable">
+        <thead><tr>
+            <th>Type</th><th>Value</th><th>Scope</th><th>Path</th><th>Enabled</th><th></th>
+        </tr></thead>
+        <tbody id="conditionsBody"><tr><td colspan="6" style="color:#888">Loading…</td></tr></tbody>
+    </table>
+    <div style="margin-top:10px">
+        <button class="btn btn-blue" onclick="openAddConditionModal()">+ Add Condition</button>
+    </div>
+    </details>
+</div>
+
+<!-- Add Condition Modal -->
+<div class="modal-overlay" id="conditionModal" onclick="if(event.target===this)closeConditionModal()">
+<div class="modal">
+    <h3>+ Add Scan Condition</h3>
+    <label style="color:#aaa;font-size:0.85em">Condition Type</label>
+    <select id="condType" onchange="condTypeChanged()">
+        <option value="first_connect">first_connect — First time a device checks in</option>
+        <option value="return_from_remote">return_from_remote — Device returns from VPN/remote</option>
+        <option value="extended_absence">extended_absence — Device absent for N hours</option>
+        <option value="new_login">new_login — Previously unseen user logs in</option>
+        <option value="usb_inserted">usb_inserted — New USB device plugged in</option>
+    </select>
+    <div id="condValueRow" style="display:none">
+        <label style="color:#aaa;font-size:0.85em" id="condValueLabel">Hours</label>
+        <input type="text" id="condValue" placeholder="24">
+    </div>
+    <label style="color:#aaa;font-size:0.85em">Scan Path</label>
+    <input type="text" id="condPath" value="/">
+    <label style="color:#aaa;font-size:0.85em">Device Scope (blank = all devices)</label>
+    <input type="text" id="condDevice" placeholder="device_id or leave blank">
+    <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-green" onclick="saveCondition()">Save</button>
+        <button class="btn btn-grey" style="opacity:1;cursor:pointer" onclick="closeConditionModal()">Cancel</button>
+    </div>
+    <div id="condResult" style="margin-top:8px;font-size:0.85em"></div>
+</div>
+</div>
+
+<!-- Toast notification -->
+<div class="toast" id="toastEl"></div>
 
 <!-- Send Alert Modal -->
 <div class="modal-overlay" id="notifyModal" onclick="if(event.target===this)closeNotifyModal()">
@@ -5457,10 +5596,14 @@ function renderDeviceGrid(devs) {{
             : '';
         var hwBadge    = hwHealthBadge(d.hw_health);
         var scanBadge  = scanStatusBadge(d.last_scan_status, d.last_scan_at, d.last_scan_threats);
-        var canScan    = isLocal ? d.clamav_available : (d.agent_status === 'online');
+        var pendingBadge = (d.pending_scans > 0)
+            ? '<span class="badge badge-purple">🕐 ' + d.pending_scans + ' pending</span>'
+            : '';
+        var canScan    = isLocal ? d.clamav_available
+                                 : (d.agent_status === 'online' || d.agent_status === 'offline');
         var scanBtnTitle = isLocal
             ? (d.clamav_available ? '' : 'ClamAV not installed on this host')
-            : 'Install Nemesis Agent to enable scanning';
+            : (d.agent_status === 'offline' ? 'Agent offline — scan will be queued' : 'Install Nemesis Agent to enable scanning');
         var scanBtn = canScan
             ? '<button class="btn btn-green" onclick="triggerScan(\\'' + d.device_id + '\\')">🔬 Scan Now</button>'
             : '<button class="btn btn-grey" title="' + scanBtnTitle + '">🔬 Scan Now</button>';
@@ -5483,7 +5626,7 @@ function renderDeviceGrid(devs) {{
             nameEl +
             '<div class="device-meta">' + escHtml(d.device_type || 'unknown') +
                 (d.ip_address ? ' &nbsp;·&nbsp; ' + escHtml(d.ip_address) : '') + '</div>' +
-            '<div>' + agentBadge + connBadge + idsBadge + hwBadge + '</div>' +
+            '<div>' + agentBadge + connBadge + idsBadge + hwBadge + pendingBadge + '</div>' +
             '<div style="margin-top:6px;font-size:0.8em;color:#aaa">' + scanBadge + '</div>' +
             '<div class="device-actions">' +
                 scanBtn + alertBtn +
@@ -5538,7 +5681,11 @@ function triggerScan(deviceId) {{
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify({{device_id: deviceId, path: '/'}})
     }}).then(function(r){{return r.json();}}).then(function(d){{
-        if (d.ok) {{
+        if (d.ok && d.queued) {{
+            showToast('🕐 ' + (d.message || 'Scan queued for next reconnect'), 4000);
+            loadPendingScans();
+            loadDevices();
+        }} else if (d.ok) {{
             _activeScans[d.scan_id] = {{device_id: deviceId, started: new Date()}};
             renderActiveScans();
         }} else {{
@@ -5708,11 +5855,174 @@ function escHtml(s) {{
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }}
 
+// ── Toast ─────────────────────────────────────────────────────────────────────
+var _toastTimer = null;
+function showToast(msg, ms) {{
+    var el = document.getElementById('toastEl');
+    el.textContent = msg;
+    el.classList.add('show');
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(function(){{ el.classList.remove('show'); }}, ms || 3000);
+}}
+
+// ── Pending Scans ─────────────────────────────────────────────────────────────
+function loadPendingScans() {{
+    fetch('/api/scan/queue?status=pending')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+            var items = d.queue || [];
+            var panel = document.getElementById('pendingScansPanel');
+            var badge = document.getElementById('pendingBadge');
+            if (!items.length) {{
+                panel.innerHTML = '<div style="color:#888;font-size:0.85em">No pending scans.</div>';
+                badge.textContent = '';
+                return;
+            }}
+            badge.textContent = '(' + items.length + ')';
+            panel.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:0.83em">' +
+                '<thead><tr><th style="color:#888;padding:4px 6px;text-align:left">Device</th>' +
+                '<th style="color:#888;padding:4px 6px;text-align:left">Trigger</th>' +
+                '<th style="color:#888;padding:4px 6px;text-align:left">Detail</th>' +
+                '<th style="color:#888;padding:4px 6px;text-align:left">Path</th>' +
+                '<th style="color:#888;padding:4px 6px;text-align:left">Queued</th>' +
+                '<th></th>' +
+                '</tr></thead><tbody>' +
+                items.map(function(q){{
+                    var dn = deviceName(q.device_id) || q.device_id;
+                    var qt = q.queued_at ? new Date(q.queued_at).toLocaleString() : '';
+                    return '<tr>' +
+                        '<td style="padding:4px 6px">' + escHtml(dn) + '</td>' +
+                        '<td style="padding:4px 6px"><span class="badge badge-purple">' + escHtml(q.trigger_type) + '</span></td>' +
+                        '<td style="padding:4px 6px;color:#888">' + escHtml(q.trigger_detail||'') + '</td>' +
+                        '<td style="padding:4px 6px;color:#888">' + escHtml(q.scan_path||'/') + '</td>' +
+                        '<td style="padding:4px 6px;color:#888">' + qt + '</td>' +
+                        '<td style="padding:4px 6px">' +
+                            '<button class="btn btn-grey" style="opacity:1;cursor:pointer;font-size:0.75em" ' +
+                            'onclick="cancelQueueItem(' + q.id + ')">Cancel</button>' +
+                        '</td>' +
+                    '</tr>';
+                }}).join('') +
+                '</tbody></table>';
+        }})
+        .catch(function(e){{console.error('loadPendingScans:', e);}});
+}}
+
+function cancelQueueItem(queueId) {{
+    fetch('/api/scan/queue/cancel', {{
+        method: 'POST',
+        headers: {{'Content-Type':'application/json'}},
+        body: JSON.stringify({{queue_id: queueId}})
+    }}).then(function(){{ loadPendingScans(); loadDevices(); }});
+}}
+
+// ── Scan Conditions ───────────────────────────────────────────────────────────
+var _COND_LABELS = {{
+    first_connect:      'First Connect',
+    return_from_remote: 'Return from Remote',
+    extended_absence:   'Extended Absence',
+    new_login:          'New Login',
+    usb_inserted:       'USB Inserted',
+}};
+var _COND_EXPLAIN = {{
+    first_connect:      'Queues a scan the very first time a device checks in.',
+    return_from_remote: 'Queues a scan when a device transitions from VPN/remote back to local network.',
+    extended_absence:   'Queues a scan when a device has been offline for longer than N hours.',
+    new_login:          'Queues a scan when a user that has never been seen before logs into the device.',
+    usb_inserted:       'Queues a scan when a new USB device (never seen before) is plugged into the device.',
+}};
+
+function loadScanConditions() {{
+    fetch('/api/scan/conditions')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+            var rows = d.conditions || [];
+            var tbody = document.getElementById('conditionsBody');
+            if (!rows.length) {{
+                tbody.innerHTML = '<tr><td colspan="6" style="color:#888">No conditions defined.</td></tr>';
+                return;
+            }}
+            tbody.innerHTML = rows.map(function(c){{
+                var label = _COND_LABELS[c.condition_type] || c.condition_type;
+                var explain = _COND_EXPLAIN[c.condition_type] || '';
+                var val = (c.condition_type === 'extended_absence')
+                    ? (c.condition_value || '24') + 'h' : (c.condition_value || '—');
+                var scope = c.device_id ? escHtml(c.device_id) : '<em style="color:#888">All devices</em>';
+                var enabledDot = c.enabled
+                    ? '<span style="color:#00ff88">●</span>'
+                    : '<span style="color:#444">●</span>';
+                return '<tr title="' + escHtml(explain) + '">' +
+                    '<td><strong>' + escHtml(label) + '</strong></td>' +
+                    '<td>' + escHtml(val) + '</td>' +
+                    '<td>' + scope + '</td>' +
+                    '<td>' + escHtml(c.scan_path||'/') + '</td>' +
+                    '<td>' + enabledDot + '</td>' +
+                    '<td><button class="btn btn-grey" style="opacity:1;cursor:pointer;font-size:0.75em" ' +
+                        'onclick="deleteCondition(' + c.id + ')">Delete</button></td>' +
+                '</tr>';
+            }}).join('');
+        }});
+}}
+
+function deleteCondition(cid) {{
+    if (!confirm('Delete this scan condition?')) return;
+    fetch('/api/scan/conditions/' + cid, {{method:'DELETE'}})
+        .then(function(){{ loadScanConditions(); }});
+}}
+
+function openAddConditionModal() {{
+    document.getElementById('condResult').textContent = '';
+    document.getElementById('condType').value = 'first_connect';
+    document.getElementById('condValue').value = '';
+    document.getElementById('condPath').value = '/';
+    document.getElementById('condDevice').value = '';
+    condTypeChanged();
+    document.getElementById('conditionModal').style.display = 'block';
+}}
+function closeConditionModal() {{ document.getElementById('conditionModal').style.display = 'none'; }}
+
+function condTypeChanged() {{
+    var t = document.getElementById('condType').value;
+    var row = document.getElementById('condValueRow');
+    var lbl = document.getElementById('condValueLabel');
+    if (t === 'extended_absence') {{
+        row.style.display = 'block';
+        lbl.textContent = 'Absence threshold (hours)';
+        document.getElementById('condValue').placeholder = '24';
+    }} else {{
+        row.style.display = 'none';
+    }}
+}}
+
+function saveCondition() {{
+    var payload = {{
+        condition_type:  document.getElementById('condType').value,
+        condition_value: document.getElementById('condValue').value || null,
+        scan_path:       document.getElementById('condPath').value || '/',
+        device_id:       document.getElementById('condDevice').value || null,
+        enabled:         true,
+    }};
+    document.getElementById('condResult').textContent = 'Saving…';
+    fetch('/api/scan/conditions', {{
+        method: 'POST',
+        headers: {{'Content-Type':'application/json'}},
+        body: JSON.stringify(payload)
+    }}).then(function(r){{return r.json();}}).then(function(d){{
+        if (d.ok) {{
+            closeConditionModal();
+            loadScanConditions();
+        }} else {{
+            document.getElementById('condResult').textContent = '❌ ' + (d.error||'failed');
+        }}
+    }});
+}}
+
 // Init
 loadDevices();
 loadFindings();
 loadSchedules();
-setInterval(function() {{ loadDevices(); pollActiveScans(); }}, 5000);
+loadPendingScans();
+loadScanConditions();
+setInterval(function() {{ loadDevices(); pollActiveScans(); loadPendingScans(); }}, 5000);
 setInterval(loadFindings, 30000);
 </script>
 </body>
