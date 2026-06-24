@@ -626,7 +626,7 @@ install_suricata() {
 ###############################################################################
 
 install_clamav() {
-    step_header "5/9" "Installing ClamAV (Antivirus)"
+    step_header "5/9" "Installing ClamAV + Malware Detection Dependencies"
 
     apt-get install -y clamav clamav-daemon
 
@@ -643,6 +643,17 @@ install_clamav() {
     else
         warn "ClamAV daemon failed to start — check: sudo journalctl -u clamav-daemon -n 20"
     fi
+
+    # YARA + PE heuristics — required by malware_detection Layer A.
+    # yara / python3-yara via apt (avoids needing libyara-dev headers for pip build);
+    # pefile has no apt package so pip is the only option.
+    info "Installing YARA and PE analysis libraries for malware_detection module..."
+    apt-get install -y yara python3-yara \
+        || warn "yara apt packages unavailable — trying pip fallback..."  \
+        && pip3 install --break-system-packages yara-python 2>/dev/null || true
+    pip3 install --break-system-packages pefile \
+        || warn "pefile pip install failed — PE heuristics will be disabled."
+    ok "Malware detection Python dependencies installed"
 }
 
 ###############################################################################
