@@ -5,5 +5,7 @@
     "description": "Anthropic Claude integration — centralised AI analysis, caching, rate limiting, and usage tracking for all Nemesis modules.",
     "category": "intelligence",
     "enabled_by_default": true,
-    "required": true
+    "required": true,
+    "apt_deps": [],
+    "pip_deps": ["anthropic"]
 }

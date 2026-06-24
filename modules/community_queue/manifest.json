@@ -8,5 +8,7 @@
   "requires_background_service": false,
   "config_keys": [],
   "enabled_by_default": false,
-  "confirmation_required": false
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
 }

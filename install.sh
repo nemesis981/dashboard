@@ -657,6 +657,89 @@ install_clamav() {
 }
 
 ###############################################################################
+# MODULE DEPENDENCY INSTALLER
+# Reads apt_deps / pip_deps from every modules/*/manifest.json and installs
+# anything declared.  Supplements the hand-coded installs above so new modules
+# can declare their own deps without touching install.sh.
+###############################################################################
+
+install_module_deps() {
+    step_header "" "Installing module-declared dependencies"
+
+    local modules_dir="$DASHBOARD_DIR/modules"
+
+    if [[ ! -d "$modules_dir" ]]; then
+        warn "Modules directory not found — skipping manifest dep scan"
+        return
+    fi
+
+    # Collect all apt and pip deps from every manifest.json
+    local apt_deps pip_deps
+    apt_deps=$(python3 - "$modules_dir" <<'PYEOF'
+import sys, json, os, glob
+modules_dir = sys.argv[1]
+apt = []
+for mf in sorted(glob.glob(os.path.join(modules_dir, "*", "manifest.json"))):
+    try:
+        m = json.load(open(mf))
+        apt.extend(m.get("apt_deps", []))
+    except Exception:
+        pass
+# Deduplicate, preserve order
+seen = set()
+out = []
+for x in apt:
+    if x not in seen:
+        seen.add(x)
+        out.append(x)
+print("\n".join(out))
+PYEOF
+)
+
+    pip_deps=$(python3 - "$modules_dir" <<'PYEOF'
+import sys, json, os, glob
+modules_dir = sys.argv[1]
+pip = []
+for mf in sorted(glob.glob(os.path.join(modules_dir, "*", "manifest.json"))):
+    try:
+        m = json.load(open(mf))
+        pip.extend(m.get("pip_deps", []))
+    except Exception:
+        pass
+seen = set()
+out = []
+for x in pip:
+    if x not in seen:
+        seen.add(x)
+        out.append(x)
+print("\n".join(out))
+PYEOF
+)
+
+    if [[ -n "$apt_deps" ]]; then
+        info "apt packages from manifests: $(echo "$apt_deps" | tr '\n' ' ')"
+        # shellcheck disable=SC2086
+        apt-get install -y $apt_deps \
+            || warn "One or more manifest apt deps failed — check output above"
+        ok "Manifest apt deps installed"
+    else
+        info "No apt deps declared in module manifests"
+    fi
+
+    if [[ -n "$pip_deps" ]]; then
+        info "pip packages from manifests: $(echo "$pip_deps" | tr '\n' ' ')"
+        while IFS= read -r pkg; do
+            [[ -z "$pkg" ]] && continue
+            pip3 install --break-system-packages "$pkg" \
+                || warn "pip install failed for $pkg"
+        done <<< "$pip_deps"
+        ok "Manifest pip deps installed"
+    else
+        info "No pip deps declared in module manifests"
+    fi
+}
+
+###############################################################################
 # STEP 6/9 — NEMESIS GROUP & PERMISSIONS
 ###############################################################################
 
@@ -1134,6 +1217,7 @@ EOF
     install_pihole
     install_suricata
     install_clamav
+    install_module_deps
     setup_nemesis_group   # writes /etc/nemesis.env and sets permissions
     hardware_discovery
     deploy_services
