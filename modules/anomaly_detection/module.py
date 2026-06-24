@@ -39,8 +39,9 @@ from modules.ai_engine import (
 log = logging.getLogger("nemesis.anomaly")
 
 # ── File paths ───────────────────────────────────────────────────────────────
+_HERE        = os.path.dirname(os.path.abspath(__file__))
 EVE_LOG      = "/var/log/suricata/eve.json"
-DB_PATH      = "/home/paul/dashboard/alert_manager/alerts.db"
+DB_PATH      = os.path.join(_HERE, "..", "..", "alert_manager", "alerts.db")
 
 # ── Tuning ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL       = 60        # seconds between detection cycles
@@ -1207,6 +1208,9 @@ def _render_card(building: bool, built: bool) -> str:
                         '(starting)</span>')
 
     stats_html = ""
+    total_open = 0
+    high_open = 0
+    total_baseline = 0
     try:
         conn = _conn()
         total_open = conn.execute(
