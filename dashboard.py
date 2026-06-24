@@ -4757,6 +4757,1005 @@ def api_dashboard_uptime():
         return jsonify({"started_at": "unknown", "uptime": "unknown"})
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Nemesis Agent API — device hardware, scan, notify, rules
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.route("/api/hw/devices")
+def api_hw_devices():
+    """Return devices seen in hw_metrics last 24h, joined with agent_devices info."""
+    try:
+        hw_devs  = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
+        ag_devs  = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
+        all_ids  = set(hw_devs) | set(ag_devs)
+        result   = []
+        for did in all_ids:
+            hw = hw_devs.get(did, {})
+            ag = ag_devs.get(did, {})
+            # Friendly name: prefer devices table lookup by device_id, then agent name
+            friendly = ag.get("device_name") or did
+            try:
+                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                row = conn.execute(
+                    "SELECT friendly_name FROM devices WHERE mac=?", (did,)
+                ).fetchone()
+                conn.close()
+                if row and row[0]:
+                    friendly = row[0]
+            except Exception:
+                pass
+            result.append({
+                "device_id":       did,
+                "friendly_name":   friendly,
+                "device_type":     ag.get("device_type", "unknown"),
+                "ip_address":      ag.get("ip_address", ""),
+                "connection_type": ag.get("connection_type", "local" if did == "local" else ""),
+                "agent_last_seen": ag.get("agent_last_seen") or hw.get("last_seen", ""),
+                "suricata_running": bool(ag.get("suricata_running")),
+                "suricata_profile": ag.get("suricata_profile", ""),
+                "last_scan_at":    ag.get("last_scan_at", ""),
+                "last_scan_result": ag.get("last_scan_result", "never"),
+                "cpu_temp":        hw.get("cpu_temp"),
+                "gpu_temp":        hw.get("gpu_temp"),
+                "cpu_percent":     hw.get("cpu_percent"),
+                "ram_used_gb":     hw.get("ram_used_gb"),
+                "hw_last_seen":    hw.get("last_seen", ""),
+            })
+        return jsonify({"devices": result})
+    except Exception as e:
+        log.exception("api_hw_devices failed: %s", e)
+        return jsonify({"devices": [], "error": str(e)})
+
+
+@app.route("/api/hw/metrics-for-device")
+def api_hw_metrics_for_device():
+    """GET /api/hw/metrics-for-device?device_id=<id>"""
+    device_id = request.args.get("device_id", "local")
+    try:
+        samples = hw_monitor.get_recent_samples_for_device(device_id, 288)
+        return jsonify({"device_id": device_id, "samples": samples})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scan/devices")
+def api_scan_devices():
+    """All devices with agent status, last scan, hardware health, connection type."""
+    try:
+        hw_devs = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
+        ag_devs = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
+        net_devs = get_network_devices()
+        now_ts   = datetime.now()
+
+        all_ids = set(hw_devs) | set(ag_devs)
+        # Also include pure network devices (no agent)
+        for nd in net_devs:
+            all_ids.add(nd.get("mac", nd.get("ip", "")))
+
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        result = []
+        for did in all_ids:
+            hw = hw_devs.get(did, {})
+            ag = ag_devs.get(did, {})
+
+            # Friendly name
+            friendly = ag.get("device_name") or did
+            try:
+                row = conn.execute(
+                    "SELECT friendly_name FROM devices WHERE mac=?", (did,)
+                ).fetchone()
+                if row and row[0]:
+                    friendly = row[0]
+            except Exception:
+                pass
+
+            # Last scan info
+            scan_row = conn.execute(
+                "SELECT status, completed_at, threats_found FROM scan_jobs "
+                "WHERE device_id=? ORDER BY started_at DESC LIMIT 1", (did,)
+            ).fetchone()
+            last_scan_status = scan_row[0] if scan_row else ag.get("last_scan_result", "never")
+            last_scan_at     = scan_row[1] if scan_row else ag.get("last_scan_at", "")
+            last_scan_threats= scan_row[2] if scan_row else 0
+
+            # Agent online status
+            agent_seen = ag.get("agent_last_seen") or hw.get("last_seen", "")
+            agent_status = "no_agent"
+            if agent_seen:
+                try:
+                    seen_dt = datetime.fromisoformat(agent_seen)
+                    mins_ago = (now_ts - seen_dt).total_seconds() / 60
+                    if mins_ago <= 10:
+                        agent_status = "online"
+                    elif mins_ago <= 60:
+                        agent_status = "offline"
+                    else:
+                        agent_status = "offline"
+                except Exception:
+                    agent_status = "offline"
+
+            # Hardware health
+            hw_health = "unknown"
+            cpu_t = hw.get("cpu_temp")
+            if cpu_t is not None:
+                hw_health = "ok"
+                if cpu_t > 90:
+                    hw_health = "critical"
+                elif cpu_t > 75:
+                    hw_health = "warning"
+
+            result.append({
+                "device_id":       did,
+                "friendly_name":   friendly,
+                "device_type":     ag.get("device_type", "unknown"),
+                "ip_address":      ag.get("ip_address", ""),
+                "connection_type": ag.get("connection_type", ""),
+                "agent_status":    agent_status,
+                "agent_last_seen": agent_seen,
+                "suricata_running": bool(ag.get("suricata_running")),
+                "suricata_profile": ag.get("suricata_profile", ""),
+                "last_scan_at":    last_scan_at,
+                "last_scan_status": last_scan_status,
+                "last_scan_threats": last_scan_threats,
+                "hw_health":       hw_health,
+                "cpu_temp":        cpu_t,
+            })
+        conn.close()
+        return jsonify({"devices": result})
+    except Exception as e:
+        log.exception("api_scan_devices failed: %s", e)
+        return jsonify({"devices": [], "error": str(e)})
+
+
+@app.route("/api/scan/trigger", methods=["POST"])
+def api_scan_trigger():
+    """POST {device_id, path} → sends scan command to agent, returns scan_id."""
+    data = request.get_json(force=True) or {}
+    device_id = data.get("device_id", "")
+    path      = data.get("path", "/")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    import uuid as _uuid
+    scan_id = str(_uuid.uuid4())
+    try:
+        # Look up agent IP from agent_devices
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        row = conn.execute(
+            "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
+        ).fetchone()
+        conn.close()
+        agent_ip = row[0] if row and row[0] else None
+
+        # Record job in DB
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
+            "VALUES (?, ?, ?, 'queued', ?)",
+            (device_id, scan_id, path, datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+
+        # Try to send command to agent
+        if agent_ip:
+            try:
+                requests.post(
+                    f"http://{agent_ip}:5002",
+                    json={"action": "scan", "path": path, "scan_id": scan_id},
+                    timeout=5,
+                )
+            except Exception as e:
+                log.warning("Could not reach agent %s: %s", agent_ip, e)
+
+        return jsonify({"ok": True, "scan_id": scan_id})
+    except Exception as e:
+        log.exception("api_scan_trigger failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scan/status")
+def api_scan_status():
+    """GET /api/scan/status?scan_id=<id>"""
+    scan_id = request.args.get("scan_id", "")
+    if not scan_id:
+        return jsonify({"error": "scan_id required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        row = conn.execute(
+            "SELECT device_id, path, status, progress_pct, files_scanned, threats_found, "
+            "started_at, completed_at FROM scan_jobs WHERE scan_id=?", (scan_id,)
+        ).fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "not found"}), 404
+        return jsonify(dict(zip(
+            ["device_id", "path", "status", "progress_pct", "files_scanned",
+             "threats_found", "started_at", "completed_at"], row
+        )))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scan/results")
+def api_scan_results():
+    """GET /api/scan/results?device_id=<id>"""
+    device_id = request.args.get("device_id", "")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        if device_id:
+            rows = conn.execute(
+                "SELECT t.file_path, t.threat_name, t.action_taken, t.detected_at, "
+                "j.scan_id, j.started_at "
+                "FROM scan_threats t JOIN scan_jobs j ON t.scan_job_id=j.id "
+                "WHERE t.device_id=? ORDER BY t.detected_at DESC LIMIT 100", (device_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT t.file_path, t.threat_name, t.action_taken, t.detected_at, "
+                "j.scan_id, j.started_at "
+                "FROM scan_threats t JOIN scan_jobs j ON t.scan_job_id=j.id "
+                "ORDER BY t.detected_at DESC LIMIT 20"
+            ).fetchall()
+        conn.close()
+        return jsonify({"threats": [
+            dict(zip(["file_path", "threat_name", "action_taken", "detected_at",
+                      "scan_id", "scan_started_at"], r)) for r in rows
+        ]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scan/schedule", methods=["POST"])
+def api_scan_schedule():
+    """POST {device_id, schedule_type, scheduled_time} → save scan schedule."""
+    data = request.get_json(force=True) or {}
+    device_id     = data.get("device_id", "")
+    schedule_type = data.get("schedule_type", "weekly")
+    scheduled_time= data.get("scheduled_time", "")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "INSERT INTO scan_schedules (device_id, schedule_type, scheduled_time) "
+            "VALUES (?, ?, ?)", (device_id, schedule_type, scheduled_time)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/scan/history")
+def api_scan_history():
+    """GET all scan history, optionally filtered by device_id."""
+    device_id = request.args.get("device_id", "")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        if device_id:
+            rows = conn.execute(
+                "SELECT scan_id, device_id, path, status, progress_pct, files_scanned, "
+                "threats_found, started_at, completed_at FROM scan_jobs "
+                "WHERE device_id=? ORDER BY started_at DESC LIMIT 50", (device_id,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT scan_id, device_id, path, status, progress_pct, files_scanned, "
+                "threats_found, started_at, completed_at FROM scan_jobs "
+                "ORDER BY started_at DESC LIMIT 50"
+            ).fetchall()
+        conn.close()
+        cols = ["scan_id", "device_id", "path", "status", "progress_pct",
+                "files_scanned", "threats_found", "started_at", "completed_at"]
+        return jsonify({"history": [dict(zip(cols, r)) for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agent/notify", methods=["POST"])
+def api_agent_notify():
+    """POST {device_id, title, message, severity, suggested_action} → push notification to agent."""
+    data = request.get_json(force=True) or {}
+    device_id = data.get("device_id", "")
+    if not device_id:
+        return jsonify({"error": "device_id required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        row = conn.execute(
+            "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
+        ).fetchone()
+        conn.close()
+        agent_ip = row[0] if row and row[0] else None
+        if not agent_ip:
+            return jsonify({"error": "agent IP not known for this device"}), 404
+        cmd = {
+            "action":           "notify",
+            "title":            data.get("title", "Nemesis"),
+            "message":          data.get("message", ""),
+            "severity":         data.get("severity", "info"),
+            "suggested_action": data.get("suggested_action", ""),
+        }
+        r = requests.post(f"http://{agent_ip}:5002", json=cmd, timeout=5)
+        return jsonify({"ok": True, "agent_response": r.json()})
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "cannot reach agent"}), 502
+    except Exception as e:
+        log.exception("api_agent_notify failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agent/rules")
+def api_agent_rules():
+    """GET /api/agent/rules?profile=office|roaming — serve Suricata rule file to agents."""
+    profile = request.args.get("profile", "office")
+    if profile not in ("office", "roaming"):
+        return jsonify({"error": "profile must be office or roaming"}), 400
+    rules_paths = [
+        f"/var/lib/suricata/rules/{profile}.rules",
+        f"/var/lib/suricata/rules/suricata.rules",
+        f"/etc/suricata/rules/{profile}.rules",
+    ]
+    for path in rules_paths:
+        if os.path.exists(path):
+            with open(path, "rb") as f:
+                content = f.read()
+            from flask import Response
+            return Response(content, mimetype="text/plain",
+                            headers={"Content-Disposition": f"attachment; filename={profile}.rules"})
+    return jsonify({"error": f"No rules file found for profile={profile}"}), 404
+
+
+@app.route("/api/devices/update-friendly-name", methods=["POST"])
+def api_update_friendly_name():
+    """POST {device_id, friendly_name} → update friendly name for an agent device."""
+    data = request.get_json(force=True) or {}
+    device_id     = data.get("device_id", "")
+    friendly_name = data.get("friendly_name", "")
+    if not device_id or not friendly_name:
+        return jsonify({"error": "device_id and friendly_name required"}), 400
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "UPDATE agent_devices SET device_name=? WHERE device_id=?",
+            (friendly_name, device_id)
+        )
+        # Also update devices table if a matching MAC exists
+        conn.execute(
+            "UPDATE devices SET friendly_name=? WHERE mac=?",
+            (friendly_name, device_id)
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Scan page (/scan) ─────────────────────────────────────────────────────────
+
+@app.route("/scan")
+def scan_page():
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis — Device Security Scanner</title>
+    <script src="/static/tier.js"></script>
+    <style>
+        body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
+               padding: 24px; max-width: 1400px; margin: 0 auto; }}
+        h1 {{ color: #00d4ff; margin-bottom: 4px; }}
+        h2 {{ color: #00d4ff; font-size: 1.05em; margin: 20px 0 10px 0;
+             border-bottom: 1px solid #1e2d4e; padding-bottom: 6px; }}
+        a.back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
+        .device-grid {{ display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 16px; margin: 16px 0; }}
+        .device-card {{
+            background: #0d1117; border: 1px solid #1e2d4e; border-radius: 8px;
+            padding: 16px; position: relative; }}
+        .device-card.agent-online {{ border-color: #00ff88; }}
+        .device-card.hw-critical {{ border-color: #ff4444; }}
+        .device-name {{ font-size: 1.1em; font-weight: bold; color: #fff;
+            cursor: pointer; margin-bottom: 6px; }}
+        .device-name:hover {{ color: #00d4ff; }}
+        .badge {{ display: inline-block; padding: 2px 7px; border-radius: 10px;
+            font-size: 0.72em; font-weight: bold; margin: 2px; }}
+        .badge-green  {{ background: #003a1a; color: #00ff88; border: 1px solid #00ff88; }}
+        .badge-yellow {{ background: #2a1f00; color: #ffaa00; border: 1px solid #ffaa00; }}
+        .badge-grey   {{ background: #1a1a1a; color: #888;    border: 1px solid #444; }}
+        .badge-blue   {{ background: #001a2a; color: #00d4ff; border: 1px solid #00d4ff; }}
+        .badge-red    {{ background: #2a0000; color: #ff4444; border: 1px solid #ff4444; }}
+        .device-meta {{ font-size: 0.8em; color: #888; margin: 4px 0 10px 0; }}
+        .device-actions {{ display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }}
+        .btn {{ padding: 5px 12px; border-radius: 4px; border: none; cursor: pointer;
+            font-size: 0.82em; font-weight: bold; }}
+        .btn-blue   {{ background: #003a50; color: #00d4ff; border: 1px solid #00d4ff; }}
+        .btn-green  {{ background: #003a1a; color: #00ff88; border: 1px solid #00ff88; }}
+        .btn-orange {{ background: #2a1500; color: #ff8800; border: 1px solid #ff8800; }}
+        .btn-grey   {{ background: #1a1a1a; color: #888;    border: 1px solid #444; opacity: 0.5; cursor: not-allowed; }}
+        .btn:hover:not(:disabled) {{ opacity: 0.85; }}
+        .panel {{ background: #0d1117; border: 1px solid #1e2d4e; border-radius: 8px;
+            padding: 16px; margin-bottom: 16px; }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 0.85em; }}
+        th {{ text-align: left; color: #888; padding: 6px; border-bottom: 1px solid #222; }}
+        td {{ padding: 6px; border-bottom: 1px solid #1a1a2e; }}
+        .alert-banner {{ background: #1a0000; border: 1px solid #ff4444;
+            border-radius: 6px; padding: 12px 16px; margin-bottom: 16px; color: #ff8888; }}
+        .modal-overlay {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%;
+            background:rgba(0,0,0,0.7); z-index:1000; }}
+        .modal {{ background:#0d1117; border:1px solid #1e2d4e; border-radius:8px;
+            padding:24px; max-width:480px; margin:10% auto; position:relative; }}
+        .modal h3 {{ color:#00d4ff; margin-top:0; }}
+        input, select, textarea {{ background:#1a1a2e; color:#eee; border:1px solid #333;
+            padding:8px; border-radius:4px; width:100%; box-sizing:border-box; margin:6px 0; }}
+        .progress-bar {{ height:8px; background:#1a1a2e; border-radius:4px; overflow:hidden; }}
+        .progress-fill {{ height:100%; background:#00d4ff; transition:width 0.3s; }}
+    </style>
+</head>
+<body>
+<h1>🔬 Device Security Scanner</h1>
+<p><a class="back" href="/">← Back to Dashboard</a></p>
+
+<div id="alertBanner" style="display:none" class="alert-banner"></div>
+
+<div style="display:flex;align-items:center;gap:16px;margin-bottom:8px">
+    <button class="btn btn-blue" onclick="scanAllDevices()">⚡ Scan All Online Devices</button>
+    <span style="color:#888;font-size:0.85em">Last full scan: <span id="lastFullScan">—</span></span>
+</div>
+
+<h2>Device Overview</h2>
+<div class="device-grid" id="deviceGrid">
+    <div style="color:#888">Loading devices…</div>
+</div>
+
+<h2>Active Scans</h2>
+<div class="panel" id="activeScansPanel">
+    <div style="color:#888;font-size:0.85em">No active scans.</div>
+</div>
+
+<h2>Recent Findings</h2>
+<div class="panel">
+    <table id="findingsTable">
+        <thead><tr><th>Device</th><th>File</th><th>Threat</th><th>Action</th><th>Time</th></tr></thead>
+        <tbody id="findingsBody"><tr><td colspan="5" style="color:#888">No findings.</td></tr></tbody>
+    </table>
+</div>
+
+<h2>Scheduled Scans</h2>
+<div class="panel" id="schedulesPanel">
+    <div style="color:#888;font-size:0.85em">No scheduled scans.</div>
+</div>
+
+<!-- Send Alert Modal -->
+<div class="modal-overlay" id="notifyModal" onclick="if(event.target===this)closeNotifyModal()">
+<div class="modal">
+    <h3>📢 Send Alert to Device</h3>
+    <input type="hidden" id="notifyDeviceId">
+    <label style="color:#aaa;font-size:0.85em">Message</label>
+    <textarea id="notifyMessage" rows="3" placeholder="Alert message..."></textarea>
+    <label style="color:#aaa;font-size:0.85em">Severity</label>
+    <select id="notifySeverity" onchange="notifySeverityChanged()">
+        <option value="info">ℹ️ Info</option>
+        <option value="warning">⚠️ Warning</option>
+        <option value="critical">🚨 Critical</option>
+    </select>
+    <label style="color:#aaa;font-size:0.85em">Suggested Action</label>
+    <input type="text" id="notifySuggestedAction" placeholder="What the user should do...">
+    <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-blue" onclick="sendNotify()">Send</button>
+        <button class="btn btn-grey" style="opacity:1;cursor:pointer" onclick="closeNotifyModal()">Cancel</button>
+    </div>
+    <div id="notifyResult" style="margin-top:8px;font-size:0.85em"></div>
+</div>
+</div>
+
+<!-- Schedule Modal -->
+<div class="modal-overlay" id="scheduleModal" onclick="if(event.target===this)closeScheduleModal()">
+<div class="modal">
+    <h3>📅 Schedule Scan</h3>
+    <input type="hidden" id="scheduleDeviceId">
+    <label style="color:#aaa;font-size:0.85em">Frequency</label>
+    <select id="scheduleType">
+        <option value="daily">Daily</option>
+        <option value="weekly" selected>Weekly</option>
+        <option value="on_reconnect">On Reconnect</option>
+        <option value="on_demand">On Demand only</option>
+    </select>
+    <label style="color:#aaa;font-size:0.85em">Time (HH:MM)</label>
+    <input type="text" id="scheduleTime" placeholder="02:00">
+    <label style="color:#aaa;font-size:0.85em">Path to scan</label>
+    <input type="text" id="schedulePath" value="/">
+    <div style="margin-top:16px;display:flex;gap:8px">
+        <button class="btn btn-green" onclick="saveSchedule()">Save</button>
+        <button class="btn btn-grey" style="opacity:1;cursor:pointer" onclick="closeScheduleModal()">Cancel</button>
+    </div>
+    <div id="scheduleResult" style="margin-top:8px;font-size:0.85em"></div>
+</div>
+</div>
+
+<script>
+var _devices = [];
+var _activeScans = {{}};
+var _SEVERITY_ACTIONS = {{
+    info:     "No action required.",
+    warning:  "Please review the alert and take appropriate action.",
+    critical: "Please save your work and contact your IT administrator immediately."
+}};
+
+function loadDevices() {{
+    fetch('/api/scan/devices')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+            _devices = d.devices || [];
+            renderDeviceGrid(_devices);
+            checkAlertBanner(_devices);
+        }})
+        .catch(function(e){{console.error('loadDevices:', e);}});
+}}
+
+function renderDeviceGrid(devs) {{
+    var grid = document.getElementById('deviceGrid');
+    if (!devs.length) {{
+        grid.innerHTML = '<div style="color:#888">No devices found. Install the Nemesis Agent on endpoint devices to enable scanning.</div>';
+        return;
+    }}
+    grid.innerHTML = devs.map(function(d) {{
+        var agentBadge = agentStatusBadge(d.agent_status);
+        var connBadge  = d.connection_type ? connTypeBadge(d.connection_type) : '';
+        var idsBadge   = d.suricata_running
+            ? '<span class="badge badge-blue">IDS: Active (' + (d.suricata_profile||'?') + ')</span>'
+            : '';
+        var hwBadge    = hwHealthBadge(d.hw_health);
+        var scanBadge  = scanStatusBadge(d.last_scan_status, d.last_scan_at, d.last_scan_threats);
+        var canScan    = d.agent_status === 'online';
+        var scanBtn    = canScan
+            ? '<button class="btn btn-green" onclick="triggerScan(\\'' + d.device_id + '\\')">🔬 Scan Now</button>'
+            : '<button class="btn btn-grey" title="Install agent to enable scanning">🔬 Scan Now</button>';
+        var cardClass  = 'device-card' +
+            (d.agent_status === 'online' ? ' agent-online' : '') +
+            (d.hw_health === 'critical' ? ' hw-critical' : '');
+        return '<div class="' + cardClass + '">' +
+            '<div class="device-name" onclick="editFriendlyName(\\'' + d.device_id + '\\', this)">' +
+                escHtml(d.friendly_name) + '</div>' +
+            '<div class="device-meta">' + escHtml(d.device_type || 'unknown') +
+                (d.ip_address ? ' &nbsp;·&nbsp; ' + escHtml(d.ip_address) : '') + '</div>' +
+            '<div>' + agentBadge + connBadge + idsBadge + hwBadge + '</div>' +
+            '<div style="margin-top:6px;font-size:0.8em;color:#aaa">' + scanBadge + '</div>' +
+            '<div class="device-actions">' +
+                scanBtn +
+                '<button class="btn btn-orange" onclick="openNotifyModal(\\'' + d.device_id + '\\')">📢 Alert</button>' +
+                '<button class="btn btn-grey" style="opacity:1;cursor:pointer" onclick="openScheduleModal(\\'' + d.device_id + '\\')">📅 Schedule</button>' +
+                (d.hw_health !== 'unknown'
+                    ? '<a class="btn btn-blue" href="/hardware/all#' + escHtml(d.device_id) + '" target="_blank">🌡️ HW</a>'
+                    : '') +
+            '</div>' +
+        '</div>';
+    }}).join('');
+}}
+
+function agentStatusBadge(status) {{
+    if (status === 'online')  return '<span class="badge badge-green">🟢 Agent Online</span>';
+    if (status === 'offline') return '<span class="badge badge-yellow">🟡 Agent Offline</span>';
+    return '<span class="badge badge-grey">⚪ No Agent</span>';
+}}
+function connTypeBadge(conn) {{
+    if (conn === 'local') return '<span class="badge badge-green">Local</span>';
+    if (conn === 'vpn_remote') return '<span class="badge badge-blue">Remote (VPN)</span>';
+    return '';
+}}
+function hwHealthBadge(health) {{
+    if (health === 'ok')       return '<span class="badge badge-green">🟢 HW OK</span>';
+    if (health === 'warning')  return '<span class="badge badge-yellow">🟡 HW Warning</span>';
+    if (health === 'critical') return '<span class="badge badge-red">🔴 HW Critical</span>';
+    return '';
+}}
+function scanStatusBadge(status, at, threats) {{
+    if (!status || status === 'never') return 'Last scan: Never';
+    var ts = at ? new Date(at).toLocaleString() : '';
+    if (status === 'clean')          return 'Last scan: ✅ Clean (' + ts + ')';
+    if (status === 'threats_found')  return 'Last scan: 🚨 ' + threats + ' threat(s) (' + ts + ')';
+    if (status === 'in_progress')    return 'Scan in progress…';
+    return 'Last scan: ' + status + (ts ? ' (' + ts + ')' : '');
+}}
+
+function checkAlertBanner(devs) {{
+    var critical = devs.filter(function(d){{ return d.hw_health === 'critical'; }});
+    var banner = document.getElementById('alertBanner');
+    if (critical.length) {{
+        banner.style.display = 'block';
+        banner.innerHTML = '⚠️ ' + critical.length + ' device(s) require attention: ' +
+            critical.map(function(d){{ return escHtml(d.friendly_name); }}).join(', ');
+    }} else {{
+        banner.style.display = 'none';
+    }}
+}}
+
+function triggerScan(deviceId) {{
+    fetch('/api/scan/trigger', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify({{device_id: deviceId, path: '/'}})
+    }}).then(function(r){{return r.json();}}).then(function(d){{
+        if (d.ok) {{
+            _activeScans[d.scan_id] = {{device_id: deviceId, started: new Date()}};
+            renderActiveScans();
+        }} else {{
+            alert('Scan trigger failed: ' + (d.error || 'unknown error'));
+        }}
+    }});
+}}
+
+function scanAllDevices() {{
+    var online = _devices.filter(function(d){{ return d.agent_status === 'online'; }});
+    if (!online.length) {{ alert('No online agent devices found.'); return; }}
+    online.forEach(function(d){{ triggerScan(d.device_id); }});
+}}
+
+function renderActiveScans() {{
+    var ids = Object.keys(_activeScans);
+    var panel = document.getElementById('activeScansPanel');
+    if (!ids.length) {{
+        panel.innerHTML = '<div style="color:#888;font-size:0.85em">No active scans.</div>';
+        return;
+    }}
+    panel.innerHTML = ids.map(function(sid) {{
+        var j = _activeScans[sid];
+        var pct = j.progress_pct || 0;
+        return '<div style="margin-bottom:12px">' +
+            '<div style="font-size:0.85em;margin-bottom:4px">' +
+                escHtml(deviceName(j.device_id)) + ' — ' + (j.status || 'running') +
+                (j.files_scanned ? ' (' + j.files_scanned + ' files)' : '') +
+            '</div>' +
+            '<div class="progress-bar"><div class="progress-fill" style="width:' + pct + '%"></div></div>' +
+        '</div>';
+    }}).join('');
+}}
+
+function deviceName(id) {{
+    var d = _devices.find(function(x){{ return x.device_id === id; }});
+    return d ? d.friendly_name : id;
+}}
+
+function pollActiveScans() {{
+    var ids = Object.keys(_activeScans);
+    ids.forEach(function(sid) {{
+        fetch('/api/scan/status?scan_id=' + sid)
+            .then(function(r){{return r.json();}})
+            .then(function(d){{
+                if (d.status === 'clean' || d.status === 'threats_found' || d.status === 'error') {{
+                    delete _activeScans[sid];
+                    loadFindings();
+                    loadDevices();
+                }} else {{
+                    _activeScans[sid] = Object.assign(_activeScans[sid], d);
+                }}
+                renderActiveScans();
+            }});
+    }});
+}}
+
+function loadFindings() {{
+    fetch('/api/scan/results')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+            var tbody = document.getElementById('findingsBody');
+            if (!d.threats || !d.threats.length) {{
+                tbody.innerHTML = '<tr><td colspan="5" style="color:#888">No findings.</td></tr>';
+                return;
+            }}
+            tbody.innerHTML = d.threats.map(function(t){{
+                return '<tr>' +
+                    '<td>' + escHtml(t.device_id) + '</td>' +
+                    '<td style="word-break:break-all">' + escHtml(t.file_path) + '</td>' +
+                    '<td style="color:#ff4444">' + escHtml(t.threat_name) + '</td>' +
+                    '<td>' + escHtml(t.action_taken||'—') + '</td>' +
+                    '<td>' + escHtml(t.detected_at||'') + '</td>' +
+                '</tr>';
+            }}).join('');
+        }});
+}}
+
+function loadSchedules() {{
+    // Schedules are stored per device — show from DB (simple display)
+    document.getElementById('schedulesPanel').innerHTML =
+        '<div style="color:#888;font-size:0.85em">Use the Schedule button on a device card to add schedules.</div>';
+}}
+
+function openNotifyModal(deviceId) {{
+    document.getElementById('notifyDeviceId').value = deviceId;
+    document.getElementById('notifyMessage').value = '';
+    document.getElementById('notifyResult').textContent = '';
+    document.getElementById('notifySeverity').value = 'info';
+    document.getElementById('notifySuggestedAction').value = _SEVERITY_ACTIONS.info;
+    document.getElementById('notifyModal').style.display = 'block';
+}}
+function closeNotifyModal() {{ document.getElementById('notifyModal').style.display = 'none'; }}
+
+function notifySeverityChanged() {{
+    var sev = document.getElementById('notifySeverity').value;
+    document.getElementById('notifySuggestedAction').value = _SEVERITY_ACTIONS[sev] || '';
+}}
+
+function sendNotify() {{
+    var payload = {{
+        device_id:        document.getElementById('notifyDeviceId').value,
+        title:            'Nemesis Security Alert',
+        message:          document.getElementById('notifyMessage').value,
+        severity:         document.getElementById('notifySeverity').value,
+        suggested_action: document.getElementById('notifySuggestedAction').value
+    }};
+    document.getElementById('notifyResult').textContent = 'Sending…';
+    fetch('/api/agent/notify', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(payload)
+    }}).then(function(r){{return r.json();}}).then(function(d){{
+        document.getElementById('notifyResult').textContent = d.ok ? '✅ Sent' : '❌ ' + (d.error||'failed');
+    }});
+}}
+
+function openScheduleModal(deviceId) {{
+    document.getElementById('scheduleDeviceId').value = deviceId;
+    document.getElementById('scheduleResult').textContent = '';
+    document.getElementById('scheduleModal').style.display = 'block';
+}}
+function closeScheduleModal() {{ document.getElementById('scheduleModal').style.display = 'none'; }}
+
+function saveSchedule() {{
+    var payload = {{
+        device_id:     document.getElementById('scheduleDeviceId').value,
+        schedule_type: document.getElementById('scheduleType').value,
+        scheduled_time:document.getElementById('scheduleTime').value
+    }};
+    fetch('/api/scan/schedule', {{
+        method: 'POST',
+        headers: {{'Content-Type': 'application/json'}},
+        body: JSON.stringify(payload)
+    }}).then(function(r){{return r.json();}}).then(function(d){{
+        document.getElementById('scheduleResult').textContent = d.ok ? '✅ Saved' : '❌ ' + (d.error||'failed');
+    }});
+}}
+
+function editFriendlyName(deviceId, el) {{
+    var current = el.textContent;
+    var input = document.createElement('input');
+    input.value = current;
+    input.style.cssText = 'background:#1a1a2e;color:#fff;border:1px solid #00d4ff;padding:2px 6px;border-radius:3px;width:180px;font-size:1em';
+    el.innerHTML = '';
+    el.appendChild(input);
+    input.focus();
+    input.select();
+    function save() {{
+        var val = input.value.trim() || current;
+        fetch('/api/devices/update-friendly-name', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{device_id: deviceId, friendly_name: val}})
+        }}).then(function(){{ el.textContent = val; }})
+          .catch(function(){{ el.textContent = current; }});
+    }}
+    input.addEventListener('blur', save);
+    input.addEventListener('keydown', function(e){{ if (e.key==='Enter') input.blur(); if (e.key==='Escape') {{ el.textContent = current; }} }});
+}}
+
+function escHtml(s) {{
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+
+// Init
+loadDevices();
+loadFindings();
+loadSchedules();
+setInterval(function() {{ loadDevices(); pollActiveScans(); }}, 5000);
+setInterval(loadFindings, 30000);
+</script>
+</body>
+</html>"""
+
+
+# ── Fleet hardware overview (/hardware/all) ────────────────────────────────────
+
+@app.route("/hardware/all")
+def hardware_all_page():
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>Nemesis — All Device Hardware</title>
+    <script src="/static/tier.js"></script>
+    <style>
+        body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
+               padding: 24px; max-width: 1200px; margin: 0 auto; }}
+        h1 {{ color: #00d4ff; margin-bottom: 4px; }}
+        a.back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
+        .alert-banner {{ background: #1a0000; border: 1px solid #ff4444;
+            border-radius: 6px; padding: 12px 16px; margin: 12px 0; color: #ff8888; }}
+        .device-section {{ background: #0d1117; border: 1px solid #1e2d4e;
+            border-radius: 8px; margin-bottom: 12px; overflow: hidden; }}
+        .device-header {{ padding: 14px 18px; cursor: pointer; display: flex;
+            align-items: center; gap: 14px; user-select: none; }}
+        .device-header:hover {{ background: #0a1020; }}
+        .health-dot {{ width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }}
+        .health-green  {{ background: #00ff88; }}
+        .health-yellow {{ background: #ffaa00; }}
+        .health-red    {{ background: #ff4444; }}
+        .health-grey   {{ background: #444; }}
+        .device-header-name {{ font-weight: bold; font-size: 1em; color: #fff; flex: 1; }}
+        .device-header-meta {{ font-size: 0.8em; color: #888; }}
+        .device-header-summary {{ font-size: 0.82em; color: #aaa; margin-left: auto; }}
+        .device-body {{ display: none; padding: 16px 18px; border-top: 1px solid #1e2d4e; }}
+        .device-body.expanded {{ display: block; }}
+        .sensor-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 10px; }}
+        .sensor-tile {{ background: #1a1a2e; border: 1px solid #1e2d4e; border-radius: 6px;
+            padding: 10px 12px; text-align: center; }}
+        .sensor-label {{ font-size: 0.75em; color: #888; margin-bottom: 4px; }}
+        .sensor-value {{ font-size: 1.3em; font-weight: bold; color: #00d4ff; }}
+        .sensor-value.warn {{ color: #ffaa00; }}
+        .sensor-value.crit {{ color: #ff4444; }}
+        .badge {{ display: inline-block; padding: 2px 7px; border-radius: 10px;
+            font-size: 0.72em; font-weight: bold; margin: 2px; }}
+        .badge-green  {{ background: #003a1a; color: #00ff88; border: 1px solid #00ff88; }}
+        .badge-yellow {{ background: #2a1f00; color: #ffaa00; border: 1px solid #ffaa00; }}
+        .badge-grey   {{ background: #1a1a1a; color: #888;    border: 1px solid #444; }}
+        .badge-blue   {{ background: #001a2a; color: #00d4ff; border: 1px solid #00d4ff; }}
+    </style>
+</head>
+<body>
+<h1>🖥️ All Device Hardware</h1>
+<p><a class="back" href="/">← Back to Dashboard</a> &nbsp;|&nbsp;
+   <a class="back" href="/scan">🔬 Scanner</a></p>
+
+<div id="alertBanner" style="display:none" class="alert-banner"></div>
+<div id="deviceList"><div style="color:#888">Loading devices…</div></div>
+
+<script>
+function loadAllHw() {{
+    fetch('/api/scan/devices')
+        .then(function(r){{return r.json();}})
+        .then(function(d){{
+            renderDevices(d.devices||[]);
+        }});
+}}
+
+function renderDevices(devs) {{
+    var list = document.getElementById('deviceList');
+    var faults = devs.filter(function(d){{ return d.hw_health === 'critical'; }});
+    var banner = document.getElementById('alertBanner');
+    if (faults.length) {{
+        banner.style.display = 'block';
+        banner.innerHTML = '⚠️ ' + faults.length + ' device(s) require attention: ' +
+            faults.map(function(d){{ return escHtml(d.friendly_name); }}).join(', ');
+    }}
+    if (!devs.length) {{
+        list.innerHTML = '<div style="color:#888">No devices with hardware data. Install the Nemesis Agent to enable hardware monitoring from remote devices.</div>';
+        return;
+    }}
+    // Sort: faults first, then by name
+    devs.sort(function(a,b){{
+        var score = function(d) {{
+            if (d.hw_health==='critical') return 0;
+            if (d.hw_health==='warning')  return 1;
+            return 2;
+        }};
+        return score(a)-score(b) || (a.friendly_name||'').localeCompare(b.friendly_name||'');
+    }});
+    list.innerHTML = devs.map(function(d){{
+        var hcls  = healthClass(d.hw_health);
+        var htext = healthText(d.hw_health, d);
+        var connB = d.connection_type ? connBadge(d.connection_type) : '';
+        var lastSeen = d.agent_last_seen || d.hw_last_seen || '';
+        var summary  = buildSummary(d);
+        var bodyId   = 'body-' + d.device_id.replace(/[^a-z0-9]/gi,'_');
+        return '<div class="device-section" id="' + escHtml(d.device_id) + '">' +
+            '<div class="device-header" onclick="toggleBody(\\'' + bodyId + '\\')">' +
+                '<div class="health-dot ' + hcls + '"></div>' +
+                '<div class="device-header-name">' + escHtml(d.friendly_name) + '</div>' +
+                connB +
+                '<div class="device-header-meta">' +
+                    escHtml(d.device_type||'') +
+                    (lastSeen ? ' &nbsp;·&nbsp; Last seen: ' + relTime(lastSeen) : '') +
+                '</div>' +
+                '<div class="device-header-summary">' + summary + '</div>' +
+                '<span style="color:#00d4ff;margin-left:8px">▶</span>' +
+            '</div>' +
+            '<div class="device-body" id="' + bodyId + '">' +
+                buildSensorGrid(d) +
+                '<div style="margin-top:12px">' +
+                    '<a href="/hardware/all?device=' + encodeURIComponent(d.device_id) + '" ' +
+                       'style="color:#00d4ff;font-size:0.85em" target="_blank">View Full Detail ▶</a>' +
+                    ' &nbsp; <a href="/scan" style="color:#00d4ff;font-size:0.85em">🔬 Scan Device</a>' +
+                '</div>' +
+            '</div>' +
+        '</div>';
+    }}).join('');
+}}
+
+function toggleBody(id) {{
+    var el = document.getElementById(id);
+    if (!el) return;
+    el.classList.toggle('expanded');
+    var chevron = el.previousElementSibling.querySelector('span:last-child');
+    if (chevron) chevron.textContent = el.classList.contains('expanded') ? '▼' : '▶';
+}}
+
+function healthClass(h) {{
+    if (h==='critical') return 'health-red';
+    if (h==='warning')  return 'health-yellow';
+    if (h==='ok')       return 'health-green';
+    return 'health-grey';
+}}
+function healthText(h, d) {{
+    if (h==='critical') return '🔴 Fault';
+    if (h==='warning')  return '🟡 Concerning';
+    if (h==='ok')       return '🟢 Healthy';
+    return '⚫ Offline';
+}}
+function connBadge(conn) {{
+    if (conn==='local')      return '<span class="badge badge-green">Local</span>';
+    if (conn==='vpn_remote') return '<span class="badge badge-blue">Remote (VPN)</span>';
+    return '';
+}}
+function buildSummary(d) {{
+    var parts = [];
+    if (d.cpu_temp != null)     parts.push('CPU ' + d.cpu_temp + '°C');
+    if (d.ram_used_gb != null)  parts.push('RAM ' + d.ram_used_gb + ' GB');
+    if (d.cpu_percent != null)  parts.push('Load ' + d.cpu_percent + '%');
+    return parts.join(' | ') || '—';
+}}
+function buildSensorGrid(d) {{
+    var tiles = [];
+    function tile(label, val, unit, warn, crit) {{
+        var vcls = '';
+        if (val != null && crit != null && val >= crit) vcls = 'crit';
+        else if (val != null && warn != null && val >= warn) vcls = 'warn';
+        var display = val != null ? val + (unit||'') : '—';
+        tiles.push('<div class="sensor-tile">' +
+            '<div class="sensor-label">' + escHtml(label) + '</div>' +
+            '<div class="sensor-value ' + vcls + '">' + escHtml(display) + '</div>' +
+        '</div>');
+    }}
+    tile('CPU Temp',  d.cpu_temp,    '°C',  75, 90);
+    tile('GPU Temp',  d.gpu_temp,    '°C',  80, 95);
+    tile('CPU Load',  d.cpu_percent, '%',   80, 95);
+    tile('RAM Used',  d.ram_used_gb, ' GB', null, null);
+    return '<div class="sensor-grid">' + tiles.join('') + '</div>';
+}}
+function relTime(ts) {{
+    if (!ts) return '—';
+    var d = new Date(ts);
+    if (isNaN(d)) return ts;
+    var s = Math.floor((Date.now() - d) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s/60) + 'm ago';
+    if (s < 86400) return Math.floor(s/3600) + 'h ago';
+    return Math.floor(s/86400) + 'd ago';
+}}
+function escHtml(s) {{
+    if (!s && s!==0) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}}
+
+// Anchor scrolling for ?device= or #device_id
+(function() {{
+    var target = (location.hash||'').replace('#','') ||
+                 (new URLSearchParams(location.search)).get('device');
+    if (target) {{
+        setTimeout(function() {{
+            var el = document.getElementById(target);
+            if (el) {{ el.scrollIntoView({{behavior:'smooth'}}); }}
+        }}, 600);
+    }}
+}})();
+
+loadAllHw();
+setInterval(loadAllHw, 30000);
+</script>
+</body>
+</html>"""
+
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -4993,6 +5992,9 @@ def dashboard():
         <a href="#section-anomaly">🔍 Anomaly</a>
         <a href="#section-tickets">🎫 Tickets</a>
         <span style="color:#333;margin:0 2px">|</span>
+        <a href="/scan" target="_blank" rel="noopener">🔬 Scan</a>
+        <a href="/hardware/all" target="_blank" rel="noopener">🖥️ All Devices</a>
+        <span style="color:#333;margin:0 2px">|</span>
         <a href="/settings" target="_blank" rel="noopener">⚙️ Settings</a>
         <a href="/diagnostics" target="_blank" rel="noopener">🔍 Diagnostics</a>
     </nav>
@@ -5034,8 +6036,19 @@ def dashboard():
                 <button onclick="event.stopPropagation();openHwModal()" class="hw-overview-btn" title="Open 24-hour combined graphs">
                     <span class="tier-text" data-beginner="Overview graphs ▸" data-intermediate="Overview ▸" data-pro="Overview ▸">Overview ▸</span>
                 </button>
+                <a href="/hardware/all" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+                   style="float:right;font-size:0.75em;color:#00d4ff;text-decoration:none;margin-right:10px;padding:4px 8px;border:1px solid #00d4ff;border-radius:4px"
+                   title="Fleet hardware overview">All Devices ▶</a>
             </h2>
             <div id="section-hw-body">
+            <div style="margin-bottom:10px;display:flex;align-items:center;gap:12px" onclick="event.stopPropagation()">
+                <label style="color:#aaa;font-size:0.85em">Device:</label>
+                <select id="hwDeviceSelect" onchange="hwDeviceChanged()"
+                        style="background:#1a1a2e;color:#eee;border:1px solid #333;padding:4px 8px;border-radius:4px;font-size:0.85em">
+                    <option value="local">This Nemesis Host (local)</option>
+                </select>
+                <span id="hwDeviceConnBadge" style="font-size:0.75em;color:#888"></span>
+            </div>
             <div class="hw-grid">
                 <div class="hw-stat hw-clickable" onclick="openSensorPopup('cpu_temp')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="CPU Temperature" data-intermediate="CPU Temp" data-pro="CPU °C">CPU Temp</span></div>
@@ -6220,6 +7233,64 @@ def dashboard():
             document.getElementById("hwGpuFan").textContent = fmtHw(hw.gpu_fan_percent, "%");
             renderFanSection(hw.fans, hw.cpu_percent, hw.fan_status);
         }}
+
+        // ── Device selector for hardware card ─────────────────────────────────
+        var _hwSelectedDevice = 'local';
+
+        function loadHwDevices() {{
+            fetch('/api/hw/devices', {{cache: 'no-store'}})
+                .then(function(r){{return r.json();}})
+                .then(function(d){{
+                    var sel = document.getElementById('hwDeviceSelect');
+                    if (!sel) return;
+                    var devs = (d.devices || []).filter(function(x){{return x.device_id!=='local';}});
+                    // Remove old non-local options
+                    while (sel.options.length > 1) sel.remove(1);
+                    devs.forEach(function(dev){{
+                        var opt = document.createElement('option');
+                        opt.value = dev.device_id;
+                        opt.textContent = dev.friendly_name + (dev.connection_type ? ' (' + dev.connection_type + ')' : '');
+                        sel.appendChild(opt);
+                    }});
+                }})
+                .catch(function(){{}});
+        }}
+
+        function hwDeviceChanged() {{
+            var sel = document.getElementById('hwDeviceSelect');
+            if (!sel) return;
+            _hwSelectedDevice = sel.value;
+            var badge = document.getElementById('hwDeviceConnBadge');
+            if (badge) {{
+                badge.textContent = _hwSelectedDevice === 'local' ? '' : '';
+            }}
+            if (_hwSelectedDevice === 'local') return; // local metrics come from normal refresh
+            fetch('/api/hw/metrics-for-device?device_id=' + encodeURIComponent(_hwSelectedDevice))
+                .then(function(r){{return r.json();}})
+                .then(function(d){{
+                    var samples = d.samples || [];
+                    if (!samples.length) return;
+                    var latest = samples[samples.length-1];
+                    // Remap to live format
+                    var live = {{
+                        cpu_temp:        latest.cpu_temp,
+                        gpu_temp:        latest.gpu_temp,
+                        ambient_temp:    latest.ambient_temp,
+                        nvme_temp:       latest.nvme_temp,
+                        cpu_percent:     latest.cpu_percent,
+                        ram_percent:     latest.ram_used_gb != null ? null : null,
+                        ram_used_gb:     latest.ram_used_gb,
+                        ram_total_gb:    null,
+                        gpu_fan_percent: latest.gpu_fan_percent,
+                        fans:            latest.fans || [],
+                    }};
+                    applyHwLive(live);
+                }})
+                .catch(function(){{}});
+        }}
+
+        loadHwDevices();
+        setInterval(loadHwDevices, 60000);
 
         function openHwModal() {{
             document.getElementById("hwModal").style.display = "block";

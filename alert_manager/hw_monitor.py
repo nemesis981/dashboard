@@ -86,7 +86,8 @@ def init_db():
                           ("gpu_power_watts", "REAL"),
                           ("fan4_rpm", "INTEGER"),
                           ("fans_json", "TEXT"),
-                          ("is_anomalous", "INTEGER DEFAULT 0")):
+                          ("is_anomalous", "INTEGER DEFAULT 0"),
+                          ("device_id", "TEXT DEFAULT 'local'")):
             if col not in existing:
                 c.execute(f"ALTER TABLE hw_metrics ADD COLUMN {col} {decl}")
         conn.commit()
@@ -162,6 +163,10 @@ def init_db():
             "CREATE INDEX IF NOT EXISTS idx_hw_anom_sensor "
             "ON hw_anomaly_snapshots(sensor_key, captured_at)"
         )
+        # device_id migration for hw_anomaly_snapshots
+        existing_anom = {row[1] for row in c.execute("PRAGMA table_info(hw_anomaly_snapshots)").fetchall()}
+        if "device_id" not in existing_anom:
+            c.execute("ALTER TABLE hw_anomaly_snapshots ADD COLUMN device_id TEXT DEFAULT 'local'")
 
         # correlation_events: fired when ≥2 sensors are simultaneously anomalous.
         c.execute("""
@@ -182,6 +187,66 @@ def init_db():
                 message      TEXT NOT NULL,
                 created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 dismissed    INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+
+        # agent_devices: tracks devices reporting via nemesis_agent.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_devices (
+                device_id       TEXT PRIMARY KEY,
+                device_name     TEXT,
+                device_type     TEXT,
+                ip_address      TEXT,
+                connection_type TEXT,
+                agent_last_seen TIMESTAMP,
+                suricata_running INTEGER DEFAULT 0,
+                suricata_profile TEXT,
+                last_scan_at    TIMESTAMP,
+                last_scan_result TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
+
+        # scan_jobs: tracks malware scan executions per device.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_jobs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT NOT NULL,
+                scan_id         TEXT NOT NULL UNIQUE,
+                path            TEXT NOT NULL DEFAULT '/',
+                status          TEXT NOT NULL DEFAULT 'queued',
+                progress_pct    INTEGER DEFAULT 0,
+                files_scanned   INTEGER DEFAULT 0,
+                threats_found   INTEGER DEFAULT 0,
+                started_at      TIMESTAMP,
+                completed_at    TIMESTAMP
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_device ON scan_jobs(device_id, started_at)")
+
+        # scan_threats: individual threat findings from scan jobs.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_threats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_job_id     INTEGER NOT NULL,
+                device_id       TEXT NOT NULL,
+                file_path       TEXT NOT NULL,
+                threat_name     TEXT NOT NULL,
+                action_taken    TEXT,
+                detected_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # scan_schedules: per-device scan schedules.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_schedules (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT NOT NULL,
+                schedule_type   TEXT NOT NULL DEFAULT 'weekly',
+                scheduled_time  TEXT,
+                last_run_at     TIMESTAMP,
+                enabled         INTEGER DEFAULT 1
             )
         """)
         conn.commit()
@@ -626,6 +691,7 @@ def _update_fan_status(c, fans):
 
 
 def insert_sample(s):
+    device_id = s.get("device_id", "local")
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     try:
         c = conn.cursor()
@@ -635,8 +701,8 @@ def insert_sample(s):
              fans_json,
              cpu_percent, ram_used_gb,
              disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
-             gpu_temp, gpu_fan_percent, gpu_power_watts, is_anomalous)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+             gpu_temp, gpu_fan_percent, gpu_power_watts, is_anomalous, device_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
             (
                 s["timestamp"], s.get("cpu_temp"), s.get("ambient_temp"),
                 s.get("nvme_temp"),
@@ -645,6 +711,7 @@ def insert_sample(s):
                 s.get("disk_read_mb"), s.get("disk_write_mb"),
                 s.get("net_in_mb"), s.get("net_out_mb"),
                 s.get("gpu_temp"), s.get("gpu_fan_percent"), s.get("gpu_power_watts"),
+                device_id,
             ),
         )
         row_id = c.lastrowid
@@ -1094,8 +1161,178 @@ def _wa_payload_to_metrics(payload: dict) -> dict:
     }
 
 
+def _nemesis_payload_to_metrics(payload):
+    """Convert nemesis_agent payload format to the internal sample dict."""
+    hw = payload.get("hardware", {})
+    ts = payload.get("timestamp") or datetime.now().isoformat(timespec="seconds")
+
+    def _val(key, cast=float):
+        entry = hw.get(key)
+        if entry is None:
+            return None
+        try:
+            return cast(entry["value"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    fans = []
+    for key, entry in sorted(hw.items()):
+        if key.startswith("fan") and key not in ("gpu_fan_percent",):
+            try:
+                rpm = int(float(entry["value"]))
+                label = entry.get("label") or key.replace("_", " ").title()
+                fans.append({"unique_key": key, "label": label, "rpm": rpm})
+            except (KeyError, TypeError, ValueError):
+                pass
+
+    # ram_mb in payload → ram_used_gb
+    ram_mb = _val("ram_mb")
+    ram_used_gb = round(ram_mb / 1024.0, 2) if ram_mb is not None else None
+
+    return {
+        "device_id":       payload.get("device_id", "local"),
+        "timestamp":       ts,
+        "cpu_temp":        _val("cpu_temp"),
+        "ambient_temp":    _val("ambient_temp"),
+        "nvme_temp":       _val("nvme_temp"),
+        "fans":            fans,
+        "cpu_percent":     _val("cpu_pct"),
+        "ram_used_gb":     ram_used_gb,
+        "gpu_temp":        _val("gpu_temp", int),
+        "gpu_fan_percent": _val("gpu_fan_percent", int),
+        "gpu_power_watts": _val("gpu_power_watts"),
+        "disk_read_mb":    None,
+        "disk_write_mb":   None,
+        "net_in_mb":       None,
+        "net_out_mb":      None,
+    }
+
+
+def _update_agent_device(payload):
+    """Upsert agent_devices row from a nemesis_agent POST."""
+    device_id   = payload.get("device_id", "local")
+    device_name = payload.get("device_name", device_id)
+    device_type = payload.get("device_type", "")
+    conn_type   = payload.get("connection_type", "")
+    ts          = payload.get("timestamp") or datetime.now().isoformat(timespec="seconds")
+    ah          = payload.get("agent_health", {})
+    suri_run    = 1 if ah.get("suricata_running") else 0
+    suri_prof   = ah.get("suricata_profile") or ""
+    last_scan   = ah.get("last_scan_at") or ""
+    last_result = ah.get("last_scan_result") or ""
+
+    # best-effort IP from request — not available in this context, skip
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute("""
+            INSERT INTO agent_devices
+                (device_id, device_name, device_type, connection_type,
+                 agent_last_seen, suricata_running, suricata_profile,
+                 last_scan_at, last_scan_result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                device_name     = excluded.device_name,
+                device_type     = excluded.device_type,
+                connection_type = excluded.connection_type,
+                agent_last_seen = excluded.agent_last_seen,
+                suricata_running= excluded.suricata_running,
+                suricata_profile= excluded.suricata_profile,
+                last_scan_at    = excluded.last_scan_at,
+                last_scan_result= excluded.last_scan_result
+        """, (device_id, device_name, device_type, conn_type,
+              ts, suri_run, suri_prof, last_scan, last_result))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.warning("_update_agent_device failed: %s", e)
+
+
+def get_agent_devices():
+    """Return all agent_devices rows as list of dicts."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute(
+            "SELECT device_id, device_name, device_type, ip_address, connection_type, "
+            "agent_last_seen, suricata_running, suricata_profile, last_scan_at, last_scan_result "
+            "FROM agent_devices ORDER BY agent_last_seen DESC"
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    cols = ["device_id", "device_name", "device_type", "ip_address", "connection_type",
+            "agent_last_seen", "suricata_running", "suricata_profile", "last_scan_at", "last_scan_result"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def get_hw_devices():
+    """Return distinct device_ids seen in hw_metrics last 24h with their latest readings."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute("""
+            SELECT m.device_id,
+                   m.timestamp,
+                   m.cpu_temp, m.gpu_temp, m.cpu_percent, m.ram_used_gb
+            FROM hw_metrics m
+            INNER JOIN (
+                SELECT device_id, MAX(timestamp) AS max_ts
+                FROM hw_metrics
+                WHERE timestamp >= datetime('now', '-24 hours')
+                GROUP BY device_id
+            ) latest ON m.device_id = latest.device_id AND m.timestamp = latest.max_ts
+        """).fetchall()
+        conn.close()
+    except Exception:
+        return []
+    result = []
+    for device_id, ts, cpu_t, gpu_t, cpu_pct, ram_gb in rows:
+        result.append({
+            "device_id":   device_id,
+            "last_seen":   ts,
+            "cpu_temp":    cpu_t,
+            "gpu_temp":    gpu_t,
+            "cpu_percent": cpu_pct,
+            "ram_used_gb": ram_gb,
+        })
+    return result
+
+
+def get_recent_samples_for_device(device_id, limit=288):
+    """Return up to `limit` samples for a specific device_id, oldest first."""
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute(
+            """SELECT timestamp, cpu_temp, ambient_temp, nvme_temp,
+                      fans_json,
+                      cpu_percent, ram_used_gb,
+                      disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
+                      gpu_temp, gpu_fan_percent, gpu_power_watts
+               FROM hw_metrics
+               WHERE device_id = ?
+               ORDER BY id DESC
+               LIMIT ?""",
+            (device_id, limit),
+        )
+        rows = c.fetchall()
+    finally:
+        conn.close()
+    cols = ["timestamp", "cpu_temp", "ambient_temp", "nvme_temp",
+            "fans_json",
+            "cpu_percent", "ram_used_gb",
+            "disk_read_mb", "disk_write_mb", "net_in_mb", "net_out_mb",
+            "gpu_temp", "gpu_fan_percent", "gpu_power_watts"]
+    rows.reverse()
+    result = []
+    for r in rows:
+        d = dict(zip(cols, r))
+        raw = d.pop("fans_json", None)
+        d["fans"] = json.loads(raw) if raw else []
+        result.append(d)
+    return result
+
+
 def _start_windows_agent_listener():
-    """Start the background HTTP listener that receives sensor POSTs from Windows.
+    """Start the background HTTP listener for both windows_agent and nemesis_agent POSTs.
 
     Runs in a daemon thread so it exits automatically when the main process ends.
     Calls insert_sample() on every valid POST so the dashboard reads from the DB.
@@ -1115,34 +1352,45 @@ def _start_windows_agent_listener():
                 body = self.rfile.read(length)
                 payload = json.loads(body)
             except Exception as e:
-                log.warning("windows_agent listener: bad POST body: %s", e)
+                log.warning("agent listener: bad POST body: %s", e)
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b'{"error":"bad request"}')
                 return
 
-            if payload.get("source") != "windows_agent":
+            source = payload.get("source", "")
+            if source not in ("windows_agent", "nemesis_agent"):
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(b'{"error":"source must be windows_agent"}')
+                self.wfile.write(b'{"error":"unknown source"}')
                 return
 
             try:
-                metrics = _wa_payload_to_metrics(payload)
-                insert_sample(metrics)
-                log.info(
-                    "windows_agent: sample cpu=%s°C gpu=%s°C fans=%d cpu%%=%s",
-                    metrics.get("cpu_temp"), metrics.get("gpu_temp"),
-                    len(metrics.get("fans", [])), metrics.get("cpu_percent"),
-                )
+                if source == "nemesis_agent":
+                    metrics = _nemesis_payload_to_metrics(payload)
+                    _update_agent_device(payload)
+                    insert_sample(metrics)
+                    log.info(
+                        "nemesis_agent: sample device=%s cpu=%s°C gpu=%s°C conn=%s",
+                        payload.get("device_id"), metrics.get("cpu_temp"),
+                        metrics.get("gpu_temp"), payload.get("connection_type"),
+                    )
+                else:
+                    metrics = _wa_payload_to_metrics(payload)
+                    insert_sample(metrics)
+                    log.info(
+                        "windows_agent: sample cpu=%s°C gpu=%s°C fans=%d cpu%%=%s",
+                        metrics.get("cpu_temp"), metrics.get("gpu_temp"),
+                        len(metrics.get("fans", [])), metrics.get("cpu_percent"),
+                    )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(b'{"ok":true}')
             except Exception as e:
-                log.exception("windows_agent: failed to store sample: %s", e)
+                log.exception("agent listener: failed to store sample: %s", e)
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -1151,10 +1399,10 @@ def _start_windows_agent_listener():
     def _serve():
         try:
             server = HTTPServer(("0.0.0.0", WA_LISTEN_PORT), _WaHandler)
-            log.info("Hardware source: windows_agent — listening on port %d", WA_LISTEN_PORT)
+            log.info("Agent listener started on port %d (windows_agent + nemesis_agent)", WA_LISTEN_PORT)
             server.serve_forever()
         except Exception as e:
-            log.error("windows_agent listener failed to start: %s", e)
+            log.error("agent listener failed to start: %s", e)
 
     t = threading.Thread(target=_serve, daemon=True, name="wa-listener")
     t.start()
@@ -1208,10 +1456,12 @@ def main():
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
 
-    # Detect windows_agent mode before touching sensors.
+    # Always start the agent listener so remote nemesis_agent devices can POST.
+    _start_windows_agent_listener()
+
+    # Detect windows_agent mode — skip local sensor collection if Windows agent is the source.
     hw_map = _load_hw_map()
     if hw_map and hw_map.get("source") == "windows_agent":
-        _start_windows_agent_listener()
         # Main thread must stay alive to keep the daemon listener thread running.
         while _running:
             _sleep_interruptible(60)
