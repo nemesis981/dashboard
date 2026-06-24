@@ -299,6 +299,8 @@ def init_db():
                 (None, "first_connect",      None,  1, "/"),
                 (None, "return_from_remote", None,  1, "/"),
                 (None, "extended_absence",   "24",  1, "/"),
+                (None, "new_login",          None,  1, "/"),
+                (None, "usb_inserted",       None,  1, "/"),
             ]
             c.executemany(
                 "INSERT INTO scan_conditions "
@@ -307,7 +309,7 @@ def init_db():
                 defaults,
             )
             conn.commit()
-            log.info("init_db: seeded 3 default scan conditions")
+            log.info("init_db: seeded 5 default scan conditions")
 
         # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
         # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
