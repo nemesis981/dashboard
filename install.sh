@@ -746,6 +746,15 @@ deploy_services() {
     systemctl daemon-reload
     ok "systemd configuration reloaded"
 
+    # Pre-create alerts.db owned by the dashboard user.
+    # Some services (hw-monitor, alert-watcher) may run as root and would otherwise
+    # create the file as root:root before the dashboard service can write to it.
+    local _db="$DASHBOARD_DIR/alert_manager/alerts.db"
+    [[ -f "$_db" ]] || touch "$_db"
+    chown "$SUDO_USER:$SUDO_USER" "$_db"
+    chmod 664 "$_db"
+    ok "alerts.db ownership set to $SUDO_USER"
+
     for svc in "${svc_names[@]}"; do
         if [[ ! -f "/etc/systemd/system/${svc}.service" ]]; then
             continue
