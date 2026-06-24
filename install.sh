@@ -50,6 +50,7 @@ CFG_IPINFO_TOKEN=""
 CFG_PIHOLE_PASSWORD=""
 CFG_ANTHROPIC_INPUT_PRICE="3.00"
 CFG_ANTHROPIC_OUTPUT_PRICE="15.00"
+CFG_DASHBOARD_PASSWORD=""
 
 # Auto-detected in preflight
 DETECTED_IFACE=""
@@ -192,6 +193,20 @@ guided_mode() {
     echo "  After that, the install runs automatically."
     echo ""
 
+    # ── Dashboard login password ─────────────────────────────────────────────
+    echo -e "  ${BOLD}── Dashboard Login ──────────────────────────────────────────────────${NC}"
+    echo "  The dashboard is protected by HTTP basic auth (username: nemesis)."
+    echo "  Choose a password you'll use to log in at http://<your-ip>"
+    echo ""
+    while [[ -z "$CFG_DASHBOARD_PASSWORD" ]]; do
+        prompt_secret CFG_DASHBOARD_PASSWORD "Dashboard login password"
+        if [[ -z "$CFG_DASHBOARD_PASSWORD" ]]; then
+            warn "Dashboard password cannot be empty."
+        fi
+    done
+    ok "Dashboard password set"
+    echo ""
+
     # ── Email alerts ─────────────────────────────────────────────────────────
     echo -e "  ${BOLD}── Email Alert Settings ─────────────────────────────────────────────${NC}"
     echo "  Nemesis emails you when it detects threats. You need an outbound"
@@ -256,6 +271,7 @@ guided_mode() {
     printf "  %-28s %s\n" "IP address:"            "$DETECTED_IP"
     printf "  %-28s %s\n" "Local subnet:"          "$DETECTED_SUBNET"
     echo ""
+    printf "  %-28s %s\n" "Dashboard login:"       "nemesis / <password set>"
     printf "  %-28s %s\n" "Alert sender email:"    "${CFG_WATCHDOG_EMAIL:-<not set>}"
     printf "  %-28s %s\n" "Alert recipient email:" "${CFG_WATCHDOG_TO:-<not set>}"
     printf "  %-28s %s\n" "SMTP host:"             "${CFG_SMTP_HOST}"
@@ -307,6 +323,11 @@ config_first_mode() {
 #  Edit values below, then save (Ctrl+O, Enter) and exit (Ctrl+X).
 #  Lines beginning with # are comments — they are ignored.
 # ══════════════════════════════════════════════════════════════════════════════
+
+# ── Dashboard Login ───────────────────────────────────────────────────────────
+# Password for the web dashboard login (username is always 'nemesis').
+# This protects the dashboard via nginx HTTP basic auth.
+DASHBOARD_PASSWORD=
 
 # ── Auto-detected network settings ───────────────────────────────────────────
 # Change these only if auto-detection picked the wrong interface or IP.
@@ -379,6 +400,7 @@ EOF
     [[ -n "$conf_ip" ]]    && DETECTED_IP="$conf_ip"
     [[ -n "$conf_subnet" ]] && DETECTED_SUBNET="$conf_subnet"
 
+    CFG_DASHBOARD_PASSWORD=$(read_conf "DASHBOARD_PASSWORD")
     CFG_WATCHDOG_EMAIL=$(read_conf "WATCHDOG_EMAIL")
     CFG_WATCHDOG_PASSWORD=$(read_conf "WATCHDOG_PASSWORD")
     CFG_WATCHDOG_TO=$(read_conf "WATCHDOG_TO" "$CFG_WATCHDOG_EMAIL")
@@ -751,35 +773,59 @@ ufw_and_finish() {
     ufw --force enable
     ok "UFW enabled with local-network-only rules"
 
-    # Port redirect: Flask runs on 5000 as a non-root user; redirect port 80 → 5000
-    # so the dashboard is reachable at http://<ip> without a reverse proxy.
-    # A systemd oneshot service is used for persistence — iptables-persistent conflicts
-    # with ufw on Ubuntu 22.04+ and would remove it if installed.
-    info "Redirecting port 80 → 5000 for dashboard access..."
-    iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
-        || iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-    iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null \
-        || iptables -t nat -A OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
+    # nginx reverse proxy: Flask runs on 5000; nginx on 80 reverse-proxies to it
+    # with HTTP basic auth so the dashboard is not open to the local network unauthenticated.
+    info "Installing nginx reverse proxy with HTTP basic auth..."
+    apt-get install -y nginx apache2-utils
 
-    cat > /etc/systemd/system/nemesis-port-redirect.service <<'SVCEOF'
-[Unit]
-Description=Nemesis port 80 → 5000 redirect
-After=network.target
+    # Generate a random dashboard password if one was not set during config
+    if [[ -z "$CFG_DASHBOARD_PASSWORD" ]]; then
+        CFG_DASHBOARD_PASSWORD=$(openssl rand -base64 12 | tr -d '/+=')
+        warn "No dashboard password was set — generated a random one (shown at completion)"
+    fi
 
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/iptables -t nat -A PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-ExecStart=/usr/sbin/iptables -t nat -A OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
-ExecStop=/usr/sbin/iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-ExecStop=/usr/sbin/iptables -t nat -D OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
-RemainAfterExit=yes
+    # Create htpasswd file (bcrypt, nginx user readable only)
+    htpasswd -bcB /etc/nginx/.nemesis_htpasswd nemesis "$CFG_DASHBOARD_PASSWORD" 2>/dev/null
+    chmod 640 /etc/nginx/.nemesis_htpasswd
+    chown root:www-data /etc/nginx/.nemesis_htpasswd
+    ok "Created /etc/nginx/.nemesis_htpasswd (user: nemesis)"
 
-[Install]
-WantedBy=multi-user.target
-SVCEOF
-    systemctl daemon-reload
-    systemctl enable nemesis-port-redirect 2>/dev/null
-    ok "Port redirect 80 → 5000 installed as systemd service (persists across reboots)"
+    # Write nginx site config
+    cat > /etc/nginx/sites-available/nemesis <<'NGINXEOF'
+server {
+    listen 80;
+    server_name _;
+
+    # Increase body size limit for dashboard file uploads (backups, etc.)
+    client_max_body_size 100M;
+
+    location / {
+        auth_basic "Nemesis Firewall";
+        auth_basic_user_file /etc/nginx/.nemesis_htpasswd;
+
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_read_timeout 300s;
+        proxy_connect_timeout 10s;
+        proxy_send_timeout 300s;
+    }
+}
+NGINXEOF
+
+    # Enable the Nemesis site; disable nginx's default placeholder
+    ln -sf /etc/nginx/sites-available/nemesis /etc/nginx/sites-enabled/nemesis
+    rm -f /etc/nginx/sites-enabled/default
+
+    systemctl enable nginx 2>/dev/null
+    if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || systemctl start nginx
+        ok "nginx reverse proxy configured and enabled (port 80 → Flask :5000)"
+    else
+        warn "nginx config test failed — check: sudo nginx -t"
+        warn "Dashboard may not be accessible on port 80 until nginx config is fixed."
+    fi
 
     # ── Pi-hole password ─────────────────────────────────────────────────────
     if [[ -z "$CFG_PIHOLE_PASSWORD" ]]; then
@@ -819,6 +865,11 @@ SVCEOF
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "  ${BOLD}Dashboard URL:${NC}    http://$DETECTED_IP"
+    echo -e "  ${BOLD}Login:${NC}            Username: nemesis"
+    echo -e "  ${BOLD}Password:${NC}         $CFG_DASHBOARD_PASSWORD"
+    echo ""
+    echo "  Save this password — it is stored in /etc/nginx/.nemesis_htpasswd"
+    echo "  To change it later:  sudo htpasswd /etc/nginx/.nemesis_htpasswd nemesis"
     echo ""
     echo -e "  ${BOLD}Next steps:${NC}"
     echo ""

@@ -15,10 +15,10 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-ok()    { echo -e "${GREEN}  ✓${NC}  $*"; }
-warn()  { echo -e "${YELLOW}  ⚠${NC}  $*"; }
-info()  { echo -e "${BLUE}  →${NC}  $*"; }
-fail()  { echo -e "${RED}  ✗  ERROR:${NC}  $*" >&2; }
+ok()      { echo -e "${GREEN}  ✓${NC}  $*"; }
+warn()    { echo -e "${YELLOW}  ⚠${NC}  $*"; }
+info()    { echo -e "${BLUE}  →${NC}  $*"; }
+fail()    { echo -e "${RED}  ✗  ERROR:${NC}  $*" >&2; }
 skipped() { echo -e "     ${BOLD}(skipped — not found)${NC}  $*"; }
 
 step_header() {
@@ -80,8 +80,10 @@ echo -e "  ${RED}${BOLD}Will be removed:${NC}"
 echo "    All 5 Nemesis systemd services"
 echo "    /etc/nemesis.env     (runtime configuration)"
 echo "    /etc/sudoers.d/nemesis, nemesis-restart"
-echo "    nemesis-port-redirect.service + iptables rules"
+echo "    nginx site config (/etc/nginx/sites-*/nemesis) + htpasswd"
+echo "    UFW rules added by Nemesis"
 echo "    nemesis system group"
+echo "    Legacy: nemesis-port-redirect.service + iptables rules (if present)"
 echo ""
 echo "  You will be asked individually about Pi-hole, Suricata, and ClamAV."
 echo ""
@@ -112,22 +114,22 @@ KEPT=()
 SKIPPED=()
 
 ###############################################################################
-# STEP 1 — STOP & DISABLE SERVICES
+# STEP 1/8 — STOP & DISABLE SERVICES
 ###############################################################################
 
-step_header "1/7" "Stopping and Disabling Services"
+step_header "1/8" "Stopping and Disabling Services"
 
 SERVICES=(dashboard watchdog hw-monitor alert-watcher device-scanner)
 
 for svc in "${SERVICES[@]}"; do
-    if systemctl list-units --full -all 2>/dev/null | grep -q "${svc}.service"; then
+    if systemctl list-units --full --all 2>/dev/null | grep -q "${svc}.service"; then
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            systemctl stop "$svc" 2>/dev/null
+            systemctl stop "$svc" 2>/dev/null || true
             ok "Stopped $svc"
         else
             info "$svc was not running"
         fi
-        systemctl disable "$svc" 2>/dev/null
+        systemctl disable "$svc" 2>/dev/null || true
         ok "Disabled $svc"
     else
         skipped "$svc (not installed)"
@@ -135,24 +137,24 @@ for svc in "${SERVICES[@]}"; do
 done
 
 ###############################################################################
-# STEP 2 — REMOVE SERVICE FILES
+# STEP 2/8 — REMOVE SERVICE FILES
 ###############################################################################
 
-step_header "2/7" "Removing Service Files"
+step_header "2/8" "Removing Service Files"
 
-any_removed=false
+_any_removed=false
 for svc in "${SERVICES[@]}"; do
     f="/etc/systemd/system/${svc}.service"
     if [[ -f "$f" ]]; then
         rm -f "$f"
         ok "Removed $f"
-        any_removed=true
+        _any_removed=true
     else
         skipped "$f"
     fi
 done
 
-if [[ "$any_removed" == true ]]; then
+if [[ "$_any_removed" == true ]]; then
     systemctl daemon-reload
     ok "systemd configuration reloaded"
     REMOVED+=("systemd services")
@@ -161,10 +163,10 @@ else
 fi
 
 ###############################################################################
-# STEP 3 — REMOVE CONFIG & PERMISSIONS
+# STEP 3/8 — REMOVE CONFIG & PERMISSIONS
 ###############################################################################
 
-step_header "3/7" "Removing Config and Permissions"
+step_header "3/8" "Removing Config and Permissions"
 
 # /etc/nemesis.env
 if [[ -f /etc/nemesis.env ]]; then
@@ -190,12 +192,11 @@ done
 
 # nemesis group
 if getent group nemesis &>/dev/null; then
-    # Remove user from group first
     if id -nG "$REAL_USER" 2>/dev/null | grep -qw nemesis; then
-        gpasswd -d "$REAL_USER" nemesis &>/dev/null
+        gpasswd -d "$REAL_USER" nemesis &>/dev/null || true
         ok "Removed $REAL_USER from nemesis group"
     fi
-    groupdel nemesis 2>/dev/null
+    groupdel nemesis 2>/dev/null || true
     ok "Removed nemesis group"
     REMOVED+=("nemesis group")
 else
@@ -204,53 +205,128 @@ else
 fi
 
 ###############################################################################
-# STEP 4 — REMOVE IPTABLES PORT REDIRECT
+# STEP 4/8 — REMOVE PORT-80 FRONTEND (nginx + legacy iptables)
 ###############################################################################
 
-step_header "4/7" "Removing iptables Port Redirect (80 → 5000)"
+step_header "4/8" "Removing Port-80 Frontend"
 
-_removed_ipt=false
+# ── nginx (current architecture) ────────────────────────────────────────────
+_nginx_removed=false
 
-# Stop/disable the systemd persistence service (preferred method as of current install.sh)
+if [[ -L /etc/nginx/sites-enabled/nemesis || -f /etc/nginx/sites-enabled/nemesis ]]; then
+    rm -f /etc/nginx/sites-enabled/nemesis
+    ok "Removed /etc/nginx/sites-enabled/nemesis"
+    _nginx_removed=true
+else
+    skipped "/etc/nginx/sites-enabled/nemesis"
+fi
+
+if [[ -f /etc/nginx/sites-available/nemesis ]]; then
+    rm -f /etc/nginx/sites-available/nemesis
+    ok "Removed /etc/nginx/sites-available/nemesis"
+    _nginx_removed=true
+else
+    skipped "/etc/nginx/sites-available/nemesis"
+fi
+
+if [[ -f /etc/nginx/.nemesis_htpasswd ]]; then
+    rm -f /etc/nginx/.nemesis_htpasswd
+    ok "Removed /etc/nginx/.nemesis_htpasswd"
+    _nginx_removed=true
+else
+    skipped "/etc/nginx/.nemesis_htpasswd"
+fi
+
+if [[ "$_nginx_removed" == true ]]; then
+    if command -v nginx &>/dev/null && systemctl is-active --quiet nginx 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || true
+        ok "nginx reloaded (Nemesis site removed)"
+    fi
+    REMOVED+=("nginx reverse proxy config")
+else
+    SKIPPED+=("nginx config (not found)")
+fi
+
+# ── Legacy: nemesis-port-redirect.service + iptables NAT ────────────────────
+# Kept as a cleanup fallback for machines installed before the nginx migration.
+_legacy_ipt=false
+
 if [[ -f /etc/systemd/system/nemesis-port-redirect.service ]]; then
-    systemctl stop nemesis-port-redirect 2>/dev/null || true
+    systemctl stop    nemesis-port-redirect 2>/dev/null || true
     systemctl disable nemesis-port-redirect 2>/dev/null || true
     rm -f /etc/systemd/system/nemesis-port-redirect.service
     systemctl daemon-reload 2>/dev/null || true
-    ok "Removed nemesis-port-redirect.service"
-    _removed_ipt=true
+    ok "Removed nemesis-port-redirect.service (legacy)"
+    _legacy_ipt=true
 else
     skipped "nemesis-port-redirect.service (not found)"
 fi
 
-# Remove live iptables rules whether or not the service existed
-if iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
-    iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000
-    ok "Removed PREROUTING rule (port 80 → 5000)"
-    _removed_ipt=true
-else
-    skipped "PREROUTING rule (not present)"
+if command -v iptables &>/dev/null; then
+    if iptables -t nat -C PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
+        iptables -t nat -D PREROUTING -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null || true
+        ok "Removed iptables PREROUTING rule (legacy)"
+        _legacy_ipt=true
+    else
+        skipped "iptables PREROUTING rule (not present)"
+    fi
+
+    if iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
+        iptables -t nat -D OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null || true
+        ok "Removed iptables OUTPUT rule (legacy)"
+        _legacy_ipt=true
+    else
+        skipped "iptables OUTPUT rule (not present)"
+    fi
 fi
 
-if iptables -t nat -C OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000 2>/dev/null; then
-    iptables -t nat -D OUTPUT -o lo -p tcp --dport 80 -j REDIRECT --to-port 5000
-    ok "Removed OUTPUT rule (localhost port 80 → 5000)"
-    _removed_ipt=true
-else
-    skipped "OUTPUT rule (not present)"
-fi
-
-if [[ "$_removed_ipt" == true ]]; then
-    REMOVED+=("iptables port-80 redirect")
-else
-    SKIPPED+=("iptables port-80 redirect")
+if [[ "$_legacy_ipt" == true ]]; then
+    REMOVED+=("legacy iptables port-80 redirect")
 fi
 
 ###############################################################################
-# STEP 5 — OPTIONAL: PI-HOLE
+# STEP 5/8 — REMOVE UFW RULES
 ###############################################################################
 
-step_header "5/7" "Optional Component — Pi-hole"
+step_header "5/8" "Removing UFW Rules"
+
+if command -v ufw &>/dev/null; then
+    _ufw_count=0
+
+    # Delete rules carrying a "Nemesis" comment (added by install.sh).
+    # Loop one-at-a-time: after each delete the remaining rule numbers shift,
+    # so we always re-query rather than collecting numbers up-front.
+    while true; do
+        _line=$(ufw status numbered 2>/dev/null | grep -i "Nemesis" | head -1)
+        [[ -z "$_line" ]] && break
+        _num=$(echo "$_line" | grep -oP '^\[\s*\K\d+')
+        [[ -z "$_num" ]] && break
+        echo "y" | ufw delete "$_num" 2>/dev/null || break
+        _ufw_count=$((_ufw_count + 1))
+    done
+
+    # Best-effort removal of Windows agent port — may not carry a Nemesis comment
+    # if the user edited the rule manually. Both tcp-only and any-protocol forms.
+    ufw delete allow 5001/tcp 2>/dev/null || true
+    ufw delete allow 5001     2>/dev/null || true
+
+    if [[ $_ufw_count -gt 0 ]]; then
+        ok "Removed $_ufw_count Nemesis UFW rule(s)"
+        REMOVED+=("UFW rules")
+    else
+        skipped "No Nemesis-tagged UFW rules found"
+        SKIPPED+=("UFW rules")
+    fi
+else
+    skipped "UFW not installed"
+    SKIPPED+=("UFW rules")
+fi
+
+###############################################################################
+# STEP 6/8 — OPTIONAL: PI-HOLE
+###############################################################################
+
+step_header "6/8" "Optional Component — Pi-hole"
 
 if command -v pihole &>/dev/null || systemctl is-active --quiet pihole-FTL 2>/dev/null; then
     if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove Pi-hole?"; then
@@ -272,17 +348,17 @@ else
 fi
 
 ###############################################################################
-# STEP 6 — OPTIONAL: SURICATA
+# STEP 7/8 — OPTIONAL: SURICATA
 ###############################################################################
 
-step_header "6/7" "Optional Component — Suricata"
+step_header "7/8" "Optional Component — Suricata"
 
 if dpkg -l suricata 2>/dev/null | grep -q '^ii'; then
     echo "  Note: /etc/suricata (your rules and config) will NOT be deleted."
     echo ""
     if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove Suricata packages?"; then
-        systemctl stop suricata 2>/dev/null
-        systemctl disable suricata 2>/dev/null
+        systemctl stop    suricata 2>/dev/null || true
+        systemctl disable suricata 2>/dev/null || true
         apt-get purge -y suricata 2>/dev/null
         ok "Suricata removed"
         REMOVED+=("Suricata")
@@ -297,15 +373,15 @@ else
 fi
 
 ###############################################################################
-# STEP 7 — OPTIONAL: CLAMAV
+# STEP 8/8 — OPTIONAL: CLAMAV
 ###############################################################################
 
-step_header "7/7" "Optional Component — ClamAV"
+step_header "8/8" "Optional Component — ClamAV"
 
 if dpkg -l clamav 2>/dev/null | grep -q '^ii'; then
     if [[ "$NON_INTERACTIVE" == true ]] || ask_yes_no "Remove ClamAV?"; then
-        systemctl stop clamav-daemon 2>/dev/null
-        systemctl disable clamav-daemon 2>/dev/null
+        systemctl stop    clamav-daemon 2>/dev/null || true
+        systemctl disable clamav-daemon 2>/dev/null || true
         apt-get purge -y clamav clamav-daemon 2>/dev/null
         ok "ClamAV removed"
         REMOVED+=("ClamAV")
