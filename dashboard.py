@@ -11,6 +11,9 @@ import time
 import logging
 import threading
 import tarfile
+import shutil
+import socket
+import uuid as _uuid_mod
 from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
@@ -4818,27 +4821,86 @@ def api_hw_metrics_for_device():
         return jsonify({"error": str(e)}), 500
 
 
+def _hw_health_from_temp(cpu_t):
+    if cpu_t is None:
+        return "unknown"
+    if cpu_t > 90:
+        return "critical"
+    if cpu_t > 75:
+        return "warning"
+    return "ok"
+
+
+def _agent_status_from_seen(agent_seen, now_ts):
+    if not agent_seen:
+        return "no_agent"
+    try:
+        seen_dt = datetime.fromisoformat(agent_seen)
+        if (now_ts - seen_dt).total_seconds() / 60 <= 10:
+            return "online"
+    except Exception:
+        pass
+    return "offline"
+
+
 @app.route("/api/scan/devices")
 def api_scan_devices():
-    """All devices with agent status, last scan, hardware health, connection type."""
+    """All devices with agent status, last scan, hardware health, connection type.
+
+    The Nemesis host (device_id='local') is always returned first as a first-class
+    device regardless of agent deployment.
+    """
     try:
-        hw_devs = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
-        ag_devs = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
+        hw_devs  = {d["device_id"]: d for d in hw_monitor.get_hw_devices()}
+        ag_devs  = {d["device_id"]: d for d in hw_monitor.get_agent_devices()}
         net_devs = get_network_devices()
         now_ts   = datetime.now()
 
-        all_ids = set(hw_devs) | set(ag_devs)
-        # Also include pure network devices (no agent)
-        for nd in net_devs:
-            all_ids.add(nd.get("mac", nd.get("ip", "")))
-
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
-        result = []
+
+        def _last_scan(did):
+            row = conn.execute(
+                "SELECT status, completed_at, threats_found FROM scan_jobs "
+                "WHERE device_id=? ORDER BY started_at DESC LIMIT 1", (did,)
+            ).fetchone()
+            if row:
+                return row[0], row[1], row[2] or 0
+            return "never", "", 0
+
+        # ── Nemesis host: always first, special agent_status ──────────────────
+        local_hw  = hw_devs.get("local", {})
+        local_cpu = local_hw.get("cpu_temp")
+        local_scan_status, local_scan_at, local_scan_threats = _last_scan("local")
+        local_entry = {
+            "device_id":        "local",
+            "friendly_name":    socket.gethostname(),
+            "device_type":      "linux",
+            "ip_address":       "",
+            "connection_type":  "local",
+            "agent_status":     "nemesis_host",
+            "agent_last_seen":  local_hw.get("last_seen", ""),
+            "suricata_running": False,
+            "suricata_profile": "",
+            "last_scan_at":     local_scan_at,
+            "last_scan_status": local_scan_status,
+            "last_scan_threats": local_scan_threats,
+            "hw_health":        _hw_health_from_temp(local_cpu),
+            "cpu_temp":         local_cpu,
+            "clamav_available": bool(shutil.which("clamscan")),
+        }
+
+        # ── Remote / network devices ──────────────────────────────────────────
+        all_ids = (set(hw_devs) | set(ag_devs)) - {"local"}
+        for nd in net_devs:
+            nid = nd.get("mac", nd.get("ip", ""))
+            if nid:
+                all_ids.add(nid)
+
+        remote = []
         for did in all_ids:
             hw = hw_devs.get(did, {})
             ag = ag_devs.get(did, {})
 
-            # Friendly name
             friendly = ag.get("device_name") or did
             try:
                 row = conn.execute(
@@ -4849,103 +4911,188 @@ def api_scan_devices():
             except Exception:
                 pass
 
-            # Last scan info
-            scan_row = conn.execute(
-                "SELECT status, completed_at, threats_found FROM scan_jobs "
-                "WHERE device_id=? ORDER BY started_at DESC LIMIT 1", (did,)
-            ).fetchone()
-            last_scan_status = scan_row[0] if scan_row else ag.get("last_scan_result", "never")
-            last_scan_at     = scan_row[1] if scan_row else ag.get("last_scan_at", "")
-            last_scan_threats= scan_row[2] if scan_row else 0
+            scan_status, scan_at, scan_threats = _last_scan(did)
+            if scan_status == "never":
+                scan_status = ag.get("last_scan_result", "never")
+                scan_at     = ag.get("last_scan_at", "")
 
-            # Agent online status
-            agent_seen = ag.get("agent_last_seen") or hw.get("last_seen", "")
-            agent_status = "no_agent"
-            if agent_seen:
-                try:
-                    seen_dt = datetime.fromisoformat(agent_seen)
-                    mins_ago = (now_ts - seen_dt).total_seconds() / 60
-                    if mins_ago <= 10:
-                        agent_status = "online"
-                    elif mins_ago <= 60:
-                        agent_status = "offline"
-                    else:
-                        agent_status = "offline"
-                except Exception:
-                    agent_status = "offline"
+            agent_seen   = ag.get("agent_last_seen") or hw.get("last_seen", "")
+            agent_status = _agent_status_from_seen(agent_seen, now_ts)
+            cpu_t        = hw.get("cpu_temp")
 
-            # Hardware health
-            hw_health = "unknown"
-            cpu_t = hw.get("cpu_temp")
-            if cpu_t is not None:
-                hw_health = "ok"
-                if cpu_t > 90:
-                    hw_health = "critical"
-                elif cpu_t > 75:
-                    hw_health = "warning"
-
-            result.append({
-                "device_id":       did,
-                "friendly_name":   friendly,
-                "device_type":     ag.get("device_type", "unknown"),
-                "ip_address":      ag.get("ip_address", ""),
-                "connection_type": ag.get("connection_type", ""),
-                "agent_status":    agent_status,
-                "agent_last_seen": agent_seen,
+            remote.append({
+                "device_id":        did,
+                "friendly_name":    friendly,
+                "device_type":      ag.get("device_type", "unknown"),
+                "ip_address":       ag.get("ip_address", ""),
+                "connection_type":  ag.get("connection_type", ""),
+                "agent_status":     agent_status,
+                "agent_last_seen":  agent_seen,
                 "suricata_running": bool(ag.get("suricata_running")),
                 "suricata_profile": ag.get("suricata_profile", ""),
-                "last_scan_at":    last_scan_at,
-                "last_scan_status": last_scan_status,
-                "last_scan_threats": last_scan_threats,
-                "hw_health":       hw_health,
-                "cpu_temp":        cpu_t,
+                "last_scan_at":     scan_at,
+                "last_scan_status": scan_status,
+                "last_scan_threats": scan_threats,
+                "hw_health":        _hw_health_from_temp(cpu_t),
+                "cpu_temp":         cpu_t,
+                "clamav_available": False,
             })
+
         conn.close()
-        return jsonify({"devices": result})
+        return jsonify({"devices": [local_entry] + remote})
     except Exception as e:
         log.exception("api_scan_devices failed: %s", e)
         return jsonify({"devices": [], "error": str(e)})
 
 
+def _run_local_clamscan(scan_id, path):
+    """Background thread: run clamscan on the Nemesis host and stream progress to scan_jobs."""
+    log_file = f"/tmp/nemesis-scan-{scan_id}.log"
+    try:
+        if not shutil.which("clamscan"):
+            raise RuntimeError("clamscan not found on PATH")
+
+        proc = subprocess.Popen(
+            ["clamscan", "-r", path, "--no-summary", f"--log={log_file}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        log.info("local clamscan started: scan_id=%s pid=%d path=%s", scan_id, proc.pid, path)
+
+        while proc.poll() is None:
+            time.sleep(3)
+            _update_local_scan_progress(scan_id, log_file, "running")
+
+        _update_local_scan_progress(scan_id, log_file, "running")  # final read before status flip
+
+        # Parse threats from completed log
+        threats = []
+        try:
+            with open(log_file) as f:
+                for line in f:
+                    if "FOUND" in line:
+                        line = line.strip()
+                        # Format: "/path/to/file: ThreatName FOUND"
+                        if ": " in line:
+                            file_path, rest = line.split(": ", 1)
+                            threat_name = rest.replace(" FOUND", "").strip()
+                        else:
+                            file_path, threat_name = line, "Unknown"
+                        threats.append((file_path, threat_name))
+        except Exception as e:
+            log.warning("local scan log parse error: %s", e)
+
+        final_status = "threats_found" if threats else "clean"
+
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        row = conn.execute("SELECT id, files_scanned FROM scan_jobs WHERE scan_id=?", (scan_id,)).fetchone()
+        job_id      = row[0] if row else None
+        files_count = row[1] if row else 0
+        for file_path, threat_name in threats:
+            conn.execute(
+                "INSERT INTO scan_threats (scan_job_id, device_id, file_path, threat_name, action_taken) "
+                "VALUES (?, 'local', ?, ?, 'detected')",
+                (job_id, file_path, threat_name),
+            )
+        conn.execute(
+            "UPDATE scan_jobs SET status=?, threats_found=?, progress_pct=100, completed_at=? "
+            "WHERE scan_id=?",
+            (final_status, len(threats), datetime.now().isoformat(), scan_id),
+        )
+        conn.commit()
+        conn.close()
+        log.info("local clamscan done: scan_id=%s status=%s threats=%d files=%d",
+                 scan_id, final_status, len(threats), files_count)
+
+    except Exception as e:
+        log.exception("local clamscan failed (scan_id=%s): %s", scan_id, e)
+        try:
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn.execute(
+                "UPDATE scan_jobs SET status='error', completed_at=? WHERE scan_id=?",
+                (datetime.now().isoformat(), scan_id),
+            )
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    finally:
+        try:
+            os.unlink(log_file)
+        except Exception:
+            pass
+
+
+def _update_local_scan_progress(scan_id, log_file, status):
+    """Read log file and update scan_jobs progress counters."""
+    try:
+        files_scanned = 0
+        threats_found = 0
+        with open(log_file) as f:
+            for line in f:
+                if ": " in line:
+                    files_scanned += 1
+                if "FOUND" in line:
+                    threats_found += 1
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "UPDATE scan_jobs SET status=?, files_scanned=?, threats_found=? WHERE scan_id=?",
+            (status, files_scanned, threats_found, scan_id),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 @app.route("/api/scan/trigger", methods=["POST"])
 def api_scan_trigger():
-    """POST {device_id, path} → sends scan command to agent, returns scan_id."""
-    data = request.get_json(force=True) or {}
+    """POST {device_id, path} → triggers scan. Local device runs ClamAV directly; remote via agent."""
+    data      = request.get_json(force=True) or {}
     device_id = data.get("device_id", "")
     path      = data.get("path", "/")
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
-    import uuid as _uuid
-    scan_id = str(_uuid.uuid4())
-    try:
-        # Look up agent IP from agent_devices
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
-        row = conn.execute(
-            "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
-        ).fetchone()
-        conn.close()
-        agent_ip = row[0] if row and row[0] else None
 
-        # Record job in DB
+    scan_id = str(_uuid_mod.uuid4())
+    try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.execute(
             "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
-            "VALUES (?, ?, ?, 'queued', ?)",
-            (device_id, scan_id, path, datetime.now().isoformat())
+            "VALUES (?, ?, ?, 'running', ?)",
+            (device_id, scan_id, path, datetime.now().isoformat()),
         )
         conn.commit()
         conn.close()
 
-        # Try to send command to agent
-        if agent_ip:
-            try:
-                requests.post(
-                    f"http://{agent_ip}:5002",
-                    json={"action": "scan", "path": path, "scan_id": scan_id},
-                    timeout=5,
-                )
-            except Exception as e:
-                log.warning("Could not reach agent %s: %s", agent_ip, e)
+        if device_id == "local":
+            # Run ClamAV directly on the Nemesis host
+            if not shutil.which("clamscan"):
+                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                conn.execute("UPDATE scan_jobs SET status='error' WHERE scan_id=?", (scan_id,))
+                conn.commit()
+                conn.close()
+                return jsonify({"error": "clamscan not found — install clamav"}), 500
+            t = threading.Thread(target=_run_local_clamscan, args=(scan_id, path),
+                                 daemon=True, name=f"clamscan-{scan_id[:8]}")
+            t.start()
+        else:
+            # Send command to remote agent
+            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            row = conn.execute(
+                "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
+            ).fetchone()
+            conn.close()
+            agent_ip = row[0] if row and row[0] else None
+            if agent_ip:
+                try:
+                    requests.post(
+                        f"http://{agent_ip}:5002",
+                        json={"action": "scan", "path": path, "scan_id": scan_id},
+                        timeout=5,
+                    )
+                except Exception as e:
+                    log.warning("Could not reach agent %s: %s", agent_ip, e)
 
         return jsonify({"ok": True, "scan_id": scan_id})
     except Exception as e:
@@ -5154,6 +5301,7 @@ def scan_page():
         .device-card {{
             background: #0d1117; border: 1px solid #1e2d4e; border-radius: 8px;
             padding: 16px; position: relative; }}
+        .device-card.nemesis-host-card {{ border-color: #00d4ff; background: #06101e; }}
         .device-card.agent-online {{ border-color: #00ff88; }}
         .device-card.hw-critical {{ border-color: #ff4444; }}
         .device-name {{ font-size: 1.1em; font-weight: bold; color: #fff;
@@ -5301,42 +5449,55 @@ function renderDeviceGrid(devs) {{
         return;
     }}
     grid.innerHTML = devs.map(function(d) {{
+        var isLocal   = d.device_id === 'local';
         var agentBadge = agentStatusBadge(d.agent_status);
-        var connBadge  = d.connection_type ? connTypeBadge(d.connection_type) : '';
+        var connBadge  = (!isLocal && d.connection_type) ? connTypeBadge(d.connection_type) : '';
         var idsBadge   = d.suricata_running
             ? '<span class="badge badge-blue">IDS: Active (' + (d.suricata_profile||'?') + ')</span>'
             : '';
         var hwBadge    = hwHealthBadge(d.hw_health);
         var scanBadge  = scanStatusBadge(d.last_scan_status, d.last_scan_at, d.last_scan_threats);
-        var canScan    = d.agent_status === 'online';
-        var scanBtn    = canScan
+        var canScan    = isLocal ? d.clamav_available : (d.agent_status === 'online');
+        var scanBtnTitle = isLocal
+            ? (d.clamav_available ? '' : 'ClamAV not installed on this host')
+            : 'Install Nemesis Agent to enable scanning';
+        var scanBtn = canScan
             ? '<button class="btn btn-green" onclick="triggerScan(\\'' + d.device_id + '\\')">🔬 Scan Now</button>'
-            : '<button class="btn btn-grey" title="Install agent to enable scanning">🔬 Scan Now</button>';
-        var cardClass  = 'device-card' +
+            : '<button class="btn btn-grey" title="' + scanBtnTitle + '">🔬 Scan Now</button>';
+        var alertBtn = isLocal
+            ? ''  // no push notification needed for local machine
+            : '<button class="btn btn-orange" onclick="openNotifyModal(\\'' + d.device_id + '\\')">📢 Alert</button>';
+        var hwLink = isLocal
+            ? '<a class="btn btn-blue" href="/hardware/all#local" target="_blank">🌡️ Hardware</a>'
+            : (d.hw_health !== 'unknown'
+                ? '<a class="btn btn-blue" href="/hardware/all#' + escHtml(d.device_id) + '" target="_blank">🌡️ HW</a>'
+                : '');
+        var cardClass = 'device-card' +
+            (isLocal ? ' nemesis-host-card' : '') +
             (d.agent_status === 'online' ? ' agent-online' : '') +
             (d.hw_health === 'critical' ? ' hw-critical' : '');
+        var nameEl = isLocal
+            ? '<div class="device-name">' + escHtml(d.friendly_name) + '</div>'
+            : '<div class="device-name" onclick="editFriendlyName(\\'' + d.device_id + '\\', this)">' + escHtml(d.friendly_name) + '</div>';
         return '<div class="' + cardClass + '">' +
-            '<div class="device-name" onclick="editFriendlyName(\\'' + d.device_id + '\\', this)">' +
-                escHtml(d.friendly_name) + '</div>' +
+            nameEl +
             '<div class="device-meta">' + escHtml(d.device_type || 'unknown') +
                 (d.ip_address ? ' &nbsp;·&nbsp; ' + escHtml(d.ip_address) : '') + '</div>' +
             '<div>' + agentBadge + connBadge + idsBadge + hwBadge + '</div>' +
             '<div style="margin-top:6px;font-size:0.8em;color:#aaa">' + scanBadge + '</div>' +
             '<div class="device-actions">' +
-                scanBtn +
-                '<button class="btn btn-orange" onclick="openNotifyModal(\\'' + d.device_id + '\\')">📢 Alert</button>' +
+                scanBtn + alertBtn +
                 '<button class="btn btn-grey" style="opacity:1;cursor:pointer" onclick="openScheduleModal(\\'' + d.device_id + '\\')">📅 Schedule</button>' +
-                (d.hw_health !== 'unknown'
-                    ? '<a class="btn btn-blue" href="/hardware/all#' + escHtml(d.device_id) + '" target="_blank">🌡️ HW</a>'
-                    : '') +
+                hwLink +
             '</div>' +
         '</div>';
     }}).join('');
 }}
 
 function agentStatusBadge(status) {{
-    if (status === 'online')  return '<span class="badge badge-green">🟢 Agent Online</span>';
-    if (status === 'offline') return '<span class="badge badge-yellow">🟡 Agent Offline</span>';
+    if (status === 'nemesis_host') return '<span class="badge badge-blue">🏠 Nemesis Host</span>';
+    if (status === 'online')       return '<span class="badge badge-green">🟢 Agent Online</span>';
+    if (status === 'offline')      return '<span class="badge badge-yellow">🟡 Agent Offline</span>';
     return '<span class="badge badge-grey">⚪ No Agent</span>';
 }}
 function connTypeBadge(conn) {{
@@ -5387,9 +5548,12 @@ function triggerScan(deviceId) {{
 }}
 
 function scanAllDevices() {{
-    var online = _devices.filter(function(d){{ return d.agent_status === 'online'; }});
-    if (!online.length) {{ alert('No online agent devices found.'); return; }}
-    online.forEach(function(d){{ triggerScan(d.device_id); }});
+    var scannable = _devices.filter(function(d){{
+        return d.agent_status === 'online' ||
+               (d.agent_status === 'nemesis_host' && d.clamav_available);
+    }});
+    if (!scannable.length) {{ alert('No scannable devices found.'); return; }}
+    scannable.forEach(function(d){{ triggerScan(d.device_id); }});
 }}
 
 function renderActiveScans() {{
@@ -6045,7 +6209,7 @@ def dashboard():
                 <label style="color:#aaa;font-size:0.85em">Device:</label>
                 <select id="hwDeviceSelect" onchange="hwDeviceChanged()"
                         style="background:#1a1a2e;color:#eee;border:1px solid #333;padding:4px 8px;border-radius:4px;font-size:0.85em">
-                    <option value="local">This Nemesis Host (local)</option>
+                    <option value="local">Nemesis Host (this machine)</option>
                 </select>
                 <span id="hwDeviceConnBadge" style="font-size:0.75em;color:#888"></span>
             </div>
