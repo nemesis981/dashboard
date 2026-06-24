@@ -94,10 +94,15 @@ def _get_setting(key: str, default: str = "") -> str:
 
 
 def _set_setting(key: str, value: str) -> None:
-    conn = _conn()
-    conn.execute("INSERT OR REPLACE INTO ai_settings(key, value) VALUES(?,?)", (key, value))
-    conn.commit()
-    conn.close()
+    try:
+        conn = _conn()
+        conn.execute("INSERT OR REPLACE INTO ai_settings(key, value) VALUES(?,?)", (key, value))
+        conn.commit()
+    except Exception:
+        log.exception("ai_engine: _set_setting failed for %s", key)
+        raise
+    finally:
+        conn.close()
 
 
 def _get_rate_state(conn, key: str, default: str = "0") -> str:
@@ -287,9 +292,11 @@ def get_upsell_js() -> str:
         '};'
         'window._aiUpsellDismissPermanent=function(e){'
         'e.preventDefault();'
-        'document.querySelectorAll(".ai-upsell-prompt")'
-        '.forEach(function(el){el.style.display="none";});'
-        'fetch("/api/ai/upsell_dismiss",{method:"POST"});'
+        'var els=document.querySelectorAll(".ai-upsell-prompt");'
+        'els.forEach(function(el){el.style.display="none";});'
+        'fetch("/api/ai/upsell_dismiss",{method:"POST"})'
+        '.then(function(r){return r.json();})'
+        '.then(function(d){if(!d.ok)els.forEach(function(el){el.style.display="";});});'
         '};'
         '})();'
         '</script>'
