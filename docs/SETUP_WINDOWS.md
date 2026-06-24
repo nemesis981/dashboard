@@ -1,5 +1,7 @@
 # Nemesis Firewall — Windows Setup Guide
 
+> **⚠️ Windows Support Status:** The Windows/VM installation path is currently under development. The documentation and scripts in this repository represent the planned architecture but have not been fully tested end-to-end. We recommend Linux native installation for v1.0. Windows support is planned for a future release. Community contributions to the Windows installer are welcome — see `windows_agent/` for the current work in progress.
+
 Installation and configuration reference for Windows users running Nemesis via a virtual machine.
 
 > **Explanation levels:** Look for 🟢 **Beginner**, 🔵 **Intermediate**, and 🔴 **Pro** callouts — read the level that matches your comfort.

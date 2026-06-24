@@ -15,7 +15,7 @@ Nemesis Firewall is a self-hosted network security dashboard that runs on your o
 | I want to... | Use this path |
 |---|---|
 | Run Nemesis on a dedicated Linux machine or server | [Linux native →](#linux-quick-start) |
-| Run Nemesis on a Windows PC using a virtual machine | [Windows/VM →](#windows-quick-start) |
+| Windows | Windows support coming in a future release — follow Linux native for now, or see [SETUP_WINDOWS.md](SETUP_WINDOWS.md) for the work-in-progress Windows path. |
 
 ---
 
@@ -36,17 +36,6 @@ http://<your-machine-ip>
 ```
 
 The install script will walk you through all required configuration (API keys, email alerts, network settings). Takes about 10 minutes.
-
----
-
-## Windows Quick Start
-
-**Minimum requirements:** Windows 10/11, 16GB RAM recommended (8GB minimum), quad-core CPU, 30GB free storage
-
-1. Download `nemesis-windows-setup.exe` from the releases page
-2. Run as Administrator
-3. The installer will handle everything: VirtualBox, the Nemesis VM, and the Windows hardware agent
-4. When the VM starts, follow the on-screen setup wizard
 
 ---
 
