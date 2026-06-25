@@ -144,14 +144,15 @@ def _poll_anthropic_status() -> None:
                 if not _incident["since"]:
                     _incident["since"] = now
             else:
-                # Status page clear — always clear regardless of source
-                _incident["active"]        = False
-                _incident["severity"]      = ""
-                _incident["name"]          = ""
-                _incident["update"]        = ""
-                _incident["source"]        = ""
-                _incident["since"]         = 0.0
-                _incident["failure_count"] = 0
+                # Status page clear — clear unless held by the simulate hook (testing)
+                if _incident.get("source") != "simulate":
+                    _incident["active"]        = False
+                    _incident["severity"]      = ""
+                    _incident["name"]          = ""
+                    _incident["update"]        = ""
+                    _incident["source"]        = ""
+                    _incident["since"]         = 0.0
+                    _incident["failure_count"] = 0
 
         log.info("ai_engine: status poll: indicator=%s (%s)", indicator, description)
     except Exception as exc:
