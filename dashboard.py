@@ -1497,22 +1497,19 @@ def settings_page():
         _is_windows_agent = False
         _agent_ip = ""
 
-    # Read AI Engine settings from ai_engine.db
+    # Read AI Engine settings from the shared DB via the ai_engine module API
+    # (ADR 0001 Stage 3 — no longer reaches into modules/ai_engine/ai_engine.db).
     _ai_rate_h   = "10"
     _ai_rate_d   = "50"
     _ai_upsell_dismissed = False
     _ai_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
     _ai_output_price = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
     try:
-        _ai_db_path = os.path.join(_HERE, "modules", "ai_engine", "ai_engine.db")
-        _ai_conn = sqlite3.connect(_ai_db_path, timeout=5)
-        def _ai_st(k, d=""):
-            r = _ai_conn.execute("SELECT value FROM ai_settings WHERE key=?", (k,)).fetchone()
-            return r[0] if r else d
-        _ai_rate_h = _ai_st("rate_per_hour", "10")
-        _ai_rate_d = _ai_st("rate_per_day",  "50")
-        _ai_upsell_dismissed = _ai_st("ai_upsell_dismissed", "0") == "1"
-        _ai_conn.close()
+        from modules.ai_engine import get_settings as _ai_get_settings
+        _ai_s = _ai_get_settings()
+        _ai_rate_h = _ai_s["rate_per_hour"]
+        _ai_rate_d = _ai_s["rate_per_day"]
+        _ai_upsell_dismissed = _ai_s["ai_upsell_dismissed"]
     except Exception:
         pass
     _ai_incident = {}

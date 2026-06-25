@@ -7,8 +7,10 @@ Public API (importable from any module):
     analyze(prompt, ...) → dict
     get_usage_stats()   → dict
     get_pricing()       → dict
+    get_settings()      → dict
 
-DB: modules/ai_engine/ai_engine.db
+DB: shared alerts.db (ai_* tables), reached via the Stage-1 module accessor.
+    modules/ai_engine/ai_engine.db is retained as a fallback only (ADR 0001 Stage 3).
 """
 
 import os
@@ -20,11 +22,13 @@ import threading
 import urllib.request
 from datetime import datetime, timedelta
 
-from modules import NemesisModule
+from modules import NemesisModule, get_db as _shared_get_db
 
 log = logging.getLogger("nemesis.ai_engine")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# Legacy per-module DB path. Retained as a fallback file only (not used for live
+# connections after the ADR 0001 Stage 3 cutover); removed in a later stage.
 _DB_PATH = os.path.join(_HERE, "ai_engine.db")
 
 # Defaults — overridden by ai_settings table
@@ -37,7 +41,10 @@ _RATE_DAY_DEFAULT  = 50
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _conn():
-    c = sqlite3.connect(_DB_PATH, timeout=10)
+    # ADR 0001 Stage 3: all ai_engine reads/writes go to the shared alerts.db
+    # ai_* tables via the Stage-1 accessor (WAL + busy_timeout), not the legacy
+    # per-module ai_engine.db. Single switch point — every caller uses _conn().
+    c = _shared_get_db()
     c.row_factory = sqlite3.Row
     return c
 
@@ -229,6 +236,21 @@ def _set_setting(key: str, value: str) -> None:
         raise
     finally:
         conn.close()
+
+
+def get_settings() -> dict:
+    """Public read-only view of the AI settings the dashboard header needs.
+
+    Reads from the shared DB through the module's own accessor so core code
+    (dashboard.py) no longer reaches into the module's DB file directly
+    (ADR 0001 Stage 3). Rate values are returned as their stored strings, matching
+    the dashboard's prior inline read.
+    """
+    return {
+        "rate_per_hour":       _get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT)),
+        "rate_per_day":        _get_setting("rate_per_day",  str(_RATE_DAY_DEFAULT)),
+        "ai_upsell_dismissed": _get_setting("ai_upsell_dismissed", "0") == "1",
+    }
 
 
 def _get_rate_state(conn, key: str, default: str = "0") -> str:
