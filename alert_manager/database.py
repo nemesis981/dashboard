@@ -7,6 +7,13 @@ DB_PATH = os.path.join(_HERE, "alerts.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
+    # ADR 0001 Stage-2 prerequisite: the shared DB runs in WAL mode so multiple
+    # services + modules can write concurrently without "database is locked".
+    # WAL is persistent on the file; asserting it here (idempotent) converts the
+    # DB on first startup and keeps it WAL even if the file is ever recreated.
+    # busy_timeout is per-connection — set 5s here too (matches Python's default).
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     c = conn.cursor()
     c.execute('''
         CREATE TABLE IF NOT EXISTS alerts (

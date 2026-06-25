@@ -3,6 +3,9 @@ alert_manager/watchdog.log
 alert_manager/nemesis.log
 *.log
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 __pycache__/
 *.pyc
 .env
