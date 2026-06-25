@@ -6,7 +6,7 @@ If ANTHROPIC_API_KEY is present in /etc/nemesis.env, makes a single Claude
 API call to classify all sensors, then lets the user accept or override each
 field.  Falls back to an interactive heuristic flow if no key is available.
 
-Saves the final mapping to /home/paul/dashboard/alert_manager/hw_map.json for use by
+Saves the final mapping to alert_manager/hw_map.json for use by
 hw_monitor.py.  Supports any number of fans — no limit.
 
 Usage:  python3 hw_discover.py

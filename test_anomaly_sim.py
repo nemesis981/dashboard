@@ -19,11 +19,11 @@ Phase 3: Validates AbuseIPDB threshold/dedup logic and CISA threshold settings.
   Does NOT hit the real AbuseIPDB API (validates flow control, not submission).
 
 Cleanup after UI validation:
-    python3 /home/paul/dashboard/test_anomaly_cleanup.py
+    python3 test_anomaly_cleanup.py
 """
 
 import sys, os, time, json
-sys.path.insert(0, "/home/paul/dashboard")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # repo root
 
 from datetime import datetime
 
@@ -184,7 +184,7 @@ def main():
 
     print()
     print("  When done with UI validation, run cleanup:")
-    print("    python3 /home/paul/dashboard/test_anomaly_cleanup.py")
+    print("    python3 test_anomaly_cleanup.py")
     print("=" * 58)
 
 

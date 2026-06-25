@@ -14,7 +14,12 @@ META = {
     },
 }
 
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
+# Derived from this file's location (repo_root/alert_manager/alerts.db) — no
+# hardcoded home dir. (ADR 0001, Stage 1.)
+DB_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "alert_manager", "alerts.db",
+)
 
 
 def run() -> dict:

@@ -22,6 +22,8 @@ import importlib.util
 import sqlite3
 import logging
 
+import modules  # the modules package: NemesisModule + shared DB accessor
+
 log = logging.getLogger(__name__)
 
 _modules_dir: str | None = None
@@ -41,6 +43,9 @@ def init(app, db_path: str, modules_dir: str) -> None:
     _app = app
     _db_path = db_path
     _modules_dir = modules_dir
+    # Publish the single shared DB path so modules can reach it via the accessor
+    # (self.get_db() / self.db_path) — before any module is constructed/started.
+    modules.set_shared_db_path(db_path)
     _init_db()
     _discover()
     _load_all_enabled()

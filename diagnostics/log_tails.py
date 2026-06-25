@@ -14,7 +14,11 @@ META = {
     },
 }
 
-_LOG_BASE = "/home/paul/dashboard/alert_manager"
+# Derived from this file's location (repo_root/alert_manager) — no hardcoded
+# home dir. (ADR 0001, Stage 1.)
+_LOG_BASE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "alert_manager",
+)
 LOG_FILES = [
     (os.path.join(_LOG_BASE, "watchdog.log"),      "Watchdog"),
     (os.path.join(_LOG_BASE, "hw_monitor.log"),    "HW Monitor"),

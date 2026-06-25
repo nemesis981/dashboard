@@ -10,6 +10,47 @@ instantiate. Do NOT import this file directly from module.py — the loader
 handles the relationship.
 """
 
+import sqlite3
+
+
+# ---------------------------------------------------------------------------
+# Shared database accessor  (ADR 0001, Stage 1)
+# ---------------------------------------------------------------------------
+# modules_loader.init() calls set_shared_db_path() once with the single shared
+# alerts.db path. Modules reach the DB through this accessor (self.get_db() /
+# self.db_path) instead of computing their own __file__-relative path. Stage 1
+# only INTRODUCES the accessor — no data is moved and no existing module is
+# forced to change; modules adopt it during Stage 2/3.
+_shared_db_path: str | None = None
+
+
+def set_shared_db_path(path: str) -> None:
+    """Register the single shared DB path. Called once by the loader at init."""
+    global _shared_db_path
+    _shared_db_path = path
+
+
+def get_shared_db_path() -> str:
+    """Return the shared DB path, or raise if the loader hasn't set it yet."""
+    if _shared_db_path is None:
+        raise RuntimeError(
+            "shared DB path not set — modules_loader.init() must run first"
+        )
+    return _shared_db_path
+
+
+def get_db(**kwargs) -> sqlite3.Connection:
+    """Open a connection to the shared DB. kwargs pass through to sqlite3.connect.
+
+    Applies a 5s busy_timeout explicitly (not relying on Python's default) so the
+    connection waits rather than erroring under the concurrent-writer load the
+    shared DB sees in WAL mode (ADR 0001 Stage-2 prerequisite).
+    """
+    kwargs.setdefault("timeout", 5.0)
+    conn = sqlite3.connect(get_shared_db_path(), **kwargs)
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
 
 class NemesisModule:
     """Base class all modules must subclass.
@@ -21,6 +62,17 @@ class NemesisModule:
     def __init__(self, manifest: dict):
         self.manifest = manifest
         self.name: str = manifest.get("name", "unknown")
+
+    # --- Shared database access (ADR 0001) ---------------------------------
+
+    @property
+    def db_path(self) -> str:
+        """Path to the single shared alerts.db (set by the loader at init)."""
+        return get_shared_db_path()
+
+    def get_db(self, **kwargs) -> sqlite3.Connection:
+        """Open a connection to the shared DB (kwargs -> sqlite3.connect)."""
+        return get_db(**kwargs)
 
     # --- Lifecycle ---------------------------------------------------------
 

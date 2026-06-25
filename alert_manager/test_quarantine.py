@@ -26,10 +26,12 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
 
-sys.path.insert(0, "/home/paul/dashboard/alert_manager")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # this dir (alert_manager)
 import alert_watcher  # noqa: E402
 
-DB_PATH = "/home/paul/dashboard/alert_manager/alerts.db"
+# Derived from this file's location (this dir holds alerts.db) — no hardcoded
+# home dir. (ADR 0001, Stage 1.)
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alerts.db")
 DASHBOARD = "http://127.0.0.1:5000"
 TEST_IP = "203.0.113.99"
 RULE_IDS = {"confirm": "9999991", "lift": "9999992", "expire": "9999993"}
