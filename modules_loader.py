@@ -185,6 +185,11 @@ def _load_module(name: str) -> None:
     spec = importlib.util.spec_from_file_location(f"nemesis_module_{name}", module_file)
     py_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(py_module)
+    # Register under the package path so `from modules.<name> import ...` in
+    # other modules and dashboard.py resolves to THIS instance (same _incident
+    # dicts, same in-flight sets, etc.) instead of a fresh duplicate.
+    import sys as _sys
+    _sys.modules[f"modules.{name}.module"] = py_module
 
     instance = py_module.Module(manifest)
     instance.start()
