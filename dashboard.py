@@ -637,6 +637,16 @@ def get_pihole_summary():
         "percent": percent,
     }
 
+def _get_incident_stats():
+    try:
+        from modules.ai_engine import get_incident_banner_html as _ibanner, get_incident_state as _istate
+        return {
+            "incident_banner_html": _ibanner(),
+            "incident_state": _istate(),
+        }
+    except Exception:
+        return {"incident_banner_html": "", "incident_state": {}}
+
 @app.route("/api/stats")
 def api_stats():
     quarantines = get_active_quarantines()
@@ -685,6 +695,7 @@ def api_stats():
             if modules_loader.get_loaded_modules().get("community_queue")
             else ""
         ),
+        **_get_incident_stats(),
     })
 
 
@@ -1423,6 +1434,58 @@ def set_action(rule_id, action):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def _settings_incident_panel(inc: dict) -> str:
+    import time as _time
+    active    = inc.get("active", False)
+    severity  = inc.get("severity", "")
+    name      = inc.get("name", "")
+    update    = inc.get("update", "")
+    source    = inc.get("source", "")
+    fail_cnt  = inc.get("failure_count", 0)
+    last_poll = inc.get("last_poll", 0.0)
+    indicator = inc.get("poll_indicator", "none")
+    poll_err  = inc.get("poll_error", "")
+
+    if active:
+        sev_color = "#ff4444" if severity in ("major", "critical") else "#ffaa00"
+        sev_label = severity.capitalize() if severity else "Active"
+        src_label = "Own-call failures" if source == "own_calls" else "Status page poll"
+        panel_color = sev_color
+        status_line = f'<span style="color:{sev_color};font-weight:bold">⚠️ {sev_label} Incident</span>'
+        details = ""
+        if name:
+            details += f'<div style="margin-top:6px;font-size:0.85em;color:#eee">{name}</div>'
+        if update:
+            details += f'<div style="margin-top:4px;font-size:0.8em;color:#bbb">{update}</div>'
+        details += f'<div style="margin-top:4px;font-size:0.75em;color:#888">Source: {src_label}'
+        if fail_cnt:
+            details += f" &mdash; {fail_cnt} failure(s) recorded"
+        details += "</div>"
+    else:
+        panel_color = "#00ff88"
+        ind_map = {"none": ("Operational", "#00ff88"), "minor": ("Minor", "#ffaa00"),
+                   "major": ("Degraded", "#ff4444"), "critical": ("Critical", "#ff4444")}
+        ind_label, ind_color = ind_map.get(indicator, ("Unknown", "#888"))
+        status_line = f'<span style="color:{ind_color}">✓ {ind_label}</span>'
+        details = ""
+        if poll_err:
+            details = f'<div style="margin-top:4px;font-size:0.75em;color:#888">Poll error: {poll_err[:80]}</div>'
+
+    if last_poll:
+        age_s = int(_time.time() - last_poll)
+        if age_s < 60:
+            poll_str = f"{age_s}s ago"
+        elif age_s < 3600:
+            poll_str = f"{age_s // 60}m ago"
+        else:
+            poll_str = f"{age_s // 3600}h ago"
+        last_checked = f'<div style="margin-top:6px;font-size:0.72em;color:#666">Last checked: {poll_str} &mdash; <a href="https://status.claude.com" target="_blank" rel="noopener" style="color:#555">status.claude.com ↗</a></div>'
+    else:
+        last_checked = f'<div style="margin-top:6px;font-size:0.72em;color:#666">Not yet polled &mdash; <a href="https://status.claude.com" target="_blank" rel="noopener" style="color:#555">status.claude.com ↗</a></div>'
+
+    return f"""<div style="font-size:0.85em">{status_line}{details}{last_checked}</div>"""
+
+
 @app.route("/settings")
 def settings_page():
     # Detect windows_agent mode for restart button
@@ -1450,6 +1513,12 @@ def settings_page():
         _ai_rate_d = _ai_st("rate_per_day",  "50")
         _ai_upsell_dismissed = _ai_st("ai_upsell_dismissed", "0") == "1"
         _ai_conn.close()
+    except Exception:
+        pass
+    _ai_incident = {}
+    try:
+        from modules.ai_engine import get_incident_state as _ai_get_inc
+        _ai_incident = _ai_get_inc()
     except Exception:
         pass
     _ai_key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -1714,6 +1783,20 @@ def settings_page():
 
             <div id="ai-engine-settings-status"
                  style="height:1.2em;font-size:0.8em;margin-top:8px;color:#00ff88"></div>
+
+            <div style="margin-top:18px;padding:12px;background:#0d1b2e;border-radius:8px;
+                        border:1px solid #1e3a5f">
+                <div style="color:#00d4ff;font-size:0.75em;text-transform:uppercase;
+                            letter-spacing:1px;margin-bottom:10px">
+                    <span data-beginner="Is Anthropic&#39;s AI service healthy right now?"
+                          data-intermediate="Anthropic service health — drives auto-block and banner"
+                          data-pro="Anthropic incident state (poll + own-call failure tracking)">
+                        Anthropic Service Status
+                    </span>
+                </div>
+                {_settings_incident_panel(_ai_incident)}
+            </div>
+
         </div>"""
 
         # Anomaly detection: manual override toggle + AbuseIPDB + CISA thresholds
@@ -6352,6 +6435,15 @@ def dashboard():
     except Exception:
         pass
 
+    incident_banner_html = ""
+    incident_js_html = ""
+    try:
+        from modules.ai_engine import get_incident_banner_html as _ai_ibanner, get_incident_js as _ai_ijs
+        incident_banner_html = _ai_ibanner()
+        incident_js_html = _ai_ijs()
+    except Exception:
+        pass
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     return f"""<!DOCTYPE html>
@@ -6480,6 +6572,7 @@ def dashboard():
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
+    {incident_js_html}
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall
@@ -6511,6 +6604,8 @@ def dashboard():
         <a href="/settings" target="_blank" rel="noopener">⚙️ Settings</a>
         <a href="/diagnostics" target="_blank" rel="noopener">🔍 Diagnostics</a>
     </nav>
+
+    <div id="nemesisIncidentBannerWrap">{incident_banner_html}</div>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
         <h2>🚨 Auto-Quarantined IPs</h2>
@@ -8440,6 +8535,23 @@ def dashboard():
                     if (d.community_queue_badge !== undefined) {{
                         var cqEl = document.getElementById("cq-badge-container");
                         if (cqEl) cqEl.innerHTML = d.community_queue_badge || '';
+                    }}
+                    if (d.incident_state) {{
+                        window._nemesisIncidentState = d.incident_state;
+                    }}
+                    if (d.incident_banner_html !== undefined) {{
+                        var ibWrap = document.getElementById("nemesisIncidentBannerWrap");
+                        if (ibWrap) {{
+                            var dismissed = window.sessionStorage && d.incident_state && d.incident_state.name
+                                ? sessionStorage.getItem('nemesisBannerDismissed') === d.incident_state.name
+                                : false;
+                            if (!dismissed) {{
+                                ibWrap.innerHTML = d.incident_banner_html;
+                                if (typeof applyTierText === 'function') applyTierText();
+                            }} else {{
+                                ibWrap.innerHTML = '';
+                            }}
+                        }}
                     }}
                     refreshTick++;
                     if (refreshTick % 5 === 0) {{

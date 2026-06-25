@@ -16,6 +16,8 @@ import json
 import time
 import logging
 import sqlite3
+import threading
+import urllib.request
 from datetime import datetime, timedelta
 
 from modules import NemesisModule
@@ -77,6 +79,129 @@ def _init_db() -> None:
 
 # Initialise at import time so any module can import and call before Module.start().
 _init_db()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Anthropic incident / cost-protection layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+_POLL_INTERVAL = 240   # seconds between status.claude.com polls
+_OWN_FAIL_THR  = 3     # consecutive own-call service errors to flag incident
+_SERVICE_CODES = {500, 502, 503, 529}
+
+_incident_lock  = threading.Lock()
+_incident: dict = {
+    "active":           False,
+    "severity":         "",        # "minor" | "major" | "critical"
+    "name":             "",
+    "update":           "",
+    "source":           "",        # "poll" | "own_calls"
+    "since":            0.0,
+    "failure_count":    0,
+    "last_poll":        0.0,
+    "poll_indicator":   "none",
+    "poll_description": "",
+    "poll_error":       "",
+}
+
+_in_flight_lock = threading.Lock()
+_in_flight: set = set()
+
+_poll_stop: threading.Event = threading.Event()
+
+
+def _poll_anthropic_status() -> None:
+    """Fetch Anthropic status page and update _incident. Never raises."""
+    try:
+        req = urllib.request.Request(
+            "https://status.claude.com/api/v2/summary.json",
+            headers={"User-Agent": "Nemesis-Firewall/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+
+        indicator   = data.get("status", {}).get("indicator", "none")
+        description = data.get("status", {}).get("description", "")
+        incidents   = data.get("incidents", [])
+        inc_name    = incidents[0].get("name", "")  if incidents else ""
+        inc_update  = ""
+        if incidents:
+            upds       = incidents[0].get("incident_updates", [])
+            inc_update = upds[0].get("body", "") if upds else ""
+
+        now = time.time()
+        with _incident_lock:
+            _incident["last_poll"]        = now
+            _incident["poll_indicator"]   = indicator
+            _incident["poll_description"] = description
+            _incident["poll_error"]       = ""
+            if indicator != "none":
+                _incident["active"]    = True
+                _incident["severity"]  = indicator
+                _incident["name"]      = inc_name or "Service Disruption"
+                _incident["update"]    = inc_update
+                _incident["source"]    = "poll"
+                if not _incident["since"]:
+                    _incident["since"] = now
+            else:
+                # Status page clear — always clear regardless of source
+                _incident["active"]        = False
+                _incident["severity"]      = ""
+                _incident["name"]          = ""
+                _incident["update"]        = ""
+                _incident["source"]        = ""
+                _incident["since"]         = 0.0
+                _incident["failure_count"] = 0
+
+        log.info("ai_engine: status poll: indicator=%s (%s)", indicator, description)
+    except Exception as exc:
+        with _incident_lock:
+            _incident["last_poll"]  = time.time()
+            _incident["poll_error"] = str(exc)
+        log.warning("ai_engine: status poll failed: %s", exc)
+
+
+def _poll_loop(stop_evt: threading.Event) -> None:
+    """Background polling thread: wakes every _POLL_INTERVAL seconds."""
+    while not stop_evt.wait(timeout=_POLL_INTERVAL):
+        try:
+            _poll_anthropic_status()
+        except Exception:
+            log.exception("ai_engine: status poll loop error")
+
+
+def _record_call_failure(code: int) -> None:
+    """Called when analyze() gets a service error response. Flags incident after threshold."""
+    with _incident_lock:
+        _incident["failure_count"] += 1
+        if _incident["failure_count"] >= _OWN_FAIL_THR and not _incident["active"]:
+            _incident["active"]   = True
+            _incident["severity"] = "major"
+            _incident["name"]     = f"Repeated API errors (HTTP {code})"
+            _incident["update"]   = (
+                f"Own calls failed {_incident['failure_count']} times with HTTP {code}. "
+                "Status page may lag — check status.claude.com."
+            )
+            _incident["source"]   = "own_calls"
+            _incident["since"]    = time.time()
+            log.warning(
+                "ai_engine: incident flagged — %d consecutive HTTP %d errors",
+                _incident["failure_count"], code,
+            )
+
+
+def _record_call_success() -> None:
+    """Called when analyze() succeeds. Clears own-calls incidents."""
+    with _incident_lock:
+        _incident["failure_count"] = 0
+        if _incident["active"] and _incident["source"] == "own_calls":
+            _incident["active"]   = False
+            _incident["severity"] = ""
+            _incident["name"]     = ""
+            _incident["update"]   = ""
+            _incident["source"]   = ""
+            _incident["since"]    = 0.0
+            log.info("ai_engine: own-calls incident cleared — calls succeeding again")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -303,6 +428,133 @@ def get_upsell_js() -> str:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Incident public API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_incident_state() -> dict:
+    """Return a shallow copy of the current Anthropic incident state."""
+    with _incident_lock:
+        return dict(_incident)
+
+
+def is_auto_blocked() -> bool:
+    """True when an Anthropic incident is active — auto AI calls should defer."""
+    with _incident_lock:
+        return _incident["active"]
+
+
+def get_incident_banner_html() -> str:
+    """Dismissible incident banner HTML, or '' when no incident is active."""
+    state = get_incident_state()
+    if not state["active"]:
+        return ""
+    sev  = state["severity"]
+    name = state["name"]
+    upd  = state["update"]
+
+    if sev in ("major", "critical"):
+        border = "#ff4444"
+        bg     = "rgba(255,68,68,0.08)"
+        icon   = "&#128308;"
+    else:
+        border = "#ffaa00"
+        bg     = "rgba(255,170,0,0.08)"
+        icon   = "&#9888;"
+
+    def _e(s: str) -> str:
+        return (s.replace("&", "&amp;").replace("<", "&lt;")
+                 .replace(">", "&gt;").replace('"', "&quot;"))
+
+    name_e = _e(name)
+    upd_e  = _e(upd[:240]) + ("&#8230;" if len(upd) > 240 else "")
+    sev_e  = _e(sev)
+
+    upd_row = (
+        f'<div style="font-size:0.82em;color:#bbb;margin-top:4px">{upd_e}</div>'
+        if upd_e else ""
+    )
+    return (
+        f'<div id="nemesisIncidentBanner" data-incident="{name_e}"'
+        f' style="border-left:4px solid {border};background:{bg};'
+        f'padding:10px 16px;margin-bottom:14px;border-radius:0 6px 6px 0;position:relative">'
+        f'<button onclick="(function(b){{'
+        f'var p=b.closest(&#39;[data-incident]&#39;);'
+        f'sessionStorage.setItem(&#39;nemesisBannerDismissed&#39;,p.dataset.incident);'
+        f'p.style.display=&#39;none&#39;'
+        f'}})(this)"'
+        f' style="position:absolute;top:8px;right:12px;background:none;border:none;'
+        f'color:#888;font-size:1.1em;cursor:pointer" title="Dismiss for this session">'
+        f'&#10005;</button>'
+        f'<span style="color:{border};font-weight:bold">{icon} </span>'
+        f'<span class="tier-text"'
+        f' data-beginner="{name_e} &#8212; AI may be unavailable right now.'
+        f' This is Anthropic&#39;s service, not your setup."'
+        f' data-intermediate="Anthropic incident: {name_e}"'
+        f' data-pro="{sev_e}: {name_e}">{name_e}</span>'
+        f'{upd_row}'
+        f'<div style="font-size:0.80em;margin-top:5px;color:#aaa">'
+        f'AI calls will likely fail and may still be billed. &#160;'
+        f'<a href="https://status.claude.com" target="_blank" rel="noopener"'
+        f' style="color:{border}">status.claude.com &#8599;</a></div>'
+        f'</div>'
+    )
+
+
+def get_incident_js() -> str:
+    """Guarded <script> block: in-flight lock + incident confirm + banner dismiss init.
+    Include once per page (after tier.js). Guard prevents double-definition."""
+    return (
+        '<script>'
+        '(function(){'
+        'if(window._aiIncidentJsLoaded)return;'
+        'window._aiIncidentJsLoaded=true;'
+        # Incident state (populated by stats poll)
+        'window._nemesisIncidentState={};'
+        # In-flight tracking set
+        'window._aiInFlightSet=new Set();'
+        'window._aiInFlightStart=function(key,btn){'
+        'window._aiInFlightSet.add(key);'
+        'if(btn)btn.disabled=true;'
+        '};'
+        'window._aiInFlightEnd=function(key,btn){'
+        'window._aiInFlightSet.delete(key);'
+        'if(btn)btn.disabled=false;'
+        '};'
+        'window._aiIsInFlight=function(key){'
+        'return window._aiInFlightSet.has(key);'
+        '};'
+        # Incident confirm: gate user-triggered calls when incident active
+        'window._aiIncidentConfirm=function(callFn){'
+        'var s=window._nemesisIncidentState||{};'
+        'if(!s.active){callFn();return;}'
+        'var n=s.name||"Service Issue";'
+        'var msg=typeof tierText==="function"'
+        '?tierText('
+        '"Anthropic is reporting a service issue ("+n+"). AI calls will likely fail'
+        ' and may still be billed. Try anyway?",'
+        '"Anthropic incident: "+n+". AI may fail or bill without response. Try?",'
+        '"Incident active ("+n+"). Proceed?"'
+        ')'
+        ':"Anthropic incident: "+n+". Proceed?";'
+        'if(confirm(msg))callFn();'
+        '};'
+        # Banner dismiss: hide on load if this incident was already dismissed this session
+        '(function(){'
+        'function _initDismiss(){'
+        'var b=document.getElementById("nemesisIncidentBanner");'
+        'if(b&&sessionStorage.getItem("nemesisBannerDismissed")===b.dataset.incident)'
+        'b.style.display="none";'
+        '}'
+        'if(document.readyState==="loading")'
+        'document.addEventListener("DOMContentLoaded",_initDismiss);'
+        'else _initDismiss();'
+        '})();'
+        '})();'
+        '</script>'
+    )
+
+
 def get_usage_stats() -> dict:
     try:
         conn = _conn()
@@ -348,18 +600,48 @@ def get_usage_stats() -> dict:
         }
 
 
-def analyze(prompt: str, system_prompt: str | None = None, max_tokens: int = 1000,
-            cache_key: str | None = None, cache_hours: float = 24,
-            force: bool = False) -> dict:
+def analyze(
+    prompt: str,
+    system_prompt: str | None = None,
+    max_tokens: int = 1000,
+    cache_key: str | None = None,
+    cache_hours: float = 24,
+    force: bool = False,
+    job_id: str | None = None,
+) -> dict:
     """
     Single entry point for all Anthropic API calls.
 
     Returns {"ok": True, "text": str, "from_cache": bool, "tokens_used": int}
          or {"ok": False, "reason": str}.
 
-    force=True bypasses rate limiting (for manual/override requests).
+    force=True bypasses rate limiting (for manual/override calls).
     cache_hours=0 skips cache lookup (always calls API).
+    job_id — if provided, deduplicates concurrent calls for the same job.
     """
+    # In-flight dedup
+    if job_id:
+        with _in_flight_lock:
+            if job_id in _in_flight:
+                return {"ok": False, "reason": "duplicate call — already in flight"}
+            _in_flight.add(job_id)
+
+    try:
+        return _analyze_inner(prompt, system_prompt, max_tokens, cache_key, cache_hours, force)
+    finally:
+        if job_id:
+            with _in_flight_lock:
+                _in_flight.discard(job_id)
+
+
+def _analyze_inner(
+    prompt: str,
+    system_prompt: str | None,
+    max_tokens: int,
+    cache_key: str | None,
+    cache_hours: float,
+    force: bool,
+) -> dict:
     key = _api_key()
     if not key:
         return {"ok": False, "reason": "ANTHROPIC_API_KEY not configured"}
@@ -392,26 +674,72 @@ def analyze(prompt: str, system_prompt: str | None = None, max_tokens: int = 100
         except Exception:
             log.exception("ai_engine: rate limit check failed")
 
-    # API call
+    # API call with capped retry (max 1 retry)
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=key)
-        messages = [{"role": "user", "content": prompt}]
-        kwargs = dict(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            messages=messages,
-        )
-        if system_prompt:
-            kwargs["system"] = system_prompt
+    except ImportError:
+        return {"ok": False, "reason": "anthropic package not installed — run pip install anthropic"}
 
-        msg = client.messages.create(**kwargs)
-        text = msg.content[0].text.strip()
-        tokens_in  = getattr(msg.usage, "input_tokens",  0)
-        tokens_out = getattr(msg.usage, "output_tokens", 0)
-    except Exception as exc:
-        log.exception("ai_engine: API call failed")
-        return {"ok": False, "reason": str(exc)}
+    client = anthropic.Anthropic(api_key=key)
+    messages = [{"role": "user", "content": prompt}]
+    kwargs: dict = dict(model="claude-sonnet-4-6", max_tokens=max_tokens, messages=messages)
+    if system_prompt:
+        kwargs["system"] = system_prompt
+
+    text = tokens_in = tokens_out = None
+    last_exc = None
+
+    for attempt in range(2):
+        try:
+            msg        = client.messages.create(**kwargs)
+            text       = msg.content[0].text.strip()
+            tokens_in  = getattr(msg.usage, "input_tokens",  0)
+            tokens_out = getattr(msg.usage, "output_tokens", 0)
+            _record_call_success()
+            last_exc   = None
+            break
+        except Exception as exc:
+            last_exc    = exc
+            status_code = getattr(exc, "status_code", None)
+            is_timeout  = (
+                type(exc).__name__ in ("APITimeoutError", "APIConnectionError")
+                or "timeout" in str(exc).lower()
+                or "connection" in str(exc).lower()
+            )
+            is_service  = status_code in _SERVICE_CODES
+            is_rate     = status_code == 429
+
+            if attempt == 0:
+                if is_rate:
+                    retry_after = 30.0
+                    try:
+                        rh = getattr(getattr(exc, "response", None), "headers", {}) or {}
+                        v  = float(rh.get("retry-after") or rh.get("Retry-After") or 0)
+                        if v > 0:
+                            retry_after = min(v, 60.0)
+                    except Exception:
+                        pass
+                    log.warning("ai_engine: 429 rate-limited, waiting %.0fs before retry",
+                                retry_after)
+                    time.sleep(retry_after)
+                elif is_service or is_timeout:
+                    log.warning("ai_engine: HTTP %s on attempt 1, retrying in 2s",
+                                status_code or "timeout")
+                    time.sleep(2.0)
+                else:
+                    break  # auth error or similar — don't retry
+            else:
+                if is_service or is_timeout:
+                    _record_call_failure(status_code or 0)
+                break
+
+    if last_exc is not None:
+        log.error("ai_engine: API call failed: %s", last_exc)
+        status_code = getattr(last_exc, "status_code", None)
+        result: dict = {"ok": False, "reason": str(last_exc)}
+        if status_code:
+            result["http_status"] = status_code
+        return result
 
     # Persist cache + usage + rate counters
     try:
@@ -431,7 +759,7 @@ def analyze(prompt: str, system_prompt: str | None = None, max_tokens: int = 100
         log.exception("ai_engine: failed to persist usage/cache for %s", cache_key)
 
     return {"ok": True, "text": text, "from_cache": False,
-            "tokens_used": tokens_in + tokens_out}
+            "tokens_used": (tokens_in or 0) + (tokens_out or 0)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -469,6 +797,28 @@ def _route_settings():
         return jsonify({"ok": False, "error": str(exc)}), 400
 
 
+def _route_incident():
+    """GET /api/ai/incident — current Anthropic incident state JSON."""
+    from flask import jsonify
+    return jsonify(get_incident_state())
+
+
+def _route_incident_simulate():
+    """POST /api/ai/incident/simulate — force incident state for testing."""
+    from flask import request, jsonify
+    data = request.get_json(silent=True) or {}
+    active = data.get("active", False)
+    with _incident_lock:
+        _incident["active"]        = bool(active)
+        _incident["severity"]      = data.get("severity", "major") if active else ""
+        _incident["name"]          = data.get("name", "Test Incident") if active else ""
+        _incident["update"]        = data.get("update", "Simulated for testing.") if active else ""
+        _incident["source"]        = "simulate" if active else ""
+        _incident["since"]         = time.time() if active else 0.0
+        _incident["failure_count"] = 0
+    return jsonify({"ok": True, "active": bool(active)})
+
+
 def _route_upsell_dismiss():
     from flask import jsonify
     _set_setting("ai_upsell_dismissed", "1")
@@ -488,10 +838,20 @@ def _route_upsell_restore():
 class Module(NemesisModule):
 
     def start(self) -> None:
+        global _poll_stop
         _init_db()
-        log.info("ai_engine: started (key %s)", "configured" if is_enabled() else "not configured")
+        _poll_stop.clear()
+        # Fire initial poll immediately (non-blocking daemon thread)
+        threading.Thread(target=_poll_anthropic_status, daemon=True,
+                         name="ai-status-init").start()
+        # Recurring poll loop
+        threading.Thread(target=_poll_loop, args=(_poll_stop,), daemon=True,
+                         name="ai-status-poll").start()
+        log.info("ai_engine: started (key %s, status poll started)",
+                 "configured" if is_enabled() else "not configured")
 
     def stop(self) -> None:
+        _poll_stop.set()
         log.info("ai_engine: stopped")
 
     def status(self) -> dict:
@@ -502,9 +862,11 @@ class Module(NemesisModule):
 
     def get_routes(self):
         return [
-            ("/api/ai/status",         _route_status,         {"methods": ["GET"]}),
-            ("/api/ai/usage",          _route_usage,          {"methods": ["GET"]}),
-            ("/api/ai/settings",       _route_settings,       {"methods": ["GET", "POST"]}),
-            ("/api/ai/upsell_dismiss", _route_upsell_dismiss, {"methods": ["POST"]}),
-            ("/api/ai/upsell_restore", _route_upsell_restore, {"methods": ["POST"]}),
+            ("/api/ai/status",             _route_status,            {"methods": ["GET"]}),
+            ("/api/ai/usage",              _route_usage,             {"methods": ["GET"]}),
+            ("/api/ai/settings",           _route_settings,          {"methods": ["GET", "POST"]}),
+            ("/api/ai/upsell_dismiss",     _route_upsell_dismiss,    {"methods": ["POST"]}),
+            ("/api/ai/upsell_restore",     _route_upsell_restore,    {"methods": ["POST"]}),
+            ("/api/ai/incident",           _route_incident,          {"methods": ["GET"]}),
+            ("/api/ai/incident/simulate",  _route_incident_simulate, {"methods": ["POST"]}),
         ]

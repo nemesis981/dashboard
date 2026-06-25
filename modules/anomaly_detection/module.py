@@ -36,6 +36,8 @@ from modules.ai_engine import (
     get_usage_stats as ai_get_usage_stats,
     get_upsell_prompt_html as _ai_upsell_html,
     get_upsell_js as _ai_upsell_js,
+    is_auto_blocked as _ai_auto_blocked,
+    get_incident_js as _ai_incident_js,
 )
 
 log = logging.getLogger("nemesis.anomaly")
@@ -470,11 +472,15 @@ def _detection_cycle() -> None:
             log.debug("anomaly_detection: community_queue skip for %s", domain)
 
     # Auto AI analysis — runs after commit, outside the detection conn
-    for item in ai_queue:
-        try:
-            _ai_analyze_incident(*item, is_auto=True)
-        except Exception:
-            log.exception("anomaly_detection: auto AI analysis failed for %s", item[1])
+    if _ai_auto_blocked():
+        log.info("anomaly_detection: auto AI analysis deferred — Anthropic incident active "
+                 "(%d item(s) in queue)", len(ai_queue))
+    else:
+        for item in ai_queue:
+            try:
+                _ai_analyze_incident(*item, is_auto=True)
+            except Exception:
+                log.exception("anomaly_detection: auto AI analysis failed for %s", item[1])
 
     # AbuseIPDB auto-reporting — threshold is read fresh each cycle from settings
     abuseipdb_thr = _get_abuseipdb_settings()["threshold"]
@@ -1332,6 +1338,7 @@ def _render_card(building: bool, built: bool) -> str:
   {cisa_modal}
   <script>{js}</script>
   {_ai_upsell_js()}
+  {_ai_incident_js()}
   </div><!-- end section-anomaly-body -->
 </div>"""
 
@@ -1580,18 +1587,22 @@ def _card_js() -> str:
   }};
 
   window._adShowAI = function(id) {{
+    if (window._aiIsInFlight && window._aiIsInFlight('ad-' + id)) return;
     var overlay = document.getElementById('_adAIOverlay');
     var body    = document.getElementById('_adAIBody');
     var title   = document.getElementById('_adAITitle');
     var btn     = document.getElementById('_adAIBtn' + id);
     if (!overlay) return;
-    overlay.style.display = 'block';
-    if (body)  body.innerHTML  = '<span style="color:#ccc">Generating AI analysis…</span>';
-    if (title) title.textContent = '🤖 AI Incident Analysis';
-    if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}
-    fetch('/api/anomaly/incident/' + id + '/analyze', {{method:'POST'}})
+    var doCall = function() {{
+      overlay.style.display = 'block';
+      if (body)  body.innerHTML  = '<span style="color:#ccc">Generating AI analysis…</span>';
+      if (title) title.textContent = '🤖 AI Incident Analysis';
+      if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}
+      if (window._aiInFlightStart) window._aiInFlightStart('ad-' + id, null);
+      fetch('/api/anomaly/incident/' + id + '/analyze', {{method:'POST'}})
       .then(function(r){{return r.json();}})
       .then(function(d){{
+        if (window._aiInFlightEnd) window._aiInFlightEnd('ad-' + id, null);
         if (btn) {{ btn.textContent = 'AI'; btn.disabled = false; }}
         if (d.rate_limited) {{
           if (body) body.innerHTML =
@@ -1609,16 +1620,22 @@ def _card_js() -> str:
         }}
         if (d.domain && title) title.textContent = '🤖 AI Analysis — ' + d.domain;
         if (body) body.innerHTML = d.html || '<em>No report available</em>';
-        // Update AI button style to "has report"
         if (btn) {{
           btn.style.color = '#00ff88';
           btn.style.borderColor = '#00ff8844';
         }}
       }})
       .catch(function(e){{
+        if (window._aiInFlightEnd) window._aiInFlightEnd('ad-' + id, null);
         if (btn) {{ btn.textContent = 'AI'; btn.disabled = false; }}
         if (body) body.innerHTML = '<div style="color:#ff4444">Request failed</div>';
       }});
+    }};
+    if (window._aiIncidentConfirm) {{
+      window._aiIncidentConfirm(doCall);
+    }} else {{
+      doCall();
+    }}
   }};
 
   function _adResetCISAModal() {{

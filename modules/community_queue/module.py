@@ -19,6 +19,8 @@ from modules.ai_engine import (
     analyze as ai_analyze,
     get_upsell_prompt_html as _ai_upsell_html,
     get_upsell_js as _ai_upsell_js,
+    is_auto_blocked as _ai_auto_blocked,
+    get_incident_js as _ai_incident_js,
 )
 
 log = logging.getLogger("nemesis.community_queue")
@@ -336,7 +338,7 @@ def _page_community_queue():
 
     ai_enabled     = ai_is_enabled()
     table_html     = _render_table(rows)
-    upsell_js_html = "" if ai_enabled else _ai_upsell_js()
+    upsell_js_html = ("" if ai_enabled else _ai_upsell_js()) + _ai_incident_js()
     total       = len(rows)
     reviewed    = sum(1 for r in rows if r["ai_reviewed"])
     unreviewed  = total - reviewed
@@ -464,26 +466,32 @@ def _page_community_queue():
 
     <script>
     function analyseQueue() {{
+        if (window._aiIsInFlight && window._aiIsInFlight('cq-analyse')) return;
         var btn = document.getElementById('btnAnalyse');
         var status = document.getElementById('analyseStatus');
-        if (btn) {{ btn.disabled = true; btn.textContent = '⏳ Analysing…'; }}
-        if (status) status.textContent = 'Sending to AI…';
-        fetch('/api/community-queue/analyse', {{method: 'POST'}})
-            .then(function(r) {{ return r.json(); }})
-            .then(function(d) {{
-                if (btn) {{ btn.disabled = false; btn.textContent = '🤖 Analyse Queue'; }}
-                if (d.error) {{
-                    if (status) status.textContent = '✗ ' + d.error;
-                    return;
-                }}
-                if (status) status.textContent = '✓ ' + (d.reviewed || 0) + ' item(s) reviewed';
-                // Reload table with sorted results
-                _reloadTable();
-            }})
-            .catch(function(e) {{
-                if (btn) {{ btn.disabled = false; btn.textContent = '🤖 Analyse Queue'; }}
-                if (status) status.textContent = '✗ Request failed';
-            }});
+        function doCall() {{
+            if (window._aiInFlightStart) window._aiInFlightStart('cq-analyse', btn);
+            if (btn) {{ btn.disabled = true; btn.textContent = '⏳ Analysing…'; }}
+            if (status) status.textContent = 'Sending to AI…';
+            fetch('/api/community-queue/analyse', {{method: 'POST'}})
+                .then(function(r) {{ return r.json(); }})
+                .then(function(d) {{
+                    if (window._aiInFlightEnd) window._aiInFlightEnd('cq-analyse', btn);
+                    if (btn) {{ btn.disabled = false; btn.textContent = '🤖 Analyse Queue'; }}
+                    if (d.error) {{
+                        if (status) status.textContent = '✗ ' + d.error;
+                        return;
+                    }}
+                    if (status) status.textContent = '✓ ' + (d.reviewed || 0) + ' item(s) reviewed';
+                    _reloadTable();
+                }})
+                .catch(function(e) {{
+                    if (window._aiInFlightEnd) window._aiInFlightEnd('cq-analyse', btn);
+                    if (btn) {{ btn.disabled = false; btn.textContent = '🤖 Analyse Queue'; }}
+                    if (status) status.textContent = '✗ Request failed';
+                }});
+        }}
+        if (window._aiIncidentConfirm) {{ window._aiIncidentConfirm(doCall); }} else {{ doCall(); }}
     }}
 
     function cqSubmit(id) {{
@@ -532,6 +540,11 @@ def _api_analyse():
     from flask import jsonify
     if not ai_is_enabled():
         return jsonify({"error": "AI Engine not enabled — configure ANTHROPIC_API_KEY"}), 400
+    if _ai_auto_blocked():
+        return jsonify({
+            "error": "Anthropic is reporting a service issue — batch analysis deferred. "
+                     "Try again when the incident clears (check status.claude.com)."
+        }), 503
 
     try:
         conn = _conn()
