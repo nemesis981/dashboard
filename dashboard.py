@@ -6437,10 +6437,12 @@ def dashboard():
 
     incident_banner_html = ""
     incident_js_html = ""
+    incident_state_js = "window._nemesisIncidentState={};"
     try:
-        from modules.ai_engine import get_incident_banner_html as _ai_ibanner, get_incident_js as _ai_ijs
+        from modules.ai_engine import get_incident_banner_html as _ai_ibanner, get_incident_js as _ai_ijs, get_incident_state as _ai_istate
         incident_banner_html = _ai_ibanner()
         incident_js_html = _ai_ijs()
+        incident_state_js = f"window._nemesisIncidentState={json.dumps(_ai_istate())};"
     except Exception:
         pass
 
@@ -6573,6 +6575,7 @@ def dashboard():
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
     {incident_js_html}
+    <script>{incident_state_js}</script>
 </head>
 <body>
     <h1>🛡️ Nemesis Firewall
