@@ -8,3 +8,4 @@ __pycache__/
 .env
 .claude/
 alert_manager/quarantine/
+*.state.json

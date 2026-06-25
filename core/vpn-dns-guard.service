@@ -1,0 +1,17 @@
+[Unit]
+Description=Nemesis VPN-Aware Upstream DNS Guard
+# Start after Pi-hole so the API is reachable on the first reconcile.
+After=network.target pihole-FTL.service
+Wants=pihole-FTL.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/watchdog.env
+EnvironmentFile=/etc/nemesis.env
+ExecStart=/usr/bin/python3 /home/paul/dashboard/core/vpn_dns_guard.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
