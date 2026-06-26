@@ -1,0 +1,132 @@
+# CLAUDE.md — Nemesis operating rules (auto-read each session)
+
+This file is read automatically at the start of every Claude Code session. It holds
+the project's core operating discipline (Tier 1) plus Nemesis-specific rules. Read it
+before doing anything. Also read, in this order, before starting work:
+`ARCHITECTURE.md` → `docs/architecture/` (ADRs) → `docs/handoff/HANDOFF.md`.
+
+---
+
+## TIER 1 — Core operating rules
+
+### 1. Audit-first, then act
+Before changing existing code or data, run a READ-ONLY audit that reports findings and
+**stops for review**. Never "audit and fix" in one pass. Audits are safe to run anytime
+(they change nothing) and routinely catch real problems before they bite.
+
+### 2. One variable at a time
+Don't bundle a feature change with a migration step, or two unrelated fixes in one commit.
+Isolate each change so it's clear what caused what. Separate gates, separate verification.
+
+### 3. Verify with real output — never trust "done"
+"Done / verified / clean / smoke-tested" claims get confirmed by ACTUAL output: greps,
+row counts, in-browser checks, real terminal results. Treat self-reported success as
+"probably, pending my check." Show the change (diff/grep), don't assert it.
+
+### 4. "Continue" is banned as an instruction
+Always send a SCOPED prompt stating exactly what to do and where to STOP. Never a bare
+"continue" that lets the tool decide scope — it will reliably do more (or less) than meant.
+
+### 5. Commit-first → deploy → verify; respect the chat/Code split
+- chat-Claude: design, architecture, review. Read-only externally (fetches public URLs;
+  cannot push/write/commit).
+- Code: builds, edits, commits, runs on the machine.
+- Commit BEFORE deploy; verify after (process IDs/paths, journals, browser).
+
+### 6. Backup-first before touching live data
+Before any step that modifies live data: capture a backup that is VERIFIED RESTORABLE
+(test-restore into a throwaway location, not just "it opens"), on INDEPENDENT storage
+(different disk/machine — same-disk copies die with the original). Take a FRESH snapshot
+before risky steps even if an older one exists (live systems drift).
+
+### 7. Capture ideas, don't chase them mid-task — sort by type, scale capture by maturity
+When a good idea appears mid-work, WRITE IT DOWN with its reasoning and return to the
+active thread. Sort captures:
+- **Small fixes** (bounded, known shape: tooltips, wrong defaults, cosmetic cleanup,
+  single-file deleaks) → a running `PUNCHLIST.md`. Knocked out in batches between larger work.
+- **Project ideas** (design-requiring, possibly architectural) → start as a roadmap STUB
+  (what + why, parked); GRADUATE to a full spec or ADR as discussion fleshes them out and
+  the reasoning becomes worth preserving durably.
+- **Placement is a judgment and it can CHANGE.** A "small fix" that reveals architectural
+  implications gets promoted to a project idea/spec; a stub pressure-tested into a real
+  design graduates to an ADR. Re-sort as true scope emerges.
+- **Never build mid-task.** Capture with reasoning; return to the live thread.
+
+### 8. Public-repo hygiene
+Before EVERY commit to a public repo: grep for home paths (`/home/<user>`), real IPs,
+usernames, emails, and secrets. Sanitize docs/code with placeholders. Defaults in shipped
+code must be correct for ANY user (e.g. `127.0.0.1`, not my box's IP).
+
+### 9. Handoff discipline
+- **Nightly:** when I say I'm stopping for the day, write a fresh `docs/handoff/HANDOFF.md`
+  capturing current project state (OVERWRITE — latest state wins; this is "where things
+  stand now").
+- **Per session:** when a new chat/work session starts, create a dated supplemental at
+  `docs/handoff/supplements/YYYY-MM-DD-NNN.md` logging that session's actions and decisions
+  (APPEND-ONLY, never overwritten — these are the durable log/history).
+- **Session start:** read `ARCHITECTURE.md`, `docs/architecture/` (ADRs), and
+  `docs/handoff/HANDOFF.md` first to load conventions + current state.
+- I provide the WHEN (I say "I'm done" / "fresh session"); the rule provides the WHAT.
+
+---
+
+## TIER 2 — Nemesis-specific rules
+
+### Read-order & roles
+- Start every session by reading `ARCHITECTURE.md`, then `docs/architecture/` (ADRs),
+  then `docs/handoff/HANDOFF.md`.
+- **chat-Claude = design/review, READ-ONLY externally.** It does not build or commit.
+- **Code = build/commit.** Commit *before* deploy; then verify live with `ps` /
+  `journalctl` / the browser. Never report success without that real output.
+
+### Architecture
+- **Everything new is a MODULE.** A module is `modules/<name>/` with `manifest.json` +
+  `module.py` defining a `Module(NemesisModule)` class implementing: `start`, `stop`,
+  `status`, `get_dashboard_card`, `get_routes`.
+- **Core** = the Flask app + the alert pipeline + email. Core does not reach into module
+  internals; modules register via the contract.
+
+### Multi-user-ready by default
+New features should be built so multi-user/commercial support is an addition, not a rewrite.
+Concretely:
+- **Attribute state-changing actions** — anywhere an action records "what happened," leave a
+  place to record who (an actor field), even if unused now. (Commercial tier requires
+  attributed actions; retrofitting later means touching every write.)
+- **Don't assume a single global identity/state** — prefer per-user/per-session-shaped state
+  over global singletons where it's cheap to do so.
+- **Route writes through single update paths and version data domains** — so live-refresh
+  (and later multi-user push) has a clean hook.
+- **Concurrency-aware writes** — don't assume one writer at a time from the UI (e.g. counter
+  increments like `tickets_seq` must be safe under simultaneous actors).
+- **Do NOT build the multi-user machinery now** (sessions, auth, SSE push, attribution UI) —
+  that's commercial-tier. Leave the socket, don't wire the house.
+
+### Database (per ADR 0001)
+- **One shared `alerts.db`.** All persistent state lives there.
+- **Modules own tables by prefix:** `anomaly_*`, `malware_*`, `tickets_*`, `ai_*`,
+  `community_*`. Core owns the unprefixed core tables.
+- **Write-own / read-any:** a module may read across any table but only writes/creates its
+  own prefixed tables.
+- **One DB accessor, passed by the module contract** (`self.get_db()` / the shared
+  `modules.get_db()`). **Never compute `__file__`-relative DB paths.** Separate processes
+  (e.g. `watchdog`) that call module APIs must register the shared path
+  (`modules.set_shared_db_path(...)`) before use.
+
+### #1 RECURRING BUG — JS strings inside Python f-strings
+The dashboard renders HTML/JS from Python f-strings. The most common defect by far:
+- Use **single quotes** for JS string literals inside f-strings, or build the value with
+  `json.dumps()`.
+- English contractions in rendered text (`it's`, `don't`) must be written as `it&#39;s`
+  etc. — a raw apostrophe/quote or newline inside the f-string causes a **silent
+  `SyntaxError`**.
+- **Grep for this in every retro/review pass.** Unescaped quotes and stray newlines are
+  the usual culprit when a page mysteriously fails to load.
+
+### Conventions
+- **Model string:** `claude-sonnet-4-6`.
+- **Key paths** (public-repo placeholders — substitute the real install user locally):
+  - dashboard: `/home/<user>/dashboard/dashboard.py`
+  - `/home/<user>/dashboard/alert_manager/` — core services (alert-watcher, hw-monitor,
+    device-scanner, watchdog, dashboard) + shared `alerts.db`
+  - `/home/<user>/dashboard/modules/` — pluggable modules
+  - `/etc/nemesis.env` — environment/secrets, mode `640 root:nemesis`
