@@ -123,6 +123,16 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
   the usual culprit when a page mysteriously fails to load.
 
 ### Conventions
+- **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
+  credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
+  committed.** Read it by absolute path when SMTP config or test creds are needed. **NEVER**
+  copy its values into any tracked file, commit message, code, or the public repo —
+  reference the location only.
+- **No hardcoded environment-specific defaults:** Never hardcode environment-specific values
+  (real LAN IPs, home paths, the prod host's IP) as defaults in shipped code — use
+  `127.0.0.1` or read from `/etc/nemesis.env`. Defaults must be correct for ANY user, not
+  this machine. (This is Rule 8; the `192.168.4.69` `PIHOLE_IP` default is a known instance
+  pending fix.)
 - **Model string:** `claude-sonnet-4-6`.
 - **Key paths** (public-repo placeholders — substitute the real install user locally):
   - dashboard: `/home/<user>/dashboard/dashboard.py`
