@@ -16,3 +16,12 @@ as done; keep newest context inline.
   - `dashboard.py` `_backup_candidates()` (~line 4513) — the `modules/tickets/tickets.db` entry.
   - `install.sh` restore (~lines 1084–1089) — the `tickets.db` restore block.
   - backup help/description strings referencing `tickets.db`.
+
+- [ ] **`PIHOLE_IP` hardcoded default (Rule 8 leak).** A personal LAN IP is shipped as a
+  default — replace with `127.0.0.1` / read from `/etc/nemesis.env` (defaults must be correct
+  for ANY user): `dashboard.py:65`, `diagnostics/pihole_health.py`, `modules/dhcp/module.py`.
+
+- [ ] **Full hygiene sweep.** Repo-wide grep of the tracked tree for any other leaked secrets,
+  home paths, real IPs, usernames. Known to triage: the `PIHOLE_IP` default above, the
+  hardcoded support-destination email in `dashboard.py`, and the example SMTP hostnames in the
+  SETUP docs / `install.sh`.
