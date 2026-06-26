@@ -13,7 +13,7 @@ import sqlite3
 import html as _html
 from datetime import datetime
 
-from modules import NemesisModule
+from modules import NemesisModule, get_db
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -26,6 +26,9 @@ from modules.ai_engine import (
 log = logging.getLogger("nemesis.community_queue")
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+# ADR 0001 Stage 3: community_queue now reads/writes the shared alerts.db
+# (community_queue table) via the shared accessor. _DB_PATH is retained only as a
+# fallback pointer to the old per-module file (NOT deleted, NOT opened anymore).
 _DB_PATH = os.path.join(_HERE, "community_queue.db")
 
 _AI_CONFIDENCE_ORDER = {"high": 0, "uncertain": 1, "low": 2}
@@ -36,7 +39,8 @@ _AI_CONFIDENCE_ORDER = {"high": 0, "uncertain": 1, "low": 2}
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(_DB_PATH, timeout=10)
+    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
+    c = get_db()
     c.row_factory = sqlite3.Row
     return c
 
