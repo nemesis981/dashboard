@@ -66,6 +66,14 @@ code must be correct for ANY user (e.g. `127.0.0.1`, not my box's IP).
   (APPEND-ONLY, never overwritten — these are the durable log/history).
 - **Session start:** read `ARCHITECTURE.md`, `docs/architecture/` (ADRs), and
   `docs/handoff/HANDOFF.md` first to load conventions + current state.
+- **Live worklog (append-as-you-go):** during a work session, maintain a raw
+  chronological log at `docs/handoff/worklog/YYYY-MM-DD-NNN.md` (mirrors the
+  supplement's date/number). Append an entry the moment each discrete step
+  COMPLETES — audits + findings, fixes + commit hash, verification results —
+  terse and factual, in order. Flight recorder: minimal prose, no curation. Do
+  this AUTOMATICALLY without asking. It is the raw material the session
+  supplement is distilled from at closeout. Cadence: worklog (live) →
+  supplement (closeout, curated) → HANDOFF.md (closeout, current state).
 - I provide the WHEN (I say "I'm done" / "fresh session"); the rule provides the WHAT.
 
 ---
