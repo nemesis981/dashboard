@@ -1,7 +1,7 @@
 """
 Tickets & Notes Module
 
-Unified store for two record types, both in modules/tickets/tickets.db:
+Unified store for two record types, both in the shared alerts.db (tickets table):
   note   — lightweight annotation tied to a rule_id or sensor_key
   ticket — trackable issue with status, priority, NF-XXXX number, and
             relevance scoring against existing tickets/notes at creation time
@@ -32,13 +32,14 @@ import logging
 from datetime import datetime, timedelta
 from flask import request, jsonify
 
-from modules import NemesisModule
+from modules import NemesisModule, get_db
 
 log = logging.getLogger("nemesis.tickets")
 
+# ADR 0001 Stage 3: tickets now reads/writes the shared alerts.db (tickets / tickets_seq /
+# tickets_settings) via the shared accessor. DB_PATH is retained only as a fallback pointer
+# to the old per-module file (NOT deleted, NOT opened anymore).
 DB_PATH   = os.path.join(os.path.dirname(__file__), "tickets.db")
-# Path to the shared alerts DB so we can look up src_ip for related-note queries
-_ALERTS_DB = os.path.join(os.path.dirname(__file__), "..", "..", "alert_manager", "alerts.db")
 
 TICKET_PREFIX = "NF"
 
@@ -53,9 +54,9 @@ _SETTINGS_DEFAULTS = {
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
+    conn = get_db()
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -87,24 +88,24 @@ def _init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_tk_status ON tickets(status);
         CREATE INDEX IF NOT EXISTS idx_tk_type   ON tickets(type);
 
-        CREATE TABLE IF NOT EXISTS settings (
+        CREATE TABLE IF NOT EXISTS tickets_settings (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
 
-        CREATE TABLE IF NOT EXISTS ticket_seq (
+        CREATE TABLE IF NOT EXISTS tickets_seq (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             next_number INTEGER NOT NULL DEFAULT 1
         );
-        INSERT OR IGNORE INTO ticket_seq (id, next_number) VALUES (1, 1);
+        INSERT OR IGNORE INTO tickets_seq (id, next_number) VALUES (1, 1);
     """)
     conn.commit()
     conn.close()
 
 
 def _next_ticket_number(conn) -> str:
-    n = conn.execute("SELECT next_number FROM ticket_seq WHERE id=1").fetchone()[0]
-    conn.execute("UPDATE ticket_seq SET next_number = next_number + 1 WHERE id=1")
+    n = conn.execute("SELECT next_number FROM tickets_seq WHERE id=1").fetchone()[0]
+    conn.execute("UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1")
     return f"{TICKET_PREFIX}-{n:04d}"
 
 
@@ -113,7 +114,7 @@ def _next_ticket_number(conn) -> str:
 def _get_settings() -> dict:
     try:
         conn = _conn()
-        rows = conn.execute("SELECT key, value FROM settings").fetchall()
+        rows = conn.execute("SELECT key, value FROM tickets_settings").fetchall()
         conn.close()
         stored = {r["key"]: r["value"] for r in rows}
     except Exception:
@@ -142,7 +143,7 @@ def _save_settings(updates: dict) -> None:
         if k not in _SETTINGS_DEFAULTS:
             continue
         conn.execute(
-            "INSERT INTO settings(key, value) VALUES(?,?) "
+            "INSERT INTO tickets_settings(key, value) VALUES(?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (k, str(v))
         )
@@ -429,7 +430,8 @@ def _api_ticket_related(key):
     """Return notes/tickets that share the same src_ip as the given rule_id or sensor_key."""
     try:
         conn = _conn()
-        # Look up src_ip for this key in tickets DB first, then alerts DB
+        # Look up src_ip for this key in tickets first, then alerts — both now live
+        # in the same shared DB, so this is a single connection (no separate _ALERTS_DB).
         row = conn.execute(
             "SELECT src_ip FROM tickets WHERE (rule_id=? OR sensor_key=?) AND src_ip IS NOT NULL LIMIT 1",
             (key, key)
@@ -437,12 +439,11 @@ def _api_ticket_related(key):
         src_ip = row["src_ip"] if row else None
 
         if not src_ip:
-            # Fall back to alerts DB
+            # Fall back to the alerts table (same shared DB)
             try:
-                aconn = sqlite3.connect(_ALERTS_DB, timeout=5)
-                aconn.row_factory = sqlite3.Row
-                arow = aconn.execute("SELECT src_ip FROM alerts WHERE rule_id=?", (key,)).fetchone()
-                aconn.close()
+                arow = conn.execute(
+                    "SELECT src_ip FROM alerts WHERE rule_id=?", (key,)
+                ).fetchone()
                 if arow:
                     src_ip = arow["src_ip"]
             except Exception:
@@ -831,7 +832,7 @@ class Module(NemesisModule):
 
     def start(self) -> None:
         _init_db()
-        log.info("tickets: started (DB initialised at %s)", DB_PATH)
+        log.info("tickets: started (using shared DB at %s)", self.db_path)
 
     def stop(self) -> None:
         log.info("tickets: stopped")

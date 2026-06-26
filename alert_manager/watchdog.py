@@ -324,6 +324,11 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
     try:
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+        # ADR 0001 Stage 3: tickets now reaches the shared DB via the module accessor.
+        # watchdog is a SEPARATE process that never runs modules_loader.init(), so register
+        # the shared path here (HW_DB_PATH is that same alert_manager/alerts.db). Idempotent.
+        import modules
+        modules.set_shared_db_path(HW_DB_PATH)
         from modules.tickets.module import open_ticket as _open_ticket, _get_settings as _tk_settings
         _tk = _tk_settings()
         _sev_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
