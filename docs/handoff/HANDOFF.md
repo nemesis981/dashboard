@@ -3,6 +3,19 @@
 > Current project state, last updated 2026-06-26. Overwritten at each nightly closeout
 > (latest state wins). Durable history lives in `docs/handoff/supplements/` (append-only).
 
+## Recent (2026-06-26 session)
+
+- **Malware module audit (read-only)** → `docs/audits/malware-detection-state-audit.md`
+  (commit `72653dc`). Findings: **Layer A works** (ClamAV + YARA + heuristics + `malware_findings`
+  storage + quarantine + alert hook). **Layer B (canary/behavioral "zero-day") absent**, **Layer C
+  (AI verdict) scaffolding only**, **Layer D absent**. **No background service** despite the manifest
+  flag (on-demand scan only). **`scan_jobs` tracking is broken** — schema collision with `hw_monitor`
+  (see Stage 4 below). Module also computes a `__file__`-relative DB path (violates ADR 0001 —
+  should use the shared accessor).
+- **5 roadmap stubs parked** (commit `27a7eec`, idea-capture only, no build): outbreak/lateral-movement
+  detection (network/anomaly), local isolated sandbox (disposable VM, not Firejail), YARA rule
+  auto-update, Layer D local ML (deferred), optional cloud sandbox (BYO-key, off by default).
+
 ## Where things stand
 
 **Pass 0 — restore the single shared `alerts.db`** (per ADR 0001). **Module consolidation is
@@ -31,7 +44,10 @@ community_queue.db; all `integrity_check=ok`; SHA256SUMS). Original
 
 1. **Stage 4** — collapse duplicate `CREATE`s (`quarantines`, `hw_alerts`, `scan_jobs` each
    created in two places); retire the ghost 0-byte DBs (`dashboard.db`,
-   `malware_detection/malware.db`).
+   `malware_detection/malware.db`). **Note:** the `scan_jobs` collision actively breaks the
+   malware module's scan-job tracking (malware's TEXT-id schema loses to `hw_monitor`'s INTEGER-id
+   schema; all malware scan-job DML silently fails) — likely fix is giving malware its own
+   `malware_scan_jobs`. See `docs/audits/malware-detection-state-audit.md`.
 2. **Stage 5** — switch backup to a single SQLite-safe shared-DB snapshot; make deploy/health
    DISCOVER services (picks up `vpn-dns-guard.service`); purge the per-module-DB refs in
    `_backup_candidates()` / `install.sh` (see `PUNCHLIST.md`).
@@ -46,5 +62,6 @@ community_queue.db; all `integrity_check=ok`; SHA256SUMS). Original
 - Architecture: `ARCHITECTURE.md`, `docs/architecture/` (ADR 0001 DB, 0002 DNS, 0003 resilience)
 - Operational reference: `docs/reference/operational-notes.md`
 - Parked ideas: `docs/roadmap/`
+- Audits: `docs/audits/` (latest: `malware-detection-state-audit.md`)
 - Small fixes: `PUNCHLIST.md`
 - Session logs: `docs/handoff/supplements/` (latest: `2026-06-26-001.md`)
