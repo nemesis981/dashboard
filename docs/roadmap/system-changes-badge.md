@@ -11,8 +11,9 @@ history, not just "latest"). Surface as:
 - a permanent **"view changes"** link for the full history.
 
 ## Why
-An **invisible kernel update** caused day-one debugging pain (suspected cause of early
-VPN/DNS headaches): the environment changed underneath us with no visible signal. Making
+An **invisible kernel update** caused day-one debugging pain (a suspected *trigger* of the
+early VPN/DNS headaches — not the root cause, which ADR 0002 pins on PIA's killswitch +
+policy routing): the environment changed underneath us with no visible signal. Making
 component changes visible — and durably logged — turns a silent variable into an
 observable one, directly supporting the "audit first / one variable at a time" discipline.
 

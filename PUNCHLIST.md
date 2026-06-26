@@ -8,7 +8,10 @@ as done; keep newest context inline.
   System Changes badge (`docs/roadmap/system-changes-badge.md`).
 
 - [ ] **Kernel-update check.** Review `/var/log/apt/history.log` and confirm exactly what
-  changed — a silent kernel update is the suspected cause of the day-one VPN/DNS headaches.
+  changed — a silent kernel update is the suspected *trigger* of the day-one VPN/DNS
+  headaches. (NOT a root cause: the confirmed VPN/DNS root cause is PIA's killswitch +
+  source-based policy routing — see ADR 0002. This item asks only *what changed on the box
+  that day*; it's an open investigation, separate from that diagnosis.)
 
 - [ ] **Stage-5 backup-purge (do during the backup rework).** When backup is reworked to a
   single SQLite-safe shared-DB snapshot, **remove the per-module-DB references** that back up
