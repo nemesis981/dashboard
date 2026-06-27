@@ -38,3 +38,14 @@ as done; keep newest context inline.
   home paths, real IPs, usernames. Known to triage: the `PIHOLE_IP` default above, the
   hardcoded support-destination email in `dashboard.py`, and the example SMTP hostnames in the
   SETUP docs / `install.sh`.
+
+- [ ] **AI Settings: live Anthropic model pricing (replace hardcoded).** Replace the static
+  hardcoded Anthropic pricing with LIVE pricing fetched from the Anthropic API (or a cached
+  periodic fetch with a known-stale indicator). Static pricing becomes wrong the moment
+  Anthropic changes it — and with dynamic/peak pricing likely coming, hardcoded values will
+  actively mislead users about actual costs. The AI cost display is only trustworthy if it
+  reflects real current pricing. **Fetch live, cache with TTL, show a staleness warning if the
+  fetch fails.** Low priority until pricing volatility makes it urgent — but **future-proof the
+  architecture now so it's a config change, not a rewrite.** Current hardcoded values live in
+  `/etc/nemesis.env` (`ANTHROPIC_INPUT_PRICE_PER_MTOK` / `ANTHROPIC_OUTPUT_PRICE_PER_MTOK`) and
+  are surfaced in the AI cost UI (`dashboard.py` ~1661–1663, ~1753–1756).
