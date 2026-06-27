@@ -7,12 +7,12 @@
 ## Resume point → NEXT OPENER
 
 In order (trip deadline = **this Friday** drives the sequence):
-1. **Finish the VM audit** — uninstall → fresh install → forced canary trip (IN PROGRESS
-   at closeout) — and **fix the uninstall script** per its findings.
+1. **Starlink SSH test FIRST (~5 min)** — Tailscale is enrolled on the Nemesis box
+   (tailnet IP `100.126.234.52`) + laptop, and SSH is **proven over Tailscale**.
+   Starlink arrives tomorrow → test SSH over Starlink to **complete the connectivity gate**.
 2. **Multi-user upgrades for trip testing.**
-3. **Tailscale / connectivity** — remote access to the dashboard from the camper.
-4. **Trip-critical diagnostics — watcher productization FIRST** (connectivity
-   self-diagnostic for the Starlink link).
+3. **Diagnostics audit** (watcher productization FIRST — connectivity self-diagnostic for
+   the Starlink link; see `docs/roadmap/diagnostics-*`).
 
 Reasoning in `supplements/2026-06-27-001.md` §7.
 
@@ -24,8 +24,15 @@ Reasoning in `supplements/2026-06-27-001.md` §7.
 pipeline. Pushed at `60c19ff`. Detail: `supplements/2026-06-27-001.md` §3; audit:
 `docs/audits/malware-layer-b-canary-audit.md`.
 
-**VM audit — ⏳ IN PROGRESS.** Uninstall → fresh install → forced trip. Was mid-flight at
-closeout; results + uninstall-script fixes are the **#1 resume item**.
+**VM audit — ✅ COMPLETE.** Uninstall → fresh install → forced trip → recovery on the test
+VM. 3 gaps found and fixed: auto-plant (`plant_canaries()` had no caller → wired into
+`Module.start()`, `163ea31`); uninstall canary cleanup (`ef5ad6f`, wording `c78cbfc`);
+ghost-row mass-trip bug (remove bait + baselines together, else reinstall trips on missing
+files — folded into `ef5ad6f`). **Layer B v1 is FULLY complete including VM audit fixes.**
+
+**Connectivity — ⏳ Tailscale proven, Starlink pending.** Tailscale enrolled on the Nemesis
+box (`100.126.234.52`) + laptop; SSH proven over Tailscale. Starlink arrives tomorrow →
+SSH-over-Starlink test completes the gate (resume item #1).
 
 **Pass 0 readiness — ✅ Tier A + Tier B COMPLETE.**
 - ✅ **Tier A (`fb52a83`)** — fresh-install crash fixed (`devices` table had **no CREATE
