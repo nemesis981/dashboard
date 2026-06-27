@@ -41,6 +41,27 @@ product usable by the **non-expert market those products ignore**.
   product must encode that instinct (instrument latency/clock at connect, attribute
   LATENCY vs LOGIC) so the non-expert user isn't left chasing phantom bugs.
 
+## Corollary principle — INFORMATION IS THE CEILING
+Both AI and human experts are **only as good as the information available to them**. A
+mediocre reasoner over **excellent** evidence beats a brilliant reasoner over **poor**
+evidence. Therefore the product's core engineering value is the **information-gathering
+layer**, not the reasoner on top of it:
+- the connectivity watcher and other continuous diagnostics,
+- structured captures (tickets, prior-similar-issue search),
+- **error codes**,
+- **forced-error-verified diagnostics** (a check is only trustworthy if we've proven it
+  actually fires on the failure it claims to detect),
+- **two-ended / two-sided measurement** ("is-it-me-or-them" needs both ends).
+
+**The gathering is the moat.** Reasoning sits **downstream** — AI for common cases, a human
+pro (via the [tool-aware loop](diagnostics-ai-tool-aware-loop.md)'s focused support bundle)
+for the hard ones. Both are gated by evidence quality. So **invest in the information layer**:
+its quality is the ceiling on every diagnosis, human or AI. This is *why* the diagnostics
+captures ([watcher](diagnostics-connectivity-watcher-tool.md),
+[tool-aware loop](diagnostics-ai-tool-aware-loop.md),
+[reassurance + routing](diagnostics-ai-reassurance-escalation-routing.md)) are CORE: they
+build the moat the reasoning depends on.
+
 ## Shape / next
 Capture as the guiding principle now. It may later **graduate** into `ARCHITECTURE.md`
 (durable product-vision section) or a dedicated ADR once it has shaped enough concrete
