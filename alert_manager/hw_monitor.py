@@ -120,21 +120,9 @@ def init_db():
             pass
         conn.commit()
 
-        # hw_alerts: tracks currently-active hardware alert conditions.
-        # Written by watchdog; read by the dashboard to show a persistent
-        # alert list independent of the fan section's collapsed/expanded state.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS hw_alerts (
-                alert_key         TEXT PRIMARY KEY,
-                severity          TEXT NOT NULL,
-                breach            TEXT NOT NULL,
-                recommendation    TEXT NOT NULL,
-                first_triggered_ts REAL NOT NULL,
-                last_triggered_ts  REAL NOT NULL,
-                resolved_ts        REAL
-            )
-        """)
-        conn.commit()
+        # hw_alerts is created and owned by watchdog (sole writer); this module
+        # only reads it via the exception-guarded get_hw_alerts(). See ADR 0001 /
+        # Pass 0 Stage 4: duplicate CREATE collapsed to the writer's process.
 
         # hw_anomaly_snapshots: system context captured when a sensor reading
         # deviates >2σ from its rolling same-hour-of-day 14-day baseline.
