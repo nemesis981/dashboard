@@ -57,6 +57,13 @@ Before EVERY commit to a public repo: grep for home paths (`/home/<user>`), real
 usernames, emails, and secrets. Sanitize docs/code with placeholders. Defaults in shipped
 code must be correct for ANY user (e.g. `127.0.0.1`, not my box's IP).
 
+**Audit output is not exempt.** BEFORE committing any audit (or other generated report) to
+the public repo: leak-scan its output for Rule-8 content and sanitize IN PLACE, then commit
+the clean version — `/home/paul` → `/home/<user>`, real IPs → `<ip>`, real hostnames
+(e.g. `paul-Alienware-…`) → `<host>`, real emails → placeholder. **Never commit raw audit
+output to the public repo.** (An audit that quotes the live box's paths/IPs/hostname reads as
+factual but still leaks — sanitize the quotes, keep the meaning.)
+
 ### 9. Handoff discipline
 - **Nightly:** when I say I'm stopping for the day, write a fresh `docs/handoff/HANDOFF.md`
   capturing current project state (OVERWRITE — latest state wins; this is "where things
