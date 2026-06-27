@@ -1,6 +1,19 @@
 # ADR 0002 — VPN-Aware Upstream DNS Routing for Pi-hole
 
-- **Status:** Accepted — implemented in `core/vpn_dns_guard.py`, **live-verified on PIA**
+> **⚠️ ROOT-CAUSE SUPERSEDED by [0005-dns-firewall-device-auth-architecture](0005-dns-firewall-device-auth-architecture.md) (2026-06-27).**
+> This ADR's diagnosis — that the PIA/Pi-hole DNS failure is **upstream-blocking** (the
+> killswitch dropping Pi-hole's forwarding) — is **wrong**. The real cause is
+> **Pi-hole client-refusal-by-source**: with `dns.listeningMode = ALL` /
+> `dns.interface = enp131s0`, Pi-hole **REFUSES the local host's own queries** once PIA
+> changes the host source IP to the tunnel IP (`dig @127.0.0.1` from the tunnel source =
+> REFUSED/EDE-23 in ~1 ms; the same query `-b 127.0.0.1` from the loopback source =
+> NOERROR). The upstream guard (`core/vpn_dns_guard.py`) **works correctly but solves the
+> WRONG problem** — it reconciles a layer that was never broken. This ADR is retained as
+> **historical record**; see ADR 0005 for the corrected diagnosis and the firewall-engine
+> direction.
+
+- **Status:** Superseded (root-cause) — guard implemented in `core/vpn_dns_guard.py`,
+  **live-verified on PIA** (but addresses the wrong layer; see ADR 0005)
 - **Date:** 2026-06-25
 - **Affects:** Core networking, Pi-hole upstream config, new core service
 - **Supersedes / depends on:** none

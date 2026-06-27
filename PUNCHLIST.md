@@ -24,6 +24,16 @@ as done; keep newest context inline.
   default — replace with `127.0.0.1` / read from `/etc/nemesis.env` (defaults must be correct
   for ANY user): `dashboard.py:65`, `diagnostics/pihole_health.py`, `modules/dhcp/module.py`.
 
+- [ ] **`vpn-dns-guard.service` solves the wrong layer (keep/disable deferred to ADR 0005).**
+  The unit is installed + running on this box but does **NOT fix** the DNS issue — the real
+  cause is Pi-hole client-refusal-by-source, not upstream-blocking (see
+  [ADR 0005](docs/architecture/0005-dns-firewall-device-auth-architecture.md), which
+  supersedes ADR 0002's root cause). The guard reconciles a layer that was never broken.
+  **Keep-or-disable decision is deferred to the ADR 0005 work.** Current workaround on this
+  box = **VPN-off**. Also: the guard unit's **Rule-8 hardcoded absolute home path**
+  (`core/vpn-dns-guard.service:12` `ExecStart` — a literal `/home/<user>/dashboard/...`)
+  still needs parameterizing **before any public commit**.
+
 - [ ] **Full hygiene sweep.** Repo-wide grep of the tracked tree for any other leaked secrets,
   home paths, real IPs, usernames. Known to triage: the `PIHOLE_IP` default above, the
   hardcoded support-destination email in `dashboard.py`, and the example SMTP hostnames in the
