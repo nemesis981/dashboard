@@ -6,6 +6,8 @@ import time
 import os
 from datetime import datetime
 
+from database import init_devices_table
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_HERE, "alerts.db")
 
@@ -39,6 +41,11 @@ def scan_network():
         return []
 
 def update_devices(devices):
+    # Ensure-table-exists before any access. The `devices` table has no other
+    # guaranteed creator and there is no systemd ordering, so on a fresh DB this
+    # process would otherwise crash with `no such table: devices`. Canonical DDL
+    # lives in database.init_devices_table() (readiness Tier A).
+    init_devices_table()
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     for ip, mac, vendor in devices:

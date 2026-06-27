@@ -29,7 +29,7 @@ import sqlite3
 import html as _html
 from datetime import datetime, timedelta
 
-from modules import NemesisModule
+from modules import NemesisModule, get_db
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -43,9 +43,9 @@ from modules.ai_engine import (
 log = logging.getLogger("nemesis.anomaly")
 
 # ── File paths ───────────────────────────────────────────────────────────────
-_HERE        = os.path.dirname(os.path.abspath(__file__))
+# DB handle comes from the shared get_db() accessor (ADR 0001 one-accessor rule);
+# no __file__-relative alerts.db path is computed here. See _conn() below.
 EVE_LOG      = "/var/log/suricata/eve.json"
-DB_PATH      = os.path.join(_HERE, "..", "..", "alert_manager", "alerts.db")
 
 # ── Tuning ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL       = 60        # seconds between detection cycles
@@ -192,7 +192,8 @@ class Module(NemesisModule):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _conn() -> sqlite3.Connection:
-    c = sqlite3.connect(DB_PATH, timeout=10)
+    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
+    c = get_db()
     c.row_factory = sqlite3.Row
     return c
 

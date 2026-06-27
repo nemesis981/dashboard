@@ -100,6 +100,11 @@ def _fetch_latest_hw_sample():
                FROM hw_metrics ORDER BY id DESC LIMIT 1"""
         )
         row = c.fetchone()
+    except Exception:
+        # hw_metrics is created by hw_monitor (a separate process); there is no
+        # systemd ordering, so on a fresh DB it may not exist yet. Return None
+        # rather than crash — matches _fetch_fan_status's guard.
+        row = None
     finally:
         conn.close()
     if not row:
@@ -141,6 +146,10 @@ def _fetch_recent_cpu_percents(n):
             (n,),
         )
         rows = c.fetchall()
+    except Exception:
+        # hw_metrics may not exist yet (created by hw_monitor, no startup
+        # ordering). Return empty rather than crash — matches _fetch_fan_status.
+        rows = []
     finally:
         conn.close()
     return [r[0] for r in rows if r[0] is not None]

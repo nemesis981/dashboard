@@ -67,6 +67,36 @@ def init_quarantines_table():
     finally:
         conn.close()
 
+def init_devices_table():
+    """Canonical DDL for the core `devices` table (LAN-scan inventory).
+
+    Single source of truth, mirroring init_quarantines_table(). DDL matches the
+    live table exactly (captured via `.schema devices`, 2026-06-27). Called by
+    BOTH the device_scanner (create-before-write, since it is a separate process
+    that may run on a fresh DB before the dashboard) and the dashboard's boot
+    init (self-heal before its unguarded device reads). CREATE ... IF NOT EXISTS,
+    so whichever process runs first wins and later calls are no-ops. There is NO
+    systemd ordering between the services, so both call sites are kept. This
+    table previously had NO CREATE anywhere — a fresh install crashed the
+    device_scanner with `no such table: devices`. See ADR 0001 / readiness Tier A.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS devices (
+                mac TEXT PRIMARY KEY,
+                ip TEXT,
+                friendly_name TEXT,
+                device_type TEXT,
+                notes TEXT,
+                trusted INTEGER DEFAULT 1
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 def get_alert(rule_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

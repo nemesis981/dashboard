@@ -49,7 +49,7 @@ _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
-from database import init_db as init_alerts_db, init_quarantines_table
+from database import init_db as init_alerts_db, init_quarantines_table, init_devices_table
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -59,6 +59,11 @@ import email_utils
 
 init_alerts_db()
 hw_monitor.init_db()
+# Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
+# device reads in the routes. Canonical DDL in database.init_devices_table();
+# also created create-before-write by the device_scanner. Dual-safety-net,
+# mirroring quarantines — no systemd ordering between the two processes.
+init_devices_table()
 
 app = Flask(__name__)
 
