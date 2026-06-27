@@ -119,7 +119,7 @@ SKIPPED=()
 
 step_header "1/8" "Stopping and Disabling Services"
 
-SERVICES=(dashboard watchdog hw-monitor alert-watcher device-scanner)
+SERVICES=(dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary)
 
 for svc in "${SERVICES[@]}"; do
     if systemctl list-units --full --all 2>/dev/null | grep -q "${svc}.service"; then
@@ -160,6 +160,46 @@ if [[ "$_any_removed" == true ]]; then
     REMOVED+=("systemd services")
 else
     SKIPPED+=("systemd services (none found)")
+fi
+
+# ── Layer B canary bait files + baselines ────────────────────────────────────
+# install plants decoy "bait" files in the user's home dirs and records a tamper
+# baseline in alerts.db (malware_canary_files). Remove BOTH together: deleting
+# the files while leaving the baseline rows would make a future reinstall's
+# canary poll trip on every (now-missing) bait. Paths are read from the DB so
+# custom canary_dirs are handled too. (alerts.db itself is preserved otherwise.)
+REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
+CANARY_DB="$REAL_HOME/dashboard/alert_manager/alerts.db"
+if [[ -f "$CANARY_DB" ]]; then
+    _canary_out="$(python3 - "$CANARY_DB" <<'PYEOF'
+import sqlite3, os, sys
+db = sys.argv[1]
+try:
+    c = sqlite3.connect(db)
+    rows = c.execute("SELECT path FROM malware_canary_files").fetchall()
+except sqlite3.OperationalError:
+    print("0 0"); sys.exit(0)
+files = 0
+for (p,) in rows:
+    try:
+        if p and os.path.isfile(p):
+            os.remove(p); files += 1
+    except Exception:
+        pass
+if rows:
+    c.execute("DELETE FROM malware_canary_files"); c.commit()
+print(f"{files} {len(rows)}")
+PYEOF
+)"
+    read -r _cf _cr <<< "$_canary_out"
+    if [[ "${_cr:-0}" -gt 0 || "${_cf:-0}" -gt 0 ]]; then
+        ok "Removed ${_cf:-0} canary bait file(s) and ${_cr:-0} baseline row(s)"
+        REMOVED+=("canary bait files + baselines")
+    else
+        skipped "canary bait files (none planted)"
+    fi
+else
+    skipped "canary cleanup (no alerts.db found)"
 fi
 
 ###############################################################################
