@@ -5,6 +5,11 @@ the field). Commercial agent-robustness requirement. Built engine/agent-aware pe
 forward mandates in CLAUDE.md / ADR [0005](../architecture/0005-dns-firewall-device-auth-architecture.md)
 (§3 device identity & auth, §7 agent rebuild) — this is a property of that same agent.
 
+> **North-star fit:** this is a canonical example of the **deterministic-automation**
+> pillar of the [built-in-IT-expertise thesis](product-thesis-built-in-it-expertise.md) —
+> the agent self-tunes to a bad link instead of expecting an admin to hand-tune timeouts.
+> That makes it CORE (replaces IT-human labor), not secondary.
+
 ## Why (motivation)
 Remote workers run the agent on **arbitrary / poor last-mile links** — Starlink, hotel
 wifi, cellular, congested broadband. A **fast central network (10-gig)** talking to a
