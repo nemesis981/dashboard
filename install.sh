@@ -811,7 +811,7 @@ deploy_services() {
     step_header "8/9" "Deploying Systemd Services"
 
     local svc_src="$DASHBOARD_DIR/alert_manager"
-    local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" "device-scanner")
+    local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" "device-scanner" "malware-canary")
     local deployed=0
 
     for svc in "${svc_names[@]}"; do
@@ -962,7 +962,7 @@ NGINXEOF
     echo -e "  ${BOLD}Service Status${NC}"
     echo "  ───────────────────────────────────────────────"
     local all_ok=true
-    for svc in dashboard watchdog hw-monitor alert-watcher device-scanner; do
+    for svc in dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
             printf "  %-28s ${GREEN}running${NC}\n" "$svc"
         else
@@ -1016,7 +1016,7 @@ NGINXEOF
     echo "  To change any setting later, edit that file with:"
     echo "    sudo nano /etc/nemesis.env"
     echo "  Then restart services with:"
-    echo "    sudo systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner"
+    echo "    sudo systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary"
     echo ""
 
     if [[ "$all_ok" == "false" ]]; then
@@ -1120,7 +1120,7 @@ restore_from_backup() {
     rm -rf "$tmp_dir"
 
     info "Restarting services to load restored data..."
-    systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner 2>/dev/null || true
+    systemctl restart dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary 2>/dev/null || true
     ok "Services restarted"
     echo ""
     ok "Data restored from: $(basename "$RESTORE_BACKUP_FILE")"

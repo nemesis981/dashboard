@@ -36,6 +36,7 @@ HEALTH_SERVICES = [
     "pihole-FTL", "clamav-daemon", "suricata",
     "dashboard", "device-scanner",
     "alert-watcher", "hw-monitor", "watchdog",
+    "malware-canary",
 ]
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
