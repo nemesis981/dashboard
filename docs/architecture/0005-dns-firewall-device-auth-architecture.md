@@ -96,6 +96,12 @@ session/firewall layer; it does not retrofit authentication onto plain DNS.
 This identity foundation sits under **ownership/consent** and the **multi-user/commercial**
 layer.
 
+> **Related (agent robustness):** the agent rebuilt for this auth model must also be
+> robust on poor remote last-mile links (Starlink, hotel wifi, cellular) — self-tuning
+> latency-aware timeouts + a connect-time clock-sync layer (which also yields fleet-wide
+> timestamp correlation and a drift-as-tamper signal feeding §6). Captured in
+> [roadmap/adaptive-link-aware-agent-clock-sync](../roadmap/adaptive-link-aware-agent-clock-sync.md).
+
 ---
 
 ## 4. Hardware binding via OWNER-GATED ENROLLMENT
