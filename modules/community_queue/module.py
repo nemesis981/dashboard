@@ -62,11 +62,16 @@ def _init_db() -> None:
             ai_confidence    TEXT,
             ai_assessment    TEXT,
             submitted        INTEGER DEFAULT 0,
+            actor            TEXT,
             created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         CREATE INDEX IF NOT EXISTS idx_cq_submitted ON community_queue(submitted);
         CREATE INDEX IF NOT EXISTS idx_cq_domain    ON community_queue(domain_or_ip);
     """)
+    # Idempotent migration: actor attribution seam (readiness Tier B).
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(community_queue)").fetchall()}
+    if "actor" not in existing:
+        conn.execute("ALTER TABLE community_queue ADD COLUMN actor TEXT")
     conn.commit()
     conn.close()
 
@@ -94,8 +99,12 @@ def get_pending_count() -> int:
 def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
                   confidence_score: int, device_count: int,
                   first_detected: str, last_detected: str,
-                  incident_detail: dict) -> None:
-    """Add or update an item in the community queue."""
+                  incident_detail: dict, actor: str = None) -> None:
+    """Add or update an item in the community queue.
+
+    `actor` is the attribution seam (readiness Tier B): NULL today (queue items are
+    system-detected), threaded so a future identity can be recorded on submission.
+    """
     try:
         conn = _conn()
         existing = conn.execute(
@@ -117,11 +126,13 @@ def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
             conn.execute("""
                 INSERT INTO community_queue
                     (source_type, domain_or_ip, detection_type, confidence_score,
-                     device_count, first_detected, last_detected, incident_detail)
-                VALUES (?,?,?,?,?,?,?,?)
+                     device_count, first_detected, last_detected, incident_detail,
+                     actor)
+                VALUES (?,?,?,?,?,?,?,?,?)
             """, (source_type, domain_or_ip, detection_type, confidence_score,
                   device_count, first_detected, last_detected,
-                  json.dumps(incident_detail)))
+                  json.dumps(incident_detail),
+                  actor))
             conn.commit()
         conn.close()
     except Exception:

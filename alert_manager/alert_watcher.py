@@ -97,16 +97,19 @@ def bump_seen(rule_id, parsed):
         conn.close()
 
 
-def insert_quarantine_row(ip, rule_id):
+def insert_quarantine_row(ip, rule_id, actor="system"):
+    # actor: attribution seam (readiness Tier B). Auto-quarantines are system-driven,
+    # so 'system' is the natural default; threaded so a future manual/attributed
+    # quarantine can record who. Manual confirm/lift are already audited (audit_log).
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     try:
         c = conn.cursor()
         now = datetime.now()
         expires = now + timedelta(hours=QUARANTINE_HOURS)
         c.execute(
-            """INSERT INTO quarantines (ip, rule_id, expires_at, created_at, status)
-            VALUES (?, ?, ?, ?, 'active')""",
-            (ip, rule_id, expires.isoformat(), now.isoformat()),
+            """INSERT INTO quarantines (ip, rule_id, expires_at, created_at, status, actor)
+            VALUES (?, ?, ?, ?, 'active', ?)""",
+            (ip, rule_id, expires.isoformat(), now.isoformat(), actor),
         )
         conn.commit()
     finally:

@@ -227,7 +227,8 @@ def _init_db() -> None:
             ai_report       TEXT,
             ai_generated_at REAL,
             abuseipdb_reported INTEGER NOT NULL DEFAULT 0,
-            cisa_reported      INTEGER NOT NULL DEFAULT 0
+            cisa_reported      INTEGER NOT NULL DEFAULT 0,
+            actor              TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_ai_score
             ON anomaly_incidents(score DESC);
@@ -259,6 +260,10 @@ def _init_db() -> None:
         );
 
     """)
+    # Idempotent migration: actor attribution seam (readiness Tier B).
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(anomaly_incidents)").fetchall()}
+    if "actor" not in existing:
+        conn.execute("ALTER TABLE anomaly_incidents ADD COLUMN actor TEXT")
     conn.commit()
     conn.close()
 
@@ -688,11 +693,13 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
         conn.execute("""
             INSERT INTO anomaly_incidents
                 (created_at, updated_at, incident_type, offending_target,
-                 score, status, device_count, devices_json, evidence_json)
-            VALUES (?,?,?,?,?, 'open', ?,?,?)
+                 score, status, device_count, devices_json, evidence_json,
+                 actor)
+            VALUES (?,?,?,?,?, 'open', ?,?,?,?)
         """, (now, now, signals["incident_type"], domain,
               signals["score"], len(dev_list),
-              json.dumps(dev_list), json.dumps(evidence)))
+              json.dumps(dev_list), json.dumps(evidence),
+              None))  # actor: attribution seam (Tier B) — NULL; incidents are system-detected
         inc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
         _update_recurrence(conn, domain, signals["score"], inc_id, now)
         return inc_id, signals["score"]

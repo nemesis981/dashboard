@@ -59,10 +59,16 @@ def init_quarantines_table():
                 rule_id TEXT NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 created_at TIMESTAMP NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
+                status TEXT NOT NULL DEFAULT 'active',
+                actor TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_quarantines_active ON quarantines(status, expires_at)")
+        # Idempotent migration: actor attribution seam (readiness Tier B). Adds the
+        # column to pre-existing DBs; fresh installs get it from the CREATE above.
+        existing = {row[1] for row in c.execute("PRAGMA table_info(quarantines)").fetchall()}
+        if "actor" not in existing:
+            c.execute("ALTER TABLE quarantines ADD COLUMN actor TEXT")
         conn.commit()
     finally:
         conn.close()

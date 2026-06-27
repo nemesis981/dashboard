@@ -111,9 +111,15 @@ def _init_db() -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS modules_enabled (
             module_name TEXT PRIMARY KEY,
-            enabled     INTEGER NOT NULL DEFAULT 0
+            enabled     INTEGER NOT NULL DEFAULT 0,
+            actor       TEXT
         )
     """)
+    # Idempotent migration: actor attribution seam (readiness Tier B). Records who
+    # toggled a module; NULL today, threaded so a future identity can flow through.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(modules_enabled)").fetchall()}
+    if "actor" not in existing:
+        conn.execute("ALTER TABLE modules_enabled ADD COLUMN actor TEXT")
     conn.commit()
     conn.close()
 
@@ -164,11 +170,13 @@ def _is_enabled(name: str) -> bool:
     return bool(_manifests.get(name, {}).get("enabled_by_default", False))
 
 
-def _set_enabled_in_db(name: str, enabled: bool) -> None:
+def _set_enabled_in_db(name: str, enabled: bool, actor: str = None) -> None:
+    # actor: attribution seam (readiness Tier B). NULL today; threaded so a future
+    # authenticated caller can record who enabled/disabled the module.
     conn = sqlite3.connect(_db_path)
     conn.execute(
-        "INSERT OR REPLACE INTO modules_enabled (module_name, enabled) VALUES (?, ?)",
-        (name, int(enabled)),
+        "INSERT OR REPLACE INTO modules_enabled (module_name, enabled, actor) VALUES (?, ?, ?)",
+        (name, int(enabled), actor),
     )
     conn.commit()
     conn.close()

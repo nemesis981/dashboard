@@ -79,6 +79,7 @@ def _init_db() -> None:
             ai_analysis_ref   TEXT,
             hw_snapshot_ref   INTEGER,
             relevance_scores  TEXT,
+            created_by        TEXT,
             created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
@@ -99,6 +100,11 @@ def _init_db() -> None:
         );
         INSERT OR IGNORE INTO tickets_seq (id, next_number) VALUES (1, 1);
     """)
+    # Idempotent migration: created_by attribution seam (readiness Tier B). Adds
+    # the column to pre-existing DBs; fresh installs get it from the CREATE above.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(tickets)").fetchall()}
+    if "created_by" not in existing:
+        conn.execute("ALTER TABLE tickets ADD COLUMN created_by TEXT")
     conn.commit()
     conn.close()
 
@@ -208,8 +214,12 @@ def _score_relevance(conn, rule_id, sensor_key, src_ip, dst_ip, priority, body, 
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def add_note(key: str, text: str, src_ip: str = None, dst_ip: str = None,
-             priority: str = None) -> int:
-    """Add a note tied to rule_id or sensor_key. Returns the new row id."""
+             priority: str = None, actor: str = "admin") -> int:
+    """Add a note tied to rule_id or sensor_key. Returns the new row id.
+
+    `actor` is the attribution seam (readiness Tier B): defaults to 'admin' but is
+    now sourced (not hardcoded) so a future authenticated identity can flow through.
+    """
     _init_db()
     # Determine whether key looks like a sensor key (contains ".") or a rule_id
     is_sensor = "." in key and not key.replace(".", "").isdigit()
@@ -218,14 +228,15 @@ def add_note(key: str, text: str, src_ip: str = None, dst_ip: str = None,
     cur = conn.execute(
         """INSERT INTO tickets
              (type, rule_id, sensor_key, src_ip, dst_ip, priority, body,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+              created_by, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             "note",
             None if is_sensor else key,
             key if is_sensor else None,
             src_ip, dst_ip, priority,
             text[:4000],
+            actor,
             now, now,
         )
     )
@@ -241,7 +252,7 @@ def get_notes(key: str) -> list:
         _init_db()
         conn = _conn()
         rows = conn.execute(
-            """SELECT id, body AS note, 'admin' AS author, created_at
+            """SELECT id, body AS note, COALESCE(created_by, 'admin') AS author, created_at
                FROM tickets
                WHERE type='note' AND (rule_id=? OR sensor_key=?)
                ORDER BY created_at DESC""",
@@ -257,7 +268,7 @@ def get_notes(key: str) -> list:
 def open_ticket(rule_id: str = None, sensor_key: str = None,
                 title: str = None, body: str = None, priority: str = None,
                 src_ip: str = None, dst_ip: str = None,
-                ai_analysis_ref: str = None) -> int:
+                ai_analysis_ref: str = None, actor: str = "admin") -> int:
     """
     Create a new ticket. Auto-assigns NF-XXXX number and scores related items.
     Returns the new ticket id, or 0 on failure.
@@ -274,8 +285,8 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
             """INSERT INTO tickets
                  (type, rule_id, sensor_key, src_ip, dst_ip, priority,
                   title, body, status, ticket_number, ai_analysis_ref,
-                  relevance_scores, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?)""",
+                  relevance_scores, created_by, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?, ?)""",
             (
                 "ticket",
                 rule_id, sensor_key, src_ip, dst_ip, priority,
@@ -284,6 +295,7 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
                 ticket_number,
                 ai_analysis_ref,
                 json.dumps(scores) if scores else None,
+                actor,
                 now.isoformat(timespec="seconds"),
                 now.isoformat(timespec="seconds"),
             )
@@ -319,7 +331,7 @@ def search(keyword: str) -> list:
         like = f"%{keyword}%"
         rows = conn.execute(
             """SELECT id, type, ticket_number, rule_id, sensor_key, src_ip,
-                      title, body, status, priority, created_at
+                      title, body, status, priority, created_by, created_at
                FROM tickets
                WHERE body LIKE ? OR title LIKE ? OR rule_id LIKE ? OR sensor_key LIKE ?
                ORDER BY created_at DESC LIMIT 100""",
@@ -455,7 +467,7 @@ def _api_ticket_related(key):
 
         rows = conn.execute(
             """SELECT id, type, ticket_number, rule_id, sensor_key,
-                      body AS note, 'admin' AS author, created_at,
+                      body AS note, COALESCE(created_by, 'admin') AS author, created_at,
                       rule_id AS rule_name
                FROM tickets
                WHERE src_ip=? AND (rule_id!=? OR rule_id IS NULL) AND (sensor_key!=? OR sensor_key IS NULL)
@@ -482,7 +494,7 @@ def _api_ticket_search():
                 "id":         r["id"],
                 "rule_id":    r.get("rule_id") or r.get("sensor_key") or "",
                 "note":       r.get("body") or "",
-                "author":     "admin",
+                "author":     r.get("created_by") or "admin",
                 "created_at": r.get("created_at") or "",
                 "rule_name":  r.get("title") or r.get("rule_id") or r.get("sensor_key") or "",
                 "type":       r.get("type"),

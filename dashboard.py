@@ -4671,6 +4671,10 @@ def api_config_update():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+    # Attribution seam (readiness Tier B): config edits previously left NO record.
+    # Log only the KEY NAMES changed — never the values (they include secrets).
+    _audit("config_update: " + ", ".join(sorted(updated)))
+
     def _restart():
         time.sleep(2)
         subprocess.run(["sudo", "systemctl", "restart", "dashboard"])

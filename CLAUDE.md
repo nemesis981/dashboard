@@ -93,6 +93,10 @@ code must be correct for ANY user (e.g. `127.0.0.1`, not my box's IP).
   `status`, `get_dashboard_card`, `get_routes`.
 - **Core** = the Flask app + the alert pipeline + email. Core does not reach into module
   internals; modules register via the contract.
+- **All new network access-control MUST route through `alert_manager/firewall.py`** (the
+  single `ufw` chokepoint). Do NOT add ad-hoc `nft`/`iptables`/`ufw` calls elsewhere — they
+  become debt the future firewall engine (ADR 0005) must reconcile. (Readiness audit
+  2026-06-27.)
 
 ### Multi-user-ready by default
 New features should be built so multi-user/commercial support is an addition, not a rewrite.
@@ -106,6 +110,11 @@ Concretely:
   (and later multi-user push) has a clean hook.
 - **Concurrency-aware writes** — don't assume one writer at a time from the UI (e.g. counter
   increments like `tickets_seq` must be safe under simultaneous actors).
+- **The malware Layer-B build and the agent rebuild MUST include the actor seam** on their
+  tables (`malware_findings`, `scan_*`/`queue`, `agent_devices`) and be built **auth-aware**
+  at the two hook points: the `/hw_data` handler (`hw_monitor.py` ~1812) for device-auth, and
+  `firewall.py` for the engine. Do NOT add these seams twice — fold them into the rebuild.
+  (Readiness audit 2026-06-27 / ADR 0005.)
 - **Do NOT build the multi-user machinery now** (sessions, auth, SSE push, attribution UI) —
   that's commercial-tier. Leave the socket, don't wire the house.
 
@@ -119,6 +128,11 @@ Concretely:
   `modules.get_db()`). **Never compute `__file__`-relative DB paths.** Separate processes
   (e.g. `watchdog`) that call module APIs must register the shared path
   (`modules.set_shared_db_path(...)`) before use.
+- **Every table's DDL lives in exactly ONE canonical init** (the `database.py` shared-init
+  pattern / the owning module's `_init_db`). **No table without a `CREATE` in the repo** —
+  ref the `devices`-table fresh-install crash (it had no `CREATE` anywhere). Schema changes
+  use a guarded `PRAGMA table_info` + `ALTER TABLE ADD COLUMN` migration alongside the
+  updated `CREATE`. (Readiness audit 2026-06-27.)
 
 ### #1 RECURRING BUG — JS strings inside Python f-strings
 The dashboard renders HTML/JS from Python f-strings. The most common defect by far:
