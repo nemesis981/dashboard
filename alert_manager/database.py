@@ -37,6 +37,36 @@ def init_db():
     conn.close()
     print("Database initialized successfully")
 
+def init_quarantines_table():
+    """Canonical DDL for the core `quarantines` table (+ active index).
+
+    Single source of truth, called by BOTH alert_watcher's startup init
+    (init_quarantines_db) and the dashboard's lazy self-heal
+    (_ensure_quarantines_table). CREATE ... IF NOT EXISTS, so whichever process
+    runs first wins and later calls are no-ops. Both callers are kept (not
+    collapsed to one): there is NO systemd ordering between the services, so
+    alert_watcher's create-before-write and the dashboard's self-heal before its
+    unguarded SELECT must each remain. This dedups the DDL text, not the safety
+    nets. See ADR 0001 / Pass 0 Stage 4.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS quarantines (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ip TEXT NOT NULL,
+                rule_id TEXT NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_quarantines_active ON quarantines(status, expires_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
 def get_alert(rule_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

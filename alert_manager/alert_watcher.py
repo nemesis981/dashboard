@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
-from database import init_db as init_alerts_db
+from database import init_db as init_alerts_db, init_quarantines_table
 from ip_enrichment import enrich_ip
 from email_utils import send_email
 from firewall import (
@@ -47,23 +47,11 @@ signal.signal(signal.SIGINT, _stop)
 
 
 def init_quarantines_db():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS quarantines (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                rule_id TEXT NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                created_at TIMESTAMP NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_quarantines_active ON quarantines(status, expires_at)")
-        conn.commit()
-    finally:
-        conn.close()
+    # Startup init — canonical DDL lives in database.init_quarantines_table()
+    # (one source of truth, shared with the dashboard's lazy self-heal). This
+    # call site is kept: it guarantees the table exists before alert_watcher's
+    # own INSERTs, independent of dashboard startup order. Pass 0 Stage 4.
+    init_quarantines_table()
 
 
 def lookup_action(rule_id):

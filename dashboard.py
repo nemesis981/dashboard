@@ -49,7 +49,7 @@ _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
-from database import init_db as init_alerts_db
+from database import init_db as init_alerts_db, init_quarantines_table
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -456,23 +456,12 @@ def _audit(action, rule_id=None, ip=None):
 
 
 def _ensure_quarantines_table():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS quarantines (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip TEXT NOT NULL,
-                rule_id TEXT NOT NULL,
-                expires_at TIMESTAMP NOT NULL,
-                created_at TIMESTAMP NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active'
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_quarantines_active ON quarantines(status, expires_at)")
-        conn.commit()
-    finally:
-        conn.close()
+    # Lazy self-heal — canonical DDL lives in database.init_quarantines_table()
+    # (one source of truth, shared with alert_watcher's startup init). This call
+    # site is kept: it fires before the UNguarded SELECT in get_active_quarantines(),
+    # so the dashboard can't hit a missing-table crash regardless of whether
+    # alert_watcher has started yet (no systemd ordering). Pass 0 Stage 4.
+    init_quarantines_table()
 
 
 
