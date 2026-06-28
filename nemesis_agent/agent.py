@@ -48,11 +48,11 @@ _scan_on_reconnect_done = False
 def _load_platform_module():
     global _platform_mod
     if _platform_name == "Windows":
-        from platform import windows as pm
+        from platforms import windows as pm
     elif _platform_name == "Darwin":
-        from platform import mac as pm
+        from platforms import mac as pm
     else:
-        from platform import linux as pm
+        from platforms import linux as pm
     _platform_mod = pm
     log.info("Loaded platform module for %s", _platform_name)
 

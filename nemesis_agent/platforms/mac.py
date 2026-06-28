@@ -3,7 +3,7 @@ import logging
 import subprocess
 import psutil
 
-log = logging.getLogger("nemesis_agent.platform.mac")
+log = logging.getLogger("nemesis_agent.platforms.mac")
 
 
 def _run(cmd, timeout=10):

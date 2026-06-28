@@ -4,7 +4,7 @@ import logging
 import subprocess
 import psutil
 
-log = logging.getLogger("nemesis_agent.platform.linux")
+log = logging.getLogger("nemesis_agent.platforms.linux")
 
 
 def _run(cmd, timeout=10):

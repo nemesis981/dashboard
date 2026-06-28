@@ -3,7 +3,7 @@ import logging
 import requests
 
 LHM_URL = "http://localhost:8085/data.json"
-log = logging.getLogger("nemesis_agent.platform.windows")
+log = logging.getLogger("nemesis_agent.platforms.windows")
 
 
 def _find(nodes, path_parts):
