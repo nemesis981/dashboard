@@ -74,6 +74,7 @@ def _init_db() -> None:
                 api_ok      INTEGER,
                 verdict     TEXT,
                 latency_ms  REAL,
+                vpn_connected INTEGER,
                 actor       TEXT,
                 note        TEXT
             )
@@ -93,6 +94,7 @@ def _init_db() -> None:
                 egress_ok    INTEGER,
                 api_ok       INTEGER,
                 latency_ms   REAL,
+                vpn_connected INTEGER,
                 sample_count INTEGER,
                 actor        TEXT,
                 note         TEXT
@@ -104,6 +106,12 @@ def _init_db() -> None:
                 value TEXT
             )
         """)
+        # Guarded migration: add vpn_connected to DBs created before it existed
+        # (CLAUDE.md DB rule — ALTER TABLE ADD COLUMN alongside the updated CREATE).
+        for _tbl in ("diagnostics_connectivity_samples", "diagnostics_status"):
+            _cols = [r[1] for r in conn.execute(f"PRAGMA table_info({_tbl})")]
+            if "vpn_connected" not in _cols:
+                conn.execute(f"ALTER TABLE {_tbl} ADD COLUMN vpn_connected INTEGER")
         for k, v in DEFAULT_SETTINGS.items():
             conn.execute(
                 "INSERT OR IGNORE INTO diagnostics_settings(key, value) VALUES (?, ?)",

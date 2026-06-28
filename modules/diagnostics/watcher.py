@@ -67,6 +67,113 @@ def _curl(host_or_ip, *extra):
     return ok, code, secs, out
 
 
+# ── VPN provider probes (plugins) ─────────────────────────────────────────────
+# Each probe detects ONE VPN client. CONTRACT: return None if the client is not
+# installed (skip-if-absent — never crash on a box that lacks it); otherwise a
+# dict {provider, connected, server, protocol, raw}. `server`/`raw` may carry
+# IPs/hostnames, so they go to the FLAT LOG ONLY. The DB sampler records just the
+# aggregated `vpn_connected` boolean — provider-agnostic and address-free (Rule 8).
+# Add your own provider: write one of these + append it to _VPN_PROBES below.
+# Beginner guide: docs/modules/diagnostics/CUSTOM_VPN_PROBE.md
+def _probe_pia():
+    """Private Internet Access — `piactl get connectionstate`."""
+    exe = shutil.which("piactl")
+    if not exe:
+        return None
+    _rc, state = _run([exe, "get", "connectionstate"])
+    _r2, region = _run([exe, "get", "region"])
+    return {"provider": "PIA", "connected": state.strip() == "Connected",
+            "server": region.strip() or None, "protocol": None,
+            "raw": f"connectionstate: {state}\nregion: {region}"}
+
+
+def _probe_mullvad():
+    """Mullvad — `mullvad status`."""
+    exe = shutil.which("mullvad")
+    if not exe:
+        return None
+    _rc, out = _run([exe, "status"])
+    first = (out.splitlines() or [""])[0].strip().lower()
+    low = out.lower()
+    m = re.search(r"[Cc]onnected to ([^\s,]+)", out)
+    proto = "WireGuard" if "wireguard" in low else ("OpenVPN" if "openvpn" in low else None)
+    return {"provider": "Mullvad", "connected": first.startswith("connected"),
+            "server": m.group(1) if m else None, "protocol": proto, "raw": out}
+
+
+def _probe_protonvpn():
+    """ProtonVPN — `protonvpn-cli status`."""
+    exe = shutil.which("protonvpn-cli")
+    if not exe:
+        return None
+    _rc, out = _run([exe, "status"])
+    low = out.lower()
+    connected = ("connected" in low) and ("no active" not in low) and ("disconnected" not in low)
+    srv = re.search(r"[Ss]erver:\s*(\S+)", out)
+    prt = re.search(r"[Pp]rotocol:\s*(\S+)", out)
+    return {"provider": "ProtonVPN", "connected": connected,
+            "server": srv.group(1) if srv else None,
+            "protocol": prt.group(1) if prt else None, "raw": out}
+
+
+def _probe_wireguard():
+    """WireGuard — `wg show` (an interface present = a tunnel is up)."""
+    exe = shutil.which("wg")
+    if not exe:
+        return None
+    _rc, out = _run([exe, "show"])
+    ep = re.search(r"endpoint:\s*(\S+)", out)
+    return {"provider": "WireGuard", "connected": "interface:" in out,
+            "server": ep.group(1) if ep else None, "protocol": "WireGuard", "raw": out}
+
+
+def _probe_tailscale():
+    """Tailscale — `tailscale status`."""
+    exe = shutil.which("tailscale")
+    if not exe:
+        return None
+    _rc, out = _run([exe, "status"])
+    low = out.lower()
+    connected = bool(out.strip()) and "stopped" not in low and "logged out" not in low
+    parts = (out.splitlines() or [""])[0].split()
+    return {"provider": "Tailscale", "connected": connected,
+            "server": parts[1] if len(parts) > 1 else None,
+            "protocol": "WireGuard", "raw": out}
+
+
+# Register every built-in probe here. Custom probes append to this list (see guide).
+_VPN_PROBES = [_probe_pia, _probe_mullvad, _probe_protonvpn, _probe_wireguard, _probe_tailscale]
+
+
+def _probe_vpn(raw_lines) -> bool:
+    """Run every VPN provider probe (each skips cleanly if its client is absent).
+    Flat log gets the full per-provider detail (provider/state/server/proto + raw
+    output); the DB gets ONLY the returned aggregated boolean. True if any detected
+    provider reports connected, else False (incl. no client installed)."""
+    connected_any = False
+    detected = False
+    for probe in _VPN_PROBES:
+        try:
+            res = probe()
+        except Exception:   # a single probe must never kill the cycle (observe-only)
+            log.exception("watcher: VPN probe %s failed", getattr(probe, "__name__", "?"))
+            res = None
+        if not res:
+            continue
+        detected = True
+        raw_lines.append(
+            f"  [vpn.{res.get('provider', '?')}] connected={res.get('connected')} "
+            f"server={res.get('server')} protocol={res.get('protocol')}"
+        )
+        for line in (res.get("raw") or "").splitlines():
+            raw_lines.append(f"      {line}")
+        if res.get("connected"):
+            connected_any = True
+    if not detected:
+        raw_lines.append("  [vpn] no supported VPN client detected")
+    return connected_any
+
+
 # ── config ─────────────────────────────────────────────────────────────────--
 def _load_cfg() -> dict:
     g = diag._get_setting
@@ -116,14 +223,9 @@ def _probe(cfg: dict):
         for line in (out or "<no output>").splitlines() or ["<no output>"]:
             raw.append(f"      {line}")
 
-    # 1. VPN state (optional plugin — skip cleanly if piactl absent)
-    piactl = shutil.which("piactl")
-    if piactl:
-        for k in ("connectionstate", "vpnip", "pubip"):
-            rc, out = _run([piactl, "get", k])
-            raw.append(f"  [pia.{k}] (rc={rc}) {out}")
-    else:
-        raw.append("  [pia] piactl not present — VPN probe skipped")
+    # 1. VPN provider probes (plugins; each skips if its client is absent).
+    #    Raw per-provider detail -> flat log; only the aggregated boolean -> DB.
+    vpn_connected = _probe_vpn(raw)
 
     # 2. Tunnel interface present?
     rc, out = _run(["ip", "-o", "link", "show"])
@@ -171,7 +273,7 @@ def _probe(cfg: dict):
     flags = {"routing_ok": routing_ok, "dns_ok": dns_ok,
              "egress_ok": egress_ok, "api_ok": api_ok}
     note = _note(flags, v4_ok, v6_ok)
-    return flags, latency_ms, note, raw, (v4_ok, v6_ok)
+    return flags, latency_ms, note, raw, (v4_ok, v6_ok), vpn_connected
 
 
 def _note(flags, v4_ok, v6_ok) -> str:
@@ -249,7 +351,7 @@ def _prune_old(log_dir: str, cfg: dict):
 
 
 # ── sanitized DB sampler (verdicts ONLY — guaranteed address-free) ────────────
-def _record(flags, verdict, latency_ms, note, actor, samples_max):
+def _record(flags, verdict, latency_ms, note, vpn_connected, actor, samples_max):
     def b(x):  # bool -> 0/1, preserve None
         return None if x is None else (1 if x else 0)
 
@@ -258,24 +360,25 @@ def _record(flags, verdict, latency_ms, note, actor, samples_max):
         ts = datetime.now().timestamp()
         conn.execute(
             "INSERT INTO diagnostics_connectivity_samples"
-            "(ts, routing_ok, dns_ok, egress_ok, api_ok, verdict, latency_ms, actor, note)"
-            " VALUES (?,?,?,?,?,?,?,?,?)",
+            "(ts, routing_ok, dns_ok, egress_ok, api_ok, verdict, latency_ms, vpn_connected, actor, note)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (ts, b(flags["routing_ok"]), b(flags["dns_ok"]), b(flags["egress_ok"]),
-             b(flags["api_ok"]), verdict, latency_ms, actor, note),
+             b(flags["api_ok"]), verdict, latency_ms, b(vpn_connected), actor, note),
         )
         count = conn.execute(
             "SELECT COUNT(*) FROM diagnostics_connectivity_samples").fetchone()[0]
         conn.execute(
             "INSERT INTO diagnostics_status"
             "(id, updated_at, verdict, routing_ok, dns_ok, egress_ok, api_ok,"
-            " latency_ms, sample_count, actor, note) VALUES (1,?,?,?,?,?,?,?,?,?,?)"
+            " latency_ms, vpn_connected, sample_count, actor, note) VALUES (1,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(id) DO UPDATE SET updated_at=excluded.updated_at,"
             " verdict=excluded.verdict, routing_ok=excluded.routing_ok,"
             " dns_ok=excluded.dns_ok, egress_ok=excluded.egress_ok,"
             " api_ok=excluded.api_ok, latency_ms=excluded.latency_ms,"
+            " vpn_connected=excluded.vpn_connected,"
             " sample_count=excluded.sample_count, actor=excluded.actor, note=excluded.note",
             (ts, verdict, b(flags["routing_ok"]), b(flags["dns_ok"]), b(flags["egress_ok"]),
-             b(flags["api_ok"]), latency_ms, count, actor, note),
+             b(flags["api_ok"]), latency_ms, b(vpn_connected), count, actor, note),
         )
         # Retention: row-count cap (oldest dropped). Flat-file age prune is separate.
         try:
@@ -301,22 +404,24 @@ def run_once(actor: str = "watcher-service", verbose=None) -> dict:
         verbose = _verbose_now(cfg)
 
     ts = datetime.now()
-    flags, latency_ms, note, raw_lines, (v4_ok, v6_ok) = _probe(cfg)
+    flags, latency_ms, note, raw_lines, (v4_ok, v6_ok), vpn_connected = _probe(cfg)
     verdict = classify(flags, v4_ok, v6_ok)
 
     summary = (f"{ts.isoformat()} verdict={verdict} "
                f"routing={int(bool(flags['routing_ok']))} dns={int(bool(flags['dns_ok']))} "
                f"egress={int(bool(flags['egress_ok']))} api={int(bool(flags['api_ok']))} "
+               f"vpn={int(bool(vpn_connected))} "
                f"lat={latency_ms if latency_ms is not None else '-'}ms"
                + (f" note={note}" if note else ""))
 
     _write_log(cfg, verbose, ts, summary, raw_lines)
     try:
-        _record(flags, verdict, latency_ms, note, actor, cfg["samples_max"])
+        _record(flags, verdict, latency_ms, note, vpn_connected, actor, cfg["samples_max"])
     except Exception:
         log.exception("watcher: DB record failed")
 
-    return {"verdict": verdict, "latency_ms": latency_ms, "note": note, **flags}
+    return {"verdict": verdict, "latency_ms": latency_ms, "note": note,
+            "vpn_connected": bool(vpn_connected), **flags}
 
 
 if __name__ == "__main__":

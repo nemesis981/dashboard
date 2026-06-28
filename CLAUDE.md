@@ -105,6 +105,15 @@ factual but still leaks — sanitize the quotes, keep the meaning.)
   become debt the future firewall engine (ADR 0005) must reconcile. (Readiness audit
   2026-06-27.)
 
+### Vendor-specific integrations
+**VENDOR-SPECIFIC INTEGRATIONS: whenever a vendor-specific probe, plugin, or integration is
+built (VPN clients, hardware sensors, notification channels, threat feeds, etc.), a
+`CUSTOM_*.md` guide must ship alongside it in the same commit.** The guide covers: the
+interface contract, the skip-if-absent pattern, a minimal working example, where to register
+it, and any Rule-8 constraints. This is part of the definition of done — not optional polish.
+A vendor integration without a custom guide is incomplete. Purpose: community members familiar
+with a specific product build the custom code they need instead of filing issues.
+
 ### Multi-user-ready by default
 New features should be built so multi-user/commercial support is an addition, not a rewrite.
 Concretely:
