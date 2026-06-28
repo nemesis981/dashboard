@@ -103,6 +103,35 @@ def init_devices_table():
     finally:
         conn.close()
 
+def init_users_table():
+    """Canonical DDL for the core `users` table (Flask-Login auth).
+
+    Single source of truth, mirroring init_quarantines_table(). One place only
+    (per the DB rules). Called from the shared boot init so every process sees
+    the table. `password_hash` is bcrypt; `role` is a seam for the commercial
+    multi-user tier. failed_attempts/lockout_until back the login rate-limit.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                username        TEXT NOT NULL UNIQUE,      -- login ID, stable, lowercase
+                display_name    TEXT NOT NULL,             -- shown in UI, can change
+                password_hash   TEXT NOT NULL,             -- bcrypt
+                role            TEXT NOT NULL DEFAULT 'admin',  -- 'admin'|'user' (commercial seam)
+                is_active       INTEGER NOT NULL DEFAULT 1,
+                created_at      TEXT NOT NULL,
+                last_login      TEXT,
+                failed_attempts INTEGER NOT NULL DEFAULT 0,
+                lockout_until   TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 def get_alert(rule_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

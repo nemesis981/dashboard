@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to Nemesis Firewall</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:32px 34px; width:92%; max-width:480px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 4px; font-size:1.5em; }
+    .sub { color:#aaa; margin:0 0 22px; font-size:0.92em; }
+    label { display:block; margin:14px 0 4px; font-size:0.86em; color:#ccd; }
+    .hint { color:#888; font-size:0.78em; margin:2px 0 0; }
+    input[type=text], input[type=password] {
+      width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+      color:#eee; padding:9px 11px; border-radius:7px; font-size:0.95em; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    .pass-box { background:#0d0d1e; border:1px dashed #00d4ff55; border-radius:8px;
+                padding:12px; margin:6px 0 2px; }
+    .pass-val { font-family:ui-monospace,monospace; color:#00ff88; font-size:1.05em;
+                word-break:break-all; }
+    .pass-actions { margin-top:8px; display:flex; gap:8px; }
+    button.mini { background:#00d4ff22; color:#00d4ff; border:1px solid #00d4ff66;
+                  border-radius:6px; padding:5px 12px; cursor:pointer; font-size:0.82em; }
+    .save-note { color:#ffcc00; font-size:0.8em; margin-top:6px; }
+    button.primary { width:100%; margin-top:22px; background:#00d4ff; color:#062;
+                     border:none; border-radius:8px; padding:11px; font-size:1em;
+                     font-weight:bold; cursor:pointer; }
+    .errors { background:#ff444422; border:1px solid #ff4444; border-radius:8px;
+              padding:10px 12px; margin-bottom:14px; }
+    .errors li { color:#ff8888; font-size:0.85em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Welcome to Nemesis Firewall</h1>
+    <p class="sub">Create your admin account to get started.</p>
+
+    {% if errors %}
+    <ul class="errors">{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    <form method="POST" action="/setup">
+      <label for="username">Choose a login ID</label>
+      <input type="text" id="username" name="username" value="{{ username or '' }}"
+             autocomplete="username" autofocus>
+      <p class="hint">lowercase, no spaces, e.g. alex or alex_lee</p>
+
+      <label for="display_name">Your name</label>
+      <input type="text" id="display_name" name="display_name" value="{{ display_name or '' }}">
+      <p class="hint">How you&#39;ll appear in the dashboard, e.g. Alex</p>
+
+      <label>Suggested passphrase</label>
+      <div class="pass-box">
+        <span class="pass-val" id="genPass">{{ suggested }}</span>
+        <div class="pass-actions">
+          <button type="button" class="mini" onclick="copyPass()">&#128203; Copy</button>
+          <button type="button" class="mini" onclick="regen()">&#128260; Generate another</button>
+        </div>
+        <div class="save-note">Save this somewhere safe before continuing.</div>
+      </div>
+
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="new-password">
+      <p class="hint">Use the generated passphrase above, or create your own.</p>
+
+      <label for="confirm_password">Confirm password</label>
+      <input type="password" id="confirm_password" name="confirm_password" autocomplete="new-password">
+
+      <button type="submit" class="primary">Create Account &rarr;</button>
+    </form>
+  </div>
+  <script>
+    function copyPass() {
+      var t = document.getElementById('genPass').textContent;
+      navigator.clipboard && navigator.clipboard.writeText(t);
+    }
+    function regen() {
+      fetch('/api/passphrase/generate').then(function(r){ return r.json(); })
+        .then(function(d){ document.getElementById('genPass').textContent = d.passphrase; })
+        .catch(function(){});
+    }
+  </script>
+</body>
+</html>

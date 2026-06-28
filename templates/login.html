@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Log In</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:32px 34px; width:92%; max-width:380px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 22px; font-size:1.4em; text-align:center; }
+    label { display:block; margin:14px 0 4px; font-size:0.86em; color:#ccd; }
+    input { width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+            color:#eee; padding:9px 11px; border-radius:7px; font-size:0.95em; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    button { width:100%; margin-top:22px; background:#00d4ff; color:#062; border:none;
+             border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
+    .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
+             border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#128737; Nemesis Firewall</h1>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="POST" action="/login">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" autofocus>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password">
+      <button type="submit">Log In</button>
+    </form>
+  </div>
+</body>
+</html>

@@ -31,6 +31,7 @@ import html as _html
 import logging
 from datetime import datetime, timedelta
 from flask import request, jsonify
+from flask_login import current_user
 
 from modules import NemesisModule, get_db
 
@@ -383,7 +384,7 @@ def _api_tickets_list_create():
             src_ip=data.get("src_ip"),
             dst_ip=data.get("dst_ip"),
             ai_analysis_ref=data.get("ai_analysis_ref"),
-            actor=request.remote_addr,   # actor seam: Flask request context
+            actor=getattr(current_user, "username", "unknown"),   # actor seam: logged-in user
         )
         return jsonify({"ok": bool(tid), "id": tid})
     except Exception as e:
@@ -439,7 +440,7 @@ def _api_ticket_notes(key):
             src_ip=data.get("src_ip"),
             dst_ip=data.get("dst_ip"),
             priority=data.get("priority"),
-            actor=request.remote_addr,   # actor seam: Flask request context
+            actor=getattr(current_user, "username", "unknown"),   # actor seam: logged-in user
         )
         return jsonify({"ok": True, "id": note_id})
     except Exception as e:

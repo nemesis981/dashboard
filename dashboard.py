@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort
 import requests
 import subprocess
 import sqlite3
@@ -50,7 +50,8 @@ _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
-from database import init_db as init_alerts_db, init_quarantines_table, init_devices_table
+from database import (init_db as init_alerts_db, init_quarantines_table,
+                      init_devices_table, init_users_table)
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -58,8 +59,14 @@ import modules_loader
 import diagnostics as _diag
 import email_utils
 
+import bcrypt
+from flask_login import (LoginManager, UserMixin, login_user, logout_user,
+                         login_required, current_user)
+from core import entitlements, passphrase
+
 init_alerts_db()
 hw_monitor.init_db()
+init_users_table()
 # Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
 # device reads in the routes. Canonical DDL in database.init_devices_table();
 # also created create-before-write by the device_scanner. Dual-safety-net,
@@ -74,6 +81,246 @@ DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 _BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
+
+# ── Authentication (Flask-Login) ──────────────────────────────────────────────
+auth_log = logging.getLogger("nemesis.auth")
+# Sessions need a STABLE secret key — persist one outside the repo (0600,
+# gitignored) so a restart doesn't invalidate everyone's session.
+_SECRET_KEY_PATH = os.path.join(_HERE, "alert_manager", ".flask_secret")
+
+
+def _load_secret_key() -> str:
+    try:
+        with open(_SECRET_KEY_PATH) as f:
+            data = f.read().strip()
+            if data:
+                return data
+    except FileNotFoundError:
+        pass
+    key = os.urandom(32).hex()
+    try:
+        with open(_SECRET_KEY_PATH, "w") as f:
+            f.write(key)
+        os.chmod(_SECRET_KEY_PATH, 0o600)
+    except Exception:
+        auth_log.warning("auth: could not persist secret key to %s", _SECRET_KEY_PATH)
+    return key
+
+
+app.secret_key = _load_secret_key()
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = "login"
+login_manager.login_message = "Please log in to access Nemesis."
+
+
+def _users_conn():
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _load_user_row(field: str, value) -> "sqlite3.Row | None":
+    # field is an internal literal ('id' / 'username'), never user input.
+    try:
+        conn = _users_conn()
+        row = conn.execute(f"SELECT * FROM users WHERE {field}=?", (value,)).fetchone()
+        conn.close()
+        return row
+    except Exception:
+        auth_log.exception("auth: user load failed")
+        return None
+
+
+def _user_count() -> int:
+    try:
+        conn = _users_conn()
+        n = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        conn.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
+class User(UserMixin):
+    """A dashboard user loaded from the core `users` table."""
+    def __init__(self, row):
+        self.id = row["id"]
+        self.username = row["username"]
+        self.display_name = row["display_name"]
+        self.role = row["role"]
+        self._active = bool(row["is_active"])
+
+    @property
+    def is_active(self):           # Flask-Login: inactive users cannot log in
+        return self._active
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    row = _load_user_row("id", user_id)
+    return User(row) if row else None
+
+
+# ── Auth helpers ──────────────────────────────────────────────────────────────
+_USERNAME_RE   = re.compile(r"^[a-z0-9_]{3,20}$")
+_MAX_FAILED    = 5
+_LOCKOUT_MINS  = 15
+# Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
+_AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static"}
+
+
+def _hash_password(pw: str) -> str:
+    return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
+
+
+def _check_password(pw: str, pw_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(pw.encode(), (pw_hash or "").encode())
+    except Exception:
+        return False
+
+
+def _create_user(username: str, display_name: str, password: str, role: str = "admin") -> int:
+    conn = _users_conn()
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        cur = conn.execute(
+            "INSERT INTO users(username, display_name, password_hash, role, is_active, created_at) "
+            "VALUES(?,?,?,?,1,?)",
+            (username, display_name, _hash_password(password), role, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def _actor() -> str:
+    """Attribution actor for Flask request contexts: the logged-in username
+    (Part 3 upgrade from IP). Falls back to the client IP pre-auth."""
+    try:
+        if current_user.is_authenticated:
+            return current_user.username
+    except Exception:
+        pass
+    return request.remote_addr or "unknown"
+
+
+# ── First-run + auth guard (covers dashboard.py AND all module routes) ────────
+@app.before_request
+def _enforce_setup_and_auth():
+    ep = request.endpoint
+    if ep is None:
+        return  # let Flask 404 unknown paths
+    if ep in _AUTH_EXEMPT or ep.startswith("static"):
+        return
+    # First run: no users yet → force the setup wizard (runs before login).
+    if _user_count() == 0:
+        return redirect(url_for("setup"))
+    # Otherwise every route requires an authenticated session.
+    if not current_user.is_authenticated:
+        return redirect(url_for("login"))
+
+
+# ── Auth routes ───────────────────────────────────────────────────────────────
+@app.route("/api/passphrase/generate")
+def api_passphrase_generate():
+    """Pre-auth: used by the setup page's 'generate another' button."""
+    return jsonify({"passphrase": passphrase.generate()})
+
+
+@app.route("/setup", methods=["GET", "POST"])
+def setup():
+    if _user_count() > 0:
+        return redirect(url_for("login"))         # setup already done
+    if request.method == "GET":
+        return render_template("setup.html", suggested=passphrase.generate())
+
+    username     = (request.form.get("username") or "").strip().lower()
+    display_name = (request.form.get("display_name") or "").strip()
+    password     = request.form.get("password") or ""
+    confirm      = request.form.get("confirm_password") or ""
+
+    errors = []
+    if not _USERNAME_RE.match(username):
+        errors.append("Login ID must be 3-20 chars: lowercase letters, numbers, or underscore.")
+    elif username == "admin":
+        errors.append("Choose a more specific login ID than 'admin' (e.g. your name).")
+    if not (1 <= len(display_name) <= 50):
+        errors.append("Display name must be 1-50 characters.")
+    ok, reason = passphrase.validate(password)
+    if not ok:
+        errors.append(reason)
+    if password != confirm:
+        errors.append("Passwords do not match.")
+
+    if errors:
+        return render_template("setup.html", suggested=passphrase.generate(),
+                               errors=errors, username=username, display_name=display_name)
+
+    uid = _create_user(username, display_name, password, role="admin")
+    row = _load_user_row("id", uid)
+    if row:
+        login_user(User(row))
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+    if request.method == "GET":
+        return render_template("login.html")
+
+    username = (request.form.get("username") or "").strip().lower()
+    password = request.form.get("password") or ""
+    row = _load_user_row("username", username)
+
+    # Lockout check (failed-attempt rate limit)
+    if row and row["lockout_until"]:
+        try:
+            until = datetime.fromisoformat(row["lockout_until"])
+            if datetime.now() < until:
+                mins = int((until - datetime.now()).total_seconds() // 60) + 1
+                return render_template("login.html",
+                                       error=f"Account locked. Try again in {mins} minute(s).")
+        except ValueError:
+            pass
+
+    if row and row["is_active"] and _check_password(password, row["password_hash"]):
+        conn = _users_conn()
+        conn.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL, last_login=? WHERE id=?",
+                     (datetime.now().isoformat(timespec="seconds"), row["id"]))
+        conn.commit()
+        conn.close()
+        login_user(User(row))
+        return redirect(url_for("dashboard"))
+
+    # Failure: increment attempts, lock after _MAX_FAILED
+    if row:
+        conn = _users_conn()
+        fa = int(row["failed_attempts"] or 0) + 1
+        lock = None
+        if fa >= _MAX_FAILED:
+            lock = (datetime.now() + timedelta(minutes=_LOCKOUT_MINS)).isoformat(timespec="seconds")
+            fa = 0
+        conn.execute("UPDATE users SET failed_attempts=?, lockout_until=? WHERE id=?", (fa, lock, row["id"]))
+        conn.commit()
+        conn.close()
+        if lock:
+            return render_template("login.html",
+                                   error=f"Too many failed attempts. Account locked for {_LOCKOUT_MINS} minutes.")
+    # Never reveal which field was wrong (security best practice).
+    return render_template("login.html", error="Invalid username or password.")
+
+
+@app.route("/logout")
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for("login"))
 
 modules_loader.init(app, DB_PATH, MODULES_DIR)
 
@@ -1226,7 +1473,7 @@ def api_quarantine_confirm(q_id):
             conn.close()
             return jsonify({"error": f"quarantine status is {status}, cannot confirm"}), 409
         c.execute("UPDATE alerts SET action='block' WHERE rule_id=?", (rule_id,))
-        c.execute("UPDATE quarantines SET status='confirmed', actor=? WHERE id=?", (request.remote_addr, q_id))
+        c.execute("UPDATE quarantines SET status='confirmed', actor=? WHERE id=?", (_actor(), q_id))
         conn.commit()
         conn.close()
         _audit(action="confirm", rule_id=rule_id, ip=ip)
@@ -1251,7 +1498,7 @@ def api_quarantine_lift(q_id):
             return jsonify({"error": f"quarantine status is {status}, cannot lift"}), 409
         ufw_ok = ufw_delete(ip)
         c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
-        c.execute("UPDATE quarantines SET status='lifted', actor=? WHERE id=?", (request.remote_addr, q_id))
+        c.execute("UPDATE quarantines SET status='lifted', actor=? WHERE id=?", (_actor(), q_id))
         conn.commit()
         conn.close()
         _audit(action="lift", rule_id=rule_id, ip=ip)
@@ -1973,6 +2220,24 @@ def settings_page():
     if not module_rows_html:
         module_rows_html = '<p style="color:#bbb;font-style:italic">No modules found in modules/ directory.</p>'
 
+    # Users section — multi-user is a commercial-tier feature (entitlements gate).
+    if entitlements.is_commercial():
+        _add_user_html = (
+            '<div class="card" style="margin-bottom:16px"><h2>&#128101; Users</h2>'
+            '<button onclick="alert(&#39;User management UI coming soon.&#39;)" '
+            'style="background:#00d4ff22;color:#00d4ff;border:1px solid #00d4ff;border-radius:6px;'
+            'padding:7px 16px;cursor:pointer">+ Add User</button></div>'
+        )
+    else:
+        _add_user_html = (
+            '<div class="card" style="margin-bottom:16px;opacity:0.75"><h2>&#128101; Users</h2>'
+            '<button disabled title="Available in the commercial tier" '
+            'style="background:#222;color:#888;border:1px solid #444;border-radius:6px;'
+            'padding:7px 16px;cursor:not-allowed">+ Add User (Commercial)</button>'
+            '<p style="color:#888;font-size:0.85em;margin-top:8px">Multi-user accounts are part of '
+            'the commercial tier. You&#39;re running the free tier &mdash; a single admin account.</p></div>'
+        )
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -2221,6 +2486,8 @@ def settings_page():
            title="Diagnostics &amp; Support">🔍 Diagnostics</a>
     </h1>
     <p><a class="back" href="/">← Back to Dashboard</a></p>
+
+    {_add_user_html}
 
     <div id="moduleRestartBanner" style="display:none;background:#2a1800;border:1px solid #ffaa00;border-radius:8px;padding:12px 16px;margin-bottom:16px;align-items:center;gap:12px;flex-wrap:wrap">
         <span class="tier-text"
@@ -4296,7 +4563,7 @@ def api_modules():
 @app.route("/api/modules/<name>/enable", methods=["POST"])
 def api_module_enable(name):
     try:
-        modules_loader.set_enabled(name, True, actor=request.remote_addr)
+        modules_loader.set_enabled(name, True, actor=_actor())
         return jsonify({"success": True, "status": modules_loader.module_status(name)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4305,7 +4572,7 @@ def api_module_enable(name):
 @app.route("/api/modules/<name>/disable", methods=["POST"])
 def api_module_disable(name):
     try:
-        modules_loader.set_enabled(name, False, actor=request.remote_addr)
+        modules_loader.set_enabled(name, False, actor=_actor())
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -6581,6 +6848,9 @@ def dashboard():
                   text-decoration:none;color:#888;cursor:pointer">AI ○</a>
         <span id="cq-badge-container">{cq_badge_html}</span>
         <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
+            <span style="color:#00d4ff" title="Logged in">👤 {html.escape(current_user.display_name)}</span>
+            &nbsp;<a href="/logout" style="color:#bbb;text-decoration:none" title="Log out">Logout</a>
+            &nbsp;|&nbsp;
             <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
             &nbsp;|&nbsp;
             <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
