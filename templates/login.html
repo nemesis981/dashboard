@@ -18,6 +18,10 @@
              border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
     .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
              border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+    .login-hint { margin-top:20px; font-size:0.72em; color:#6b7689; text-align:center;
+                  line-height:1.6; }
+    .login-hint code { background:#0d0d1e; border:1px solid #2a3450; border-radius:4px;
+                       padding:1px 5px; color:#8a98b3; font-size:0.95em; }
   </style>
 </head>
 <body>
@@ -31,6 +35,10 @@
       <input type="password" id="password" name="password" autocomplete="current-password">
       <button type="submit">Log In</button>
     </form>
+    <p class="login-hint">
+      Forgot your password? Access your Nemesis box via SSH and run:<br>
+      <code>python3 ~/dashboard/core/manage.py reset-password &lt;username&gt;</code>
+    </p>
   </div>
 </body>
 </html>
