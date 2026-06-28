@@ -119,7 +119,7 @@ SKIPPED=()
 
 step_header "1/8" "Stopping and Disabling Services"
 
-SERVICES=(dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary)
+SERVICES=(dashboard watchdog hw-monitor alert-watcher device-scanner malware-canary diagnostics-watcher)
 
 for svc in "${SERVICES[@]}"; do
     if systemctl list-units --full --all 2>/dev/null | grep -q "${svc}.service"; then
@@ -200,6 +200,36 @@ PYEOF
     fi
 else
     skipped "canary cleanup (no alerts.db found)"
+fi
+
+# ── Diagnostics connectivity-watcher flat logs ───────────────────────────────
+# The watcher writes raw probe detail to a flat log dir OUTSIDE the repo
+# (watcher_log_dir, default /var/log/nemesis/diagnostics). This is OUR diagnostic
+# data, not OS logs — remove it on uninstall (leaving it orphans a directory of
+# our history). The shared alerts.db is preserved; the diagnostics_* tables stay
+# (they hold only sanitized verdicts and are harmless if left empty).
+DIAG_LOG_DIR="/var/log/nemesis/diagnostics"
+if [[ -f "$CANARY_DB" ]]; then
+    _diag_dir="$(python3 - "$CANARY_DB" <<'PYEOF'
+import sqlite3, sys
+try:
+    c = sqlite3.connect(sys.argv[1])
+    row = c.execute("SELECT value FROM diagnostics_settings WHERE key='watcher_log_dir'").fetchone()
+    print(row[0] if row and row[0] else "")
+except Exception:
+    print("")
+PYEOF
+)"
+    [[ -n "$_diag_dir" ]] && DIAG_LOG_DIR="$_diag_dir"
+fi
+if [[ -d "$DIAG_LOG_DIR" ]]; then
+    rm -rf "$DIAG_LOG_DIR"
+    ok "Removed diagnostics watcher logs ($DIAG_LOG_DIR)"
+    REMOVED+=("diagnostics watcher logs")
+    # Remove the parent /var/log/nemesis only if it is now empty (never force it).
+    rmdir /var/log/nemesis 2>/dev/null && info "Removed empty /var/log/nemesis" || true
+else
+    skipped "diagnostics watcher logs (none found)"
 fi
 
 ###############################################################################

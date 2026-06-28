@@ -153,6 +153,27 @@ def _set_setting(key: str, value: str) -> None:
         conn.close()
 
 
+def _module_enabled(name: str = "diagnostics") -> bool:
+    """Read module-enabled from the core `modules_enabled` table (read-any).
+
+    Direct DB read (not a modules_loader import) so the standalone watcher
+    service — which never runs modules_loader.init() — can gate identically
+    (mirrors malware_detection._module_enabled). Defaults to disabled if the
+    row/table is absent.
+    """
+    try:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT enabled FROM modules_enabled WHERE module_name=?", (name,)
+        ).fetchone()
+        conn.close()
+        if row is not None:
+            return bool(row["enabled"])
+    except Exception:
+        log.exception("diagnostics: _module_enabled read failed")
+    return False
+
+
 # ── Status reads (sanitized — these tables hold no addresses, see watcher.py) ──
 # Verdict metadata is the SINGLE source of truth for label/color/blurb. Stored as
 # plain text (regular strings — apostrophes/em-dash are safe here, NOT in an
