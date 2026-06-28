@@ -11,27 +11,45 @@ in concurrently. `get_db()` is autocommit + `busy_timeout` only — no multi-sta
 Fix each atomically, one at a time, audit-then-fix. The `ai_usage` `INSERT … ON CONFLICT DO
 UPDATE` (`modules/ai_engine/module.py`) is the in-repo template.
 
-- [ ] **[FIX-NOW] `tickets_seq` duplicate ticket numbers.** `_next_ticket_number`
+**✅ All four fixed atomically in `2d200e0` (Data Manager v0 seed, ADR 0006; Rule-6 backup
+`alerts-PRE-DATAMGR-V0-20260628`).** Each labeled in code `# DATA MANAGER v0 — atomic
+operation`. Anomaly used a *partial* `UNIQUE(offending_target) WHERE status='open'` (a plain
+composite UNIQUE would also forbid multiple `closed` rows / break history). One residual
+below.
+
+- [x] **[FIX-NOW] `tickets_seq` duplicate ticket numbers.** `_next_ticket_number`
   (`modules/tickets/module.py:113-115`) does `SELECT next_number` then a separate
   `UPDATE … = next_number + 1` → two concurrent `open_ticket()` calls (e.g. auto-ticket-on-
   alert firing from alert-watcher + a module) get the same number. Fix: atomic
   `UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1 RETURNING next_number`
   (or equivalent single statement). **Highest-likelihood to surface during the trip.**
 
-- [ ] **[FIX-NOW] AI rate-limit counter lost increments.** `_increment_rate`
+- [x] **[FIX-NOW] AI rate-limit counter lost increments.** `_increment_rate`
   (`modules/ai_engine/module.py:308-318`) reads `hour_count`/`day_count`, computes `+1`, writes
   back separately → concurrent calls lose increments and under-count the rate limit. Fix:
   atomic upsert like the `_increment_usage` sibling right below it.
 
-- [ ] **[FIX-NOW] `community_queue` duplicate rows.** `add_to_queue`
+- [x] **[FIX-NOW] `community_queue` duplicate rows.** `add_to_queue`
   (`modules/community_queue/module.py:110-135`) is SELECT-then-INSERT/UPDATE with no UNIQUE on
   `(domain_or_ip, submitted)` → concurrent detections create duplicate queue entries. Fix:
   add the UNIQUE constraint + `INSERT … ON CONFLICT DO UPDATE`.
 
-- [ ] **[FIX-NOW] `anomaly_incidents` duplicate open incidents.** `_create_or_update_incident`
+- [x] **[FIX-NOW] `anomaly_incidents` duplicate open incidents.** `_create_or_update_incident`
   (`modules/anomaly_detection/module.py:654-705`) is SELECT-then-INSERT/UPDATE with no UNIQUE
   on `(offending_target, status)` → concurrent detections for one target create duplicate open
   incidents instead of merging. Fix: UNIQUE + atomic upsert (mind the time-window merge logic).
+
+- [ ] **`anomaly_incidents` merge is still read-JSON→merge-Python→write (RACE 4 residual).**
+  The `2d200e0` fix removed duplicate open incidents (partial unique index funnels concurrent
+  detections into ONE incident), but the device-list merge in `_create_or_update_incident`
+  (`modules/anomaly_detection/module.py`, `_merge_into`) still reads `devices_json`, merges in
+  Python, and writes back — so *simultaneous* merges on the same target can drop device-list
+  entries (lost update). **Low priority:** anomaly detection isn't highly concurrent per target
+  in practice, and this is pre-existing (unchanged in kind from before `2d200e0`); it does NOT
+  recreate duplicate incidents. Fix (one variable): wrap the read+merge+write in
+  `BEGIN IMMEDIATE … COMMIT` (this op owns a fresh `get_db()` connection, so serializing the
+  merge is safe), or do the merge SQL-side (JSON1 / `json_*`) as a single atomic UPDATE.
+  [ADR 0006 Data Manager — same atomic-operation seam.]
 
 - [ ] **Header de-dup.** Remove the duplicated **Settings** / **Diagnostics** links from the
   upper-right corner — they also exist in the always-visible header. Frees the corner for the
@@ -157,3 +175,28 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
   `docs/roadmap/lateral-movement-outbreak-detection.md`.)
 - [ ] **Emergency backup on canary trip (v2).** Trigger the backup module on canary detection.
   Not full rollback, but "emergency backup before more files are encrypted."
+
+- [ ] **Data Manager v0 follow-on — Race 4 residual merge-RMW.** `anomaly_incidents` device-list
+  merge is still read-JSON → merge-in-Python → write under concurrent detections on the same
+  target (the partial UNIQUE fix prevents duplicate incidents but doesn't atomicize the merge
+  itself). Low priority in practice (anomaly detection isn't highly concurrent per target). Fix:
+  `BEGIN IMMEDIATE` around the merge, or an SQL-side JSON merge. One variable. Follow-on to
+  `2d200e0`.
+
+- [ ] **Dashboard layout memory — server-side from the start.** Layouts must follow the user
+  across devices (laptop → phone → tablet), so localStorage is wrong — store **server-side in
+  `alerts.db` from day one**.
+  - **Table:** `user_layouts (user_key TEXT, slot_name TEXT, slot_index 1-5, layout_json TEXT,
+    updated_at TEXT, UNIQUE(user_key, slot_index))`.
+  - **`user_key` evolution** (same table, value changes as identity matures): pre-session-identity
+    → `request.remote_addr` (device-specific, functional); session identity (cookie display name)
+    → display-name string (follows the user across devices — the trip-ready version); commercial
+    auth → real user ID (secure, multi-tenant).
+  - **Layout slots:** 3–5 named slots per user (user-defined names), switchable instantly from a
+    dashboard-header dropdown. Layout = ordered array of card IDs serialized to JSON. "Reset to
+    default" → tier-appropriate default.
+  - **Draggable cards:** Sortable.js (available via cdnjs, no new dependency).
+  - **2 API routes:** `GET /api/layout` (load slots) + `POST /api/layout` (save).
+  - **Build-order dependency:** session identity must land **before** layout memory so layouts
+    are globally available per-user from day one. Full build order: race fixes ✅ → actor
+    attribution → session identity → dashboard layout memory.

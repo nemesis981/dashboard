@@ -97,6 +97,9 @@ The same VM-creation engine serves both — no separate infrastructure.
 - **Diagnostics watcher** (connectivity tests run against the VM).
 - **`CONFIG_CHANGE_PROCEDURE.md`** (the VM is the canary device).
 - **Open-source threat feeds** (scan layer uses the same IOC data).
+- **Post-update repair** — the behavioral baseline uses the Data Manager operation log
+  ([ADR 0006](../architecture/0006-data-manager.md)) as its source (detail in
+  [post-update-module-repair](post-update-module-repair.md)).
 
 ## Sequencing
 
