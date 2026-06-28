@@ -8,7 +8,7 @@
 
 In order (trip deadline = **this Friday** drives the sequence):
 1. **Starlink SSH test FIRST (~5 min)** — Tailscale is enrolled on the Nemesis box
-   (tailnet IP `100.126.234.52`) + laptop, and SSH is **proven over Tailscale**.
+   (tailnet IP `100.87.130.25`) + laptop, and SSH is **proven over Tailscale**.
    Starlink arrives tomorrow → test SSH over Starlink to **complete the connectivity gate**.
 2. **Multi-user upgrades for trip testing.**
 3. **Diagnostics audit** (watcher productization FIRST — connectivity self-diagnostic for
@@ -31,7 +31,7 @@ ghost-row mass-trip bug (remove bait + baselines together, else reinstall trips 
 files — folded into `ef5ad6f`). **Layer B v1 is FULLY complete including VM audit fixes.**
 
 **Connectivity — ⏳ Tailscale proven, Starlink pending.** Tailscale enrolled on the Nemesis
-box (`100.126.234.52`) + laptop; SSH proven over Tailscale. Starlink arrives tomorrow →
+box (`100.87.130.25`) + laptop; SSH proven over Tailscale. Starlink arrives tomorrow →
 SSH-over-Starlink test completes the gate (resume item #1).
 
 **Pass 0 readiness — ✅ Tier A + Tier B COMPLETE.**

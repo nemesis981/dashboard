@@ -3535,7 +3535,7 @@ def api_diag_submit():
         return jsonify({"ok": False, "error": "WATCHDOG_EMAIL / WATCHDOG_PASSWORD not configured in nemesis.env — cannot send email."})
 
     subject = f"[Nemesis Support] Diagnostics — {hostname} — {now_str}"
-    ok = email_utils.send_email(subject, body, to="nemesis-firewall-support@proton.me", cc=sender)
+    ok = email_utils.send_email(subject, body, to="support@nemesis-sw.com", cc=sender)
     if ok:
         log.info("diagnostics: support email sent from %s", sender)
         return jsonify({"ok": True, "sent_from": sender})
@@ -3654,7 +3654,7 @@ def diagnostics_page():
         <span class="tier-text"
             data-beginner="Run these checks to see the current health of your Nemesis Firewall. Each check examines a different part of the system. When you&apos;re done, you can send the results to support — all API keys and passwords are automatically hidden before anything is sent."
             data-intermediate="Run individual or all diagnostic checks. Sensitive values (API keys, passwords) are automatically redacted server-side before display or submission. Use the free-text box to describe your issue before submitting."
-            data-pro="Diagnostic runner for Nemesis components. Each check is independently runnable (python3 -m diagnostics.&lt;id&gt;). Redaction applied server-side before all output. Submit POSTs to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP.">
+            data-pro="Diagnostic runner for Nemesis components. Each check is independently runnable (python3 -m diagnostics.&lt;id&gt;). Redaction applied server-side before all output. Submit POSTs to support@nemesis-sw.com via WATCHDOG_EMAIL SMTP.">
             Run these checks to see the current health of your Nemesis Firewall.
         </span>
     </p>
@@ -3703,9 +3703,9 @@ def diagnostics_page():
             <div style="color:#bbb;font-size:0.78em;margin-top:4px">
                 <span class="tier-text"
                     data-beginner="Sends an email with your notes and whichever diagnostic results you&apos;ve run. You&apos;ll get a copy at your configured alert email address."
-                    data-intermediate="Sends to nemesis-firewall-support@proton.me via WATCHDOG_EMAIL SMTP. CC&apos;d to WATCHDOG_EMAIL."
-                    data-pro="POST /api/diagnostics/submit → SMTP to nemesis-firewall-support@proton.me, Cc: WATCHDOG_EMAIL.">
-                    Sends to nemesis-firewall-support@proton.me. You get a copy at your alert email.
+                    data-intermediate="Sends to support@nemesis-sw.com via WATCHDOG_EMAIL SMTP. CC&apos;d to WATCHDOG_EMAIL."
+                    data-pro="POST /api/diagnostics/submit → SMTP to support@nemesis-sw.com, Cc: WATCHDOG_EMAIL.">
+                    Sends to support@nemesis-sw.com. You get a copy at your alert email.
                 </span>
             </div>
         </div>
