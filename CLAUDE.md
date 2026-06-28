@@ -59,8 +59,8 @@ code must be correct for ANY user (e.g. `127.0.0.1`, not my box's IP).
 
 **Audit output is not exempt.** BEFORE committing any audit (or other generated report) to
 the public repo: leak-scan its output for Rule-8 content and sanitize IN PLACE, then commit
-the clean version — `/home/paul` → `/home/<user>`, real IPs → `<ip>`, real hostnames
-(e.g. `paul-Alienware-…`) → `<host>`, real emails → placeholder. **Never commit raw audit
+the clean version — `/home/<user>` → `/home/<user>`, real IPs → `<ip>`, real hostnames
+(e.g. `<hostname>`) → `<host>`, real emails → placeholder. **Never commit raw audit
 output to the public repo.** (An audit that quotes the live box's paths/IPs/hostname reads as
 factual but still leaks — sanitize the quotes, keep the meaning.)
 
@@ -169,7 +169,7 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
 - **No hardcoded environment-specific defaults:** Never hardcode environment-specific values
   (real LAN IPs, home paths, the prod host's IP) as defaults in shipped code — use
   `127.0.0.1` or read from `/etc/nemesis.env`. Defaults must be correct for ANY user, not
-  this machine. (This is Rule 8; the `192.168.4.69` `PIHOLE_IP` default is a known instance
+  this machine. (This is Rule 8; the `<pihole-ip>` `PIHOLE_IP` default is a known instance
   pending fix.)
 - **Model string:** `claude-sonnet-4-6`.
 - **Key paths** (public-repo placeholders — substitute the real install user locally):
