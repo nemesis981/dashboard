@@ -139,6 +139,18 @@ factual but still leaks — sanitize the quotes, keep the meaning.)
   become debt the future firewall engine (ADR 0005) must reconcile. (Readiness audit
   2026-06-27.)
 
+### Data Manager (ADR 0006 — enforced when built)
+- Modules MUST use the Data Manager for ALL DB operations **after it is built**. Direct
+  `sqlite3.connect()` or bare `get_db()` calls from module code are **FORBIDDEN**.
+- The loader enforces this — a module that bypasses the Data Manager **does not load. No
+  exceptions.**
+- The four atomic SQL fixes (`tickets_seq`, `ai_engine` rate, `community_queue`,
+  `anomaly_incidents`) are the **Data Manager v0 seed**. Label new atomic operations as Data
+  Manager functions with a pointer to ADR 0006.
+- **Actor is applied automatically** by the Data Manager on every write. Modules do NOT pass
+  `actor` manually after the Data Manager is built — they pass identity context and the Data
+  Manager handles it.
+
 ### Vendor-specific integrations
 **VENDOR-SPECIFIC INTEGRATIONS: whenever a vendor-specific probe, plugin, or integration is
 built (VPN clients, hardware sensors, notification channels, threat feeds, etc.), a
