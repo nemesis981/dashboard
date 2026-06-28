@@ -22,6 +22,30 @@ B, C, D?"
 
 Found framing during the diagnostics VM audit 2026-06-28.
 
+## Enrollment enriches detection (applies to both tiers)
+Device enrollment (ADR 0005) is what turns this from guessing into knowing:
+- **Without enrollment:** IP addresses, no context → high false positives.
+- **With enrollment:** a behavioral baseline per device → high-confidence detection.
+
+**Detection factors enabled by enrollment:**
+- **Historical connection graph** — has A ever connected to B before?
+- **Post-detection timing** — a connection right after a recent finding = critical.
+- **Behavioral baseline** — typical ports, hours, connection count.
+- **Device role context** — server / NAS / appliance = a sensitive target.
+- **Enrollment age** — an older enrollment = a richer baseline = higher confidence.
+
+**Venue compound benefit** ([venue-guest-network.md](venue-guest-network.md)): repeat guests
+**restore their historical baseline on reconnection**, so a compromised returning device can
+be detected **at reconnection, before network access is granted** — proactive, not reactive.
+
+**Confidence score:** a `risk_score` aggregates multiple signals. A single anomaly = low
+confidence → investigate; multiple simultaneous anomalies = high confidence → isolate
+immediately. Enrollment data is the difference between guessing and knowing.
+
+**Compounding effect:** detection improves continuously as baselines mature. Day 1 — sparse
+baseline, cautious alerts. Month 6 — precise behavioral model, near-zero false positives.
+**The longer Nemesis runs, the smarter it gets** — per device, per network, per user pattern.
+
 ## Tier 2 — Venue / epidemic spread (later, separate addition)
 The broader "outbreak on a shared/public LAN" detection described below — unknown devices,
 baseline-from-scratch, agentless-guest protection. Stays parked until Tier 1 ships and the

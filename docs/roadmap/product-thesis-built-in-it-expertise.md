@@ -97,6 +97,38 @@ impossible-travel layer even fires.
 **Marketing one-liner:**
 > "Two-factor authentication built in — no setup, no apps, no codes. It just works."
 
+## The AI hacking inflection point
+
+AI-assisted attacks are becoming the default attack vector. The barrier to sophisticated
+hacking drops to near zero when AI can find vulnerabilities, craft exploits, and execute
+attacks automatically. By 2027–2028, mass-scale AI-assisted attacks against home and SMB
+networks will be routine.
+
+**The defender's answer: behavioral detection + zero-trust enrollment.**
+
+Signature-based detection fails against AI-generated novel malware (the signature doesn't
+exist yet). **Behavioral detection catches it by what it DOES regardless of what it IS:**
+- Ransomware modifies files → the **canary** catches it.
+- Lateral movement probes other devices →
+  [**outbreak detection**](lateral-movement-outbreak-detection.md) catches it.
+- Malicious outbound → the **inspection proxy** catches it.
+- Novel AI-generated malware → still does one of the above.
+
+**The WiFi device explosion multiplies the attack surface:** every smart device is a
+potential entry point, most poorly secured. The
+[**venue guest-network**](venue-guest-network.md) solution (agent as credential, inspection
+tunnel, outbreak detection) closes the highest-risk attack surface — **public WiFi** — that
+AI-assisted attackers will target at scale.
+
+**Market timing: building now, before the wave.** By the time AI attacks are mass-scale,
+Nemesis has:
+- an established user base + community threat feed,
+- behavioral detection that catches novel AI malware,
+- venue/employee coverage for the most vulnerable networks.
+
+**Product thesis in one line:**
+> "AI makes attacking easy. Nemesis makes defending automatic. No IT department required."
+
 ## Shape / next
 Capture as the guiding principle now. It may later **graduate** into `ARCHITECTURE.md`
 (durable product-vision section) or a dedicated ADR once it has shaped enough concrete
