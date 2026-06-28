@@ -49,3 +49,25 @@ as done; keep newest context inline.
   architecture now so it's a config change, not a rewrite.** Current hardcoded values live in
   `/etc/nemesis.env` (`ANTHROPIC_INPUT_PRICE_PER_MTOK` / `ANTHROPIC_OUTPUT_PRICE_PER_MTOK`) and
   are surfaced in the AI cost UI (`dashboard.py` ~1661–1663, ~1753–1756).
+
+- [ ] **PRE-RELEASE: Full system-transparency audit.** Find every place Nemesis affects the
+  user's system **without making it visible** — the black-box surfaces that erode trust,
+  especially on shared machines. Read-only audit first (Rule 1): inventory + classify, then
+  the `[ADD]` items become scoped pre-release work. **Same format as the readiness audit**
+  (findings table → classification → fix list). Categories:
+  - **Resource transparency** — CPU/memory/disk/network per service (the overhead meter,
+    `docs/roadmap/nemesis-overhead-meter.md`).
+  - **Action transparency** — every automated action logged and visible (ties to the
+    multi-user `actor` seam — attributed, surfaced).
+  - **Cost transparency** — live AI pricing, not stale estimates (subsumes the **live
+    Anthropic pricing** punchlist item above — fold them together).
+  - **Data transparency** — what's stored, where, and the retention policy (per ADR 0001
+    shared `alerts.db` + each module's retention caps).
+  - **Network transparency** — all outbound connections visible **and user-controlled**
+    (relates to the firewall engine, ADR 0005).
+  - **State transparency** — what each service is currently doing right now.
+  - **Decision transparency** — why the AI said X, why an alert scored Y (surface the
+    reasoning, not just the verdict).
+  - Classify each finding as **[SAFE already visible]** / **[ADD pre-release]** / **[DEFER]**.
+  **Scope:** one focused session (audit → classify → stop for review), to run before
+  **v1.1 / commercial release**. The `[ADD]` items graduate to pre-release work.
