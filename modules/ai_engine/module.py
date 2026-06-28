@@ -307,22 +307,28 @@ def _check_rate_limit(conn) -> tuple:
 
 def _increment_rate(conn) -> None:
     now = time.time()
-
-    h_start = float(_get_rate_state(conn, "hour_window_start", "0"))
-    h_count = int(_get_rate_state(conn, "hour_count", "0"))
-    if now - h_start > 3600:
-        h_start = now
-        h_count = 0
-    _set_rate_state(conn, "hour_window_start", h_start)
-    _set_rate_state(conn, "hour_count", h_count + 1)
-
-    d_start = float(_get_rate_state(conn, "day_window_start", "0"))
-    d_count = int(_get_rate_state(conn, "day_count", "0"))
-    if now - d_start > 86400:
-        d_start = now
-        d_count = 0
-    _set_rate_state(conn, "day_window_start", d_start)
-    _set_rate_state(conn, "day_count", d_count + 1)
+    for win_key, cnt_key, span in (
+        ("hour_window_start", "hour_count", 3600),
+        ("day_window_start", "day_count", 86400),
+    ):
+        start = float(_get_rate_state(conn, win_key, "0"))
+        if now - start > span:
+            # Window expired (or first call): open a fresh window. This roll runs at most
+            # once per window; a rare boundary collision can drop a single count, which the
+            # read side tolerates (_check_rate_limit treats an expired window as count 0).
+            _set_rate_state(conn, win_key, now)
+            _set_rate_state(conn, cnt_key, "1")
+        else:
+            # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+            # In-window increment in ONE statement (mirrors _increment_usage's
+            # INSERT … ON CONFLICT DO UPDATE). Concurrent calls can no longer read the same
+            # count and write back the same +1, so increments are never lost.
+            conn.execute(
+                "INSERT INTO ai_rate_state(key, value) VALUES(?, '1') "
+                "ON CONFLICT(key) DO UPDATE SET "
+                "value = CAST(CAST(ai_rate_state.value AS INTEGER) + 1 AS TEXT)",
+                (cnt_key,),
+            )
 
 
 def _increment_usage(conn, tokens_in: int, tokens_out: int) -> None:

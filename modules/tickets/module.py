@@ -110,8 +110,14 @@ def _init_db() -> None:
 
 
 def _next_ticket_number(conn) -> str:
-    n = conn.execute("SELECT next_number FROM tickets_seq WHERE id=1").fetchone()[0]
-    conn.execute("UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1")
+    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+    # Increment-and-read in ONE statement: RETURNING gives the post-increment value,
+    # so `next_number - 1` is the number assigned to this ticket. No SELECT-then-UPDATE
+    # window, so two concurrent open_ticket() calls can never get the same number.
+    n = conn.execute(
+        "UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1 "
+        "RETURNING next_number - 1"
+    ).fetchone()[0]
     return f"{TICKET_PREFIX}-{n:04d}"
 
 

@@ -72,6 +72,29 @@ def _init_db() -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(community_queue)").fetchall()}
     if "actor" not in existing:
         conn.execute("ALTER TABLE community_queue ADD COLUMN actor TEXT")
+    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+    # Idempotent migration: enforce ONE row per (domain_or_ip, submitted) so concurrent
+    # add_to_queue() calls upsert instead of racing SELECT→INSERT into duplicates. SQLite
+    # cannot ALTER-ADD a constraint, so the UNIQUE is a unique index; guard on its presence
+    # (the index-existence analog of the Tier-B PRAGMA guard). Dedupe any pre-existing
+    # duplicates FIRST — keeping the highest-confidence row — else the index creation fails.
+    has_unique = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_cq_domain_submitted'"
+    ).fetchone()
+    if not has_unique:
+        conn.execute("""
+            DELETE FROM community_queue
+             WHERE id NOT IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (
+                   PARTITION BY domain_or_ip, submitted
+                   ORDER BY confidence_score DESC, id DESC) AS rn
+                 FROM community_queue
+               ) WHERE rn = 1
+             )
+        """)
+        conn.execute("CREATE UNIQUE INDEX idx_cq_domain_submitted "
+                     "ON community_queue(domain_or_ip, submitted)")
     conn.commit()
     conn.close()
 
@@ -107,33 +130,27 @@ def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
     """
     try:
         conn = _conn()
-        existing = conn.execute(
-            "SELECT id, confidence_score FROM community_queue "
-            "WHERE domain_or_ip=? AND submitted=0",
-            (domain_or_ip,)
-        ).fetchone()
-        if existing:
-            if confidence_score > existing["confidence_score"]:
-                conn.execute("""
-                    UPDATE community_queue
-                       SET last_detected=?, confidence_score=?, device_count=?,
-                           incident_detail=?, ai_reviewed=0
-                     WHERE id=?
-                """, (last_detected, confidence_score, device_count,
-                      json.dumps(incident_detail), existing["id"]))
-                conn.commit()
-        else:
-            conn.execute("""
-                INSERT INTO community_queue
-                    (source_type, domain_or_ip, detection_type, confidence_score,
-                     device_count, first_detected, last_detected, incident_detail,
-                     actor)
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (source_type, domain_or_ip, detection_type, confidence_score,
-                  device_count, first_detected, last_detected,
-                  json.dumps(incident_detail),
-                  actor))
-            conn.commit()
+        # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+        # Single idempotent upsert against the UNIQUE(domain_or_ip, submitted) index.
+        # A concurrent second call for the same pending target hits ON CONFLICT instead of
+        # inserting a duplicate row; the DO UPDATE only overwrites when the new detection is
+        # MORE confident (the WHERE), preserving the original "update only if higher" rule.
+        conn.execute("""
+            INSERT INTO community_queue
+                (source_type, domain_or_ip, detection_type, confidence_score,
+                 device_count, first_detected, last_detected, incident_detail, actor)
+            VALUES (?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(domain_or_ip, submitted) DO UPDATE SET
+                last_detected    = excluded.last_detected,
+                confidence_score = excluded.confidence_score,
+                device_count     = excluded.device_count,
+                incident_detail  = excluded.incident_detail,
+                ai_reviewed      = 0
+            WHERE excluded.confidence_score > community_queue.confidence_score
+        """, (source_type, domain_or_ip, detection_type, confidence_score,
+              device_count, first_detected, last_detected,
+              json.dumps(incident_detail), actor))
+        conn.commit()
         conn.close()
     except Exception:
         log.exception("community_queue: add_to_queue failed for %s", domain_or_ip)

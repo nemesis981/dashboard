@@ -264,6 +264,32 @@ def _init_db() -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(anomaly_incidents)").fetchall()}
     if "actor" not in existing:
         conn.execute("ALTER TABLE anomaly_incidents ADD COLUMN actor TEXT")
+    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+    # Idempotent migration: enforce at most ONE 'open' incident per offending_target so
+    # concurrent detections merge into it instead of racing SELECT→INSERT into duplicates.
+    # A PARTIAL unique index (WHERE status='open') is required — a plain UNIQUE on
+    # (offending_target, status) would also forbid multiple 'closed' rows, destroying
+    # incident history. Guard on index presence (the index analog of the Tier-B PRAGMA
+    # guard). Collapse any pre-existing duplicate opens FIRST — keep the highest-scoring,
+    # most-recent open row, mark the rest 'closed' (preserve the data, don't delete) — else
+    # the unique index creation fails.
+    has_open_uniq = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_ai_open_target'"
+    ).fetchone()
+    if not has_open_uniq:
+        conn.execute("""
+            UPDATE anomaly_incidents SET status='closed'
+             WHERE status='open' AND id NOT IN (
+               SELECT id FROM (
+                 SELECT id, ROW_NUMBER() OVER (
+                   PARTITION BY offending_target
+                   ORDER BY score DESC, id DESC) AS rn
+                 FROM anomaly_incidents WHERE status='open'
+               ) WHERE rn = 1
+             )
+        """)
+        conn.execute("CREATE UNIQUE INDEX idx_ai_open_target "
+                     "ON anomaly_incidents(offending_target) WHERE status='open'")
     conn.commit()
     conn.close()
 
@@ -651,13 +677,6 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
                                 device_names: dict, now: float):
     """Create or merge an incident. Returns (inc_id, final_score)."""
     merge_after = now - MERGE_WINDOW_H * 3600
-    existing = conn.execute(
-        "SELECT id, score, devices_json, evidence_json, device_count "
-        "FROM anomaly_incidents "
-        "WHERE offending_target=? AND status='open' AND created_at>? "
-        "ORDER BY created_at DESC LIMIT 1",
-        (domain, merge_after)
-    ).fetchone()
 
     dev_list = []
     for ip, ts_list in sorted(data["clients"].items(), key=lambda kv: min(kv[1])):
@@ -673,36 +692,58 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
         "captured_at": round(now, 3),
     }
 
-    if existing:
-        new_score = max(existing["score"], signals["score"])
-        old_devs  = json.loads(existing["devices_json"] or "[]")
-        merged    = _merge_devices(old_devs, dev_list)
-        old_ev    = json.loads(existing["evidence_json"] or "{}")
+    _SEL = ("SELECT id, score, devices_json, evidence_json, device_count "
+            "FROM anomaly_incidents WHERE offending_target=? AND status='open'")
+
+    def _merge_into(row):
+        # Fold this detection into an existing OPEN incident (UPDATE by id — single-row,
+        # inherently safe). Device lists, evidence and score are combined in Python; the
+        # one-open-per-target index guarantees there is exactly one row to merge into.
+        new_score = max(row["score"], signals["score"])
+        merged    = _merge_devices(json.loads(row["devices_json"] or "[]"), dev_list)
+        old_ev    = json.loads(row["evidence_json"] or "{}")
         old_ev["latest_signals"] = evidence
         conn.execute("""
             UPDATE anomaly_incidents
                SET updated_at=?, score=?, device_count=?,
-                   devices_json=?, evidence_json=?,
-                   incident_type=?
+                   devices_json=?, evidence_json=?, incident_type=?
              WHERE id=?
-        """, (now, new_score, len(merged),
-              json.dumps(merged), json.dumps(old_ev),
-              signals["incident_type"], existing["id"]))
-        return existing["id"], new_score
-    else:
-        conn.execute("""
+        """, (now, new_score, len(merged), json.dumps(merged), json.dumps(old_ev),
+              signals["incident_type"], row["id"]))
+        return row["id"], new_score
+
+    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+    # A recent open incident → merge. Otherwise open a new one with an upsert guarded by the
+    # partial UNIQUE(offending_target) WHERE status='open' index: if a concurrent writer — or
+    # an open incident OLDER than the merge window — already holds the single open slot, the
+    # INSERT is a no-op (DO NOTHING) and we merge into that one row instead of creating a
+    # duplicate. The bounded loop only re-runs in the rare case the slot is closed out from
+    # under us between the INSERT and the follow-up SELECT.
+    for _attempt in range(3):
+        recent = conn.execute(
+            _SEL + " AND created_at>? ORDER BY created_at DESC LIMIT 1",
+            (domain, merge_after)).fetchone()
+        if recent:
+            return _merge_into(recent)
+        cur = conn.execute("""
             INSERT INTO anomaly_incidents
                 (created_at, updated_at, incident_type, offending_target,
-                 score, status, device_count, devices_json, evidence_json,
-                 actor)
+                 score, status, device_count, devices_json, evidence_json, actor)
             VALUES (?,?,?,?,?, 'open', ?,?,?,?)
-        """, (now, now, signals["incident_type"], domain,
-              signals["score"], len(dev_list),
-              json.dumps(dev_list), json.dumps(evidence),
+            ON CONFLICT(offending_target) WHERE status='open' DO NOTHING
+        """, (now, now, signals["incident_type"], domain, signals["score"],
+              len(dev_list), json.dumps(dev_list), json.dumps(evidence),
               None))  # actor: attribution seam (Tier B) — NULL; incidents are system-detected
-        inc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        _update_recurrence(conn, domain, signals["score"], inc_id, now)
-        return inc_id, signals["score"]
+        if cur.rowcount == 1:
+            inc_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+            _update_recurrence(conn, domain, signals["score"], inc_id, now)
+            return inc_id, signals["score"]
+        # Conflict: an open incident already holds the slot (older than the window or just
+        # created by a concurrent writer) — merge into it.
+        held = conn.execute(_SEL + " ORDER BY created_at DESC LIMIT 1", (domain,)).fetchone()
+        if held:
+            return _merge_into(held)
+    return None, signals["score"]
 
 
 def _merge_devices(old: list, new: list) -> list:
