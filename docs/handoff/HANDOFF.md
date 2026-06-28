@@ -1,112 +1,113 @@
 # HANDOFF — current state
 
-> Current project state, last updated 2026-06-27 (major-session closeout). Overwritten at
-> each nightly closeout (latest state wins). Durable history lives in
-> `docs/handoff/supplements/` (append-only); raw step log in `docs/handoff/worklog/`.
+> Current project state, last updated 2026-06-28 (session closeout). Overwritten at each
+> closeout (latest state wins). Durable history lives in `docs/handoff/supplements/`
+> (append-only); raw step log in `docs/handoff/worklog/`.
 
 ## Resume point → NEXT OPENER
 
-In order (trip deadline = **this Friday** drives the sequence):
-1. **Starlink SSH test FIRST (~5 min)** — Tailscale is enrolled on the Nemesis box
-   (tailnet IP `100.87.130.25`) + laptop, and SSH is **proven over Tailscale**.
-   Starlink arrives tomorrow → test SSH over Starlink to **complete the connectivity gate**.
-2. **Multi-user upgrades for trip testing.**
-3. **Diagnostics audit** (watcher productization FIRST — connectivity self-diagnostic for
-   the Starlink link; see `docs/roadmap/diagnostics-*`).
+Order driven by the trip deadline (**leaving Friday**, 2-week Wisconsin camper deployment):
 
-Reasoning in `supplements/2026-06-27-001.md` §7.
+1. **Starlink SSH test FIRST (~5 min)** — Tailscale proven over the project tailnet; Starlink
+   is **arriving soon**. SSH-over-Starlink completes the connectivity gate and **gates the
+   trip**. Run it the moment Starlink lands.
+2. **NEXT BUILD — multi-user trip-testing surface.** Read-only audit already staged (see
+   chat). Three focused items, goal = make attribution **TESTABLE in Wisconsin without full
+   auth machinery**:
+   - **Basic session identity** — cookie-based "who am I" (NO real auth yet).
+   - **Actor surfacing in the UI** — Tier-B `actor` data already in the DB, just needs display.
+   - **Entitlements stub** (optional).
+3. **After multi-user — Windows agent readiness.** Minimum bar: **installs + phones home**,
+   testable on a Windows PC at the trip site.
 
 ## Where things stand
 
-**Layer B (ransomware canary) — ✅ v1 COMPLETE.** Canary is **live on the dev box**,
-**boot-enabled** via `malware-canary.service`, and **verified end-to-end**: 4 bait files,
-30s poll, a forced trip propagated **trip → finding → ticket → alert** through the full
-pipeline. Pushed at `60c19ff`. Detail: `supplements/2026-06-27-001.md` §3; audit:
-`docs/audits/malware-layer-b-canary-audit.md`.
+**Diagnostics connectivity-watcher — ✅ COMPLETE + deployed.** Passes 0-3 (`2e4f3e3 ->
+086a659`). `diagnostics-watcher.service` is **live, boot-enabled**, self-gating; live verdict
+`ALL_OK` at 60s cadence. **Rule-8 split proven** (raw detail to flat log outside repo;
+sanitized booleans-only to the DB). **5 VPN providers** (PIA/Mullvad/ProtonVPN/WireGuard/
+Tailscale, skip-if-absent) + `CUSTOM_VPN_PROBE.md`. **VM audit = ZERO gaps** (install/
+uninstall lifecycle clean; `diagnostics_*` tables preserved on uninstall). Detail:
+`supplements/2026-06-28-003.md`. Old throwaway `vpn-watch.sh` retired (logs saved).
 
-**VM audit — ✅ COMPLETE.** Uninstall → fresh install → forced trip → recovery on the test
-VM. 3 gaps found and fixed: auto-plant (`plant_canaries()` had no caller → wired into
-`Module.start()`, `163ea31`); uninstall canary cleanup (`ef5ad6f`, wording `c78cbfc`);
-ghost-row mass-trip bug (remove bait + baselines together, else reinstall trips on missing
-files — folded into `ef5ad6f`). **Layer B v1 is FULLY complete including VM audit fixes.**
+**Layer B (ransomware canary) — ✅ v1 COMPLETE.** Live + **boot-enabled** via
+`malware-canary.service`, verified end-to-end (trip → finding → ticket → alert), VM-audited.
+**Both `malware-canary` and `diagnostics-watcher` are live and boot-enabled.** Detail:
+`supplements/2026-06-27-001.md` §3; audit `docs/audits/malware-layer-b-canary-audit.md`.
 
-**Connectivity — ⏳ Tailscale proven, Starlink pending.** Tailscale enrolled on the Nemesis
-box (`100.87.130.25`) + laptop; SSH proven over Tailscale. Starlink arrives tomorrow →
-SSH-over-Starlink test completes the gate (resume item #1).
+**Project identity — ✅ demo-ready, no PII in the public repo.** Domain `nemesis-sw.com`;
+support `support@nemesis-sw.com` (subject-tag `[Nemesis Firewall]`). **Tailscale migrated to
+project account `nemesis.tailscale@gmail.com`**, box tailnet IP **`100.87.130.25`**. Son's
+laptop still on the old personal account → **re-enroll under the project account when
+convenient** (not blocking). (`5b9f9d6`.)
 
-**Pass 0 readiness — ✅ Tier A + Tier B COMPLETE.**
-- ✅ **Tier A (`fb52a83`)** — fresh-install crash fixed (`devices` table had **no CREATE
-  anywhere** → added canonical CREATE); `anomaly_detection` on shared `get_db()`;
-  cross-process reads guarded.
-- ✅ **Tier B (`31337e1`)** — attribution (`actor`) seams on the module tables the Layer-B
-  + agent rebuilds write through; config-change audit; **CLAUDE.md build-discipline
-  mandates** added (firewall single-chokepoint, multi-user-ready-by-default, DB
-  canonical-init / "no table without a CREATE").
+**Connectivity — ⏳ Tailscale proven, Starlink pending.** SSH proven over Tailscale; Starlink
+arriving soon → SSH-over-Starlink test completes the gate (resume #1).
 
 **DNS root cause — ✅ CORRECTED (ADR 0002 superseded by ADR 0005).** Proven
-**client-refusal-by-source** via the `-b 127.0.0.1` test — the failure is which *source
-address* the client may query from, NOT policy routing / killswitch. The previously-
-considered DNS **guard solves the wrong layer** and is shelved. **Workaround on this box
-until the firewall engine exists: run VPN-off** for Claude Code connectivity. Detail:
-`supplements/2026-06-27-001.md` §1.
+**client-refusal-by-source** (`-b 127.0.0.1`). The shelved DNS guard solved the wrong layer.
+**Workaround still in place on this box: run VPN-off** for Claude Code connectivity — the real
+fix is the firewall engine (ADR 0005), **deferred**. Detail: `supplements/2026-06-27-001.md` §1.
 
-**VPN watcher — corroborating evidence captured.** Running since this morning; stayed
-**all-green through 7 failed Claude-Code attempts**, confirming the failure was **not
-local DNS** (backend hiccup + source-based refusal). Stays armed for the trip's Starlink
-link. (`~/work/vpn-watcher/`, OUTSIDE repo, not committed.)
+**Pass 0 readiness — ✅ Tier A + Tier B COMPLETE.** Fresh-install crash fixed (`fb52a83`);
+attribution (`actor`) seams + CLAUDE.md build-discipline mandates (`31337e1`). The **vendor-
+integration mandate** (a vendor probe ships its `CUSTOM_*.md` in the same commit) was added
+this session.
 
 ## Trip context (drives priorities)
-**Leaving Friday — 2-week camper deployment in Wisconsin, Starlink ordered.** This is a
-live field test of the **remote-worker scenario that is the product's core market**.
-Canary + agent = **road security without carrying extra hardware**. Pre-trip build
-targets: **Tailscale/remote-access** + a **Windows agent**.
+**Leaving Friday — 2-week camper deployment in Wisconsin, Starlink ordered.** Live field test
+of the **remote-worker scenario that is the product's core market**. Pre-trip build targets:
+**multi-user trip-testing surface** (attribution testable), then **Windows agent readiness**.
 
-## Architecture captured this session (PARKED — ADR/roadmap-bound)
-- **ADR 0005** — firewall engine as a **foundational primitive** (base for DNS control,
-  device auth Level 2, hardware binding, proportional tamper response, forward build
-  sequence). Supersedes ADR 0002's DNS framing.
-- **Product thesis** — built-in IT expertise; enterprise capability without enterprise
-  pricing. (`docs/roadmap/product-thesis-built-in-it-expertise.md`.)
-- **Market position** — the remote / infrastructure-light / expertise-light edge;
-  Starlink/remote-worker is **core market**, not a niche.
-- **Adaptive link-aware agent + clock sync** — agent robust over bad links, ordered
-  findings across devices. (`docs/roadmap/adaptive-link-aware-agent-clock-sync.md`.)
-- **Watcher productization** (toggleable connectivity self-diagnostic),
-  **tiered diagnostic reports**, **AI tool-aware diagnostic loop**, **reassurance/
-  escalation routing**. (`docs/roadmap/diagnostics-*.md`, `diagnostic-scan-scope.md`.)
-- **DB resilience via backup-promotion**; **agent auto-load-by-ownership**.
+## Architecture / roadmap captured (PARKED — ADR/roadmap-bound)
+- **ADR 0005** — firewall engine as the **foundational primitive** (DNS control, device auth,
+  hardware binding, tamper response). Supersedes ADR 0002's DNS framing.
+- **VM Test Lab + sandbox integration (major).** Five-layer architecture; same VM engine drives
+  `--mode test` and `--mode sandbox`. **Sandbox stub (was deferred — Firejail insufficient) NOW
+  ENABLED** by the VM Lab. Post-commercial milestone. (`docs/roadmap/nemesis-test-lab.md`,
+  `malware-local-isolated-sandbox.md`.)
+- **Agent rebuild — config-driven** two-phase bootstrap, VPN as a configurable field, staggered
+  restart, scripted VM creation. (`docs/roadmap/agent-rebuild-config-driven.md`.)
+- **Open-source threat feeds → V2** (Abuse.ch/OTX/MISP/Spamhaus), in the community backend build,
+  not deferred — closes the record-count gap at zero cost. (`docs/roadmap/open-source-threat-feeds.md`.)
+- **Enterprise gap audit** — network layer stronger than most pure-EDR; v2 adds MITRE ATT&CK
+  mapping, vuln mgmt, auth/login monitoring, lateral-movement core.
+  (`docs/roadmap/enterprise-gap-audit-2026.md`.)
+- **Lateral movement — core promoted to v2** (owned fleet, correlation query, no new sensors);
+  venue/epidemic version stays parked. (`docs/roadmap/lateral-movement-outbreak-detection.md`.)
+- **Product thesis** — built-in IT expertise; enterprise capability without enterprise pricing.
+  (`docs/roadmap/product-thesis-built-in-it-expertise.md`.)
 
 ## Carried from prior sessions (still live)
-- **Scan/task orchestration — DIRECTION DECIDED (ADR 0004, Proposed):** scheduler =
-  authoritative dispatcher; execution modules (malware = full-stack, hardware) do the
-  work; reporting module delivers printable reports; `hw_monitor` → hardware-only. 3 open
-  hinge questions in the ADR.
-- **Licensing principle:** SINGLE version; a key/license unlocks commercial features
-  (multi-user, attribution, device limits) IN PLACE — the key "wires the house" the
-  multi-user-ready seams leave socketed. (Flagged for CLAUDE.md promotion.)
-- **Schema gatekeeper / registry** + **third-party module trust & isolation model** +
-  **ownership/consent boundary** — see `supplements/2026-06-26-002.md` §10.
+- **Scan/task orchestration — DIRECTION DECIDED (ADR 0004, Proposed):** scheduler = dispatcher;
+  execution modules do the work; reporting delivers reports; 3 open hinge questions in the ADR.
+- **Licensing principle:** SINGLE version; a key unlocks commercial features (multi-user,
+  attribution, device limits) IN PLACE — the key "wires the house" the multi-user-ready seams
+  leave socketed. (Flagged for CLAUDE.md promotion.)
+- **Schema gatekeeper / registry**, **third-party module trust & isolation**, **ownership/
+  consent boundary** — `supplements/2026-06-26-002.md` §10.
 
-**Secrets:** externalized OUT of the repo to `~/work/nemesis-private/local-config.md`
-— referenced by location only, never committed.
+**Secrets:** externalized OUT of the repo to `~/work/nemesis-private/local-config.md` —
+referenced by location only, never committed.
 
-## Stage 5 / 6 (later)
-- **Stage 5** — single SQLite-safe shared-DB snapshot backup; make deploy/health DISCOVER
-  services (now also `malware-canary.service`); purge per-module-DB refs in
-  `_backup_candidates()` / `install.sh` (`PUNCHLIST.md`).
-- **Stage 6** — retire old module `.db` fallbacks after N verified days.
-- **Parked quick wins** — `PIHOLE_IP` hardcoded-default fix (Rule 8), settings status-fix,
-  header de-dup, kernel-update check, live Anthropic pricing capture (all `PUNCHLIST.md`).
+## Stage 5 / 6 + parked quick wins (later)
+- **Stage 5** — single SQLite-safe shared-DB snapshot backup; deploy/health DISCOVER services;
+  purge per-module-DB refs (`PUNCHLIST.md`). **Stage 6** — retire old module `.db` fallbacks.
+- **PUNCHLIST quick wins** — `PIHOLE_IP` hardcoded-default fix (Rule 8), header de-dup,
+  kernel-update check, live Anthropic pricing capture, **Pi-hole unattended-install quirk**.
+- **PRE-RELEASE audits (PUNCHLIST)** — full system-transparency audit, documentation-
+  completeness, tiered-output, recurring-user-error.
 
 ## Pointers
 - Methodology & rules: `CLAUDE.md`
-- Architecture: `ARCHITECTURE.md`, `docs/architecture/` (ADR 0001 DB, 0002 DNS
-  **[superseded by 0005]**, 0003 resilience, 0004 scan/task orchestration,
-  **0005 DNS/firewall/device-auth — the new foundational architecture**)
-- Audits: `docs/audits/` — incl. **`malware-layer-b-canary-audit.md`**
-- Parked ideas: `docs/roadmap/` (incl. `product-thesis-built-in-it-expertise.md`,
-  `adaptive-link-aware-agent-clock-sync.md`, `diagnostics-*`)
+- Architecture: `ARCHITECTURE.md`, `docs/architecture/` (ADR 0001 DB, 0002 DNS **[superseded by
+  0005]**, 0003 resilience, 0004 scan/task orchestration, **0005 DNS/firewall/device-auth — the
+  foundational architecture**)
+- Operations: `docs/operation/CONFIG_CHANGE_PROCEDURE.md`
+- Roadmap: `docs/roadmap/` — incl. `product-thesis-built-in-it-expertise.md`,
+  `nemesis-test-lab.md`, `agent-rebuild-config-driven.md`, `enterprise-gap-audit-2026.md`,
+  `open-source-threat-feeds.md`, `lateral-movement-outbreak-detection.md`, `diagnostics-*`
+- Audits: `docs/audits/` (incl. `malware-layer-b-canary-audit.md`)
 - Small fixes: `PUNCHLIST.md`
-- Session logs: `docs/handoff/supplements/` (latest `2026-06-27-001.md`);
-  worklog `docs/handoff/worklog/2026-06-27-001.md`
-- VPN watcher (outside repo, not committed): `~/work/vpn-watcher/vpn-watch.sh`
+- Session logs: `docs/handoff/supplements/` (latest `2026-06-28-003.md`); worklog
+  `docs/handoff/worklog/2026-06-28-001.md`
