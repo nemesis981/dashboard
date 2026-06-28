@@ -42,6 +42,13 @@ applies it.
 - Windows host support (`VBoxManage` is cross-platform).
 - Connects to the VM Lab (the UI wrapper around this script).
 
+## Fold in at build time
+- **Connection-type awareness** ([connection-type-awareness.md](connection-type-awareness.md)):
+  the heartbeat payload + `agent_devices` schema gain `connection_type` / `interface_name` /
+  `connection_speed` (`psutil` interface detection). **Fold these columns into the same
+  `agent_devices` migration as the readiness actor seam** — don't touch `agent_devices` twice.
+
 ## Ties to
 
-ADR 0005, the [VM Lab](nemesis-test-lab.md), `docs/operation/CONFIG_CHANGE_PROCEDURE.md`.
+ADR 0005, the [VM Lab](nemesis-test-lab.md), `docs/operation/CONFIG_CHANGE_PROCEDURE.md`,
+[connection-type-awareness.md](connection-type-awareness.md).
