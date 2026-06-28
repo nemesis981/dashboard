@@ -250,3 +250,21 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
     green vs red light.
   - **Build order:** independent of session identity and layout memory — can be built any time.
     Small: one API route + one 30s polling interval + header HTML/CSS. High visibility, low effort.
+
+- [ ] **Impossible-travel detection — v2 (ADR 0008).** `login_events` table is collecting from
+  `21c8931`. Build the detection logic in v2: unknown-location alert, impossible-travel flag,
+  time anomaly, and cross-site detection via the central management plane. The **concurrent-
+  session seam is already built** (follow-on to `21c8931`). Full design:
+  [docs/architecture/0008-impossible-travel-detection.md](docs/architecture/0008-impossible-travel-detection.md).
+
+- [ ] **MSP central management plane — v3+.** See
+  [docs/roadmap/msp-central-management.md](docs/roadmap/msp-central-management.md). **Seam to
+  leave now:** clean, versioned, authenticated read API endpoints on every Nemesis instance
+  (`@login_required` + API key) — free to add correctly, expensive to retrofit. A future central
+  plane queries these without major surgery.
+
+- [ ] **Device-user permissions — commercial tier (ADR 0007).** `device_user_permissions` table
+  (`device_id`, `username`, `role`, `granted_by`, `granted_at`; many-to-many device↔user).
+  Handles shared workstations, shift-based access, the traveling IT person, and visiting support.
+  Build **after** Flask-Login + device-auth Level 2. Full design:
+  [docs/architecture/0007-device-user-model.md](docs/architecture/0007-device-user-model.md).
