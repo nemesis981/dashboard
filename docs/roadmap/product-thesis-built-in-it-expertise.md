@@ -62,6 +62,41 @@ captures ([watcher](diagnostics-connectivity-watcher-tool.md),
 [reassurance + routing](diagnostics-ai-reassurance-escalation-routing.md)) are CORE: they
 build the moat the reasoning depends on.
 
+## 2FA by default (no setup required)
+
+Every Nemesis device enrollment automatically generates an RSA keypair — the device becomes
+the second factor without any user action required.
+
+- **Factor 1 — Something you know:** username + passphrase (Flask-Login session).
+- **Factor 2 — Something you have:** device RSA keypair (generated automatically on first
+  agent install, never leaves the device).
+
+Two factors. Zero configuration. The right thing happens automatically.
+
+**Contrast with enterprise 2FA:** requires IT to configure an authenticator service, users
+to install an app, scan QR codes, save backup codes, and re-enroll when phones change.
+Nemesis 2FA requires: install the agent. That's it.
+
+**Mobile hardening:** on Android and iOS, the keypair is stored in hardware security modules
+(Android Keystore / iOS Secure Enclave) — cryptographically bound to the physical device,
+cannot be extracted even with root access. Stronger than most software-based enterprise 2FA
+implementations.
+
+**Connection to impossible travel detection
+([ADR 0008](../architecture/0008-impossible-travel-detection.md)):** the keypair also
+identifies WHICH device is connecting, not just that someone has the right password. Login
+from an unenrolled device (no keypair) is immediately suspicious regardless of correct
+password — flagged as a HIGH alert even before geographic analysis. An attacker with a stolen
+password has no keypair; they're caught at the device-identity layer before the
+impossible-travel layer even fires.
+
+**User-facing explanation (Beginner tier):**
+> "Your password proves who you are. Your device proves where you are. Both are required —
+> a stolen password alone can't access your network."
+
+**Marketing one-liner:**
+> "Two-factor authentication built in — no setup, no apps, no codes. It just works."
+
 ## Shape / next
 Capture as the guiding principle now. It may later **graduate** into `ARCHITECTURE.md`
 (durable product-vision section) or a dedicated ADR once it has shaped enough concrete
