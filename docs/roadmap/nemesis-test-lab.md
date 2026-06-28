@@ -103,3 +103,53 @@ The same VM-creation engine serves both — no separate infrastructure.
 Requires the community backend + the malware behavioral layer (Layer C) before full
 implementation. **Major post-commercial milestone.** The **sandbox is enabled earlier (v2)**
 once the VM Lab infrastructure exists.
+
+---
+
+## Post-update module validation + AI repair + behavioral verification
+
+**Trigger:** any update (version pull, `install.sh` re-run, dashboard update).
+
+**Flow:**
+1. **Automatic validation pass** on all installed modules (deterministic): schema-gatekeeper
+   check, Data Manager routing check, lifecycle-contract check. **No AI needed for detection** —
+   purely structural.
+2. Any failures surfaced immediately with a clear explanation.
+3. User prompted: *"Module X broke after the update. Would you like Nemesis to attempt an
+   automatic fix?"* — **[Yes] [No — show me the error]**.
+4. **AI analyzes:** error + module code + what changed in the update → proposes a fix.
+   Teaching/Automated mode gates apply (same as existing AI actions — Teaching shows and
+   explains, Automated applies).
+5. **Code tool applies the fix in a VM** (VM Lab infrastructure — safe, isolated, not the
+   production system).
+6. **Behavioral verification (the authoritative piece):** the Code tool runs the module against
+   stored behavioral baselines (recorded from last known-good operation via the **Data Manager
+   operation log** — the audit trail IS the behavioral baseline, no separate test framework
+   needed). Outputs compared against baseline → authoritative verdict:
+   - **PASS:** *"Fix verified against pre-update behavior — safe to apply to production?"* [Yes] [No]
+   - **FAIL:** *"Outputs differ from baseline in [specific ways] — fix incomplete."* → retry an
+     alternative fix or escalate with a diff + support bundle.
+7. User confirms → apply to production → post-apply behavioral test confirms restoration.
+
+**Baseline model:**
+- Stored per-module per-version (not fixed historical — **rolling**).
+- Updates on every successful verification (each pass becomes the new ground truth for the next
+  update).
+- The **Data Manager operation log** (who/what/when/result on every significant operation) **IS
+  the behavioral baseline** — one mechanism, two consumers: transparency/attribution **and**
+  regression testing.
+- The forced-trip VM audit procedures (canary, diagnostics) are **prototypes of this** —
+  formalized and automated.
+
+**Optional pre-update:** test the update in a VM first (VM Lab) before applying to the real
+system. The config-change-procedure pattern applied to updates: test → verify → deploy with
+confidence.
+
+**Authority:** the verdict is authoritative because it compares against **recorded ground truth
+(past behavior)**, not against "does it seem to work." AI proposes; Code verifies; ground truth
+decides.
+
+**Connections:** Data Manager ([ADR 0006](../architecture/0006-data-manager.md) — the operation
+log is the baseline), VM Lab (safe execution environment), Teaching/Automated mode (gates),
+tiered support bundle (escalation path), `docs/operation/CONFIG_CHANGE_PROCEDURE.md`. Design
+notes: [post-update-module-repair](post-update-module-repair.md).
