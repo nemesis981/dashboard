@@ -50,6 +50,15 @@ as done; keep newest context inline.
   `/etc/nemesis.env` (`ANTHROPIC_INPUT_PRICE_PER_MTOK` / `ANTHROPIC_OUTPUT_PRICE_PER_MTOK`) and
   are surfaced in the AI cost UI (`dashboard.py` ~1661–1663, ~1753–1756).
 
+- [ ] **Pi-hole unattended-install whiptail hang (fresh headless installs).** On a
+  headless / no-display server, Pi-hole's installer still exits at a **static-IP whiptail
+  notice** even on the non-interactive path — so Pi-hole never installs, and a later
+  `uninstall.sh` then reports it "not installed." The `--unattended` call already sets
+  `TERM=xterm` (`install.sh:587`), but the static-IP notice needs **pre-answering** (e.g.
+  pre-seed `setupVars.conf` / pass the relevant non-interactive flag) so the installer
+  doesn't block. Affects fresh installs on servers without a display. Found during the
+  diagnostics VM audit 2026-06-28.
+
 - [ ] **PRE-RELEASE: Full system-transparency audit.** Find every place Nemesis affects the
   user's system **without making it visible** — the black-box surfaces that erode trust,
   especially on shared machines. Read-only audit first (Rule 1): inventory + classify, then
@@ -110,8 +119,11 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
 - [ ] **Process-execution monitoring (v2/v3).** Extend psutil to track process spawning +
   parent-child relationships. Catches malware before it touches files (earlier kill chain than
   the canary).
-- [ ] **Lateral-movement detection (v2/v3).** Suricata + agent-data correlation: "unusual
-  outbound from A to B after a detection on A" = a query, not a new sensor. (Stub:
+- [ ] **Lateral-movement detection — core (promoted to v2).** Suricata + agent-data
+  correlation: "unusual outbound from A to other fleet devices **after a detection on A**" =
+  a query, not a new sensor. **Core (owned-fleet) version promoted to a v2 target** — simpler
+  than the venue version (known fleet topology, owned devices, inputs already present). The
+  **venue/epidemic spread** version remains a separate, later addition. (Stub:
   `docs/roadmap/lateral-movement-outbreak-detection.md`.)
 - [ ] **Emergency backup on canary trip (v2).** Trigger the backup module on canary detection.
   Not full rollback, but "emergency backup before more files are encrypted."

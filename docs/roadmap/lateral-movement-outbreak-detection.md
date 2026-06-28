@@ -1,7 +1,31 @@
 # Roadmap stub — lateral-movement / outbreak detection
 
-**Status:** parked (idea captured — do NOT build yet). Lives in the **network / anomaly**
-subsystem, **not** the malware module.
+**Status:** **two tiers, sequenced.** The **core (owned-fleet) version is promoted to a v2
+target** — build candidate, still needs a short spec before code. The **venue/epidemic
+version stays parked** (separate, later). Lives in the **network / anomaly** subsystem,
+**not** the malware module.
+
+## Tier 1 — Core lateral-movement (v2 target, build first)
+Detect **an owned/agent-known device making unusual outbound connections to OTHER fleet
+devices after a detection event on it** (e.g. canary trip, YARA hit, anomaly flag). The
+post-event correlation is the trigger: "device A was just flagged → is A now reaching for
+B, C, D?"
+
+**Why this is the simpler, earlier build:**
+- **Known fleet topology** — the devices and their normal peer relationships are already
+  known (owned, enrolled, agent-reporting), so "unusual peer" is well-defined without
+  baselining a hostile/unknown LAN.
+- **Owned devices** — no agentless-guest ambiguity; attribution and containment hooks exist.
+- **No new sensors** — Suricata `eve.json` + agent data **already carry the raw inputs**.
+  This is a **correlation query** (post-detection outbound → other fleet members), not new
+  sensor infrastructure. That's why it lands in v2 ahead of the venue work.
+
+Found framing during the diagnostics VM audit 2026-06-28.
+
+## Tier 2 — Venue / epidemic spread (later, separate addition)
+The broader "outbreak on a shared/public LAN" detection described below — unknown devices,
+baseline-from-scratch, agentless-guest protection. Stays parked until Tier 1 ships and the
+venue market is scheduled. Everything from here down describes **Tier 2**.
 
 ## What
 Detect a device on a shared/public LAN exhibiting **spread** behavior — the network
