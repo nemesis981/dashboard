@@ -222,3 +222,31 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
   - **Principle:** *"this feels like my tool"* — what keeps a product in daily use. Layout memory
     at both the card and metric level is complete personalization for the non-expert user who
     builds a specific mental map of where things are.
+
+- [ ] **Dashboard header status lights — global green/amber/red health indicator.** Always
+  visible in the header regardless of the current layout — this **solves the layout-memory
+  blind-spot**: a user's preferred layout may have the alerts card off-screen, but the header is
+  always visible. Three states:
+  - **GREEN (●):** all clear — no unacknowledged critical/high alerts, all services healthy,
+    canary clean, nothing awaiting action.
+  - **AMBER (▲):** attention when convenient — medium alerts, open tickets, degraded (not down)
+    services.
+  - **RED (■):** action needed now — unacknowledged CRITICAL/HIGH alerts, service down, canary
+    trip unresolved, quarantine awaiting confirmation, diagnostics LOCAL_FAIL.
+  - **Display:** leftmost header element, color + shape (colorblind-friendly), optional count
+    badge (`🔴 3` = 3 things need attention). Clicking jumps to the alerts/tickets view
+    regardless of current layout — the "one click to what needs attention" shortcut.
+  - **Data sources** (aggregated into one `/api/header/status` verdict): alert severity
+    (unacknowledged CRITICAL/HIGH → red); service health (any down → red, degraded → amber);
+    diagnostics watcher verdict (LOCAL_FAIL → red, DEGRADED → amber); canary state (unresolved
+    trip → red); quarantine state (awaiting confirmation → red).
+  - **Polling:** `GET /api/header/status` every 30s (existing `setInterval` pattern), returns
+    `{status: 'red'|'amber'|'green', counts: {critical, high, services_down}}`. Count badge shown
+    when non-zero.
+  - **Tiered tooltip:** same light for all tiers; hover detail is tiered (Beginner: plain language
+    "3 alerts need your attention"; Pro: specific counts and states).
+  - **Professional value:** makes the product look/feel built by people who thought about how it
+    gets *used*, not just how it *works*. Universal signal — no expertise required to understand a
+    green vs red light.
+  - **Build order:** independent of session identity and layout memory — can be built any time.
+    Small: one API route + one 30s polling interval + header HTML/CSS. High visibility, low effort.
