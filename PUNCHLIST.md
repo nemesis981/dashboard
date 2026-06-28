@@ -71,3 +71,47 @@ as done; keep newest context inline.
   - Classify each finding as **[SAFE already visible]** / **[ADD pre-release]** / **[DEFER]**.
   **Scope:** one focused session (audit → classify → stop for review), to run before
   **v1.1 / commercial release**. The `[ADD]` items graduate to pre-release work.
+
+- [ ] **Hardware monitor — Nemesis overhead meter.** Per-process CPU/memory for each Nemesis
+  service (psutil, data already available). A "Nemesis overhead" section: total + per-service
+  breakdown + memory-trend sparkline (leak detection). Transparency value: "Nemesis is using
+  X% — not us." Could feed a `DEGRADED` verdict to the diagnostics watcher. (Full stub:
+  `docs/roadmap/nemesis-overhead-meter.md`.)
+
+- [ ] **Broken-API-endpoint self-healing.** When an AI/external API call fails with a
+  connection/endpoint error (NOT auth), attempt to find + verify the correct current endpoint:
+  (1) AI-assisted lookup (if the API is partially reachable); (2) web-search fallback (if raw
+  egress works); (3) manual-guidance fallback (link to service docs). If found + verified →
+  auto-update config → retry. Applies to all configured endpoints.
+
+- [ ] **PRE-RELEASE: Documentation-completeness audit.** Every feature has docs; every vendor
+  integration has a `CUSTOM_*.md`. Grep-verifiable.
+
+- [ ] **PRE-RELEASE: Tiered-output audit.** Every client-facing output renders correctly at
+  all three tiers. `tierText()` discipline verified end-to-end.
+
+- [ ] **Recurring-user-error audit (ongoing research practice).** Skim help forums for each
+  Nemesis component (Pi-hole, Suricata, ClamAV, VirtualBox, Tailscale, Ubuntu, r/selfhosted)
+  for recurring error types. Classify: **DOCS / FEATURE / DESIGN.** First pass: alongside the
+  pre-release audits. Ongoing: apply the same classification to first-party support tickets
+  (`support@nemesis-sw.com`).
+
+### v2/v3 captures — from the enterprise gap audit
+Full analysis + priority in `docs/roadmap/enterprise-gap-audit-2026.md`. Listed here as a
+working checklist (these are project-sized — they graduate to roadmap specs when scheduled).
+
+- [ ] **MITRE ATT&CK mapping (v2).** Tag existing detections with tactic/technique/sub-technique.
+  Canary trip = **T1486** (Data Encrypted for Impact). YARA rules can carry ATT&CK tags. Mostly
+  labeling, not new detection. High professional credibility, medium effort.
+- [ ] **Vulnerability management — basic (v2).** CVE check on installed packages + open-port
+  exposure check + basic misconfiguration detection. Low–medium effort.
+- [ ] **Auth/login monitoring via agent (v2).** PAM auth logging, SSH login events, sudo-usage
+  tracking. Agent reports auth events to the dashboard. Low effort, high value.
+- [ ] **Process-execution monitoring (v2/v3).** Extend psutil to track process spawning +
+  parent-child relationships. Catches malware before it touches files (earlier kill chain than
+  the canary).
+- [ ] **Lateral-movement detection (v2/v3).** Suricata + agent-data correlation: "unusual
+  outbound from A to B after a detection on A" = a query, not a new sensor. (Stub:
+  `docs/roadmap/lateral-movement-outbreak-detection.md`.)
+- [ ] **Emergency backup on canary trip (v2).** Trigger the backup module on canary detection.
+  Not full rollback, but "emergency backup before more files are encrypted."
