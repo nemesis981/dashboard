@@ -7,6 +7,40 @@ before doing anything. Also read, in this order, before starting work:
 
 ---
 
+### Morning Status (run on session start)
+At the start of every new session, before anything else, run these and report the results
+in a clean block:
+
+1. **Total code lines:**
+   ```
+   find ~/dashboard -type f \( -name "*.py" -o -name "*.js" -o -name "*.html" \
+     -o -name "*.css" -o -name "*.sh" \) | grep -v __pycache__ | grep -v .git \
+     | xargs wc -l 2>/dev/null | tail -1
+   ```
+2. **Last 3 commits:** `git -C ~/dashboard log --oneline -3`
+3. **Service status (is-active):**
+   ```
+   systemctl is-active dashboard watchdog alert-watcher malware-canary \
+     diagnostics-watcher vpn-dns-guard 2>/dev/null
+   ```
+4. **Working tree status:** `git -C ~/dashboard status --short`
+5. **Read `docs/handoff/HANDOFF.md`** and state today's resume point.
+
+Format the output as:
+```
+--- NEMESIS MORNING STATUS ---
+Lines of code: XX,XXX
+Last commits: [3 lines]
+Services: dashboard=active watchdog=active ...
+Tree: clean / [N files modified]
+Resume: [one sentence from HANDOFF]
+------------------------------
+```
+Then ask: **"What would you like to work on today?"** This replaces the manual catch-up
+prompt — session is oriented in under 30 seconds.
+
+---
+
 ## TIER 1 — Core operating rules
 
 ### 1. Audit-first, then act
