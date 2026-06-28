@@ -3,6 +3,36 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [FIX-NOW] — concurrency races (multi-writer, real today)
+From `docs/audits/single-user-assumptions-audit-2026-06-28.md` §1. NOT a commercial-tier
+concern: Nemesis already runs 6 concurrent writer processes against one shared `alerts.db`,
+so these read-modify-write races can bite with a single operator when the agent fleet checks
+in concurrently. `get_db()` is autocommit + `busy_timeout` only — no multi-statement atomicity.
+Fix each atomically, one at a time, audit-then-fix. The `ai_usage` `INSERT … ON CONFLICT DO
+UPDATE` (`modules/ai_engine/module.py`) is the in-repo template.
+
+- [ ] **[FIX-NOW] `tickets_seq` duplicate ticket numbers.** `_next_ticket_number`
+  (`modules/tickets/module.py:113-115`) does `SELECT next_number` then a separate
+  `UPDATE … = next_number + 1` → two concurrent `open_ticket()` calls (e.g. auto-ticket-on-
+  alert firing from alert-watcher + a module) get the same number. Fix: atomic
+  `UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1 RETURNING next_number`
+  (or equivalent single statement). **Highest-likelihood to surface during the trip.**
+
+- [ ] **[FIX-NOW] AI rate-limit counter lost increments.** `_increment_rate`
+  (`modules/ai_engine/module.py:308-318`) reads `hour_count`/`day_count`, computes `+1`, writes
+  back separately → concurrent calls lose increments and under-count the rate limit. Fix:
+  atomic upsert like the `_increment_usage` sibling right below it.
+
+- [ ] **[FIX-NOW] `community_queue` duplicate rows.** `add_to_queue`
+  (`modules/community_queue/module.py:110-135`) is SELECT-then-INSERT/UPDATE with no UNIQUE on
+  `(domain_or_ip, submitted)` → concurrent detections create duplicate queue entries. Fix:
+  add the UNIQUE constraint + `INSERT … ON CONFLICT DO UPDATE`.
+
+- [ ] **[FIX-NOW] `anomaly_incidents` duplicate open incidents.** `_create_or_update_incident`
+  (`modules/anomaly_detection/module.py:654-705`) is SELECT-then-INSERT/UPDATE with no UNIQUE
+  on `(offending_target, status)` → concurrent detections for one target create duplicate open
+  incidents instead of merging. Fix: UNIQUE + atomic upsert (mind the time-window merge logic).
+
 - [ ] **Header de-dup.** Remove the duplicated **Settings** / **Diagnostics** links from the
   upper-right corner — they also exist in the always-visible header. Frees the corner for the
   System Changes badge (`docs/roadmap/system-changes-badge.md`).
