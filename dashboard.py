@@ -1284,6 +1284,74 @@ def get_services_status():
     return data
 
 
+def _header_status_data() -> dict:
+    """Aggregate global health into one verdict for the header status light.
+    Read-only (no schema changes). RED dominates AMBER dominates GREEN."""
+    counts = {"critical": 0, "high": 0, "medium": 0, "services_down": 0,
+              "open_tickets": 0, "canary_trips": 0}
+    quar_pending = 0
+    diag_verdict = None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        c = conn.cursor()
+
+        def _alerts(level):
+            try:
+                return c.execute(
+                    "SELECT COUNT(*) FROM alerts WHERE action='pending' "
+                    "AND UPPER(COALESCE(risk_level,''))=?", (level,)).fetchone()[0]
+            except Exception:
+                return 0
+        counts["critical"] = _alerts("CRITICAL")
+        counts["high"]     = _alerts("HIGH")
+        counts["medium"]   = _alerts("MEDIUM")
+        try:
+            counts["open_tickets"] = c.execute(
+                "SELECT COUNT(*) FROM tickets WHERE type='ticket' "
+                "AND LOWER(COALESCE(status,'')) NOT IN ('closed','resolved')").fetchone()[0]
+        except Exception:
+            pass
+        try:
+            counts["canary_trips"] = c.execute(
+                "SELECT COUNT(*) FROM malware_findings WHERE status IN ('new','investigating')"
+            ).fetchone()[0]
+        except Exception:
+            pass
+        try:
+            quar_pending = c.execute(
+                "SELECT COUNT(*) FROM quarantines WHERE status='active'").fetchone()[0]
+        except Exception:
+            pass
+        try:
+            r = c.execute("SELECT verdict FROM diagnostics_connectivity_samples "
+                          "ORDER BY ts DESC LIMIT 1").fetchone()
+            diag_verdict = r[0] if r else None
+        except Exception:
+            pass
+        conn.close()
+    except Exception:
+        auth_log.exception("header status: db read failed")
+
+    try:
+        svc = get_services_status()
+        counts["services_down"] = max(0, svc.get("total", 0) - svc.get("active", 0))
+    except Exception:
+        pass
+
+    red = bool(counts["critical"] or counts["high"] or counts["services_down"]
+               or counts["canary_trips"] or quar_pending or diag_verdict == "LOCAL_FAIL")
+    amber = bool(counts["medium"] or counts["open_tickets"]
+                 or diag_verdict in ("DEGRADED", "UPSTREAM_FAIL"))
+    status = "red" if red else ("amber" if amber else "green")
+    return {"status": status, "counts": counts}
+
+
+@app.route("/api/header/status")
+def api_header_status():
+    """Global health verdict for the header light (auth-guarded; no exemption)."""
+    return jsonify(_header_status_data())
+
+
 _TUNNEL_IFACES = ["tun0", "tun1", "wg0", "wg1", "nordlynx", "proton0"]
 
 def get_vpn_status():
@@ -6971,7 +7039,9 @@ def dashboard():
     <script>{incident_state_js}</script>
 </head>
 <body>
-    <h1>🛡️ Nemesis Firewall
+    <h1><a id="hdrStatusLight" href="#section-firewall" title="Loading status…"
+           style="text-decoration:none;color:#888;font-size:0.66em;vertical-align:middle;margin-right:9px;cursor:pointer"
+           ><span id="hdrStatusShape">●</span><span id="hdrStatusCount" style="font-size:0.62em;color:#ccc"></span></a>🛡️ Nemesis Firewall
         <a id="ai-status-badge" href="/settings#ai-engine" target="_blank" rel="noopener"
            title="AI Engine status — click to configure"
            style="font-size:0.42em;font-weight:normal;margin-left:12px;vertical-align:middle;
@@ -6986,6 +7056,7 @@ def dashboard():
             <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
         </span>
     </h1>
+    <script src="/static/header-status.js"></script>
     <p style="color:#ccc;margin-top:0">Last updated: <span id="lastUpdated">{now}</span> | Stats refresh every 60s, tables every 5 min | Uptime: <span id="dashUptime">…</span></p>
 
     <nav class="jump-nav">
