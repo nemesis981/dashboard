@@ -1,0 +1,14 @@
+{
+  "name": "diagnostics",
+  "display_name": "Diagnostics",
+  "version": "0.1.0",
+  "description": "Self-diagnostics subsystem. First piece: a continuous connectivity watcher (routing / DNS / egress / upstream-API probes) that answers the 'is-it-me-or-them' question during outages. Runs as a self-gating standalone service outside Flask (so it survives a dashboard/DB failure); raw probe detail goes to a flat log outside the repo, only sanitized verdicts reach the DB. Pass 0: module skeleton + schema only.",
+  "category": "system",
+  "provides_dashboard_card": false,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
+}

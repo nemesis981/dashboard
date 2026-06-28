@@ -162,8 +162,10 @@ the drift in the first place.
 1. **One database.** All persistent state lives in the shared `alerts.db`. No module
    opens its own `.db` file.
 2. **Table ownership by prefix.** Each module owns tables under its prefix: `anomaly_*`,
-   `malware_*`, `tickets_*`, `ai_*`, `community_*`. Core owns the unprefixed core tables
-   (`alerts`, `devices`, `hw_*`, `scan_*`, `quarantines`, `modules_enabled`, …).
+   `malware_*`, `tickets_*`, `ai_*`, `community_*`, `diagnostics_*`. Core owns the unprefixed
+   core tables (`alerts`, `devices`, `hw_*`, `scan_*`, `quarantines`, `modules_enabled`, …).
+   (`diagnostics_*` added 2026-06-28 for the connectivity-watcher module — see
+   `docs/specs/diagnostics-connectivity-watcher.md`.)
 3. **Write-own / read-any.** A module may `SELECT`/join across any table (cross-module
    reads are allowed and expected), but only `INSERT/UPDATE/DELETE/CREATE` its **own**
    prefixed tables.
