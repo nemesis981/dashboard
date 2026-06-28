@@ -86,7 +86,7 @@ def reset_password(username: str):
         sys.exit(1)
     pw = _choose_password()
     conn.execute(
-        "UPDATE users SET password_hash=?, failed_attempts=0, lockout_until=NULL WHERE id=?",
+        "UPDATE users SET password_hash=?, failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE id=?",
         (_hash(pw), row["id"]),
     )
     conn.commit()
@@ -116,7 +116,7 @@ def unlock(username: str):
     database.init_users_table()
     conn = _conn()
     cur = conn.execute(
-        "UPDATE users SET failed_attempts=0, lockout_until=NULL WHERE username=?", (username,)
+        "UPDATE users SET failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE username=?", (username,)
     )
     conn.commit()
     if cur.rowcount:

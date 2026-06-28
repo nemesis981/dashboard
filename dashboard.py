@@ -51,7 +51,7 @@ _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 from database import (init_db as init_alerts_db, init_quarantines_table,
-                      init_devices_table, init_users_table)
+                      init_devices_table, init_users_table, init_login_events_table)
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -67,6 +67,7 @@ from core import entitlements, passphrase
 init_alerts_db()
 hw_monitor.init_db()
 init_users_table()
+init_login_events_table()
 # Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
 # device reads in the routes. Canonical DDL in database.init_devices_table();
 # also created create-before-write by the device_scanner. Dual-safety-net,
@@ -165,8 +166,12 @@ def load_user(user_id):
 
 # ── Auth helpers ──────────────────────────────────────────────────────────────
 _USERNAME_RE   = re.compile(r"^[a-z0-9_]{3,20}$")
-_MAX_FAILED    = 5
-_LOCKOUT_MINS  = 15
+# Tiered lockout: (cumulative_failed_attempts, lockout_minutes, severity, send_email)
+_LOCKOUT_TIERS = [
+    (3,  5,  "MEDIUM",   False),
+    (5,  15, "HIGH",     True),
+    (10, 60, "CRITICAL", True),
+]
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
 _AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static"}
 
@@ -206,6 +211,79 @@ def _actor() -> str:
     except Exception:
         pass
     return request.remote_addr or "unknown"
+
+
+# ── Auth audit + tiered-lockout side effects ──────────────────────────────────
+def _log_login_event(username, ip, success, failure_reason=None, lockout_tier=None,
+                     user_agent=None, session_id=None, tailscale_ip=None):
+    """One row per login attempt (success AND failure). geo_*/device_id are seams."""
+    try:
+        conn = _users_conn()
+        conn.execute(
+            "INSERT INTO login_events(username, ip_address, success, failure_reason, "
+            "lockout_tier, user_agent, session_id, tailscale_ip) VALUES (?,?,?,?,?,?,?,?)",
+            (username, ip or "unknown", 1 if success else 0, failure_reason,
+             lockout_tier, (user_agent or "")[:300], session_id, tailscale_ip),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        auth_log.exception("auth: login_event log failed")
+
+
+def _open_security_ticket(title, body, severity):
+    try:
+        from modules.tickets.module import open_ticket as _open_ticket
+        _open_ticket(sensor_key="auth_security", title=title[:200], body=body,
+                     priority=severity, actor="system")
+    except Exception:
+        auth_log.exception("auth: security ticket creation failed")
+
+
+def _notify_email(subject, body):
+    try:
+        email_utils.send_email(subject, body)
+    except Exception:
+        auth_log.exception("auth: email notify failed")
+
+
+def _auth_threat_level() -> str:
+    """'' / 'amber' / 'red' for the header indicator: active lockouts + recent
+    concurrent-session events. tier>=2 or a concurrent flag => red; tier1 => amber."""
+    try:
+        now = datetime.now()
+        conn = _users_conn()
+        tiers = []
+        for r in conn.execute("SELECT lockout_tier, lockout_until FROM users "
+                              "WHERE lockout_until IS NOT NULL"):
+            try:
+                if r["lockout_until"] and now < datetime.fromisoformat(r["lockout_until"]):
+                    tiers.append(int(r["lockout_tier"] or 0))
+            except ValueError:
+                pass
+        concurrent = conn.execute(
+            "SELECT 1 FROM login_events WHERE failure_reason='concurrent_session_detected' "
+            "AND timestamp > datetime('now','-1 hour') LIMIT 1").fetchone()
+        conn.close()
+        if concurrent or any(t >= 2 for t in tiers):
+            return "red"
+        if tiers:
+            return "amber"
+    except Exception:
+        pass
+    return ""
+
+
+def _threat_indicator_html() -> str:
+    lvl = _auth_threat_level()
+    if lvl == "red":
+        return ('<a href="/settings" style="color:#ff4444;text-decoration:none" '
+                'title="Security: failed logins or concurrent session — review">&#9888; Security</a>'
+                '&nbsp;|&nbsp;')
+    if lvl == "amber":
+        return ('<span style="color:#ffcc00" title="Elevated failed logins">&#9888; Login alerts</span>'
+                '&nbsp;|&nbsp;')
+    return ""
 
 
 # ── First-run + auth guard (covers dashboard.py AND all module routes) ────────
@@ -276,42 +354,94 @@ def login():
 
     username = (request.form.get("username") or "").strip().lower()
     password = request.form.get("password") or ""
+    ip = request.remote_addr or "unknown"
+    ua = request.headers.get("User-Agent", "")
     row = _load_user_row("username", username)
 
-    # Lockout check (failed-attempt rate limit)
+    # Active lockout?
     if row and row["lockout_until"]:
         try:
             until = datetime.fromisoformat(row["lockout_until"])
             if datetime.now() < until:
                 mins = int((until - datetime.now()).total_seconds() // 60) + 1
+                _log_login_event(username, ip, False, "locked_out", row["lockout_tier"], ua)
                 return render_template("login.html",
                                        error=f"Account locked. Try again in {mins} minute(s).")
         except ValueError:
             pass
 
+    # Success
     if row and row["is_active"] and _check_password(password, row["password_hash"]):
+        # Concurrent-session check against PRIOR successful logins (before logging this one).
+        prior_ip = None
+        try:
+            conn = _users_conn()
+            pr = conn.execute(
+                "SELECT ip_address FROM login_events WHERE username=? AND success=1 "
+                "AND ip_address<>? AND timestamp > datetime('now','-24 hours') "
+                "ORDER BY timestamp DESC LIMIT 1", (username, ip)).fetchone()
+            conn.close()
+            prior_ip = pr["ip_address"] if pr else None
+        except Exception:
+            auth_log.exception("auth: concurrent-session check failed")
+        # Reset ALL counters + stamp last_login
         conn = _users_conn()
-        conn.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL, last_login=? WHERE id=?",
+        conn.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL, lockout_tier=0, "
+                     "last_login=? WHERE id=?",
                      (datetime.now().isoformat(timespec="seconds"), row["id"]))
         conn.commit()
         conn.close()
+        _log_login_event(username, ip, True, None, None, ua, session_id=session.get("_id"))
         login_user(User(row))
+        if prior_ip:
+            _log_login_event(username, ip, True, "concurrent_session_detected", None, ua)
+            _open_security_ticket(
+                f"Concurrent session detected for {username}",
+                (f"Active session from {prior_ip}, new login from {ip}. Was this you? "
+                 f"If not, use core/manage.py to reset your password immediately."),
+                "HIGH")
         return redirect(url_for("dashboard"))
 
-    # Failure: increment attempts, lock after _MAX_FAILED
-    if row:
-        conn = _users_conn()
-        fa = int(row["failed_attempts"] or 0) + 1
-        lock = None
-        if fa >= _MAX_FAILED:
-            lock = (datetime.now() + timedelta(minutes=_LOCKOUT_MINS)).isoformat(timespec="seconds")
-            fa = 0
-        conn.execute("UPDATE users SET failed_attempts=?, lockout_until=? WHERE id=?", (fa, lock, row["id"]))
+    # Failure — unknown user (still logged; no row to update)
+    if not row:
+        _log_login_event(username, ip, False, "unknown_user", None, ua)
+        return render_template("login.html", error="Invalid username or password.")
+
+    # Failure — known user: increment, escalate tier on 3 / 5 / 10 cumulative fails
+    fa   = int(row["failed_attempts"] or 0) + 1
+    tier = int(row["lockout_tier"] or 0)
+    triggered = None
+    for idx, (thr, mins, severity, do_email) in enumerate(_LOCKOUT_TIERS, start=1):
+        if fa >= thr and tier < idx:
+            triggered = (idx, mins, severity, do_email)   # keep the highest crossed tier
+
+    conn = _users_conn()
+    if triggered:
+        tnum, mins, severity, do_email = triggered
+        lock_until = (datetime.now() + timedelta(minutes=mins)).isoformat(timespec="seconds")
+        conn.execute("UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? WHERE id=?",
+                     (fa, lock_until, tnum, row["id"]))
         conn.commit()
         conn.close()
-        if lock:
-            return render_template("login.html",
-                                   error=f"Too many failed attempts. Account locked for {_LOCKOUT_MINS} minutes.")
+        _log_login_event(username, ip, False, f"lockout_tier_{tnum}", tnum, ua)
+        if tnum == 3:
+            _log_login_event(username, ip, False, "persistent_brute_force", 3, ua)
+        _open_security_ticket(
+            f"Login lockout tier {tnum} ({severity}) for {username}",
+            (f"{fa} failed login attempts for '{username}' from {ip}. "
+             f"Account locked for {mins} minutes (tier {tnum})."),
+            severity)
+        if do_email:
+            _notify_email(
+                f"[Nemesis] Login lockout tier {tnum} ({severity}) for {username}",
+                f"{fa} failed login attempts for '{username}' from {ip}. Locked for {mins} minutes.")
+        return render_template("login.html",
+                               error=f"Too many failed attempts. Account locked for {mins} minutes.")
+
+    conn.execute("UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
+    conn.commit()
+    conn.close()
+    _log_login_event(username, ip, False, "bad_password", tier, ua)
     # Never reveal which field was wrong (security best practice).
     return render_template("login.html", error="Invalid username or password.")
 
@@ -6848,7 +6978,7 @@ def dashboard():
                   text-decoration:none;color:#888;cursor:pointer">AI ○</a>
         <span id="cq-badge-container">{cq_badge_html}</span>
         <span style="float:right;font-size:0.45em;font-weight:normal;margin-top:8px">
-            <span style="color:#00d4ff" title="Logged in">👤 {html.escape(current_user.display_name)}</span>
+            {_threat_indicator_html()}<span style="color:#00d4ff" title="Logged in">👤 {html.escape(current_user.display_name)}</span>
             &nbsp;<a href="/logout" style="color:#bbb;text-decoration:none" title="Log out">Logout</a>
             &nbsp;|&nbsp;
             <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>

@@ -125,9 +125,49 @@ def init_users_table():
                 created_at      TEXT NOT NULL,
                 last_login      TEXT,
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
-                lockout_until   TEXT
+                lockout_until   TEXT,
+                lockout_tier    INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Guarded migration: add lockout_tier to users tables created before it
+        # existed (CLAUDE.md DB rule — ALTER alongside the updated CREATE).
+        cols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+        if "lockout_tier" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN lockout_tier INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    finally:
+        conn.close()
+
+def init_login_events_table():
+    """Canonical DDL for the core `login_events` table (auth audit trail).
+
+    One row per login attempt (success AND failure). The data source for
+    concurrent-session detection, location anomaly, impossible travel, and
+    brute-force detection. Collection starts now; detection logic comes later.
+    geo_*/device_id/tailscale_ip/session_id are seams (NULL until populated).
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS login_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                username      TEXT NOT NULL,
+                timestamp     TEXT NOT NULL DEFAULT (datetime('now')),
+                ip_address    TEXT NOT NULL,
+                device_id     TEXT,
+                tailscale_ip  TEXT,
+                geo_country   TEXT,
+                geo_city      TEXT,
+                success       INTEGER NOT NULL,
+                failure_reason TEXT,
+                lockout_tier  INTEGER,
+                session_id    TEXT,
+                user_agent    TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_login_events_user_ts "
+                  "ON login_events(username, timestamp)")
         conn.commit()
     finally:
         conn.close()
