@@ -29,9 +29,9 @@ Edit `nemesis_agent.conf`:
 
 ```ini
 [nemesis]
-nemesis_ip = 192.168.4.1       # Your Nemesis server IP
+nemesis_ip = <your-nemesis-ip>   # Your Nemesis server IP (Tailscale or LAN)
 nemesis_port = 5001            # Nemesis data port
-nemesis_subnet = 192.168.4.0/22  # Local subnet (used to detect local vs VPN)
+nemesis_subnet = <your-local-subnet>  # Local subnet (used to detect local vs VPN)
 device_name = My Laptop        # Friendly name shown in dashboard
 device_id =                    # Auto-generated UUID on first run
 poll_interval = 300            # Seconds between data posts

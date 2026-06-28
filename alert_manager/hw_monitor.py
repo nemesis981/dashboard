@@ -191,7 +191,18 @@ def init_db():
                 suricata_running INTEGER DEFAULT 0,
                 suricata_profile TEXT,
                 last_scan_at    TIMESTAMP,
-                last_scan_result TEXT
+                last_scan_result TEXT,
+                enrollment_status TEXT DEFAULT 'approved',
+                public_key       TEXT,
+                enrolled_by      TEXT,
+                enrolled_at      TEXT,
+                os               TEXT,
+                os_version       TEXT,
+                hardware_summary TEXT,
+                interface_name   TEXT,
+                connection_speed TEXT,
+                lhm_available    INTEGER DEFAULT 0,
+                last_heartbeat_data TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
@@ -243,7 +254,19 @@ def init_db():
         existing_ag = {row[1] for row in c.execute("PRAGMA table_info(agent_devices)").fetchall()}
         for col, decl in (("ip_address",        "TEXT"),
                           ("known_users_json",   "TEXT DEFAULT '[]'"),
-                          ("known_usb_json",     "TEXT DEFAULT '[]'")):
+                          ("known_usb_json",     "TEXT DEFAULT '[]'"),
+                          # ── owner-gated enrollment layer (ONE migration, all columns) ──
+                          ("enrollment_status",  "TEXT DEFAULT 'approved'"),  # grandfather existing devices
+                          ("public_key",         "TEXT"),
+                          ("enrolled_by",        "TEXT"),
+                          ("enrolled_at",        "TEXT"),
+                          ("os",                 "TEXT"),
+                          ("os_version",         "TEXT"),
+                          ("hardware_summary",   "TEXT"),
+                          ("interface_name",     "TEXT"),
+                          ("connection_speed",   "TEXT"),
+                          ("lhm_available",      "INTEGER DEFAULT 0"),
+                          ("last_heartbeat_data", "TEXT")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1781,18 +1804,134 @@ def get_recent_samples_for_device(device_id, limit=288):
     return result
 
 
+# ── Owner-gated agent enrollment (machine-to-machine; NOT Flask-Login guarded —
+#    this is the raw 5001 http.server, the keypair signature is the agent's auth) ──
+def _agent_enrollment_status(device_id):
+    if not device_id:
+        return None
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        row = conn.execute("SELECT enrollment_status FROM agent_devices WHERE device_id=?",
+                           (device_id,)).fetchone()
+        conn.close()
+        return row[0] if row else None
+    except Exception:
+        log.exception("agent enrollment-status lookup failed")
+        return None
+
+
+def _agent_approved(device_id):
+    return _agent_enrollment_status(device_id) == "approved"
+
+
+def _verify_enroll_signature(public_key_pem, message, signature_b64):
+    """Verify the enroll signature against the submitted public key (proof of
+    possession). Returns True/False; never raises."""
+    try:
+        import base64
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives import hashes, serialization
+        pub = serialization.load_pem_public_key(public_key_pem.encode())
+        pub.verify(base64.b64decode(signature_b64), message.encode(),
+                   padding.PKCS1v15(), hashes.SHA256())
+        return True
+    except Exception:
+        return False
+
+
+def _create_enrollment(payload, remote_ip):
+    """Verify the signed request, create a PENDING agent_devices row, open an
+    approval ticket. Returns (device_id, status) or (None, error_str)."""
+    public_key  = payload.get("public_key", "") or ""
+    device_name = (payload.get("device_name") or "device").strip()
+    os_name     = payload.get("os", "") or ""
+    signed_at   = payload.get("signed_at", "") or ""
+    signature   = payload.get("signature", "") or ""
+    if not (public_key and signature and signed_at):
+        return None, "missing_fields"
+    if not _verify_enroll_signature(public_key, f"{device_name}|{os_name}|{signed_at}", signature):
+        return None, "bad_signature"
+    import uuid as _uuid
+    device_id = _uuid.uuid4().hex
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "INSERT INTO agent_devices (device_id, device_name, os, os_version, "
+            "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen) "
+            "VALUES (?,?,?,?,?,?, 'pending', ?, ?)",
+            (device_id, device_name, os_name, payload.get("os_version", ""),
+             payload.get("hardware_summary", ""), public_key, remote_ip, now))
+        conn.commit()
+        conn.close()
+    except Exception:
+        log.exception("agent enrollment insert failed")
+        return None, "db_error"
+    try:   # best-effort approval ticket
+        import modules
+        modules.set_shared_db_path(DB_PATH)
+        from modules.tickets.module import open_ticket
+        open_ticket(
+            sensor_key=f"agent_enroll_{device_id}",
+            title=f"New device pending approval: {device_name} ({os_name})",
+            body=(f"A new device requested enrollment.\n\nName: {device_name}\n"
+                  f"OS: {os_name} {payload.get('os_version', '')}\n"
+                  f"Hardware: {payload.get('hardware_summary', '')}\nFrom: {remote_ip}\n\n"
+                  f"Approve or reject it in Settings -> Devices."),
+            priority="MEDIUM", actor="system")
+    except Exception:
+        log.exception("agent enrollment ticket failed (non-fatal)")
+    return device_id, "pending"
+
+
 def _start_windows_agent_listener():
     """Start the background HTTP listener for both windows_agent and nemesis_agent POSTs.
 
     Runs in a daemon thread so it exits automatically when the main process ends.
     Calls insert_sample() on every valid POST so the dashboard reads from the DB.
+    Also serves the owner-gated enrollment endpoints (/enroll, /enrollment_status).
     """
 
     class _WaHandler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):
             pass  # silence default per-request stdout logging
 
+        def _json(self, code, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            if parsed.path == "/enrollment_status":
+                device_id = (parse_qs(parsed.query).get("device_id") or [""])[0]
+                self._json(200, {"status": _agent_enrollment_status(device_id) or "unknown"})
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def _handle_enroll(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                self._json(400, {"error": "bad request"})
+                return
+            device_id, status = _create_enrollment(payload, self.client_address[0])
+            if not device_id:
+                self._json(400, {"error": status})
+                return
+            log.info("agent enroll: %s pending approval (%s)", device_id, payload.get("device_name"))
+            self._json(200, {"device_id": device_id, "status": status})
+
         def do_POST(self):
+            if self.path == "/enroll":
+                self._handle_enroll()
+                return
             if self.path != "/hw_data":
                 self.send_response(404)
                 self.end_headers()
@@ -1820,6 +1959,13 @@ def _start_windows_agent_listener():
             try:
                 remote_ip = self.client_address[0]
                 if source == "nemesis_agent":
+                    # Enrollment gate: drop heartbeats from non-approved devices.
+                    if not _agent_approved(payload.get("device_id")):
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.end_headers()
+                        self.wfile.write(b'{"ok":false,"status":"not_approved"}')
+                        return
                     metrics = _nemesis_payload_to_metrics(payload)
                     _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
                     _update_agent_device(payload, remote_ip=remote_ip)

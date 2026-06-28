@@ -60,7 +60,10 @@ def _load_platform_module():
 def _detect_connection_type(conf):
     """Compare local IP against nemesis_subnet to determine local vs vpn_remote."""
     try:
-        subnet = ipaddress.ip_network(conf.get("nemesis_subnet", "192.168.4.0/22"), strict=False)
+        subnet_str = conf.get("nemesis_subnet") or ""
+        if not subnet_str:
+            return "vpn_remote"   # no local subnet configured -> treat as remote
+        subnet = ipaddress.ip_network(subnet_str, strict=False)
         hostname = socket.gethostname()
         local_ips = [addr.address for iface_addrs in psutil.net_if_addrs().values()
                      for addr in iface_addrs if addr.family == socket.AF_INET]
@@ -326,7 +329,21 @@ def main():
     log.info("Nemesis Agent starting (platform=%s)", _platform_name)
 
     _conf = config.load()
-    _conf = config.ensure_device_id(_conf)
+
+    # Owner-gated enrollment: block until the owner approves this device in the
+    # Nemesis dashboard before starting the /hw_data telemetry loop. Backward-
+    # compatible — an already-approved (or grandfathered) device passes straight
+    # through. The keypair signature on /enroll is the agent's auth.
+    try:
+        import enrollment
+        approved_id = enrollment.ensure_enrolled(_conf)
+    except Exception:
+        log.exception("enrollment failed")
+        approved_id = None
+    if not approved_id:
+        log.error("Device not approved — agent will not report. Exiting.")
+        return
+    _conf = config.load()
 
     _load_platform_module()
 

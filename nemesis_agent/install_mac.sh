@@ -61,7 +61,7 @@ if [ ! -f "$CONF" ]; then
 [nemesis]
 nemesis_ip = REPLACE_ME
 nemesis_port = 5001
-nemesis_subnet = 192.168.4.0/22
+nemesis_subnet =
 device_name = My Mac
 device_id =
 poll_interval = 300
@@ -73,7 +73,7 @@ EOF
 fi
 
 if grep -q "REPLACE_ME" "$CONF"; then
-    read -rp "Enter your Nemesis server IP (e.g. 192.168.4.1): " NIP
+    read -rp "Enter your Nemesis server address (Tailscale IP or LAN IP): " NIP
     sed -i "" "s/nemesis_ip = REPLACE_ME/nemesis_ip = $NIP/" "$CONF"
 fi
 

@@ -51,12 +51,39 @@ Write-OK "Found: $pyver"
 # ── 3. Pip packages ──────────────────────────────────────────────────────────
 Write-Step "Installing Python packages..."
 & python -m pip install --upgrade pip --quiet
-& python -m pip install requests psutil watchdog plyer pywin32 --quiet
+& python -m pip install requests psutil watchdog plyer pywin32 cryptography --quiet
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "pip install failed — ensure Visual C++ Redistributable is installed first"
     exit 1
 }
 Write-OK "Python packages installed"
+
+# ── 3b. Tailscale (remote access for the road) ───────────────────────────────
+Write-Step "Checking Tailscale (remote access to your Nemesis box)..."
+$ts = Get-Command tailscale -ErrorAction SilentlyContinue
+if (-not $ts) {
+    $resp = Read-Host "Tailscale not found. Install it now? (recommended for remote/road use) [y/N]"
+    if ($resp -eq 'y' -or $resp -eq 'Y') {
+        winget install Tailscale.Tailscale --silent --accept-package-agreements --accept-source-agreements
+        Write-OK "Tailscale installed — run 'tailscale up' and sign in to join your tailnet"
+    } else {
+        Write-Warn "Skipped Tailscale — the Nemesis box must be reachable on your LAN/VPN"
+    }
+} else {
+    Write-OK "Tailscale already installed"
+}
+
+# ── 3c. LibreHardwareMonitor web server (temps/fans on port 8085) ─────────────
+Write-Step "Starting LibreHardwareMonitor web server (port 8085)..."
+$lhmExe = "C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe"
+if (Test-Path $lhmExe) {
+    Start-Process -FilePath $lhmExe -WindowStyle Minimized -ErrorAction SilentlyContinue
+    Write-OK "LibreHardwareMonitor started (enable Options -> Web Server if not already on)"
+} else {
+    Write-Warn "LibreHardwareMonitor not found at $lhmExe"
+    Write-Host "    Temps/fans need LHM: https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases"
+    Write-Host "    Then enable Options -> Web Server (port 8085). The agent still runs without it (psutil only)."
+}
 
 # ── 4. Copy agent files ──────────────────────────────────────────────────────
 Write-Step "Installing agent to $InstallDir..."
@@ -75,7 +102,7 @@ if (-not (Test-Path $confPath)) {
 [nemesis]
 nemesis_ip = REPLACE_ME
 nemesis_port = 5001
-nemesis_subnet = 192.168.4.0/22
+nemesis_subnet =
 device_name = My Windows PC
 device_id =
 poll_interval = 300
@@ -95,7 +122,7 @@ if ($DeviceName) {
 }
 
 if ((Get-Content $confPath) -match "REPLACE_ME") {
-    $ip = Read-Host "Enter your Nemesis server IP (e.g. 192.168.4.1)"
+    $ip = Read-Host "Enter your Nemesis server address (Tailscale IP or LAN IP)"
     (Get-Content $confPath) -replace "REPLACE_ME", $ip | Set-Content $confPath
 }
 
@@ -140,4 +167,9 @@ Write-Host "  Nemesis Agent installed successfully!" -ForegroundColor Green
 Write-Host "  Install dir: $InstallDir" -ForegroundColor Green
 Write-Host "  Log file:    $InstallDir\nemesis_agent.log" -ForegroundColor Green
 Write-Host "  Config:      $InstallDir\nemesis_agent.conf" -ForegroundColor Green
+Write-Host "" -ForegroundColor Green
+Write-Host "  NEXT STEP — approve this device:" -ForegroundColor Yellow
+Write-Host "    The agent generated a keypair and requested enrollment." -ForegroundColor Yellow
+Write-Host "    Open your Nemesis dashboard -> Settings -> Devices and click" -ForegroundColor Yellow
+Write-Host "    Approve. The agent will start reporting once approved." -ForegroundColor Yellow
 Write-Host "============================================================`n" -ForegroundColor Green

@@ -6,9 +6,9 @@ import uuid
 CONF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nemesis_agent.conf")
 
 DEFAULTS = {
-    "nemesis_ip": "192.168.4.1",
+    "nemesis_ip": "",                 # set at install time (Rule 8: no real IP shipped)
     "nemesis_port": "5001",
-    "nemesis_subnet": "192.168.4.0/22",
+    "nemesis_subnet": "",             # local subnet for local-vs-VPN detection; set at install
     "device_name": "My Device",
     "device_id": "",
     "poll_interval": "300",
@@ -16,7 +16,16 @@ DEFAULTS = {
     "suricata_profile": "auto",
     "scan_on_reconnect": "true",
     "last_scan_at": "",
+    # ── owner-gated enrollment (keypair lives alongside this .conf) ──
+    "enrollment_status": "",          # mirrors the server: 'pending'|'approved'|'rejected'
+    "private_key_path": "",           # set by enrollment.ensure_keypair()
+    "public_key_path": "",
 }
+
+
+def keys_dir():
+    """Directory holding the agent's RSA keypair — alongside the .conf file."""
+    return os.path.join(os.path.dirname(CONF_PATH), "keys")
 
 
 def load():

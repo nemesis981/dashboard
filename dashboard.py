@@ -1352,6 +1352,88 @@ def api_header_status():
     return jsonify(_header_status_data())
 
 
+# ── Agent enrollment approval (owner action; auth-guarded dashboard routes) ────
+@app.route("/api/agent/<device_id>/approve", methods=["POST"])
+def api_agent_approve(device_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "UPDATE agent_devices SET enrollment_status='approved', enrolled_by=?, enrolled_at=? "
+            "WHERE device_id=?",
+            (_actor(), datetime.now().isoformat(timespec="seconds"), device_id))
+        conn.commit()
+        conn.close()
+        _audit(action="agent_approve", rule_id=device_id)
+        return jsonify({"ok": True, "status": "approved"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/agent/<device_id>/reject", methods=["POST"])
+def api_agent_reject(device_id):
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute("UPDATE agent_devices SET enrollment_status='rejected' WHERE device_id=?",
+                     (device_id,))
+        conn.commit()
+        conn.close()
+        _audit(action="agent_reject", rule_id=device_id)
+        return jsonify({"ok": True, "status": "rejected"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _render_agent_devices_html() -> str:
+    """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT device_id, device_name, os, os_version, hardware_summary, "
+            "enrollment_status, connection_type, lhm_available, agent_last_seen "
+            "FROM agent_devices ORDER BY agent_last_seen DESC").fetchall()
+        conn.close()
+    except Exception:
+        return ('<div class="card" id="section-devices-enroll"><h2>&#128421; Devices</h2>'
+                '<p style="color:#888">No device data available.</p></div>')
+    pending  = [r for r in rows if (r["enrollment_status"] or "") == "pending"]
+    enrolled = [r for r in rows if (r["enrollment_status"] or "") == "approved"]
+    h = ['<div class="card" id="section-devices-enroll" style="margin-bottom:16px">'
+         '<h2>&#128421; Devices</h2>',
+         '<h3 style="color:#ffcc00;font-size:0.95em">Pending approval</h3>']
+    if not pending:
+        h.append('<p style="color:#888;font-size:0.86em">No devices awaiting approval.</p>')
+    for r in pending:
+        did = html.escape(r["device_id"], quote=True)
+        h.append(
+            '<div style="background:#0d0d1e;border:1px solid #ffcc0044;border-radius:8px;'
+            'padding:10px 12px;margin-bottom:8px">'
+            f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+            f'<span style="color:#aaa;font-size:0.84em">{html.escape((r["os"] or "") + " " + (r["os_version"] or "")[:40])}</span><br>'
+            f'<span style="color:#888;font-size:0.82em">{html.escape(r["hardware_summary"] or "")}</span><br>'
+            f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
+            'border:1px solid #00ff88;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Approve</button> '
+            f'<button onclick="agentReject(\'{did}\')" style="background:#ff444422;color:#ff6666;'
+            'border:1px solid #ff4444;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Reject</button>'
+            '</div>')
+    h.append('<h3 style="color:#00d4ff;font-size:0.95em;margin-top:14px">Enrolled devices</h3>')
+    if not enrolled:
+        h.append('<p style="color:#888;font-size:0.86em">No enrolled devices yet.</p>')
+    for r in enrolled:
+        lhm = ('&#9989; sensors' if r["lhm_available"]
+               else '&#9888; no LHM (temps/fans need LibreHardwareMonitor)')
+        h.append(
+            '<div style="background:#0d0d1e;border:1px solid #222;border-radius:8px;'
+            'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
+            f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+            f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
+            f'<span style="color:#888">conn: {html.escape(r["connection_type"] or "unknown")}</span> &middot; '
+            f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span> &middot; '
+            f'<span style="color:#888">{lhm}</span></div>')
+    h.append('</div>')
+    return "".join(h)
+
+
 _TUNNEL_IFACES = ["tun0", "tun1", "wg0", "wg1", "nordlynx", "proton0"]
 
 def get_vpn_status():
@@ -2686,6 +2768,8 @@ def settings_page():
     <p><a class="back" href="/">← Back to Dashboard</a></p>
 
     {_add_user_html}
+    <script src="/static/agent-enroll.js"></script>
+    {_render_agent_devices_html()}
 
     <div id="moduleRestartBanner" style="display:none;background:#2a1800;border:1px solid #ffaa00;border-radius:8px;padding:12px 16px;margin-bottom:16px;align-items:center;gap:12px;flex-wrap:wrap">
         <span class="tier-text"
