@@ -1878,12 +1878,12 @@ def _api_incident_detail(inc_id: int):
 
 
 def _api_incident_close(inc_id: int):
-    from flask import jsonify
+    from flask import jsonify, request
     try:
         conn = _conn()
         conn.execute(
-            "UPDATE anomaly_incidents SET status='closed', updated_at=? WHERE id=?",
-            (time.time(), inc_id)
+            "UPDATE anomaly_incidents SET status='closed', updated_at=?, actor=? WHERE id=?",
+            (time.time(), request.remote_addr, inc_id)
         )
         conn.commit()
         conn.close()

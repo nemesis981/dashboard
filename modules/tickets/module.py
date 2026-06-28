@@ -383,6 +383,7 @@ def _api_tickets_list_create():
             src_ip=data.get("src_ip"),
             dst_ip=data.get("dst_ip"),
             ai_analysis_ref=data.get("ai_analysis_ref"),
+            actor=request.remote_addr,   # actor seam: Flask request context
         )
         return jsonify({"ok": bool(tid), "id": tid})
     except Exception as e:
@@ -438,6 +439,7 @@ def _api_ticket_notes(key):
             src_ip=data.get("src_ip"),
             dst_ip=data.get("dst_ip"),
             priority=data.get("priority"),
+            actor=request.remote_addr,   # actor seam: Flask request context
         )
         return jsonify({"ok": True, "id": note_id})
     except Exception as e:

@@ -630,11 +630,11 @@ def _api_rows():
 
 def _api_submit(item_id: int):
     """Mark item as submitted (shows 'coming soon' message on client)."""
-    from flask import jsonify
+    from flask import jsonify, request
     try:
         conn = _conn()
         conn.execute(
-            "UPDATE community_queue SET submitted=1 WHERE id=?", (item_id,)
+            "UPDATE community_queue SET submitted=1, actor=? WHERE id=?", (request.remote_addr, item_id)
         )
         conn.commit()
         conn.close()
@@ -645,11 +645,11 @@ def _api_submit(item_id: int):
 
 def _api_dismiss(item_id: int):
     """Dismiss item from queue (submitted=2)."""
-    from flask import jsonify
+    from flask import jsonify, request
     try:
         conn = _conn()
         conn.execute(
-            "UPDATE community_queue SET submitted=2 WHERE id=?", (item_id,)
+            "UPDATE community_queue SET submitted=2, actor=? WHERE id=?", (request.remote_addr, item_id)
         )
         conn.commit()
         conn.close()

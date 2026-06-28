@@ -62,13 +62,17 @@ def is_enabled(name: str) -> bool:
     return _is_enabled(name)
 
 
-def set_enabled(name: str, enabled: bool) -> None:
-    """Toggle a module.  Updates DB and starts/stops the module immediately."""
+def set_enabled(name: str, enabled: bool, actor: str = None) -> None:
+    """Toggle a module.  Updates DB and starts/stops the module immediately.
+
+    `actor` is the attribution seam: threaded to _set_enabled_in_db so the
+    toggling identity is recorded on the modules_enabled row.
+    """
     if name not in _manifests:
         raise ValueError(f"Unknown module: {name!r}")
     if not enabled and _manifests[name].get("required"):
         raise ValueError(f"Module {name!r} is required and cannot be disabled")
-    _set_enabled_in_db(name, enabled)
+    _set_enabled_in_db(name, enabled, actor)
     if enabled:
         _load_module(name)
     else:

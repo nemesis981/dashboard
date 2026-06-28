@@ -1226,7 +1226,7 @@ def api_quarantine_confirm(q_id):
             conn.close()
             return jsonify({"error": f"quarantine status is {status}, cannot confirm"}), 409
         c.execute("UPDATE alerts SET action='block' WHERE rule_id=?", (rule_id,))
-        c.execute("UPDATE quarantines SET status='confirmed' WHERE id=?", (q_id,))
+        c.execute("UPDATE quarantines SET status='confirmed', actor=? WHERE id=?", (request.remote_addr, q_id))
         conn.commit()
         conn.close()
         _audit(action="confirm", rule_id=rule_id, ip=ip)
@@ -1251,7 +1251,7 @@ def api_quarantine_lift(q_id):
             return jsonify({"error": f"quarantine status is {status}, cannot lift"}), 409
         ufw_ok = ufw_delete(ip)
         c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
-        c.execute("UPDATE quarantines SET status='lifted' WHERE id=?", (q_id,))
+        c.execute("UPDATE quarantines SET status='lifted', actor=? WHERE id=?", (request.remote_addr, q_id))
         conn.commit()
         conn.close()
         _audit(action="lift", rule_id=rule_id, ip=ip)
@@ -4296,7 +4296,7 @@ def api_modules():
 @app.route("/api/modules/<name>/enable", methods=["POST"])
 def api_module_enable(name):
     try:
-        modules_loader.set_enabled(name, True)
+        modules_loader.set_enabled(name, True, actor=request.remote_addr)
         return jsonify({"success": True, "status": modules_loader.module_status(name)})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -4305,7 +4305,7 @@ def api_module_enable(name):
 @app.route("/api/modules/<name>/disable", methods=["POST"])
 def api_module_disable(name):
     try:
-        modules_loader.set_enabled(name, False)
+        modules_loader.set_enabled(name, False, actor=request.remote_addr)
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

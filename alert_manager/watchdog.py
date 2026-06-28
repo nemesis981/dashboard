@@ -349,6 +349,7 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
                 title=f"Auto: {breach}",
                 body=body,
                 priority=severity,
+                actor="system",   # actor seam: background service (watchdog)
             )
     except Exception:
         pass  # never crash watchdog
