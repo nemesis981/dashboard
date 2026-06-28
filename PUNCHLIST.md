@@ -183,20 +183,42 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
   `BEGIN IMMEDIATE` around the merge, or an SQL-side JSON merge. One variable. Follow-on to
   `2d200e0`.
 
-- [ ] **Dashboard layout memory — server-side from the start.** Layouts must follow the user
-  across devices (laptop → phone → tablet), so localStorage is wrong — store **server-side in
-  `alerts.db` from day one**.
+- [ ] **Dashboard layout memory — server-side, two-level personalization.** Layouts must follow
+  the user across devices (laptop → phone → tablet), so localStorage is wrong — store
+  **server-side in `alerts.db` from day one**.
   - **Table:** `user_layouts (user_key TEXT, slot_name TEXT, slot_index 1-5, layout_json TEXT,
     updated_at TEXT, UNIQUE(user_key, slot_index))`.
+  - **Layout JSON format (two levels):**
+    ```json
+    {
+      "card_order": ["alerts", "hardware", "tickets", "diagnostics"],
+      "card_content": {
+        "hardware": ["cpu_temp", "fan_speed", "memory", "gpu_temp"],
+        "alerts":   ["critical", "high", "medium", "low"],
+        "tickets":  ["open", "investigating", "resolved"]
+      }
+    }
+    ```
+    - **Level 1 — card order:** which cards appear where on the dashboard.
+    - **Level 2 — content order within cards:** which metrics/sections appear first inside each
+      card. E.g. a hardware-monitor user may want `cpu_temp` first vs `fan_speed` first vs
+      `memory` first — their priority, their order. Applies to: hardware monitor, alerts,
+      tickets, diagnostics, malware card.
+    - Same Sortable.js, same drag-and-drop, same storage — just applied at **two** levels
+      instead of one.
   - **`user_key` evolution** (same table, value changes as identity matures): pre-session-identity
     → `request.remote_addr` (device-specific, functional); session identity (cookie display name)
     → display-name string (follows the user across devices — the trip-ready version); commercial
-    auth → real user ID (secure, multi-tenant).
-  - **Layout slots:** 3–5 named slots per user (user-defined names), switchable instantly from a
-    dashboard-header dropdown. Layout = ordered array of card IDs serialized to JSON. "Reset to
-    default" → tier-appropriate default.
-  - **Draggable cards:** Sortable.js (available via cdnjs, no new dependency).
-  - **2 API routes:** `GET /api/layout` (load slots) + `POST /api/layout` (save).
+    auth → real user ID (secure, multi-tenant). Layout upgrades automatically as `user_key` matures.
+  - **Layout slots:** 3–5 named slots per user (user-defined names: "Working", "Monitoring",
+    "Incident Response", etc.), switchable instantly from a dashboard-header dropdown.
+    "Reset to default" → tier-appropriate default layout.
+  - **Draggable cards + draggable within-card sections:** Sortable.js (available via cdnjs, no
+    new dependency).
+  - **2 API routes:** `GET /api/layout` (load slots) + `POST /api/layout` (save slot).
   - **Build-order dependency:** session identity must land **before** layout memory so layouts
     are globally available per-user from day one. Full build order: race fixes ✅ → actor
-    attribution → session identity → dashboard layout memory.
+    attribution → session identity → dashboard layout memory (two-level).
+  - **Principle:** *"this feels like my tool"* — what keeps a product in daily use. Layout memory
+    at both the card and metric level is complete personalization for the non-expert user who
+    builds a specific mental map of where things are.
