@@ -24,8 +24,6 @@
 4. Session closeout + trip ready.
 
 ## Open items
-- **ADR 0009 (Security Inspection Proxy / SSE) file is NOT yet written** — only a captured
-  summary exists (supplement `2026-06-28-004.md` §Architecture). Write the ADR file.
 - Son's laptop Tailscale re-enrollment (`nemesis.tailscale@gmail.com`).
 - Ethernet cable for Wisconsin (find before Friday).
 - KDE Connect broken (not pursuing).
@@ -34,8 +32,8 @@
 - Race 4 residual merge-RMW (low-priority PUNCHLIST item).
 
 ## Pointers
-- **ADRs:** 0006 (Data Manager), 0007 (device-user model), 0008 (impossible travel).
-  **0009 (inspection proxy/SSE) — decision captured, ADR file pending (see Open items).**
+- **ADRs:** 0006 (Data Manager), 0007 (device-user model), 0008 (impossible travel),
+  0009 (security inspection proxy / self-hosted SSE — `docs/architecture/0009-security-inspection-proxy.md`).
 - `docs/roadmap/nemesis-test-lab.md` (VM Lab + sandbox)
 - `docs/roadmap/agent-rebuild-config-driven.md`
 - `docs/roadmap/msp-central-management.md`
