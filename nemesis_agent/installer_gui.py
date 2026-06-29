@@ -129,10 +129,18 @@ class InstallerApp:
             self._register_autostart()
             self.set_status(STEPS[3], 4)
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
-        except Exception as e:                       # friendly failure
-            self.set_status("Something went wrong. Please contact your admin.")
+        except Exception as e:                       # Phase 8: show the real error
+            import traceback
+            self.set_status("Install failed: " + str(e)[:200])
+            try:
+                os.makedirs(INSTALL_DIR, exist_ok=True)
+                logp = os.path.join(INSTALL_DIR, "install_error.log")
+                with open(logp, "w", encoding="utf-8") as f:
+                    f.write(traceback.format_exc())
+                self.status.config(text=self.status.cget("text") + f"\n(details: {logp})")
+            except Exception:
+                pass
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
-            self._error_detail = str(e)
 
     # ── install steps (Windows) ──────────────────────────────────────────────
     def _check_requirements(self):
