@@ -544,3 +544,24 @@ AI TUTORIAL — ADDENDUM (first-run + searchable index + connected dashboard):
   ADR 0006: writes via Data Manager.
   Connected dashboard: index knows each topic's DOM element → "show me" highlights the
   LIVE element (reality, not screenshots — never drifts from UI).
+
+THREE-SNAPSHOT VENDOR PACKAGE (see docs/roadmap/three-snapshot-vendor-package.md):
+
+Hand vendors PROOF: Snapshot 1 (pre-install clean baseline — from registry backup),
+Snapshot 2 (issue state, auto-captured on canary/crash/flag — registry, processes,
+services, network, file changes, memory, error log, canary state), Snapshot 3 (delta:
+files+registry+services+network changed, with attribution + AI diagnosis).
+
+Package: snapshot-1/2/3.zip + nemesis-rebuild-{linux.sh,windows.ps1} + Dockerfile +
+reproduction-steps.txt. Auto-captured (sandbox monitors continuously — export just packages).
+
+Update regression: S1=v1.0 working, S2=v2.0 broken, delta = what the UPDATE changed.
+"Your v2.0 modified SharedLib.dll — v1.0 did not." Vendor can't say "works on our end".
+
+Sanitization: all 3 snapshots, same Rule-8 chokepoint as support bundle (strip
+user/host/IP/personal, preserve software config+version).
+
+Open: MEMORY-state sanitization is hard (dump can hold creds/tokens — narrow to
+process+module list or build a dedicated scrubber BEFORE any memory artifact ships to a
+commercial recipient — highest-risk Rule-8 surface); rebuild-script/Dockerfile generation
+undesigned (encode system profile); snapshot retention/size policy (tie to ADR 0006).
