@@ -603,3 +603,16 @@ ADR 0001: new id columns (confidence/signals/last_identified) = guarded migratio
 Open: mDNS/NetBIOS names are PII (sanitize before community feed); passive listener = new
 always-on core service/module; active probes are LAN access (don't bypass firewall.py / ADR
 0005); default user-accept (never silent auto-trust).
+
+MAC RANDOMIZATION + STABLE HARDWARE ID (see docs/roadmap/device-identification.md):
+  Correlation engine: new MAC/IP → check stable signals → match known device →
+  suggest merge (NEVER auto-merge). Confidence: keypair=1.0, dhcp=0.95, mdns=0.90,
+  timing=0.70. Threshold 0.85 → suggest merge to user.
+  Stable hardware ID: composite hash of available signals (machine-id, battery serial,
+  motherboard serial, CPU ID). Hash before storing — never raw hardware data. Battery
+  serial standout: no root needed (Linux /sys, Windows WMI, Mac ioreg), survives reinstall.
+  Agent enrollment: stable_id added to enrollment payload.
+  DB (guarded migration, ADR 0001, writes via Data Manager): known_macs, known_ips,
+  dhcp_hostname, mdns_name, stable_id, identity_confidence, identity_signals.
+  ADR 0008: stable_id distinguishes MAC randomization (normal) from true impossible
+  travel (suspicious). Build alongside the device-identification feature (same session).

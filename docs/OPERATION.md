@@ -10,6 +10,7 @@ Day-to-day usage reference for Nemesis Firewall. This guide covers what you'll s
 
 - [The Dashboard Overview](#the-dashboard-overview)
 - [Accessing the Dashboard](#accessing-the-dashboard)
+- [Browser Bookmark Note](#browser-bookmark-note)
 - [Network Devices](#network-devices)
 - [Hardware Monitor](#hardware-monitor)
 - [AI Firewall (Suricata Alerts)](#ai-firewall-suricata-alerts)
@@ -55,6 +56,15 @@ app internally.
   LAN-allowed (subnet-scoped) for agent enrollment + telemetry.
 - **Port canonicalization is an nginx concern**, not the app's. Do not add a Flask redirect to
   `:5000` — it would bounce proxied users to the firewall-blocked internal port.
+
+---
+
+## Browser Bookmark Note
+
+Nemesis is accessible at `http://<box-ip>` (port 80, nginx). **Do NOT bookmark**
+`http://<box-ip>:5000` — port 5000 is internal only (blocked from the LAN by the firewall).
+nginx on port 80 is the official, stable entrypoint. Some browser updates strip port numbers
+from bookmarks — using port 80 (no port needed) avoids this entirely.
 
 ---
 
