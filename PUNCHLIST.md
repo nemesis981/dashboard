@@ -269,6 +269,13 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
   Build **after** Flask-Login + device-auth Level 2. Full design:
   [docs/architecture/0007-device-user-model.md](docs/architecture/0007-device-user-model.md).
 
+- [ ] **Agent ping monitor — v1 (ADR 0010).** Continuous adaptive ICMP monitor on each agent
+  (7 targets, latency/TTL/loss/reachable, 60/15/5s adaptive interval, local SQLite buffer,
+  queued `/ping_batch` sync, per-device timeline). v1 core; traceroute capture, failure-narrative,
+  Tailscale relay netcheck, and TTL-trend deferred to v1.1. **Build deferred** until after
+  trip-readiness (pre-enrollment scan + Windows smoke test). Full design:
+  [docs/architecture/0010-agent-ping-monitor.md](docs/architecture/0010-agent-ping-monitor.md).
+
 COMMUNITY REPORTER IDENTITY SYSTEM (v1.1):
 Free tier key (NMS-FREE-XXXX) auto-generated on install.
 Reporter ID derived from license key + network latency +
@@ -278,6 +285,16 @@ verification (ZKP-adjacent — key never sent over network).
 Trust score, rate limiting, abuse detection, upgrade path
 with verified identity migration. Three-pass sanitization
 pipeline. See docs/roadmap/community-reporter-identity.md.
+Build alongside community backend (v2).
+
+COMMUNITY SIGNAL DEDUPLICATION (community backend data model):
+One entry per unique signal (SHA256(signal_type:signal_value),
+UNIQUE constraint). Duplicate reports bump times_seen / last_seen /
+unique_reporters / regions and recompute confidence. Bounded
+timestamp aggregates (100 recent / 168h / 90d / 24mo). Local raw
+context vs global sanitized aggregates; DB grows with unique
+threats not report volume. This is the Phase-2 "Data schema" lock.
+See docs/roadmap/community-signal-dedup.md.
 Build alongside community backend (v2).
 
 DAILY STATUS REPORT (printable/emailable) — v2:
@@ -301,6 +318,9 @@ user preference — admin sets, agent enforces via config-pull.
 BYOD: personal traffic summarized not specific (legal middle
 ground). AUP surfaced clearly at connection.
 Fail closed (business) vs fail open (personal) per network type.
+Time-based switching: tunnel policy can vary by schedule (e.g.
+work_only during business hours, personal/split off-hours) —
+admin-set via config-pull, not a user preference.
 Build alongside agent rebuild (v2).
 
 ZTNA + NAC ENFORCEMENT (v2):
