@@ -52,9 +52,22 @@ class InstallerApp:
         self.token = token
         self.device_name = device_name or "Windows Device"
         root.title("Nemesis Security — Setup")
-        root.geometry("440x260")
+        root.geometry("480x420")
 
-        tk.Label(root, text="Nemesis Security Agent", font=("Segoe UI", 14, "bold")).pack(pady=(18, 4))
+        tk.Label(root, text="Nemesis Security Agent", font=("Segoe UI", 14, "bold")).pack(pady=(16, 2))
+        # Option C: inline beginner instructions on the first screen (no separate file to open).
+        steps_text = (
+            "Before you start: install Tailscale (tailscale.com/download), log in with the "
+            "account your admin gave you, and wait for its green checkmark.\n\n"
+            "Then install Nemesis:\n"
+            "1. Click Install below.\n"
+            "2. If Windows asks permission, click Yes — this is safe; it came from your own "
+            "security system.\n"
+            "3. Watch the progress bar (about 2 minutes).\n"
+            "4. When it says \"Done! Your device is now protected,\" you can close this window."
+        )
+        tk.Message(root, text=steps_text, width=440, justify="left",
+                   font=("Segoe UI", 9)).pack(padx=16, pady=(2, 8))
         self.status = tk.Label(root, text="Ready to install.", font=("Segoe UI", 10))
         self.status.pack(pady=6)
         self.bar = ttk.Progressbar(root, length=360, mode="determinate", maximum=len(STEPS))

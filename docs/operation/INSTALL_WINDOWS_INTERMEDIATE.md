@@ -23,6 +23,26 @@
 - Network access to the Nemesis server (LAN, or Tailscale if you're remote).
 - The ability to approve the **UAC** prompt (admin rights on the machine).
 
+## Prerequisites
+
+### Tailscale (required — install first)
+Tailscale creates an encrypted tunnel between your
+device and the Nemesis server, enabling protection
+both at home and away from your network.
+
+1. Download from tailscale.com/download
+2. Install normally (standard Windows installer)
+3. Log in with the account your admin provides
+4. Confirm Tailscale shows Connected (green icon
+   in system tray) before running Nemesis installer
+
+⚠️ Tailscale must be connected before enrolling.
+   The Nemesis installer will fail silently if
+   Tailscale is not running.
+
+### Admin rights
+Have your Windows password ready for the UAC prompt.
+
 ## Installation steps
 
 1. **Get the installer** — `NemesisAgent-Setup.exe`, sent by your admin.

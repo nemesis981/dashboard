@@ -31,15 +31,33 @@ jobs:
       - name: Build NemesisAgent-Setup.exe
         run: python nemesis_agent/build_installer.py
 
-      - name: Upload installer artifact
+      - name: Bundle installer + docs (zip)
+        shell: pwsh
+        run: |
+          $ver = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME } else { $env:GITHUB_SHA.Substring(0,7) }
+          $stage = "nemesis_agent/dist/bundle"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item nemesis_agent/dist/NemesisAgent-Setup.exe $stage/
+          Copy-Item docs/operation/INSTALL_WINDOWS_BEGINNER.md     "$stage/START_HERE_BEGINNER.md"
+          Copy-Item docs/operation/INSTALL_WINDOWS_INTERMEDIATE.md "$stage/INSTALL_INTERMEDIATE.md"
+          Copy-Item docs/operation/INSTALL_WINDOWS_PRO.md          "$stage/INSTALL_PRO.md"
+          $zip = "nemesis_agent/dist/NemesisAgent-$ver-Windows.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          Write-Host "Bundled: $zip"
+
+      - name: Upload artifacts (exe + bundle zip)
         uses: actions/upload-artifact@v4
         with:
-          name: NemesisAgent-Setup
-          path: nemesis_agent/dist/NemesisAgent-Setup.exe
+          name: NemesisAgent-Windows
+          path: |
+            nemesis_agent/dist/NemesisAgent-Setup.exe
+            nemesis_agent/dist/NemesisAgent-*-Windows.zip
           if-no-files-found: error
 
       - name: Attach to Release (tagged builds only)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: nemesis_agent/dist/NemesisAgent-Setup.exe
+          files: |
+            nemesis_agent/dist/NemesisAgent-Setup.exe
+            nemesis_agent/dist/NemesisAgent-*-Windows.zip

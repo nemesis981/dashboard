@@ -2,6 +2,29 @@
 
 *For IT professionals, developers, and power users.*
 
+## Prerequisites
+
+### Tailscale
+The agent requires Tailscale for:
+  Management tunnel: enrollment, heartbeat, port 5002
+  Mode 2 inspection proxy: traffic routing via tunnel
+  Remote dashboard access: port 80 via nginx
+
+Setup options:
+  A. Admin invite link (recommended for most users)
+  B. Pre-auth key:
+     Generate at login.tailscale.com/admin/settings/keys
+     tailscale up --authkey=tskey-auth-xxxxx
+  C. Manual login: tailscale up
+
+Verify before installing:
+  tailscale status
+  → Nemesis box IP should appear as a peer
+
+Planned v1.1: silent Tailscale install bundled in exe
+  Pre-auth key baked into token at generation time
+  No manual Tailscale setup required for end users
+
 ## Architecture
 
 The Nemesis Agent is a config-driven Python process (`nemesis_agent/agent.py`)

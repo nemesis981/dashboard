@@ -2,6 +2,31 @@
 
 *A friendly, step-by-step guide. No computer experience required.*
 
+## Step 0: Install Tailscale first (required)
+
+Before installing Nemesis, you need one free app
+called Tailscale. This connects your computer
+securely to your home security system.
+
+1. Open your web browser and go to:
+   tailscale.com/download
+
+2. Click Download for Windows
+
+3. Double-click the downloaded file to install it
+   (just like any normal Windows program)
+
+4. When Tailscale opens, click Log in
+   → Use the account details your admin sent you
+   → OR ask [SUPPORT_CONTACT] which account to use
+
+5. When Tailscale shows a green light or checkmark:
+   ✅ You're done with this step
+   Continue to Step 1 below
+
+Note: Tailscale must be connected (green) before
+the Nemesis installer will work.
+
 ## What this does
 
 This puts a small, quiet helper on your computer that keeps an eye on its
