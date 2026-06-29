@@ -100,8 +100,24 @@ class InstallerApp:
         self.btn.config(state="disabled")
         threading.Thread(target=self._run, daemon=True).start()
 
+    def _tailscale_installed(self):
+        """Phase 7: Tailscale provides the tunnel to the Nemesis server. Detect it
+        on PATH or in its default install dir."""
+        import shutil
+        if shutil.which("tailscale"):
+            return True
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        return os.path.isfile(os.path.join(pf, "Tailscale", "tailscale.exe"))
+
     def _run(self):
         try:
+            # Phase 7: block (don't half-install) if Tailscale is missing — without
+            # the tunnel the agent can't reach the server.
+            if not self._tailscale_installed():
+                self.set_status("Tailscale is required first. Install it from "
+                                "tailscale.com/download, sign in, then run this installer again.")
+                self.btn.config(text="Retry", state="normal", command=self.start)
+                return
             self.set_status(STEPS[0], 1)
             self._check_requirements()
             self.set_status(STEPS[1], 2)
