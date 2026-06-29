@@ -375,6 +375,18 @@ only if nemesis_agent/yara_rules/rules.yar is present. No rules file ships yet,
 so YARA always reports yara_available=false / not_available. ClamAV coverage is
 unaffected. Acceptable for v1, but ship a baseline YARA ruleset (and a way to
 update it) before commercial release. See enrollment.py pre_enrollment_scan().
+(NB: this note is AGENT-specific. The server-side malware_detection module
+DOES ship YARA — 6 bundled rule files, _yara_scan working.)
+
+YARA FALSE-POSITIVE KNOWN-GOOD PATH EXCLUSIONS (build candidate, live scanner):
+The live malware_detection YARA scanner (_yara_scan, scan_directory) has a
+max-file-size skip but NO known-good path exclusions, so it will false-positive
+on browser extension dirs, browser/Electron caches (VS Code, Chrome), service
+worker caches, and ad-blocker rulesets (which contain malicious domains BY
+DESIGN). Add a cross-platform, updatable Tier-1 known-good PATH exclusion list.
+Design captured in docs/roadmap/malware-detection-pipeline.md ("YARA FALSE-
+POSITIVE EXCLUSIONS"). Real FP-prevention on developer machines; needs Rule-6
+backup + tests when built (touches the live scanner).
 
 MALWARE DETECTION PIPELINE (see docs/roadmap/malware-detection-pipeline.md):
 
