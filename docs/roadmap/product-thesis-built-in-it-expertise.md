@@ -129,6 +129,36 @@ Nemesis has:
 **Product thesis in one line:**
 > "AI makes attacking easy. Nemesis makes defending automatic. No IT department required."
 
+## SMB Software Support (the hidden value)
+
+SMBs are notorious for buying cheap software with issues. The typical experience: something
+breaks, support asks for system information the user can't provide, 2 weeks of back-and-forth,
+"try reinstalling."
+
+Nemesis changes this dynamic completely:
+
+The [support bundle](support-bundle.md) (generated in 10 seconds from already-collected data)
+gives SMB users something they've never had: documented, provable evidence of exactly what
+happened.
+
+- The **NMS-INST certificate** proves the install was clean.
+- The **registry diff** proves what changed and when.
+- The **sandbox log** proves what the software was doing at install.
+- The **AI diagnosis** tells them what likely caused the issue.
+
+Vendors can no longer say "works on our end." The conversation shifts from
+"describe your problem" to "here's the exact cause, here's the fix."
+
+This is **not a security feature — it's an accountability layer for the software ecosystem.**
+But it's only possible because of the security infrastructure underneath it.
+(The certificate chain + manifest come from the
+[malware-detection-pipeline](malware-detection-pipeline.md) §8; the bundle assembly + routing
+from [support-bundle.md](support-bundle.md).)
+
+**Marketing angle for SMB:**
+> "Stop wasting weeks on software support. Nemesis documents everything automatically.
+> When something breaks, you have the proof."
+
 ## Shape / next
 Capture as the guiding principle now. It may later **graduate** into `ARCHITECTURE.md`
 (durable product-vision section) or a dedicated ADR once it has shaped enough concrete
