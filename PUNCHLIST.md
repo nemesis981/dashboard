@@ -585,3 +585,21 @@ before_request: a Flask "host missing :5000 → 301 :5000" would bounce every ng
 user to a firewall-blocked port = dashboard outage (nginx forwards Host with no port). The
 naive Flask redirect is unsafe at any altitude here. Documented in docs/OPERATION.md.
 (From the 2026-06-29 smoke-test topology audit.)
+
+DEVICE IDENTIFICATION (passive + on-demand active) — see docs/roadmap/device-identification.md:
+
+Turn ❓ unknown devices into named/trusted ones WITHOUT DNS takeover or router config.
+PASSIVE (always-on, zero risk): mDNS/Zeroconf listener — devices announce themselves
+(phones, speakers, TVs, printers); most ❓ identified within 24h. No DNS/router changes.
+ACTIVE (on-demand button, per-device/fleet): reverse DNS, mDNS query, NetBIOS, UPnP/SSDP,
+HTTP banner, port fingerprint → AI combines → name suggestion → user accept/edit/skip.
+NEW-DEVICE TRIGGER: passive signals auto-run; unidentified after 1h → queue active scan;
+notify "N new unidentified devices need review". Result: confidence score, accept → trusted ✅.
+
+Builds on: existing `devices` core table (mac/ip/friendly_name/device_type/trusted — the spec's
+"device_map") + device_scanner.py (nmap, LAN_SUBNET-driven) + AI Engine + alerts.
+ADR 0001: new id columns (confidence/signals/last_identified) = guarded migration on `devices`
++ updated CREATE; writes via Data Manager (0006); accept/edit/skip carries actor.
+Open: mDNS/NetBIOS names are PII (sanitize before community feed); passive listener = new
+always-on core service/module; active probes are LAN access (don't bypass firewall.py / ADR
+0005); default user-accept (never silent auto-trust).
