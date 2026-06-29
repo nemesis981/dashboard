@@ -32,8 +32,8 @@ jobs:
         continue-on-error: true   # a download hiccup must NOT fail the exe build
         shell: pwsh
         run: |
-          $ver = "1.4.1"
-          $url = "https://www.clamav.net/downloads/production/clamav-$ver.win.x64.portable.zip"
+          $ver = "1.5.2"
+          $url = "https://github.com/Cisco-Talos/clamav/releases/download/clamav-$ver/clamav-$ver.win.x64.zip"
           $zip = "$env:RUNNER_TEMP\clamav.zip"
           $dest = "nemesis_agent/clamav"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -48,12 +48,16 @@ jobs:
         continue-on-error: true   # a download hiccup must NOT fail the exe build
         shell: pwsh
         run: |
-          $url = "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest/download/LibreHardwareMonitor-net472.zip"
+          $url = "https://github.com/LibreHardwareMonitor/LibreHardwareMonitor/releases/latest/download/LibreHardwareMonitor.zip"
           $zip = "$env:RUNNER_TEMP\lhm.zip"
           $dest = "nemesis_agent/lhm"
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
           Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\lhm" -Force
+          # Flatten if the zip nested everything in a subdir; LibreHardwareMonitor.exe must land at lhm/ root.
+          $inner = Get-ChildItem "$env:RUNNER_TEMP\lhm" -Directory | Where-Object { Test-Path "$($_.FullName)\LibreHardwareMonitor.exe" } | Select-Object -First 1
+          $from = if ($inner) { "$($inner.FullName)\*" } else { "$env:RUNNER_TEMP\lhm\*" }
+          Copy-Item $from $dest -Recurse -Force
           Write-Host "LHM staged into $dest"
 
       - name: Build NemesisAgent-Setup.exe
