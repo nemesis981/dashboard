@@ -9,6 +9,7 @@ Day-to-day usage reference for Nemesis Firewall. This guide covers what you'll s
 ## Table of Contents
 
 - [The Dashboard Overview](#the-dashboard-overview)
+- [Accessing the Dashboard](#accessing-the-dashboard)
 - [Network Devices](#network-devices)
 - [Hardware Monitor](#hardware-monitor)
 - [AI Firewall (Suricata Alerts)](#ai-firewall-suricata-alerts)
@@ -35,6 +36,25 @@ The header bar shows:
 - **Community queue badge** — shows pending community threat submissions. Click to open the queue.
 - **Last updated** — when the dashboard last refreshed
 - **Uptime** — how long the Nemesis service has been running
+
+---
+
+## Accessing the Dashboard
+
+**The official entrypoint is nginx on port 80.** Browse to your Nemesis box's address with no
+port (e.g. `http://<box-ip>/` on the LAN, or the box's tailnet address). Nginx serves the
+dashboard behind HTTP Basic auth ("Nemesis Firewall" realm) and reverse-proxies to the Flask
+app internally.
+
+🔴 **Pro / operator detail:**
+- **nginx :80** — the public entrypoint (LAN-allowed in ufw, Basic-auth). Proxies to Flask
+  with `proxy_set_header Host $host`.
+- **Flask :5000** — the dashboard app itself. **Internal only** — ufw does NOT allow :5000 from
+  the LAN. Never link users to `:5000`; it is unreachable off-box.
+- **hw-monitor :5001** — the agent endpoint (`/enroll`, `/enrollment_status`, `/hw_data`),
+  LAN-allowed (subnet-scoped) for agent enrollment + telemetry.
+- **Port canonicalization is an nginx concern**, not the app's. Do not add a Flask redirect to
+  `:5000` — it would bounce proxied users to the firewall-blocked internal port.
 
 ---
 

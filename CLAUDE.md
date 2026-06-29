@@ -98,6 +98,12 @@ the clean version — `/home/<user>` → `/home/<user>`, real IPs → `<ip>`, re
 output to the public repo.** (An audit that quotes the live box's paths/IPs/hostname reads as
 factual but still leaks — sanitize the quotes, keep the meaning.)
 
+**Handoff docs are NOT exempt.** `docs/handoff/` (HANDOFF.md, supplements, worklogs) MUST pass
+the Rule-8 leak-scan before EVERY commit. Real LAN/tailnet IPs, hostnames, emails, and account
+names → placeholders (`<box-ip>`, `<tailnet-ip>`, `<project-account>`, …); the real values live
+ONLY in `~/work/nemesis-private/local-config.md` (outside the repo). (These are operational
+notes that read as internal, but the repo is public — they leak just like code.)
+
 ### 9. Handoff discipline
 - **Nightly:** when I say I'm stopping for the day, write a fresh `docs/handoff/HANDOFF.md`
   capturing current project state (OVERWRITE — latest state wins; this is "where things

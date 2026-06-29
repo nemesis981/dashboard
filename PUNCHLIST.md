@@ -577,3 +577,11 @@ Open: MEMORY-state sanitization is hard (dump can hold creds/tokens — narrow t
 process+module list or build a dedicated scrubber BEFORE any memory artifact ships to a
 commercial recipient — highest-risk Rule-8 surface); rebuild-script/Dockerfile generation
 undesigned (encode system profile); snapshot retention/size policy (tie to ADR 0006).
+
+PORT CANONICALIZATION — lives at the NGINX layer (already implemented; no action):
+The dashboard entrypoint is nginx :80 (Basic-auth) → Flask :5000 (internal, ufw-blocked
+from LAN). Any port redirect/canonicalization belongs in the nginx config, NOT a Flask
+before_request: a Flask "host missing :5000 → 301 :5000" would bounce every nginx-proxied
+user to a firewall-blocked port = dashboard outage (nginx forwards Host with no port). The
+naive Flask redirect is unsafe at any altitude here. Documented in docs/OPERATION.md.
+(From the 2026-06-29 smoke-test topology audit.)
