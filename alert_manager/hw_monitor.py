@@ -1906,10 +1906,17 @@ def _create_enrollment(payload, remote_ip):
                     (token, _time.time()))
                 if cur.rowcount == 1:
                     r = conn.execute(
-                        "SELECT created_by FROM enrollment_tokens WHERE token=?",
-                        (token,)).fetchone()
+                        "SELECT created_by, device_name_hint FROM enrollment_tokens "
+                        "WHERE token=?", (token,)).fetchone()
                     token_creator = r[0] if r else None
                     enroll_status = "approved"
+                    # Phase 6: if the agent didn't supply a specific name (blank or a
+                    # generic default), fall back to the token's device_name_hint.
+                    # Safe: signature was already verified against the supplied name.
+                    hint = (r[1] if r else None) or ""
+                    if hint.strip() and device_name.strip().lower() in (
+                            "", "device", "my device", "windows device"):
+                        device_name = hint.strip()
             except Exception:
                 log.exception("enrollment token check failed; falling back to pending")
         conn.execute(
