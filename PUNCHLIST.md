@@ -616,3 +616,15 @@ MAC RANDOMIZATION + STABLE HARDWARE ID (see docs/roadmap/device-identification.m
   dhcp_hostname, mdns_name, stable_id, identity_confidence, identity_signals.
   ADR 0008: stable_id distinguishes MAC randomization (normal) from true impossible
   travel (suspicious). Build alongside the device-identification feature (same session).
+
+INSTALLER EMAIL DELIVERY (v2 — build AFTER Wisconsin trip; see docs/roadmap/installer-email-delivery.md):
+  Admin form (device name, recipient email, support contact, optional message) → Nemesis
+  generates enrollment token + sends personalized email with installer /zip download link +
+  friendly message. Uses existing SMTP config from nemesis.env. Logs delivery; token tied
+  to recipient email (audit trail).
+  MOSTLY WIRING — already exists: enrollment_tokens core table, token gen + installer download
+  links (dashboard.py ~1458), send_email() helper (email_utils.py, SMTP from env).
+  ADDS: admin form, email composition, + guarded migration on enrollment_tokens (ADR 0001):
+  recipient_email, support_contact, custom_message, delivered_at (writes via Data Manager).
+  Rule 8: recipient email/message are PII (never to community feed); short expires_at +
+  max_uses=1 so an intercepted email can't enroll a rogue device; surface send failures.
