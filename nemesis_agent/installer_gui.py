@@ -107,6 +107,7 @@ class InstallerApp:
             self.set_status(STEPS[1], 2)
             self._install_files()
             self._start_freshclam()      # Phase 4: fetch AV definitions in background
+            self._setup_lhm()            # Phase 5: start LibreHardwareMonitor + logon task
             self.set_status(STEPS[2], 3)
             self._enroll()
             self._register_autostart()
@@ -138,6 +139,28 @@ class InstallerApp:
         except Exception:
             pass
 
+    def _setup_lhm(self):
+        """Phase 5: start LibreHardwareMonitor (temps/fans web server on :8085) and
+        register a logon task so it runs each login. Best-effort; the agent works
+        without it (psutil-only metrics). Web server may need a one-time enable
+        (Options -> Web Server), matching the .ps1 behaviour."""
+        import subprocess
+        exe = os.path.join(INSTALL_DIR, "lhm", "LibreHardwareMonitor.exe")
+        if not os.path.isfile(exe):
+            return
+        flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
+        try:
+            subprocess.Popen([exe], cwd=os.path.join(INSTALL_DIR, "lhm"),
+                             creationflags=flags)
+        except Exception:
+            pass
+        try:
+            subprocess.run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "HIGHEST",
+                            "/TN", "NemesisLHM", "/TR", f'"{exe}"'],
+                           check=False, capture_output=True, timeout=30)
+        except Exception:
+            pass
+
     def _add_defender_exclusion(self):
         """Phase 3: exclude the install dir from Windows Defender so the agent exe
         isn't flagged/quarantined. Best-effort (needs admin — Setup runs elevated)."""
@@ -162,6 +185,10 @@ class InstallerApp:
         clam_src = os.path.join(src, "clamav")
         if os.path.isdir(clam_src):
             shutil.copytree(clam_src, os.path.join(INSTALL_DIR, "clamav"), dirs_exist_ok=True)
+        # Phase 5: extract bundled LibreHardwareMonitor (temps/fans) if present.
+        lhm_src = os.path.join(src, "lhm")
+        if os.path.isdir(lhm_src):
+            shutil.copytree(lhm_src, os.path.join(INSTALL_DIR, "lhm"), dirs_exist_ok=True)
         cfg = configparser.ConfigParser()
         cfg.add_section("nemesis")
         cfg.set("nemesis", "nemesis_ip", self.server)

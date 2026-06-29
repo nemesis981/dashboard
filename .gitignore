@@ -25,3 +25,4 @@ nemesis_agent/clamav/
 nemesis_agent/dist/
 nemesis_agent/build/
 *.spec
+nemesis_agent/lhm/

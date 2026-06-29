@@ -91,8 +91,9 @@ def main(argv=None):
     setup_datas = []
     if os.path.exists(agent_exe):
         setup_datas.append(f"{agent_exe}{SEP}.")
-    # "clamav" (Phase 4) is bundled if the CI fetch step produced it; skip-if-absent.
-    for sub in ("config.py", "enrollment.py", "modules", "platforms", "clamav"):
+    # "clamav" (Phase 4) / "lhm" (Phase 5) are bundled if the CI fetch steps
+    # produced them; skip-if-absent so the build never depends on those downloads.
+    for sub in ("config.py", "enrollment.py", "modules", "platforms", "clamav", "lhm"):
         p = os.path.join(HERE, sub)
         if os.path.exists(p):
             setup_datas.append(f"{p}{SEP}{sub if os.path.isdir(p) else '.'}")
