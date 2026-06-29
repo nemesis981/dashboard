@@ -485,3 +485,29 @@ Prerequisites (all roadmap-only): support bundle, certificate system,
 community backend infrastructure.
 Open: separate product line? legal (vendor agreements, consent, disclosure —
 same legal bucket as community feed); cert verification-store trust (signing/revocation).
+
+PRE-ESCALATION SUPPORT SEARCH (see docs/roadmap/pre-escalation-support-search.md):
+
+Before generating a support ticket, AI searches for an existing fix — escalation
+is the LAST step, not the first. Common issues already have answers.
+
+Search sources (priority): Nemesis community feed (local, fastest) → vendor KB →
+release notes/known-issues → vendor forums → general web (last resort).
+Query = software + version + error signature + OS + conflict (from issue profile).
+
+Result tiers: Nemesis-knows (one-click) / vendor-docs (cite + apply) /
+community-workaround (upvotes, try-or-escalate) / not-found (bundle + "searched" note).
+
+"Searched, not found" in bundle: documents what/when searched, tells vendor it's
+genuinely new, includes search terms (helps vendor KB).
+
+Self-building community KB: user confirms fix worked → contributed back
+(sanitized, anonymous reporter_id, dedup times_seen) → "confirmed by N users".
+
+Custom vendor search: CUSTOM_VENDOR_SEARCH.md pattern (mirrors CUSTOM_VPN_PROBE.md),
+vendor_sources.json registration, skip-if-absent. Vendor guide ships in same commit
+as code (Tier-2 vendor rule) when built.
+
+Open: outbound-query privacy (Rule-8 gate must cover the QUERY not just the bundle —
+error signature can leak path/username); fix-worked → community-signal mapping
+(undesigned); vendor_sources.json freshness/staleness.
