@@ -212,11 +212,40 @@ class InstallerApp:
         self.btn.config(text="Retry", state="normal", command=self.start)
         return False
 
+    def _verify_nemesis_reachable(self):
+        """Final link in the connection chain: Tailscale is up — can we actually reach the
+        Nemesis server? Hits the auth-exempt /api/health via nginx (:80). Returns True to
+        proceed, else shows a clear message + Retry."""
+        import requests
+        server_url = f"http://{self.server}"
+        self.set_status("Checking connection to your security server...")
+        try:
+            r = requests.get(f"{server_url}/api/health", timeout=10)
+            if r.status_code == 200:
+                return True
+            detail = f"server returned {r.status_code}"
+        except requests.exceptions.ConnectionError:
+            detail = "cannot reach security server"
+        except requests.exceptions.Timeout:
+            detail = "server connection timed out"
+        except Exception as e:
+            detail = str(e)[:80]
+        self.set_status(
+            "Cannot reach your security server (" + detail + "). Tailscale is connected but "
+            "the server is not responding. Check the server is running and that you're on "
+            "the correct Tailscale network. Server: " + server_url + ". Contact " +
+            self.support_contact + ", then click Retry.")
+        self.btn.config(text="Retry", state="normal", command=self.start)
+        return False
+
     def _run(self):
         try:
             # Phase 7: Tailscale is the tunnel to the Nemesis server. Validate its full
             # state (installed / service running / connected) before touching the system.
             if not self._ensure_tailscale():
+                return
+            # Connection chain: Tailscale connected → verify the server actually answers.
+            if not self._verify_nemesis_reachable():
                 return
             self.set_status(STEPS[0], 1)
             self._check_requirements()

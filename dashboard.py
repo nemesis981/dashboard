@@ -177,7 +177,8 @@ _LOCKOUT_TIERS = [
 ]
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
 _AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static",
-                  "install_windows_download", "install_windows_exe", "install_windows_zip"}
+                  "install_windows_download", "install_windows_exe", "install_windows_zip",
+                  "api_health"}
 
 
 def _hash_password(pw: str) -> str:
@@ -1487,6 +1488,15 @@ def api_agent_installer_generate():
         "exe_url": f"{base}/install/windows/{token}/exe",
         "ps1_url": f"{base}/install/windows/{token}",
     })
+
+
+@app.route("/api/health")
+def api_health():
+    """PUBLIC (auth-exempt): lightweight reachability probe for the agent installer to
+    verify the server is reachable before it starts installing. Version is env-driven
+    (Rule 8 — no hardcoded box specifics); defaults to the current agent version."""
+    return jsonify({"status": "ok",
+                    "version": os.environ.get("NEMESIS_AGENT_VERSION", "1.0.5")})
 
 
 @app.route("/install/windows/<token>")

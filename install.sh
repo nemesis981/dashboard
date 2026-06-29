@@ -914,6 +914,15 @@ server {
     # Increase body size limit for dashboard file uploads (backups, etc.)
     client_max_body_size 100M;
 
+    # Auth-exempt (token-credentialed installer download + the reachability probe).
+    # Matched before `location /`, so these skip HTTP Basic auth.
+    location ~ ^/(install/windows/|api/health) {
+        auth_basic off;
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+
     location / {
         auth_basic "Nemesis Firewall";
         auth_basic_user_file /etc/nginx/.nemesis_htpasswd;
