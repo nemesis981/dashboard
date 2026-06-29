@@ -13,7 +13,10 @@ grandfathered ``approved`` server-side) passes straight through without re-enrol
 """
 
 import base64
+import json
 import os
+import shutil
+import subprocess
 import sys
 import socket
 import time
@@ -98,6 +101,91 @@ def _hardware_summary():
         return "unknown"
 
 
+def _scan_roots():
+    """Platform-aware scan roots. Generic system roots only — NO per-user paths
+    stored or transmitted (Rule 8). Detected via os.name, not stdlib `platform`
+    (the agent dir shadows it)."""
+    if os.name == "nt":
+        return ["C:\\Users", "C:\\Program Files", "C:\\Windows\\Temp"]
+    try:
+        if os.uname().sysname == "Darwin":
+            return ["/Users", "/tmp"]
+    except AttributeError:
+        pass
+    return ["/home", "/tmp", "/var/tmp"]
+
+
+_SCAN_TIMEOUT = 300  # 5 minutes max, total
+
+
+def pre_enrollment_scan():
+    """Scan-before-trust: run ClamAV (and YARA if rules are present) over the
+    platform scan roots BEFORE the device is enrolled. Best-effort and fully
+    self-contained — never raises, never blocks enrollment beyond the timeout.
+
+    Returns the result dict described in the enrollment design. Stored paths are
+    generic roots only (Rule 8 — no usernames / home dirs)."""
+    roots = _scan_roots()
+    sanitized_path = os.name == "nt" and ";".join(roots) or ":".join(roots)
+    res = {
+        "clamav_available": False,
+        "clamav_findings": 0,
+        "clamav_scan_path": sanitized_path,
+        "yara_available": False,
+        "yara_findings": 0,
+        "scan_duration_seconds": 0,
+        "scan_timestamp": datetime.now(timezone.utc).isoformat(),
+        "scan_status": "not_available",
+    }
+    started = time.monotonic()
+    failed = False
+
+    # ── ClamAV (clamscan -ri: recursive, infected-only output) ──
+    clam = shutil.which("clamscan")
+    if clam:
+        res["clamav_available"] = True
+        try:
+            p = subprocess.run([clam, "-r", "-i", "--no-summary", *roots],
+                               capture_output=True, text=True, timeout=_SCAN_TIMEOUT)
+            # clamscan rc: 0 clean, 1 infected found, 2 error. Count FOUND lines.
+            res["clamav_findings"] = sum(1 for ln in p.stdout.splitlines()
+                                         if ln.strip().endswith("FOUND"))
+            if p.returncode == 2:
+                failed = True
+        except subprocess.TimeoutExpired:
+            failed = True
+        except Exception:
+            failed = True
+
+    # ── YARA (only if the binary AND a local rules file are present) ──
+    yara = shutil.which("yara")
+    rules = os.path.join(os.path.dirname(os.path.abspath(__file__)), "yara_rules", "rules.yar")
+    if yara and os.path.isfile(rules):
+        res["yara_available"] = True
+        remaining = max(5, _SCAN_TIMEOUT - int(time.monotonic() - started))
+        try:
+            p = subprocess.run([yara, "-r", rules, *roots],
+                               capture_output=True, text=True, timeout=remaining)
+            # yara prints one line per match: "<rule> <path>".
+            res["yara_findings"] = sum(1 for ln in p.stdout.splitlines() if ln.strip())
+        except subprocess.TimeoutExpired:
+            failed = True
+        except Exception:
+            failed = True
+
+    res["scan_duration_seconds"] = round(time.monotonic() - started, 1)
+    total = res["clamav_findings"] + res["yara_findings"]
+    if not (res["clamav_available"] or res["yara_available"]):
+        res["scan_status"] = "not_available"
+    elif failed:
+        res["scan_status"] = "scan_failed"
+    elif total > 0:
+        res["scan_status"] = "findings"
+    else:
+        res["scan_status"] = "clean"
+    return res
+
+
 def _base_url(conf):
     return f"http://{conf.get('nemesis_ip', '')}:{conf.get('nemesis_port', '5001')}"
 
@@ -108,6 +196,8 @@ def enroll(conf=None):
     if not conf.get("nemesis_ip"):
         return None, None
     public_key = ensure_keypair()
+    # Scan-before-trust: scan this device BEFORE asking to be enrolled.
+    scan = pre_enrollment_scan()
     device_name = conf.get("device_name") or socket.gethostname()
     os_name = _os_name()
     signed_at = datetime.now(timezone.utc).isoformat()
@@ -121,6 +211,7 @@ def enroll(conf=None):
         "hardware_summary": _hardware_summary(),
         "signed_at": signed_at,
         "signature": _sign(message),
+        "pre_enrollment_scan": json.dumps(scan),
     }
     try:
         r = requests.post(_base_url(conf) + "/enroll", json=payload, timeout=10)

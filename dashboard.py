@@ -1390,13 +1390,14 @@ def _render_agent_devices_html() -> str:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT device_id, device_name, os, os_version, hardware_summary, "
-            "enrollment_status, connection_type, lhm_available, agent_last_seen "
+            "enrollment_status, connection_type, lhm_available, agent_last_seen, "
+            "pre_enrollment_scan, enrollment_has_findings "
             "FROM agent_devices ORDER BY agent_last_seen DESC").fetchall()
         conn.close()
     except Exception:
         return ('<div class="card" id="section-devices-enroll"><h2>&#128421; Devices</h2>'
                 '<p style="color:#888">No device data available.</p></div>')
-    pending  = [r for r in rows if (r["enrollment_status"] or "") == "pending"]
+    pending  = [r for r in rows if (r["enrollment_status"] or "") in ("pending", "pending_with_findings")]
     enrolled = [r for r in rows if (r["enrollment_status"] or "") == "approved"]
     h = ['<div class="card" id="section-devices-enroll" style="margin-bottom:16px">'
          '<h2>&#128421; Devices</h2>',
@@ -1405,16 +1406,57 @@ def _render_agent_devices_html() -> str:
         h.append('<p style="color:#888;font-size:0.86em">No devices awaiting approval.</p>')
     for r in pending:
         did = html.escape(r["device_id"], quote=True)
+        scan = {}
+        if r["pre_enrollment_scan"]:
+            try:
+                scan = json.loads(r["pre_enrollment_scan"])
+            except Exception:
+                scan = {}
+        sstatus = scan.get("scan_status")
+        clam = int(scan.get("clamav_findings") or 0)
+        yara = int(scan.get("yara_findings") or 0)
+        total = clam + yara
+        findings = bool(r["enrollment_has_findings"]) or sstatus == "findings" or total > 0
+        if findings:
+            badge = (f'<span style="color:#ffcc00">&#9888; {total} finding(s)</span>'
+                     f'<br><span style="color:#aaa;font-size:0.8em">ClamAV: {clam} finding(s) &nbsp; YARA: {yara} finding(s)</span>'
+                     '<details style="margin-top:4px">'
+                     '<summary style="cursor:pointer;color:#ffcc00;font-size:0.82em">View findings</summary>'
+                     '<div style="color:#aaa;font-size:0.8em;margin-top:4px">'
+                     f'Status: {html.escape(str(sstatus or "?"))}<br>'
+                     f'ClamAV findings: {clam}<br>YARA findings: {yara}<br>'
+                     f'Scan roots: {html.escape(str(scan.get("clamav_scan_path") or "-"))}<br>'
+                     f'Duration: {html.escape(str(scan.get("scan_duration_seconds") or "-"))}s<br>'
+                     f'Scanned (UTC): {html.escape(str(scan.get("scan_timestamp") or "-"))}'
+                     '</div></details>')
+            buttons = (
+                f'<button onclick="agentApproveAnyway(\'{did}\')" style="background:#ffcc0022;color:#ffcc00;'
+                'border:1px solid #ffcc00;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Approve anyway</button> '
+                f'<button onclick="agentReject(\'{did}\')" style="background:#ff444422;color:#ff6666;'
+                'border:1px solid #ff4444;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Reject</button>')
+        else:
+            if sstatus == "clean":
+                badge = ('<span style="color:#00ff88">&#9989; Clean</span>'
+                         f'<br><span style="color:#aaa;font-size:0.8em">ClamAV: {clam} findings &nbsp; YARA: {yara} findings</span>')
+            elif sstatus == "scan_failed":
+                badge = '<span style="color:#ffcc00">&#9888; Scan failed (could not complete)</span>'
+            else:
+                badge = ('<span style="color:#00d4ff">&#8505; Not available</span>'
+                         '<br><span style="color:#aaa;font-size:0.8em">(scanner not installed on this device)</span>')
+            buttons = (
+                f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
+                'border:1px solid #00ff88;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Approve</button> '
+                f'<button onclick="agentReject(\'{did}\')" style="background:#ff444422;color:#ff6666;'
+                'border:1px solid #ff4444;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Reject</button>')
+        border = '#ff444466' if findings else '#ffcc0044'
         h.append(
-            '<div style="background:#0d0d1e;border:1px solid #ffcc0044;border-radius:8px;'
+            f'<div style="background:#0d0d1e;border:1px solid {border};border-radius:8px;'
             'padding:10px 12px;margin-bottom:8px">'
             f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
             f'<span style="color:#aaa;font-size:0.84em">{html.escape((r["os"] or "") + " " + (r["os_version"] or "")[:40])}</span><br>'
             f'<span style="color:#888;font-size:0.82em">{html.escape(r["hardware_summary"] or "")}</span><br>'
-            f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
-            'border:1px solid #00ff88;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Approve</button> '
-            f'<button onclick="agentReject(\'{did}\')" style="background:#ff444422;color:#ff6666;'
-            'border:1px solid #ff4444;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Reject</button>'
+            f'<span style="font-size:0.84em">Pre-enrollment scan: {badge}</span><br>'
+            f'{buttons}'
             '</div>')
     h.append('<h3 style="color:#00d4ff;font-size:0.95em;margin-top:14px">Enrolled devices</h3>')
     if not enrolled:

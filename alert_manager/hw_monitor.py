@@ -202,7 +202,9 @@ def init_db():
                 interface_name   TEXT,
                 connection_speed TEXT,
                 lhm_available    INTEGER DEFAULT 0,
-                last_heartbeat_data TEXT
+                last_heartbeat_data TEXT,
+                pre_enrollment_scan TEXT,
+                enrollment_has_findings INTEGER DEFAULT 0
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
@@ -266,7 +268,10 @@ def init_db():
                           ("interface_name",     "TEXT"),
                           ("connection_speed",   "TEXT"),
                           ("lhm_available",      "INTEGER DEFAULT 0"),
-                          ("last_heartbeat_data", "TEXT")):
+                          ("last_heartbeat_data", "TEXT"),
+                          # ── pre-enrollment scan (scan-before-trust) ──
+                          ("pre_enrollment_scan", "TEXT"),
+                          ("enrollment_has_findings", "INTEGER DEFAULT 0")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1851,6 +1856,34 @@ def _create_enrollment(payload, remote_ip):
         return None, "missing_fields"
     if not _verify_enroll_signature(public_key, f"{device_name}|{os_name}|{signed_at}", signature):
         return None, "bad_signature"
+
+    # ── pre-enrollment scan (scan-before-trust) — parse + summarize ──
+    scan = {}
+    scan_raw = payload.get("pre_enrollment_scan")
+    if isinstance(scan_raw, str):
+        try:
+            scan = json.loads(scan_raw)
+        except Exception:
+            scan = {}
+    elif isinstance(scan_raw, dict):
+        scan = scan_raw
+    scan_json = json.dumps(scan) if scan else None
+    scan_status = scan.get("scan_status")
+    clam_f = int(scan.get("clamav_findings") or 0)
+    yara_f = int(scan.get("yara_findings") or 0)
+    total_f = clam_f + yara_f
+    has_findings = 1 if (scan_status == "findings" or total_f > 0) else 0
+    enroll_status = "pending_with_findings" if has_findings else "pending"
+    if not scan or scan_status in (None, "not_available"):
+        scan_summary = "Pre-enrollment scan: ℹ️ Not available (scanner not installed on this device)"
+    elif scan_status == "scan_failed":
+        scan_summary = "Pre-enrollment scan: ⚠️ Scan failed (could not complete)"
+    elif has_findings:
+        scan_summary = (f"Pre-enrollment scan: ⚠️ {total_f} finding(s) — review before "
+                        f"approving (ClamAV: {clam_f}, YARA: {yara_f})")
+    else:
+        scan_summary = f"Pre-enrollment scan: ✅ Clean (ClamAV: {clam_f} findings, YARA: {yara_f} findings)"
+
     import uuid as _uuid
     device_id = _uuid.uuid4().hex
     now = datetime.now().isoformat(timespec="seconds")
@@ -1858,10 +1891,12 @@ def _create_enrollment(payload, remote_ip):
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.execute(
             "INSERT INTO agent_devices (device_id, device_name, os, os_version, "
-            "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen) "
-            "VALUES (?,?,?,?,?,?, 'pending', ?, ?)",
+            "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen, "
+            "pre_enrollment_scan, enrollment_has_findings) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (device_id, device_name, os_name, payload.get("os_version", ""),
-             payload.get("hardware_summary", ""), public_key, remote_ip, now))
+             payload.get("hardware_summary", ""), public_key, enroll_status, remote_ip, now,
+             scan_json, has_findings))
         conn.commit()
         conn.close()
     except Exception:
@@ -1877,11 +1912,12 @@ def _create_enrollment(payload, remote_ip):
             body=(f"A new device requested enrollment.\n\nName: {device_name}\n"
                   f"OS: {os_name} {payload.get('os_version', '')}\n"
                   f"Hardware: {payload.get('hardware_summary', '')}\nFrom: {remote_ip}\n\n"
+                  f"{scan_summary}\n\n"
                   f"Approve or reject it in Settings -> Devices."),
-            priority="MEDIUM", actor="system")
+            priority="HIGH" if has_findings else "MEDIUM", actor="system")
     except Exception:
         log.exception("agent enrollment ticket failed (non-fatal)")
-    return device_id, "pending"
+    return device_id, enroll_status
 
 
 def _start_windows_agent_listener():
