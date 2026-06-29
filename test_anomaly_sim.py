@@ -6,7 +6,7 @@ Phase 1/2: Injects a realistic multi-device "coordinated new destination" incide
 by calling the real scoring and incident-creation functions, not a raw SQL insert.
 
 Scenario:
-  Three real devices (Chris's Laptop, Fire TV Cube, Angie PC) each contact
+  Three real devices (<device-b>, <device-d>, <device-c>) each contact
   the same never-seen-before domain within a 28-second window, triggering:
     +12  new-destination signal (obs_count < MIN_BASELINE_OBS)
     +16  multi-device spread (3 devices × 8pts, capped at 24)
@@ -40,9 +40,9 @@ TEST_DOMAIN = "c2-beacon-test.ru"   # synthetic; grep-able for cleanup
 
 # Real devices from the devices table
 DEVICE_IPS = [
-    "192.168.4.23",   # Chris's Laptop  — first contact
-    "192.168.4.25",   # Fire TV Cube    — second
-    "192.168.4.22",   # Angie PC        — third
+    "<lan-ip-b>",   # <device-b>  — first contact
+    "<lan-ip-c>",   # <device-d>    — second
+    "<lan-ip-d>",   # <device-c>        — third
 ]
 
 RECURRENCE_SEED_COUNT = 5          # prior appearances to pre-seed
@@ -73,9 +73,9 @@ def main():
     # 2. Build tight-spread client timestamps (28 s spread → triggers ≤30s bonus)
     t0 = now - 45   # start 45 s ago so all timestamps are in the past
     fake_clients = {
-        DEVICE_IPS[0]: [t0,       t0 +  5],   # Chris's Laptop:  2 queries
-        DEVICE_IPS[1]: [t0 + 12,  t0 + 18],   # Fire TV Cube:    2 queries
-        DEVICE_IPS[2]: [t0 + 24,  t0 + 28],   # Angie PC:        2 queries
+        DEVICE_IPS[0]: [t0,       t0 +  5],   # <device-b>:  2 queries
+        DEVICE_IPS[1]: [t0 + 12,  t0 + 18],   # <device-d>:    2 queries
+        DEVICE_IPS[2]: [t0 + 24,  t0 + 28],   # <device-c>:        2 queries
     }
     data = {
         "clients": fake_clients,
