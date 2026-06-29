@@ -106,6 +106,7 @@ class InstallerApp:
             self._check_requirements()
             self.set_status(STEPS[1], 2)
             self._install_files()
+            self._start_freshclam()      # Phase 4: fetch AV definitions in background
             self.set_status(STEPS[2], 3)
             self._enroll()
             self._register_autostart()
@@ -120,6 +121,22 @@ class InstallerApp:
     def _check_requirements(self):
         os.makedirs(INSTALL_DIR, exist_ok=True)
         self._add_defender_exclusion()
+
+    def _start_freshclam(self):
+        """Phase 4: download ClamAV virus definitions in the background (the bundle
+        ships binaries only). Non-blocking + best-effort — install never waits on it."""
+        import subprocess
+        fc = os.path.join(INSTALL_DIR, "clamav", "freshclam.exe")
+        if not os.path.isfile(fc):
+            return
+        try:
+            flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
+            subprocess.Popen([fc, f"--datadir={os.path.join(INSTALL_DIR, 'clamav')}"],
+                             cwd=os.path.join(INSTALL_DIR, "clamav"),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=flags)
+        except Exception:
+            pass
 
     def _add_defender_exclusion(self):
         """Phase 3: exclude the install dir from Windows Defender so the agent exe
@@ -141,6 +158,10 @@ class InstallerApp:
         agent_exe = os.path.join(src, "NemesisAgent.exe")
         if os.path.exists(agent_exe):
             shutil.copy2(agent_exe, os.path.join(INSTALL_DIR, "NemesisAgent.exe"))
+        # Phase 4: extract bundled ClamAV binaries (no definitions yet) if present.
+        clam_src = os.path.join(src, "clamav")
+        if os.path.isdir(clam_src):
+            shutil.copytree(clam_src, os.path.join(INSTALL_DIR, "clamav"), dirs_exist_ok=True)
         cfg = configparser.ConfigParser()
         cfg.add_section("nemesis")
         cfg.set("nemesis", "nemesis_ip", self.server)

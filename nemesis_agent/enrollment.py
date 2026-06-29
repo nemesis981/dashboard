@@ -101,6 +101,18 @@ def _hardware_summary():
         return "unknown"
 
 
+def _find_clamscan():
+    """Prefer ClamAV bundled with the agent (%APPDATA%\\Nemesis\\clamav) over a
+    system install — Phase 4 ships the binaries so the user needs nothing."""
+    try:
+        bundled = os.path.join(config._base_dir(), "clamav", "clamscan.exe")
+        if os.path.isfile(bundled):
+            return bundled
+    except Exception:
+        pass
+    return shutil.which("clamscan")
+
+
 def _scan_roots():
     """Platform-aware scan roots. Generic system roots only — NO per-user paths
     stored or transmitted (Rule 8). Detected via os.name, not stdlib `platform`
@@ -141,7 +153,7 @@ def pre_enrollment_scan():
     failed = False
 
     # ── ClamAV (clamscan -ri: recursive, infected-only output) ──
-    clam = shutil.which("clamscan")
+    clam = _find_clamscan()
     if clam:
         res["clamav_available"] = True
         try:

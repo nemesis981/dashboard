@@ -28,6 +28,22 @@ jobs:
       - name: Install build dependencies
         run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer
 
+      - name: Fetch ClamAV binaries (best-effort, no definitions)
+        continue-on-error: true   # a download hiccup must NOT fail the exe build
+        shell: pwsh
+        run: |
+          $ver = "1.4.1"
+          $url = "https://www.clamav.net/downloads/production/clamav-$ver.win.x64.portable.zip"
+          $zip = "$env:RUNNER_TEMP\clamav.zip"
+          $dest = "nemesis_agent/clamav"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\clamav" -Force
+          $inner = Get-ChildItem "$env:RUNNER_TEMP\clamav" -Directory | Select-Object -First 1
+          $from = if ($inner) { "$($inner.FullName)\*" } else { "$env:RUNNER_TEMP\clamav\*" }
+          Copy-Item $from $dest -Recurse -Force
+          Write-Host "ClamAV staged into $dest"
+
       - name: Build NemesisAgent-Setup.exe
         run: python nemesis_agent/build_installer.py
 
