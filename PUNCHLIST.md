@@ -511,3 +511,24 @@ as code (Tier-2 vendor rule) when built.
 Open: outbound-query privacy (Rule-8 gate must cover the QUERY not just the bundle —
 error signature can leak path/username); fix-worked → community-signal mapping
 (undesigned); vendor_sources.json freshness/staleness.
+
+AI-GENERATED TUTORIAL WALKTHROUGH (ships v2 — see docs/roadmap/ai-generated-tutorial-walkthrough.md):
+
+AI generates a complete, always-current tutorial from the docs (regenerates when
+features change). Not static — sources: CUSTOM_*.md, docs/operation/, docs/modules/,
+PUNCHLIST (v1/v2/deferred), tiered-output principle.
+
+Output tiers (Beginner/Intermediate/Pro): "Getting Started" / "Understanding Your
+Dashboard" / "Complete Feature Reference". Format: in-dashboard interactive tour
+(step tooltips, progress, pause/resume) + downloadable PDF + video script.
+
+Regeneration: new feature → affected sections; major version → full; on-demand from
+Settings. First-login guided tour ("Would you like a tour?"), tier-appropriate.
+
+DOC COMPLETENESS BONUS (dual purpose): tutorial generation IS the completeness audit —
+if AI can't generate a section, that feature isn't documented. Run as pre-release check.
+
+Sequencing: build after v2 feature set locked; requires complete module docs +
+all CUSTOM_*.md guides; run completeness audit first.
+Reality (2026-06-29): source corpus is THIN — only docs/modules/diagnostics/ documented,
+only CUSTOM_VPN_PROBE.md exists. "Complete module documentation" is itself the v2 backlog.
