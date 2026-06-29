@@ -375,3 +375,60 @@ only if nemesis_agent/yara_rules/rules.yar is present. No rules file ships yet,
 so YARA always reports yara_available=false / not_available. ClamAV coverage is
 unaffected. Acceptable for v1, but ship a baseline YARA ruleset (and a way to
 update it) before commercial release. See enrollment.py pre_enrollment_scan().
+
+MALWARE DETECTION PIPELINE (see docs/roadmap/malware-detection-pipeline.md):
+
+V1 — Certification scan:
+  Deep scan at install, known-good classification, coverage %,
+  certificate issued. High-risk paths only for first scan.
+  Entropy flagged only with 2+ additional signals (never alone).
+
+V1 — First-run + hash cache:
+  SHA256 cache, scan on first run only, rescan on hash change.
+  Cache states: sandbox_verified > run_clean_N > scan_clean etc.
+  Behavioral monitoring during first run (canary tripwire).
+  Gaming: zero overhead after first run, auto Game Mode via psutil.
+
+V1 — Validation pipeline:
+  Tier 1: auto-classify (known-good types/paths)
+  Tier 2: AI validation (metadata only, not file contents)
+  Tier 3: clone sandbox (V2)
+  Tier 4: user decision (quarantine/delete/trust/investigate)
+  Infected user: 3,294 raw → 7 real threats surfaced cleanly.
+
+V1 — Trigger-based scanning:
+  inotify/FSEvents on high-risk directories
+  Archive scan to temp before extraction
+  USB scan before mount
+  V2: kernel-level blocking (fanotify/ESF)
+
+V2 — Clone-based sandbox:
+  Clones actual system (OS, hardware profile, software inventory,
+  library versions, drivers). NOT personal files/credentials.
+  CANARY FILES TRAVEL WITH CLONE → active trap for ransomware.
+  VM-aware malware behaves authentically (can't detect clone).
+  Performance testing: launch time, RAM, CPU on real hardware profile.
+  Compatibility testing: exact dependency tree, real conflict detection.
+  Requires VM Lab infrastructure.
+
+V2 — Sandbox-first software testing:
+  Any new installer → "test safely first" prompt
+  Clone sandbox install → AI behavioral report → user approves
+  Available on Windows Home (Defender sandbox is Pro/Enterprise only)
+  NMS-INST certificate issued on approval.
+  Cracked software: reports what it does without judgment.
+
+V2 — Software lifecycle management:
+  software_inventory table: manifest (all files + hashes),
+  behavioral baseline, certificate chain, update history.
+  Update diff: only changed/added files rescanned (15-30 sec).
+  Tamper detection: manifest integrity check catches supply
+  chain attacks (trusted binary modified by malware).
+
+V2 — Stale software + monthly health report:
+  Categories: truly_forgotten/recently_stale/seasonal/never_run
+  Performance impact: RAM/CPU used RIGHT NOW by unused apps
+  Hardware longevity + storage projection + dollar value
+  Safe uninstall: verify cleanup, remove leftovers, archive cert
+  Software health score (0-100), scheduled cleanup option
+  Seasonal pattern detection (don't flag tax software in June)
