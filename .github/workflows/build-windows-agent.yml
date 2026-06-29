@@ -3,9 +3,11 @@ name: Build Windows Agent
 on:
   push:
     branches: [main]
-    paths:
-      - 'nemesis_agent/**'
-      - '.github/workflows/build-windows-agent.yml'
+    tags: ['v*']          # tagged builds also attach the exe to a GitHub Release
+    # NOTE: deliberately no `paths:` filter. Combining `paths:` with `tags:` causes
+    # tag pushes to be skipped (a tag re-points an existing commit, so the push has
+    # no changed files for the filter to match). Building on every main push is
+    # cheap (~1 min) and keeps tagged releases reliable.
   workflow_dispatch: {}
 
 permissions:
