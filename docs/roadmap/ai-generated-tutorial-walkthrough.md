@@ -73,6 +73,58 @@ Not a static document — it regenerates when features change. Always current.
 - Can pause and resume.
 - Tier-appropriate language (detected from user preference).
 
+## First-run experience ("never seen security software" baseline)
+
+The lowest-assumption entry point — below even the Beginner tier.
+
+- **Assumes:** can follow instructions, no security knowledge, slightly nervous, wants
+  reassurance.
+- **Tone:** knowledgeable friend, not a technical manual.
+- **5-screen first-run tour:** welcome → dashboard overview → what Nemesis watches →
+  what red means → you're all set.
+- **Entry choice:** `[Show me around]` `[Skip]` `[Search for something specific]`.
+
+This is the default for a brand-new install; the tiered walkthroughs (Beginner/Intermediate/Pro)
+are what the user graduates into via the tier preference.
+
+## Searchable tutorial index (DB-backed)
+
+A `tutorial_index` table makes the generated tutorial queryable in natural language.
+
+```
+tutorial_index:
+  topic, keywords (JSON), section, tier,
+  content_summary, last_generated, feature_version
+```
+
+**Natural-language search maps non-expert vocabulary → the correct feature:**
+
+| User types | Resolves to |
+|---|---|
+| "virus" | malware scan |
+| "red light" | header status lights |
+| "slow computer" | stale software report |
+| "new device" | enrollment |
+| "someone hacked me" | incident response |
+
+The index is **not** a technical-term lookup — it's "what a confused user would type" → answer.
+`last_generated` / `feature_version` let the index track which sections are stale after a
+feature ships (ties into the regeneration trigger above).
+
+> **ADR 0001 note (prefix ownership):** `tutorial_index` is a new prefixed table and must be
+> owned by exactly one module (likely `ai_*`, since the AI Engine generates it) with its
+> `CREATE` in that module's canonical init. Decide the owning prefix at build time; do not
+> create it ad-hoc. Per ADR 0006, all writes route through the Data Manager.
+
+## Connected dashboard ("show me in the dashboard")
+
+The index knows which **DOM element** each topic covers, so explanation happens on the real UI:
+
+- "Show me" highlights the real element in the live dashboard.
+- The tooltip appears on the actual feature being explained.
+- The user sees **reality, not screenshots** — so the walkthrough can never drift from the UI
+  (a stale-screenshot problem static docs always have).
+
 ## Connects to
 
 - **Tiered output system** (Beginner/Intermediate/Pro — CLAUDE.md Tier-2 §E / `ARCHITECTURE.md`

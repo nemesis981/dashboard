@@ -532,3 +532,15 @@ Sequencing: build after v2 feature set locked; requires complete module docs +
 all CUSTOM_*.md guides; run completeness audit first.
 Reality (2026-06-29): source corpus is THIN — only docs/modules/diagnostics/ documented,
 only CUSTOM_VPN_PROBE.md exists. "Complete module documentation" is itself the v2 backlog.
+
+AI TUTORIAL — ADDENDUM (first-run + searchable index + connected dashboard):
+  First-run baseline (below Beginner tier): no security knowledge, nervous, wants
+  reassurance; 5-screen tour (welcome → dashboard → what it watches → what red means →
+  all set); [Show me around][Skip][Search]. Default for new installs.
+  Searchable tutorial_index table (topic, keywords JSON, section, tier, content_summary,
+  last_generated, feature_version) — NL search maps confused-user vocab → feature
+  ("virus"→malware scan, "red light"→status lights, "someone hacked me"→incident response).
+  ADR 0001: tutorial_index needs an owning prefix (likely ai_*) + canonical CREATE;
+  ADR 0006: writes via Data Manager.
+  Connected dashboard: index knows each topic's DOM element → "show me" highlights the
+  LIVE element (reality, not screenshots — never drifts from UI).
