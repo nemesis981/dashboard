@@ -432,3 +432,30 @@ V2 — Stale software + monthly health report:
   Safe uninstall: verify cleanup, remove leftovers, archive cert
   Software health score (0-100), scheduled cleanup option
   Seasonal pattern detection (don't flag tax software in June)
+
+SUPPORT BUNDLE — AUTOMATIC DIAGNOSTIC PACKAGE (see docs/roadmap/support-bundle.md):
+
+Trigger: user clicks "I need help" → ~10s package (data already collected).
+Rule 8: sanitized BEFORE any transmission (no real IPs/paths/usernames) —
+single shared sanitization chokepoint, not per-destination.
+
+Contents:
+  System profile (sanitized), software timeline (30d, with cert IDs),
+  registry diff (vs last week + vs pre-last-install), sandbox behavioral logs,
+  security state (canary/scan/tickets), connectivity (verdict + ping history),
+  AI diagnosis (most-likely cause + fix, plain language), suggested fixes.
+
+Four destinations:
+  [Fix automatically] → Nemesis applies suggested fix
+  [Contact Nemesis support] → support@nemesis-sw.com (private support module)
+  [Contact vendor support] → vendor-ready package (pro format, pre-diagnosed)
+  [Post to community] → sanitized bundle for forum/GitHub issue
+
+Vendor-ready package: system info + install timeline + what changed + what
+  Nemesis detected + what user tried. 10s vs ~2h manual.
+
+Open prerequisites (not yet captured):
+  - Registry backup / registry-diff engine (the diff source — no design doc)
+  - Private support intake (route support@nemesis-sw.com into first-party queue,
+    distinct from the user-facing tickets module — undesigned)
+  - Shared Rule-8 sanitization gate (single chokepoint for all off-box destinations)
