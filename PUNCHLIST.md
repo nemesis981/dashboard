@@ -628,3 +628,12 @@ INSTALLER EMAIL DELIVERY (v2 — build AFTER Wisconsin trip; see docs/roadmap/in
   recipient_email, support_contact, custom_message, delivered_at (writes via Data Manager).
   Rule 8: recipient email/message are PII (never to community feed); short expires_at +
   max_uses=1 so an intercepted email can't enroll a rogue device; surface send failures.
+
+INSTALLER SIZE OPTIMIZATION (post-trip):
+  Current: 272MB (ClamAV bundled = heavy download).
+  Better: ~30MB installer + fetch ClamAV on first run.
+    Installer copies NemesisAgent.exe + LHM + token only.
+    First run: NemesisAgent.exe downloads ClamAV from our mirror/GitHub,
+               shows "Downloading security scanner...".
+    Result: small installer, same end state; saves ~240MB/user.
+  Same model as the Chrome installer (small stub -> downloads the rest).
