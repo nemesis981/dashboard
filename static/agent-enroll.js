@@ -10,6 +10,35 @@ function agentReject(id) {
     .then(function () { location.reload(); })
     .catch(function () { alert('Reject failed — try again.'); });
 }
+/* Robust clipboard copy: navigator.clipboard needs HTTPS/localhost, so on plain-HTTP
+   LAN access fall back to a hidden textarea + execCommand (FIX: copy button worked
+   only in secure contexts before). */
+function nemesisFallbackCopy(text, ok) {
+  try {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    if (ok) ok();
+  } catch (e) { window.prompt('Copy this link:', text); }
+}
+function nemesisCopyText(text, btn) {
+  function ok() {
+    if (!btn) return;
+    var t = btn.textContent; btn.textContent = '✓ Copied';
+    setTimeout(function () { btn.textContent = t; }, 1500);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(ok, function () { nemesisFallbackCopy(text, ok); });
+  } else {
+    nemesisFallbackCopy(text, ok);
+  }
+}
+
+/* The copy button always copies the /zip link (exe + docs bundled). */
+var _nemesisZipUrl = '';
+function nemesisCopyZip(btn) { if (_nemesisZipUrl) nemesisCopyText(_nemesisZipUrl, btn); }
+
 /* Generate a single-use Windows installer link (token auto-approve). */
 function genWindowsInstaller() {
   var hint = (document.getElementById('installerHint') || {}).value || 'Windows Device';
@@ -23,15 +52,22 @@ function genWindowsInstaller() {
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d || !d.ok) { throw new Error((d && d.error) || 'failed'); }
+      _nemesisZipUrl = d.zip_url || '';
       var when = new Date(d.expires_at * 1000).toLocaleString();
       out.style.color = '#ddd';
       out.innerHTML =
-        'Installer generated. Send the link below to the user. Link expires ' + when + '.<br>' +
-        '<a href="' + d.ps1_url + '" style="color:#00d4ff">Download installer (.ps1)</a> &nbsp; ' +
-        '<a href="' + d.exe_url + '" style="color:#00d4ff">Windows .exe</a> &nbsp; ' +
-        '<button onclick="navigator.clipboard.writeText(\'' + d.ps1_url + '\')" ' +
-        'style="background:#222;color:#aaa;border:1px solid #444;border-radius:5px;' +
-        'padding:3px 10px;cursor:pointer">Copy download link</button>';
+        '<div style="color:#aaa;font-size:0.82em;margin-bottom:4px">Share this link with your user ' +
+        '(includes the installer and setup guide; expires ' + when + '):</div>' +
+        '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
+        '<input readonly value="' + d.zip_url + '" onclick="this.select()" ' +
+        'style="background:#11111f;border:1px solid #00d4ff55;color:#00d4ff;border-radius:6px;' +
+        'padding:5px 8px;font-size:0.82em;width:340px">' +
+        '<button onclick="nemesisCopyZip(this)" style="background:#00d4ff22;color:#00d4ff;' +
+        'border:1px solid #00d4ff;border-radius:6px;padding:5px 12px;cursor:pointer">📋 Copy link</button>' +
+        '</div>' +
+        '<div style="color:#666;font-size:0.78em;margin-top:6px">Advanced: ' +
+        '<a href="' + d.exe_url + '" style="color:#888">.exe only</a> &middot; ' +
+        '<a href="' + d.ps1_url + '" style="color:#888">.ps1 (advanced)</a></div>';
     })
     .catch(function () {
       if (out) { out.style.color = '#ff6666'; out.textContent = 'Could not generate installer — try again.'; }

@@ -177,7 +177,7 @@ _LOCKOUT_TIERS = [
 ]
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
 _AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static",
-                  "install_windows_download", "install_windows_exe"}
+                  "install_windows_download", "install_windows_exe", "install_windows_zip"}
 
 
 def _hash_password(pw: str) -> str:
@@ -1474,14 +1474,18 @@ def api_agent_installer_generate():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     _audit(action="installer_token_generate", rule_id=token[:8])
-    base = request.host_url.rstrip("/")
+    # Shareable links must use the PUBLIC entrypoint (nginx :80), not the internal
+    # Flask port. NEMESIS_PUBLIC_URL overrides; else fall back to the request host.
+    base = (os.environ.get("NEMESIS_PUBLIC_URL", "").strip().rstrip("/")
+            or request.host_url.rstrip("/"))
     return jsonify({
         "ok": True,
         "token": token,
         "device_name_hint": hint,
         "expires_at": expires,
-        "ps1_url": f"{base}/install/windows/{token}",
+        "zip_url": f"{base}/install/windows/{token}/zip",   # primary: exe + setup guides
         "exe_url": f"{base}/install/windows/{token}/exe",
+        "ps1_url": f"{base}/install/windows/{token}",
     })
 
 
@@ -1511,6 +1515,25 @@ def install_windows_exe(token):
                         "(set NEMESIS_GH_REPO). Use the .ps1 installer in the meantime.\n",
                         status=503, mimetype="text/plain")
     return redirect(f"https://github.com/{repo}/releases/latest/download/NemesisAgent-Setup.exe")
+
+
+@app.route("/install/windows/<token>/zip")
+def install_windows_zip(token):
+    """PUBLIC: redirect to the CI-built bundle zip (exe + install guides) — the latest
+    GitHub release asset. Repo + version are env-driven (NEMESIS_GH_REPO /
+    NEMESIS_AGENT_VERSION); no account/version hardcoded (Rule 8)."""
+    if not _valid_installer_token(token):
+        return Response("This installer link is invalid, revoked, or expired.\n",
+                        status=410, mimetype="text/plain")
+    repo = os.environ.get("NEMESIS_GH_REPO", "").strip()
+    ver = os.environ.get("NEMESIS_AGENT_VERSION", "").strip().lstrip("vV")
+    if not (repo and ver):
+        return Response("The Windows installer bundle is not configured yet "
+                        "(set NEMESIS_GH_REPO and NEMESIS_AGENT_VERSION). "
+                        "Use the .ps1 installer in the meantime.\n",
+                        status=503, mimetype="text/plain")
+    return redirect(f"https://github.com/{repo}/releases/latest/download/"
+                    f"NemesisAgent-v{ver}-Windows.zip")
 
 
 def _render_agent_devices_html() -> str:
