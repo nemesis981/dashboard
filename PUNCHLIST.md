@@ -368,3 +368,10 @@ Phase 2: Submission pipeline (sanitization, queue)
 Phase 3: Review infrastructure (AI + human review, trust scores)
 Phase 4: Feed publication (format, client pull, open source feeds)
 Each phase independently deployable. Phase 1 can go live with v1.1.
+
+PRE-ENROLLMENT SCAN — YARA RULES NOT SHIPPED YET:
+The agent's pre-enrollment scan (scan-before-trust) runs ClamAV, and runs YARA
+only if nemesis_agent/yara_rules/rules.yar is present. No rules file ships yet,
+so YARA always reports yara_available=false / not_available. ClamAV coverage is
+unaffected. Acceptable for v1, but ship a baseline YARA ruleset (and a way to
+update it) before commercial release. See enrollment.py pre_enrollment_scan().

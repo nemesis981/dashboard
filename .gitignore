@@ -15,3 +15,7 @@ alert_manager/quarantine/
 
 # Flask session secret (generated at runtime — never commit)
 alert_manager/.flask_secret
+
+# Agent secrets / local config (generated per-device at runtime — never commit)
+nemesis_agent/keys/
+*.conf
