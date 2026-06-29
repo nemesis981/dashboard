@@ -16,7 +16,9 @@
 - **Token installer verified end-to-end** (generate token → download → install → auto-approve
   enroll → heartbeat).
 - **`/api/health` live — 200 confirmed** through nginx (auth-bypass applied + verified).
-- **`link_type` detection in progress** (Window 1, landing soon).
+- **`link_type` detection shipped (`b3146fe`):** WiFi vs ethernet on all platforms (Linux
+  live-verified, Windows/Mac syntax-verified). Dashboard shows "WiFi · VPN remote" + the
+  Suricata Mode 2 note.
 - **`NEMESIS_AGENT_VERSION=1.0.6`** (updating now).
 - **Agent enrollment flow verified 8/8** (smoke test, Linux VM over LAN): scan-before-trust →
   enroll → owner-approve → authenticated heartbeat. Two deployment gaps found & fixed
