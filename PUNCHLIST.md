@@ -459,3 +459,29 @@ Open prerequisites (not yet captured):
   - Private support intake (route support@nemesis-sw.com into first-party queue,
     distinct from the user-facing tickets module — undesigned)
   - Shared Rule-8 sanitization gate (single chokepoint for all off-box destinations)
+
+NEMESIS VERIFIED PARTNER PROGRAM (see docs/roadmap/verified-partner-program.md):
+
+Future revenue stream — vendors pay for structured access to support bundles +
+certificate verification. Post-commercial; possibly a SEPARATE product line.
+
+Vendor value: ticket resolution 3h → 15min, cert verification API (instant
+clean-install proof), anonymized install analytics, conflict/failure intelligence.
+
+Certificate verification API:
+  GET /verify/{NMS-CERT-id} → {valid, software, date, findings, coverage_pct}
+  Vendor verifies clean install in ~30s. Cert IDs from malware-detection-pipeline
+  (NMS-CERT §1, NMS-INST §7-8).
+
+Partner tiers: Free (bundle receipt) / Pro (API + analytics) / Enterprise (custom).
+
+Analytics (aggregated, anonymized): install success per OS/hardware, conflict
+patterns, time-to-first-issue, "23% of tickets preventable by updating SharedLib".
+
+Privacy: vendors see aggregate only (community-feed model); explicit per-bundle
+consent; Rule-8 sanitization gate is a HARD gate (commercial recipient).
+
+Prerequisites (all roadmap-only): support bundle, certificate system,
+community backend infrastructure.
+Open: separate product line? legal (vendor agreements, consent, disclosure —
+same legal bucket as community feed); cert verification-store trust (signing/revocation).
