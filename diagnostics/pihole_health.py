@@ -15,7 +15,7 @@ META = {
     },
 }
 
-PIHOLE_IP = os.environ.get("PIHOLE_IP", "192.168.4.69:8080")
+PIHOLE_IP = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
 
 
 def run() -> dict:

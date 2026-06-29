@@ -7,7 +7,7 @@ Pi-hole v6 manages DHCP through its FTL config API:
   GET  /api/dhcp/leases     -> list of active DHCP leases
 
 Default DHCP range is read from modules/dhcp/config.json if present,
-otherwise falls back to sensible 192.168.4.x defaults.
+otherwise falls back to sensible 192.168.1.x defaults.
 """
 
 import os
@@ -20,9 +20,9 @@ from modules import NemesisModule
 log = logging.getLogger(__name__)
 
 _DEFAULT_CONFIG = {
-    "dhcp_start":     "192.168.4.100",
-    "dhcp_end":       "192.168.4.200",
-    "dhcp_router":    "192.168.4.1",
+    "dhcp_start":     "192.168.1.100",
+    "dhcp_end":       "192.168.1.200",
+    "dhcp_router":    "192.168.1.1",
     "dhcp_leasetime": 24,
     "dhcp_domain":    "lan",
 }
@@ -32,7 +32,7 @@ class Module(NemesisModule):
 
     def __init__(self, manifest: dict):
         super().__init__(manifest)
-        self._pihole_ip = os.environ.get("PIHOLE_IP", "192.168.4.69:8080")
+        self._pihole_ip = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
         self._pihole_pw = os.environ.get("PIHOLE_PASSWORD", "")
         self._session_sid: str | None = None
         self._cfg = self._load_local_config()

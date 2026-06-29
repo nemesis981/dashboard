@@ -76,7 +76,7 @@ init_devices_table()
 
 app = Flask(__name__)
 
-PIHOLE_IP = "192.168.4.69:8080"
+PIHOLE_IP = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")

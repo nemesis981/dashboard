@@ -21,7 +21,7 @@ def lookup_mac_vendor(mac):
 def scan_network():
     try:
         result = subprocess.run(
-            ["sudo", "nmap", "-sn", "192.168.4.0/22"],
+            ["sudo", "nmap", "-sn", os.environ.get("LAN_SUBNET", "192.168.1.0/24")],
             capture_output=True, text=True, timeout=60
         )
         devices = []
