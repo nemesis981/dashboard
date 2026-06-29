@@ -51,6 +51,7 @@ jobs:
           name: NemesisAgent-Windows
           path: |
             nemesis_agent/dist/NemesisAgent-Setup.exe
+            nemesis_agent/dist/NemesisAgent.exe
             nemesis_agent/dist/NemesisAgent-*-Windows.zip
           if-no-files-found: error
 
@@ -60,4 +61,5 @@ jobs:
         with:
           files: |
             nemesis_agent/dist/NemesisAgent-Setup.exe
+            nemesis_agent/dist/NemesisAgent.exe
             nemesis_agent/dist/NemesisAgent-*-Windows.zip

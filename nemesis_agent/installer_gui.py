@@ -121,18 +121,13 @@ class InstallerApp:
         os.makedirs(INSTALL_DIR, exist_ok=True)
 
     def _install_files(self):
+        """Copy the FROZEN agent exe into %APPDATA%\\Nemesis (no Python needed on the
+        box) and write the runtime config."""
         import shutil
         src = _bundled_dir()
-        for name in ("agent.py", "config.py", "enrollment.py", "modules", "platforms"):
-            s = os.path.join(src, name)
-            if not os.path.exists(s):
-                continue
-            d = os.path.join(INSTALL_DIR, name)
-            if os.path.isdir(s):
-                shutil.copytree(s, d, dirs_exist_ok=True)
-            else:
-                shutil.copy2(s, d)
-        # Write the runtime config with server + token.
+        agent_exe = os.path.join(src, "NemesisAgent.exe")
+        if os.path.exists(agent_exe):
+            shutil.copy2(agent_exe, os.path.join(INSTALL_DIR, "NemesisAgent.exe"))
         cfg = configparser.ConfigParser()
         cfg.add_section("nemesis")
         cfg.set("nemesis", "nemesis_ip", self.server)
@@ -144,25 +139,25 @@ class InstallerApp:
 
     def _enroll(self):
         """Generate the keypair, run the pre-enrollment scan, and send the
-        token-bearing enrollment request (server auto-approves on a valid token)."""
-        sys.path.insert(0, INSTALL_DIR)
-        import config as agent_config       # noqa: E402  (from the install dir)
+        token-bearing enrollment request (server auto-approves on a valid token).
+        Uses the agent source bundled INTO the setup exe; writes keys + device_id
+        into %APPDATA%\\Nemesis so the frozen agent picks them up on first run."""
+        sys.path.insert(0, _bundled_dir())
+        import config as agent_config       # noqa: E402  (bundled into the setup exe)
         import enrollment                   # noqa: E402
         agent_config.CONF_PATH = os.path.join(INSTALL_DIR, "nemesis_agent.conf")
         conf = agent_config.load()
-        enrollment.ensure_keypair()
-        enrollment.enroll(conf)             # includes the token + pre-enrollment scan
+        enrollment.ensure_keypair()         # keys -> %APPDATA%\Nemesis\keys
+        enrollment.enroll(conf)             # token + pre-enrollment scan
 
     def _register_autostart(self):
-        """Register a logon auto-start task for the agent (best-effort)."""
+        """Register a logon auto-start task pointing at the frozen agent exe
+        (no Python interpreter involved)."""
         import subprocess
-        py = os.path.join(sys.prefix, "pythonw.exe")
-        if not os.path.exists(py):
-            py = "pythonw"
+        exe = os.path.join(INSTALL_DIR, "NemesisAgent.exe")
         cmd = [
             "schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "HIGHEST",
-            "/TN", "NemesisAgent",
-            "/TR", f'"{py}" "{os.path.join(INSTALL_DIR, "agent.py")}"',
+            "/TN", "NemesisAgent", "/TR", f'"{exe}"',
         ]
         try:
             subprocess.run(cmd, check=False)

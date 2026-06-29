@@ -1,9 +1,20 @@
-"""Reads and writes nemesis_agent.conf in the same directory as this file."""
+"""Reads and writes nemesis_agent.conf (persistent location when frozen)."""
 import configparser
 import os
+import sys
 import uuid
 
-CONF_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nemesis_agent.conf")
+
+def _base_dir():
+    """Persistent state dir. When frozen (NemesisAgent.exe), this is
+    %APPDATA%\\Nemesis so conf/keys survive across runs — NOT the ephemeral
+    PyInstaller _MEIPASS temp dir. Unfrozen: alongside this source file."""
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Nemesis")
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+CONF_PATH = os.path.join(_base_dir(), "nemesis_agent.conf")
 
 DEFAULTS = {
     "nemesis_ip": "",                 # set at install time (Rule 8: no real IP shipped)
