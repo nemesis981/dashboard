@@ -38,19 +38,21 @@ def _read_baked_config():
     """Return (server, token, device_name) from an adjacent nemesis_install.conf, if any."""
     path = os.path.join(_bundled_dir(), "nemesis_install.conf")
     if not os.path.isfile(path):
-        return "", "", "Windows Device"
+        return "", "", "Windows Device", "your administrator"
     cfg = configparser.ConfigParser()
     cfg.read(path)
     g = lambda k, d="": cfg.get("nemesis", k, fallback=d)
-    return g("nemesis_ip"), g("enrollment_token"), g("device_name", "Windows Device")
+    return (g("nemesis_ip"), g("enrollment_token"), g("device_name", "Windows Device"),
+            g("support_contact", "your administrator"))
 
 
 class InstallerApp:
-    def __init__(self, root, server, token, device_name):
+    def __init__(self, root, server, token, device_name, support_contact="your administrator"):
         self.root = root
         self.server = server
         self.token = token
         self.device_name = device_name or "Windows Device"
+        self.support_contact = support_contact or "your administrator"
         root.title("Nemesis Security — Setup")
         root.geometry("480x420")
 
@@ -109,14 +111,112 @@ class InstallerApp:
         pf = os.environ.get("ProgramFiles", r"C:\Program Files")
         return os.path.isfile(os.path.join(pf, "Tailscale", "tailscale.exe"))
 
+    def _tailscale_exe(self):
+        import shutil
+        which = shutil.which("tailscale")
+        if which:
+            return which
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        return os.path.join(pf, "Tailscale", "tailscale.exe")
+
+    def _tailscale_state(self):
+        """Full Tailscale state for the connection chain. Returns one of:
+        'not_installed' | 'not_running' (daemon/service down) |
+        'not_connected' (installed + running but logged out / off) | 'connected'."""
+        if not self._tailscale_installed():
+            return "not_installed"
+        import subprocess, json
+        try:
+            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+                               capture_output=True, text=True, timeout=15)
+        except Exception:
+            return "not_running"
+        if p.returncode != 0 or not p.stdout.strip():
+            # CLI can't reach the local daemon → the service isn't running.
+            return "not_running"
+        try:
+            state = (json.loads(p.stdout) or {}).get("BackendState", "")
+        except Exception:
+            return "not_connected"
+        if state == "Running":
+            return "connected"
+        if state == "Stopped":
+            # logged in but Tailscale is turned off → treat as not connected (user turns it on).
+            return "not_connected"
+        # NeedsLogin / NoState / Starting / anything else → needs the user to log in.
+        return "not_connected"
+
+    def _start_tailscale_service(self):
+        """State 4: try to start the Tailscale Windows service."""
+        import subprocess
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            "Start-Service Tailscale"],
+                           check=False, capture_output=True, timeout=30)
+        except Exception:
+            pass
+
+    def _open_tailscale(self):
+        """Launch the Tailscale UI (or trigger login) so the user can sign in."""
+        import subprocess
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        gui = os.path.join(pf, "Tailscale", "tailscale-ipn.exe")
+        try:
+            if os.path.isfile(gui):
+                os.startfile(gui)            # type: ignore[attr-defined]  (Windows only)
+            else:
+                # Fallback: `tailscale up` opens the login flow in the browser.
+                subprocess.Popen([self._tailscale_exe(), "up"])
+        except Exception:
+            pass
+
+    def _show_open_tailscale(self):
+        """Show a one-time 'Open Tailscale' button next to Retry (idempotent)."""
+        if getattr(self, "_ts_btn", None) is not None:
+            return
+        self._ts_btn = tk.Button(self.root, text="Open Tailscale", width=14,
+                                 command=self._open_tailscale)
+        self._ts_btn.pack(pady=2)
+
+    def _ensure_tailscale(self):
+        """Validate the Tailscale connection chain. Returns True to proceed, or False
+        after showing a message + Retry (the user fixes Tailscale and clicks Retry)."""
+        state = self._tailscale_state()
+        if state == "not_running":
+            # State 4: attempt to start the service, then re-check.
+            self.set_status("Starting Tailscale...")
+            self._start_tailscale_service()
+            state = self._tailscale_state()
+
+        if state == "connected":
+            return True                                   # State 2: proceed silently
+
+        if state == "not_installed":                      # State 1
+            self.set_status("Tailscale is required first. Install it from "
+                            "tailscale.com/download, sign in, then click Retry.")
+            self.btn.config(text="Retry", state="normal", command=self.start)
+            return False
+
+        if state == "not_running":                        # State 4: could not start
+            self.set_status("Tailscale is installed but its service could not be started. "
+                            "Open Tailscale, make sure it is running, then click Retry.")
+            self._show_open_tailscale()
+            self.btn.config(text="Retry", state="normal", command=self.start)
+            return False
+
+        # State 3: installed + running but not logged in / connected.
+        self.set_status("Tailscale is installed but you're not logged in. Please open "
+                        "Tailscale and log in with the account your admin provided, then "
+                        "click Retry.")
+        self._show_open_tailscale()
+        self.btn.config(text="Retry", state="normal", command=self.start)
+        return False
+
     def _run(self):
         try:
-            # Phase 7: block (don't half-install) if Tailscale is missing — without
-            # the tunnel the agent can't reach the server.
-            if not self._tailscale_installed():
-                self.set_status("Tailscale is required first. Install it from "
-                                "tailscale.com/download, sign in, then run this installer again.")
-                self.btn.config(text="Retry", state="normal", command=self.start)
+            # Phase 7: Tailscale is the tunnel to the Nemesis server. Validate its full
+            # state (installed / service running / connected) before touching the system.
+            if not self._ensure_tailscale():
                 return
             self.set_status(STEPS[0], 1)
             self._check_requirements()
@@ -247,7 +347,13 @@ class InstallerApp:
         agent_config.CONF_PATH = os.path.join(INSTALL_DIR, "nemesis_agent.conf")
         conf = agent_config.load()
         enrollment.ensure_keypair()         # keys -> %APPDATA%\Nemesis\keys
-        enrollment.enroll(conf)             # token + pre-enrollment scan
+        device_id, _status = enrollment.enroll(conf)   # token + pre-enrollment scan
+        if not device_id:
+            # State 5: Tailscale connected but the server didn't answer — most often the
+            # wrong tailnet, or the server isn't running.
+            raise RuntimeError(
+                "Connection to security server failed. Make sure Tailscale is connected to "
+                "the correct network. Contact " + self.support_contact)
 
     def _register_autostart(self):
         """Register a logon auto-start task pointing at the frozen agent exe
@@ -265,7 +371,7 @@ class InstallerApp:
 
 
 def main():
-    server, token, device_name = _read_baked_config()
+    server, token, device_name, support_contact = _read_baked_config()
     # CLI overrides: --server X --token Y --device-name Z
     args = sys.argv[1:]
     for i, a in enumerate(args):
@@ -276,7 +382,7 @@ def main():
         elif a == "--device-name" and i + 1 < len(args):
             device_name = args[i + 1]
     root = tk.Tk()
-    InstallerApp(root, server, token, device_name)
+    InstallerApp(root, server, token, device_name, support_contact)
     root.mainloop()
 
 
