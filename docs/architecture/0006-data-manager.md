@@ -95,6 +95,22 @@ pointer to this ADR. Future builds grow the Data Manager from this seed.
 - **v3 (open-source contributor scale):** add capability-declaration manifest enforcement;
   consider process isolation.
 
+## SQLite longevity note
+
+The community signal deduplication model (one entry per unique signal, aggregated counts,
+bounded timestamp arrays, confidence decay + expiry — see
+[community-signal-dedup.md](../roadmap/community-signal-dedup.md)) keeps the backend database
+lean indefinitely. The **database grows with the unique threat landscape, not with report
+volume or user count**.
+
+- **Estimated scale at 100K installs, 5 years:** ~730MB total — well within SQLite's documented
+  capabilities.
+- **Submission queue pattern** (reports queue → background dedup worker) prevents write
+  contention under high concurrent submission load.
+- **Migration path to PostgreSQL exists if needed** (schema portable, application layer unchanged
+  via the Data Manager abstraction) but is **not anticipated** given the deduplication model's
+  efficiency.
+
 ## Connections
 
 - **ADR 0001** — the write-own/read-scoped rule, now **enforced, not convention**.
