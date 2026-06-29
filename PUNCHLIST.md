@@ -312,3 +312,39 @@ Venue guest network: agent as credential, TOS disclosure,
 guest app stays useful after visit (user acquisition funnel).
 Outbreak detection on enrolled guest fleet.
 Build after mobile agent (v2/v3).
+
+COMMUNITY BACKEND — PRE-BUILD DESIGN REQUIREMENTS:
+The following must be fully designed and locked before any
+backend code is written (decisions are hard to reverse once
+data is flowing):
+
+MUST BE LOCKED (already designed — verify complete):
+- Reporter ID derivation algorithm
+- Sanitization pipeline (three-pass)
+- Three-tier review model
+- Trust score algorithm + factors
+- Rate limits (free/commercial)
+- Upgrade/migration path
+- Challenge-response verification
+- Data schema
+- Consent model + TOS/EULA/Privacy Policy (legal review)
+
+NEEDS DESIGN SESSIONS:
+- Feed format (REST/signed JSON/compressed download)
+- AI review tier specifics (what does AI check, prompt design)
+- Human review interface (your queue, workflow, SLA)
+- Open source feed normalization (Abuse.ch/OTX/MISP → schema)
+- Abuse detection thresholds (when to flag, when to block)
+- Revocation mechanism (key death, data deletion)
+
+LEGAL REVIEW (before Phase 4 — feed goes public):
+TOS, EULA, Privacy Policy, consent flows, inspection proxy
+disclosure, community feed disclaimer, jurisdiction decision.
+Recommended: software/cybersecurity attorney, 2-3 hours.
+
+BUILD SEQUENCE (phases):
+Phase 1: Identity layer (reporter registration, verification)
+Phase 2: Submission pipeline (sanitization, queue)
+Phase 3: Review infrastructure (AI + human review, trust scores)
+Phase 4: Feed publication (format, client pull, open source feeds)
+Each phase independently deployable. Phase 1 can go live with v1.1.
