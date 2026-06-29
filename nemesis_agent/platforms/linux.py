@@ -1,6 +1,8 @@
 """Linux hardware collection via lm-sensors and psutil."""
 import json
 import logging
+import os
+import re
 import subprocess
 import psutil
 
@@ -92,3 +94,33 @@ def get_hardware_metrics():
     hw["ram_pct"] = vm.percent
 
     return hw
+
+
+_TUNNEL_PREFIXES = ("tailscale", "tun", "tap", "wg", "nordlynx", "proton", "utun")
+
+
+def _route_iface(server):
+    """Physical interface used to reach `server`, skipping VPN/tunnel devices —
+    we want the real link (WiFi/ethernet), not the Tailscale tunnel."""
+    def dev_for(target):
+        out = _run(["ip", "route", "get", str(target)], timeout=5)
+        m = re.search(r"\bdev\s+(\S+)", out or "")
+        return m.group(1) if m else None
+    iface = dev_for(server) if server else None
+    if not iface or iface.startswith(_TUNNEL_PREFIXES):
+        iface = dev_for("8.8.8.8")          # fall back to the physical default route
+    if not iface or iface.startswith(_TUNNEL_PREFIXES):
+        return None
+    return iface
+
+
+def get_link_type(server=None):
+    """'wifi' | 'ethernet' | 'unknown' for the physical link carrying traffic to the
+    Nemesis server (never the Tailscale tunnel)."""
+    try:
+        iface = _route_iface(server)
+        if not iface:
+            return "unknown"
+        return "wifi" if os.path.isdir("/sys/class/net/%s/wireless" % iface) else "ethernet"
+    except Exception:
+        return "unknown"

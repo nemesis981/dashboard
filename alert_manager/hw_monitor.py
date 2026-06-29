@@ -204,7 +204,8 @@ def init_db():
                 lhm_available    INTEGER DEFAULT 0,
                 last_heartbeat_data TEXT,
                 pre_enrollment_scan TEXT,
-                enrollment_has_findings INTEGER DEFAULT 0
+                enrollment_has_findings INTEGER DEFAULT 0,
+                link_type TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
@@ -271,7 +272,8 @@ def init_db():
                           ("last_heartbeat_data", "TEXT"),
                           # ── pre-enrollment scan (scan-before-trust) ──
                           ("pre_enrollment_scan", "TEXT"),
-                          ("enrollment_has_findings", "INTEGER DEFAULT 0")):
+                          ("enrollment_has_findings", "INTEGER DEFAULT 0"),
+                          ("link_type", "TEXT")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1336,6 +1338,10 @@ def _update_agent_device(payload, remote_ip=None):
                     last_scan_result= excluded.last_scan_result
             """, (device_id, device_name, device_type, conn_type,
                   ts, suri_run, suri_prof, last_scan, last_result))
+        lt = payload.get("link_type")
+        if lt:
+            conn.execute("UPDATE agent_devices SET link_type=? WHERE device_id=?",
+                         (lt, device_id))
         conn.commit()
         conn.close()
     except Exception as e:

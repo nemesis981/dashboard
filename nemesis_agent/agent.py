@@ -75,11 +75,23 @@ def _detect_connection_type(conf):
     return "vpn_remote"
 
 
+def _detect_link_type(conf):
+    """WiFi vs ethernet of the PHYSICAL link to the Nemesis server (via the platform
+    module; never the Tailscale tunnel). 'unknown' on any failure."""
+    try:
+        if _platform_mod and hasattr(_platform_mod, "get_link_type"):
+            return _platform_mod.get_link_type(conf.get("nemesis_ip"))
+    except Exception as e:
+        log.debug("link type detection error: %s", e)
+    return "unknown"
+
+
 def _collect_payload(conf):
     device_id   = conf.get("device_id", "unknown")
     device_name = conf.get("device_name", socket.gethostname())
     device_type = _platform_name.lower().replace("darwin", "mac")
     conn_type   = _detect_connection_type(conf)
+    link_type   = _detect_link_type(conf)
 
     # Hardware
     raw_hw = {}
@@ -131,6 +143,7 @@ def _collect_payload(conf):
         "device_name":     device_name,
         "device_type":     device_type,
         "connection_type": conn_type,
+        "link_type":       link_type,
         "timestamp":       datetime.now().isoformat(timespec="seconds"),
         "hardware":        hw,
         "security":        sec,

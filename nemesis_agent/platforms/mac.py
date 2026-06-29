@@ -1,5 +1,6 @@
 """macOS hardware collection via powermetrics and psutil."""
 import logging
+import re
 import subprocess
 import psutil
 
@@ -50,3 +51,39 @@ def get_hardware_metrics():
             break
 
     return hw
+
+
+_MAC_TUNNEL = ("utun", "tailscale", "tun", "tap", "ppp", "ipsec")
+
+
+def _route_iface_mac(server):
+    """Physical interface used to reach `server`, skipping tunnel devices."""
+    def iface_for(target):
+        out = _run(["route", "-n", "get", str(target)], timeout=5) or ""
+        m = re.search(r"interface:\s*(\S+)", out)
+        return m.group(1) if m else None
+    iface = iface_for(server) if server else None
+    if not iface or iface.startswith(_MAC_TUNNEL):
+        iface = iface_for("8.8.8.8")
+    if not iface or iface.startswith(_MAC_TUNNEL):
+        return None
+    return iface
+
+
+def get_link_type(server=None):
+    """'wifi' | 'ethernet' | 'unknown' for the physical link to the Nemesis server."""
+    try:
+        iface = _route_iface_mac(server)
+        if not iface:
+            return "unknown"
+        ports = _run(["networksetup", "-listallhardwareports"]) or ""
+        cur = None
+        for line in ports.splitlines():
+            line = line.strip()
+            if line.startswith("Hardware Port:"):
+                cur = line.split(":", 1)[1].strip()
+            elif line.startswith("Device:") and line.split(":", 1)[1].strip() == iface:
+                return "wifi" if ("Wi-Fi" in (cur or "") or "AirPort" in (cur or "")) else "ethernet"
+        return "ethernet"
+    except Exception:
+        return "unknown"

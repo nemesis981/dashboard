@@ -1,5 +1,7 @@
 """Windows hardware collection via LibreHardwareMonitor HTTP API."""
 import logging
+import re
+import subprocess
 import requests
 
 LHM_URL = "http://localhost:8085/data.json"
@@ -114,3 +116,53 @@ def get_hardware_metrics():
         hw["fans"] = fan_rpms
 
     return hw
+
+
+_WIN_TUNNEL = ("tailscale", "tun", "tap", "wireguard", "wg", "nordlynx", "proton", "mullvad")
+
+
+def _ps(cmd, timeout=8):
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
+                           capture_output=True, text=True, timeout=timeout)
+        return (r.stdout or "").strip()
+    except Exception:
+        return ""
+
+
+def _route_alias(server):
+    """InterfaceAlias used to reach `server`, skipping tunnel adapters (we want the
+    real WiFi/ethernet link, not the Tailscale tunnel)."""
+    def alias_for(target):
+        return _ps("(Find-NetRoute -RemoteIPAddress '%s' -ErrorAction SilentlyContinue | "
+                   "Select-Object -First 1).InterfaceAlias" % target)
+    alias = alias_for(server) if server else ""
+    if not alias or any(t in alias.lower() for t in _WIN_TUNNEL):
+        alias = alias_for("8.8.8.8")
+    if not alias or any(t in alias.lower() for t in _WIN_TUNNEL):
+        return ""
+    return alias
+
+
+def get_link_type(server=None):
+    """'wifi' | 'ethernet' | 'unknown' for the physical link to the Nemesis server."""
+    try:
+        alias = _route_alias(server)
+        if not alias:
+            return "unknown"
+        media = _ps("(Get-NetAdapter -Name '%s' -ErrorAction SilentlyContinue).PhysicalMediaType" % alias)
+        if media and "802.11" in media:
+            return "wifi"
+        if media:
+            return "ethernet"
+        # Fallback: netsh wlan show interfaces lists connected wireless adapters.
+        try:
+            wlan = subprocess.run(["netsh", "wlan", "show", "interfaces"],
+                                  capture_output=True, text=True, timeout=8).stdout or ""
+        except Exception:
+            wlan = ""
+        if "State" in wlan and "connected" in wlan.lower() and alias.lower() in wlan.lower():
+            return "wifi"
+        return "ethernet"
+    except Exception:
+        return "unknown"

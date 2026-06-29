@@ -113,6 +113,20 @@ def _find_clamscan():
     return shutil.which("clamscan")
 
 
+def _link_type(conf):
+    """WiFi vs ethernet of the physical link to the server, for the enroll payload."""
+    try:
+        if os.name == "nt":
+            from platforms import windows as pm
+        elif getattr(os, "uname", None) and os.uname().sysname == "Darwin":
+            from platforms import mac as pm
+        else:
+            from platforms import linux as pm
+        return pm.get_link_type(conf.get("nemesis_ip"))
+    except Exception:
+        return "unknown"
+
+
 def _scan_roots():
     """Platform-aware scan roots. Generic system roots only — NO per-user paths
     stored or transmitted (Rule 8). Detected via os.name, not stdlib `platform`
@@ -224,6 +238,7 @@ def enroll(conf=None):
         "signed_at": signed_at,
         "signature": _sign(message),
         "pre_enrollment_scan": json.dumps(scan),
+        "link_type": _link_type(conf),
     }
     # Single-use installer token (if the installer baked one in) → server auto-approves.
     _tok = (conf.get("enrollment_token") or "").strip()

@@ -1554,7 +1554,7 @@ def _render_agent_devices_html() -> str:
         rows = conn.execute(
             "SELECT device_id, device_name, os, os_version, hardware_summary, "
             "enrollment_status, connection_type, lhm_available, agent_last_seen, "
-            "pre_enrollment_scan, enrollment_has_findings "
+            "pre_enrollment_scan, enrollment_has_findings, link_type "
             "FROM agent_devices ORDER BY agent_last_seen DESC").fetchall()
         conn.close()
     except Exception:
@@ -1641,14 +1641,22 @@ def _render_agent_devices_html() -> str:
     for r in enrolled:
         lhm = ('&#9989; sensors' if r["lhm_available"]
                else '&#9888; no LHM (temps/fans need LibreHardwareMonitor)')
+        lt = (r["link_type"] or "").lower()
+        link_label = {"wifi": "WiFi", "ethernet": "Ethernet"}.get(lt, "")
+        conn_raw = (r["connection_type"] or "").lower()
+        conn_label = {"vpn_remote": "VPN remote", "local": "Local"}.get(
+            conn_raw, html.escape(r["connection_type"] or "unknown"))
+        net_label = (link_label + " &middot; " + conn_label) if link_label else conn_label
+        wifi_note = ('<br><span style="color:#ffcc00;font-size:0.8em">'
+                     '&#9888; WiFi — Suricata coverage via Mode 2 (v2)</span>') if lt == "wifi" else ""
         h.append(
             '<div style="background:#0d0d1e;border:1px solid #222;border-radius:8px;'
             'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
             f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
             f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
-            f'<span style="color:#888">conn: {html.escape(r["connection_type"] or "unknown")}</span> &middot; '
+            f'<span style="color:#888">{net_label}</span> &middot; '
             f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span> &middot; '
-            f'<span style="color:#888">{lhm}</span></div>')
+            f'<span style="color:#888">{lhm}</span>{wifi_note}</div>')
     h.append('</div>')
     return "".join(h)
 
