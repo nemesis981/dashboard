@@ -878,6 +878,7 @@ ufw_and_finish() {
     ufw allow from "$DETECTED_SUBNET" to any port 53   comment "Pi-hole DNS"        2>/dev/null || true
     ufw allow from "$DETECTED_SUBNET" to any port 8080 comment "Pi-hole Admin"      2>/dev/null || true
     ufw allow from "$DETECTED_SUBNET" to any port 22   comment "SSH"                2>/dev/null || true
+    ufw allow from "$DETECTED_SUBNET" to any port 5001 comment "Nemesis Enrollment" 2>/dev/null || true
     if [[ "$INSTALL_MODE" == "windows_vm" ]]; then
         ufw allow from any to any port 5001 comment "Nemesis Windows Agent" 2>/dev/null || true
         ok "UFW: port 5001 open for Windows agent"
