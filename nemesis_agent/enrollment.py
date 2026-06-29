@@ -213,6 +213,10 @@ def enroll(conf=None):
         "signature": _sign(message),
         "pre_enrollment_scan": json.dumps(scan),
     }
+    # Single-use installer token (if the installer baked one in) → server auto-approves.
+    _tok = (conf.get("enrollment_token") or "").strip()
+    if _tok:
+        payload["enrollment_token"] = _tok
     try:
         r = requests.post(_base_url(conf) + "/enroll", json=payload, timeout=10)
         d = r.json()

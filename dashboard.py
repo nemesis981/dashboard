@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort
+from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort, Response
 import requests
 import subprocess
 import sqlite3
@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import time
+import secrets
 import logging
 import threading
 import tarfile
@@ -51,7 +52,8 @@ _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 from database import (init_db as init_alerts_db, init_quarantines_table,
-                      init_devices_table, init_users_table, init_login_events_table)
+                      init_devices_table, init_users_table, init_login_events_table,
+                      init_enrollment_tokens_table)
 from ip_enrichment import enrich_ip
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
@@ -68,6 +70,7 @@ init_alerts_db()
 hw_monitor.init_db()
 init_users_table()
 init_login_events_table()
+init_enrollment_tokens_table()
 # Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
 # device reads in the routes. Canonical DDL in database.init_devices_table();
 # also created create-before-write by the device_scanner. Dual-safety-net,
@@ -173,7 +176,8 @@ _LOCKOUT_TIERS = [
     (10, 60, "CRITICAL", True),
 ]
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
-_AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static"}
+_AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static",
+                  "install_windows_download", "install_windows_exe"}
 
 
 def _hash_password(pw: str) -> str:
@@ -1383,6 +1387,132 @@ def api_agent_reject(device_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Windows installer generator (token-based auto-approve enrollment) ─────────
+def _nemesis_server_host() -> str:
+    """Bare host to bake into a generated installer (Rule-8 safe: env override
+    NEMESIS_SERVER_IP, else the host the user reached the dashboard on). The agent
+    posts to this host on the hw_monitor port (5001)."""
+    host = os.environ.get("NEMESIS_SERVER_IP", "").strip() or (request.host or "127.0.0.1")
+    return host.split(":")[0]
+
+
+def _valid_installer_token(token):
+    """Return the token row if it exists, is not revoked, and has not expired.
+    (Does NOT check uses — download is repeatable; enrollment claims the use.)"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM enrollment_tokens WHERE token=? AND revoked=0 AND expires_at > ?",
+            (token, time.time())).fetchone()
+        conn.close()
+        return row
+    except Exception:
+        return None
+
+
+_PS1_INSTALLER_TEMPLATE = r'''# Nemesis Agent installer (auto-generated, single-use, expires 24h)
+#Requires -RunAsAdministrator
+$ErrorActionPreference = "Stop"
+$NemesisIP   = "__SERVER__"
+$DeviceName  = "__HINT__"
+$EnrollToken = "__TOKEN__"
+
+Write-Host "Installing Nemesis Agent for $DeviceName ..." -ForegroundColor Cyan
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Pre-seed config including the single-use enrollment token (enables auto-approval).
+$conf = @"
+[nemesis]
+nemesis_ip = $NemesisIP
+nemesis_port = 5001
+nemesis_subnet =
+device_name = $DeviceName
+device_id =
+poll_interval = 300
+suricata_enabled = false
+suricata_profile = auto
+scan_on_reconnect = true
+last_scan_at =
+enrollment_token = $EnrollToken
+"@
+Set-Content -Path (Join-Path $ScriptDir "nemesis_agent.conf") -Value $conf -Encoding utf8
+
+# Hand off to the full installer (installs deps, copies files, registers the service).
+& (Join-Path $ScriptDir "install_windows.ps1") -NemesisIP $NemesisIP -DeviceName $DeviceName
+Write-Host "Done. This device will be approved automatically." -ForegroundColor Green
+'''
+
+
+def _render_windows_installer_ps1(server_host: str, token: str, hint: str) -> str:
+    safe_hint = re.sub(r"[^A-Za-z0-9 _.-]", "", hint or "Windows Device")[:60] or "Windows Device"
+    return (_PS1_INSTALLER_TEMPLATE
+            .replace("__SERVER__", server_host)
+            .replace("__HINT__", safe_hint)
+            .replace("__TOKEN__", token))
+
+
+@app.route("/api/agent/installer/generate", methods=["POST"])
+def api_agent_installer_generate():
+    """Owner action: mint a single-use, 24h, auto-approve enrollment token and
+    return download links for the Windows installer (.ps1 now; .exe via CI)."""
+    data = request.get_json(silent=True) or request.form
+    hint = (data.get("device_name_hint") or "Windows Device").strip()[:60] or "Windows Device"
+    token   = secrets.token_hex(16)
+    now     = time.time()
+    expires = now + 24 * 3600
+    creator = current_user.username if current_user.is_authenticated else "unknown"
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.execute(
+            "INSERT INTO enrollment_tokens "
+            "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
+            " device_name_hint, revoked) VALUES (?,?,?,?,1,0,1,?,0)",
+            (token, creator, now, expires, hint))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    _audit(action="installer_token_generate", rule_id=token[:8])
+    base = request.host_url.rstrip("/")
+    return jsonify({
+        "ok": True,
+        "token": token,
+        "device_name_hint": hint,
+        "expires_at": expires,
+        "ps1_url": f"{base}/install/windows/{token}",
+        "exe_url": f"{base}/install/windows/{token}/exe",
+    })
+
+
+@app.route("/install/windows/<token>")
+def install_windows_download(token):
+    """PUBLIC (token is the credential): serve the pre-baked PowerShell installer."""
+    row = _valid_installer_token(token)
+    if not row:
+        return Response("This installer link is invalid, revoked, or expired.\n",
+                        status=410, mimetype="text/plain")
+    ps1 = _render_windows_installer_ps1(_nemesis_server_host(), token,
+                                        row["device_name_hint"] or "Windows Device")
+    return Response(ps1, mimetype="text/plain", headers={
+        "Content-Disposition": f'attachment; filename="install-nemesis-{token[:8]}.ps1"'})
+
+
+@app.route("/install/windows/<token>/exe")
+def install_windows_exe(token):
+    """PUBLIC: redirect to the CI-built Windows .exe (latest GitHub release asset).
+    Repo is env-driven (NEMESIS_GH_REPO) — no account/repo hardcoded (Rule 8)."""
+    if not _valid_installer_token(token):
+        return Response("This installer link is invalid, revoked, or expired.\n",
+                        status=410, mimetype="text/plain")
+    repo = os.environ.get("NEMESIS_GH_REPO", "").strip()
+    if not repo:
+        return Response("The Windows .exe build target is not configured yet "
+                        "(set NEMESIS_GH_REPO). Use the .ps1 installer in the meantime.\n",
+                        status=503, mimetype="text/plain")
+    return redirect(f"https://github.com/{repo}/releases/latest/download/NemesisAgent-Setup.exe")
+
+
 def _render_agent_devices_html() -> str:
     """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
     try:
@@ -1401,6 +1531,20 @@ def _render_agent_devices_html() -> str:
     enrolled = [r for r in rows if (r["enrollment_status"] or "") == "approved"]
     h = ['<div class="card" id="section-devices-enroll" style="margin-bottom:16px">'
          '<h2>&#128421; Devices</h2>',
+         # ── Windows installer generator ──
+         '<div style="background:#0d0d1e;border:1px solid #00d4ff33;border-radius:8px;'
+         'padding:10px 12px;margin-bottom:14px">'
+         '<h3 style="color:#00d4ff;font-size:0.95em;margin-top:0">Generate Windows Installer</h3>'
+         '<p style="color:#888;font-size:0.82em;margin:4px 0">Creates a single-use link '
+         '(expires in 24 hours) that installs the agent and approves this device automatically.</p>'
+         '<input id="installerHint" type="text" value="Windows Device" maxlength="60" '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:200px" placeholder="Device name"> '
+         '<button onclick="genWindowsInstaller()" style="background:#00d4ff22;color:#00d4ff;'
+         'border:1px solid #00d4ff;border-radius:6px;padding:5px 14px;cursor:pointer">'
+         'Generate Windows Installer</button>'
+         '<div id="installerResult" style="margin-top:8px;font-size:0.84em"></div>'
+         '</div>',
          '<h3 style="color:#ffcc00;font-size:0.95em">Pending approval</h3>']
     if not pending:
         h.append('<p style="color:#888;font-size:0.86em">No devices awaiting approval.</p>')

@@ -1885,19 +1885,44 @@ def _create_enrollment(payload, remote_ip):
         scan_summary = f"Pre-enrollment scan: ✅ Clean (ClamAV: {clam_f} findings, YARA: {yara_f} findings)"
 
     import uuid as _uuid
+    import time as _time
     device_id = _uuid.uuid4().hex
     now = datetime.now().isoformat(timespec="seconds")
+
+    # ── installer token: atomic single-use claim → auto-approve (skip pending) ──
+    # The UPDATE both validates AND claims a use in one statement (concurrency-safe).
+    # Any failure (no token, bad/expired/used token, missing table) leaves the
+    # scan-derived enroll_status untouched → normal pending flow. Never errors out.
+    token = (payload.get("enrollment_token") or "").strip()
+    token_creator = None
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        if token:
+            try:
+                cur = conn.execute(
+                    "UPDATE enrollment_tokens SET uses = uses + 1 "
+                    "WHERE token=? AND revoked=0 AND auto_approve=1 "
+                    "AND uses < max_uses AND expires_at > ?",
+                    (token, _time.time()))
+                if cur.rowcount == 1:
+                    r = conn.execute(
+                        "SELECT created_by FROM enrollment_tokens WHERE token=?",
+                        (token,)).fetchone()
+                    token_creator = r[0] if r else None
+                    enroll_status = "approved"
+            except Exception:
+                log.exception("enrollment token check failed; falling back to pending")
         conn.execute(
             "INSERT INTO agent_devices (device_id, device_name, os, os_version, "
             "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen, "
-            "pre_enrollment_scan, enrollment_has_findings) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "pre_enrollment_scan, enrollment_has_findings, enrolled_by, enrolled_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (device_id, device_name, os_name, payload.get("os_version", ""),
              payload.get("hardware_summary", ""), public_key, enroll_status, remote_ip, now,
-             scan_json, has_findings))
-        conn.commit()
+             scan_json, has_findings,
+             (token_creator if enroll_status == "approved" else None),
+             (now if enroll_status == "approved" else None)))
+        conn.commit()   # token claim + device insert commit together (or both roll back)
         conn.close()
     except Exception:
         log.exception("agent enrollment insert failed")
@@ -1906,15 +1931,23 @@ def _create_enrollment(payload, remote_ip):
         import modules
         modules.set_shared_db_path(DB_PATH)
         from modules.tickets.module import open_ticket
+        if enroll_status == "approved":
+            title = f"Device auto-enrolled via installer token: {device_name} ({os_name})"
+            footer = (f"Auto-approved by installer token (created by {token_creator or 'unknown'}).\n"
+                      f"Review in Settings -> Devices if unexpected.")
+            prio = "HIGH" if has_findings else "LOW"
+        else:
+            title = f"New device pending approval: {device_name} ({os_name})"
+            footer = "Approve or reject it in Settings -> Devices."
+            prio = "HIGH" if has_findings else "MEDIUM"
         open_ticket(
             sensor_key=f"agent_enroll_{device_id}",
-            title=f"New device pending approval: {device_name} ({os_name})",
-            body=(f"A new device requested enrollment.\n\nName: {device_name}\n"
+            title=title,
+            body=(f"A device requested enrollment.\n\nName: {device_name}\n"
                   f"OS: {os_name} {payload.get('os_version', '')}\n"
                   f"Hardware: {payload.get('hardware_summary', '')}\nFrom: {remote_ip}\n\n"
-                  f"{scan_summary}\n\n"
-                  f"Approve or reject it in Settings -> Devices."),
-            priority="HIGH" if has_findings else "MEDIUM", actor="system")
+                  f"{scan_summary}\n\n{footer}"),
+            priority=prio, actor=(token_creator if enroll_status == "approved" else "system"))
     except Exception:
         log.exception("agent enrollment ticket failed (non-fatal)")
     return device_id, enroll_status

@@ -172,6 +172,38 @@ def init_login_events_table():
     finally:
         conn.close()
 
+def init_enrollment_tokens_table():
+    """Canonical DDL for the core `enrollment_tokens` table.
+
+    Backs the dashboard's "Generate Windows Installer" flow: single-use,
+    time-limited tokens that auto-approve a device at /enroll (hw_monitor),
+    skipping the manual pending→approve step. Core-owned (unprefixed) per ADR 0001.
+    Timestamps are epoch REAL. Created by the dashboard at boot; hw_monitor reads
+    it (defensively — a missing/locked table just falls back to normal pending).
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS enrollment_tokens (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                token            TEXT NOT NULL UNIQUE,
+                created_by       TEXT NOT NULL,
+                created_at       REAL NOT NULL,
+                expires_at       REAL NOT NULL,
+                max_uses         INTEGER DEFAULT 1,
+                uses             INTEGER DEFAULT 0,
+                auto_approve     INTEGER DEFAULT 1,
+                device_name_hint TEXT,
+                revoked          INTEGER DEFAULT 0
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_token "
+                  "ON enrollment_tokens(token)")
+        conn.commit()
+    finally:
+        conn.close()
+
 def get_alert(rule_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()

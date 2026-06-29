@@ -18,6 +18,7 @@ DEFAULTS = {
     "last_scan_at": "",
     # ── owner-gated enrollment (keypair lives alongside this .conf) ──
     "enrollment_status": "",          # mirrors the server: 'pending'|'approved'|'rejected'
+    "enrollment_token": "",           # single-use installer token → server auto-approves
     "private_key_path": "",           # set by enrollment.ensure_keypair()
     "public_key_path": "",
 }
