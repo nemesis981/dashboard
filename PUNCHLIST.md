@@ -268,3 +268,47 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
   Handles shared workstations, shift-based access, the traveling IT person, and visiting support.
   Build **after** Flask-Login + device-auth Level 2. Full design:
   [docs/architecture/0007-device-user-model.md](docs/architecture/0007-device-user-model.md).
+
+COMMUNITY REPORTER IDENTITY SYSTEM (v1.1):
+Free tier key (NMS-FREE-XXXX) auto-generated on install.
+Reporter ID derived from license key + network latency +
+system entropy (one-time, inputs discarded after derivation).
+Server stores derivation entropy for challenge-response
+verification (ZKP-adjacent — key never sent over network).
+Trust score, rate limiting, abuse detection, upgrade path
+with verified identity migration. Three-pass sanitization
+pipeline. See docs/roadmap/community-reporter-identity.md.
+Build alongside community backend (v2).
+
+DAILY STATUS REPORT (printable/emailable) — v2:
+GET /api/report/daily → HTML + PDF + plain text
+Content: system health, services, fleet status, alerts (24h),
+open tickets, canary state, Pi-hole stats, connectivity verdict,
+AI natural language summary paragraph.
+Schedule: auto-generate 7am, email to admin, on-demand from
+dashboard. Tiered output (Beginner/Intermediate/Pro).
+Connects to: scheduled reports roadmap, transparency audit,
+tiered output audit, hw_monitor AI report.
+
+PC AGENT USER INTERFACE + TRAFFIC READOUT (v2):
+Localhost:5003 web UI (cross-platform, no native UI needed).
+Traffic readout: approved/inspected/blocked counts, current
+routing mode, tunnel latency, cache hit rate, recently blocked.
+Network type setting (personal/business/venue) = master gate
+for all user controls. Admin-gated via device policy.
+Tunnel policy (full/split/work_only) is policy output not
+user preference — admin sets, agent enforces via config-pull.
+BYOD: personal traffic summarized not specific (legal middle
+ground). AUP surfaced clearly at connection.
+Fail closed (business) vs fail open (personal) per network type.
+Build alongside agent rebuild (v2).
+
+ZTNA + NAC ENFORCEMENT (v2):
+No enrolled agent = no internet (captive portal).
+Router firewall: only Tailscale-tunneled devices get internet.
+Captive portal: QR code → install agent → TOS → auto-approve
+after clean scan → WiFi access via inspection tunnel.
+Venue guest network: agent as credential, TOS disclosure,
+guest app stays useful after visit (user acquisition funnel).
+Outbreak detection on enrolled guest fleet.
+Build after mobile agent (v2/v3).
