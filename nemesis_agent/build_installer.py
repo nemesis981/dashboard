@@ -98,7 +98,8 @@ def main(argv=None):
     if args.token:
         setup_datas.append(f"{_bake_config(args.server, args.token, args.device_name)}{SEP}.")
     _pyinstaller("installer_gui.py", "NemesisAgent-Setup", windowed=True,
-                 datas=setup_datas, hidden=["requests", "psutil", "cryptography"])
+                 datas=setup_datas, hidden=["requests", "psutil", "cryptography"],
+                 uac=True)   # Phase 2: request UAC elevation (needs admin for schtasks/Defender)
 
     print("Built:", os.path.join(DIST, "NemesisAgent.exe"),
           "+", os.path.join(DIST, "NemesisAgent-Setup.exe"))
