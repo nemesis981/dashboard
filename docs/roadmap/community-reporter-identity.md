@@ -101,6 +101,42 @@ Revocation:
 Delete derivation data from backend → reporter_id unverifiable
 Same effect as revoking the license key
 
+## Geographic Anchoring & Compounding Verification
+
+Extended ping target pool (supersedes the 4-target illustration in
+"Reporter ID Derivation" — the random selection is now 1 of ~10-15):
+
+EXTENDED PING TARGET POOL:
+~10-15 targets across geographic regions
+(US-West/East/Central, EU-West/Central/North,
+APAC-East/Central, SA-East, AF-South)
+
+RANDOM SELECTION AT INSTALL:
+One target chosen at random from the full pool.
+Target IP + location + org stored server-side
+alongside the measured latency.
+
+GEOGRAPHIC ANCHOR:
+Target location becomes a permanent part of the identity record.
+Not "where is this reporter" but "this reporter was measured
+against [region] at install time."
+Enables regional threat correlation without identifying users.
+
+GEOGRAPHIC PLAUSIBILITY CHECK:
+Backend verifies latency is physically plausible for the
+chosen target's distance from the approximate submitter region.
+Latency to APAC from Europe (~150ms) vs from Asia (~8ms)
+— physics catches implausible claims without knowing location.
+Passive approximate geolocation via speed-of-light physics.
+No GPS, no IP lookup, no user disclosure.
+
+COMPOUNDING VERIFICATION DIMENSIONS:
+Mathematical (HMAC match) +
+Geographic (latency plausible for target?) +
+Temporal (timestamp reasonable?) +
+Behavioral (pattern looks human?)
+Four independent dimensions — breaking any one invalidates identity.
+
 ## Trust and Reputation System
 
 Reporter profile (anonymous, backend only):
