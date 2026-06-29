@@ -33,7 +33,8 @@
 
 ## Pointers
 - **ADRs:** 0006 (Data Manager), 0007 (device-user model), 0008 (impossible travel),
-  0009 (security inspection proxy / self-hosted SSE — `docs/architecture/0009-security-inspection-proxy.md`).
+  0009 (security inspection proxy / self-hosted SSE — `docs/architecture/0009-security-inspection-proxy.md`),
+  0010 (PC agent continuous ping monitor — `docs/architecture/0010-agent-ping-monitor.md`).
 - `docs/roadmap/nemesis-test-lab.md` (VM Lab + sandbox)
 - `docs/roadmap/agent-rebuild-config-driven.md`
 - `docs/roadmap/msp-central-management.md`
