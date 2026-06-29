@@ -127,6 +127,7 @@ class InstallerApp:
             self.set_status(STEPS[2], 3)
             self._enroll()
             self._register_autostart()
+            self._start_agent_now()      # Phase 9: run now, not just at next logon
             self.set_status(STEPS[3], 4)
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
         except Exception as e:                       # Phase 8: show the real error
@@ -146,6 +147,19 @@ class InstallerApp:
     def _check_requirements(self):
         os.makedirs(INSTALL_DIR, exist_ok=True)
         self._add_defender_exclusion()
+
+    def _start_agent_now(self):
+        """Phase 9: launch the frozen agent right away so it enrolls/heartbeats
+        immediately, instead of waiting for the next logon."""
+        import subprocess
+        exe = os.path.join(INSTALL_DIR, "NemesisAgent.exe")
+        if not os.path.isfile(exe):
+            return
+        flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
+        try:
+            subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=flags)
+        except Exception:
+            pass
 
     def _start_freshclam(self):
         """Phase 4: download ClamAV virus definitions in the background (the bundle
