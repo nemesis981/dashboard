@@ -96,10 +96,13 @@ security posture**, not a happy-path auto-approve.
 
 ## Dependencies (must exist for parts of this to land)
 
-- **D-dep-1 — Hardware-stable-ID.** The token-to-device binding (ADR 0011) and the review
-  card's "hardware-ID match" row depend on `docs/roadmap/hardware-stable-identifiers.md`,
-  which is **parked / no code today**. Either build it in this window or the binding/match
-  degrades to trust-on-first-use (see ADR 0011 §open Q1).
+- **D-dep-1 — Hardware-stable-ID — RESOLVED → BUILD-NOW.** Promoted from parked; the FULL
+  design (Windows+Linux collectors, locked data model/schema/payload, clean platform interface
+  with Mac deferred) is the build-ready design of record in
+  [hardware-stable-identifiers.md](hardware-stable-identifiers.md). It powers the TOFU lock +
+  review-card "same device?" check (ADR 0011 Q1, now resolved = TOFU). Build EARLY in the
+  sequence but bounded — must not crowd out the installer; trip deliverable = Windows install
+  end-to-end. Mac collector is the only deferred leg.
 - **D-dep-2 — Frozen-installer build path.** `nemesis_agent/build_installer.py` currently
   produces the generic GUI exe; the dashboard `/api/agent/installer/generate` serves the
   legacy `.ps1`. Both must be redirected to emit + serve the frozen, credential-baked exe
@@ -114,5 +117,6 @@ security posture**, not a happy-path auto-approve.
   pending an explicit privacy decision. Owner must decide the collection boundary.
 - **D2 — Engine/sig version-alignment ownership:** how the box engine version is kept aligned
   with the agent's pinned engine (who bumps, how mismatch is detected/blocked). Stage-3 caveat.
-- **D3 — Token binding for a clean remote box** (ADR 0011 open Q1): pre-bound fingerprint
-  isn't knowable before the user's box exists → trust-on-first-use vs other. Owner steer.
+- **D3 — Token binding for a clean remote box — RESOLVED = trust-on-first-use.** The
+  fingerprint isn't knowable before the user's box exists, so it **locks on first enrollment**
+  (TOFU); a later presentation from a different machine fails the match. (ADR 0011 Q1 resolved.)

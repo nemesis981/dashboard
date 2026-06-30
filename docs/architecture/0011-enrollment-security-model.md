@@ -9,9 +9,9 @@
 - **Affects:** the installer-baked credentials, `/enroll` + the enrollment payload,
   `enrollment_tokens`, the install-media transport, the owner approval UX.
 - **Depends on:** [0005 — device-auth](0005-dns-firewall-device-auth-architecture.md) (the
-  `firewall.py` chokepoint + device-auth seam); `hardware-stable-identifiers`
-  (`docs/roadmap/hardware-stable-identifiers.md`, **parked** — gates the token-to-device
-  binding).
+  `firewall.py` chokepoint + device-auth seam);
+  [hardware-stable-identifiers](../roadmap/hardware-stable-identifiers.md) — **now BUILD-NOW**
+  (Windows+Linux), the locked design powering the TOFU lock + review-card match.
 - **Related:** roadmap [installer-unified-v1.0.6](../roadmap/installer-unified-v1.0.6.md)
   (the build that carries this); [0008 — impossible-travel](0008-impossible-travel-detection.md)
   (deferred geo scoring).
@@ -38,9 +38,9 @@ an auth-bypass on `/install/windows/`, so the token is interceptable in transit 
   this alone neutralizes the in-transit token-interception risk.
 - **Default enrollment = MANUAL APPROVAL (pending).** Auto-approve becomes a deferred,
   explicit opt-in.
-- **Enrollment token:** single-use, **TTL cut to 1–2h**, and **bound to the invited device
-  fingerprint** (hardware-stable-ID) so a stolen token won't enroll a *different* machine.
-  (Binding mechanism for a not-yet-known clean box → Open question Q1.)
+- **Enrollment token:** single-use, **TTL cut to 1–2h**, and **bound to the device fingerprint
+  via TOFU** (hardware-stable-ID, now build-now): the first machine to present the token locks
+  the fingerprint, so a stolen token won't enroll a *different* machine (Q1 resolved).
 - **Tailscale pre-auth key:** single-use, short-expiry, **tagged/ephemeral** (constrained
   ACL), **per-installer**, never reusable or long-lived.
 - **Baked credentials = per-installer secrets.** Expired/used → **HARD FAIL, no fallback.**
@@ -89,12 +89,12 @@ Auto-approve (the riskiest default) is off.
 
 - **Q0 — ADR numbering:** standalone **0011**, or fold into/supersede 0005's device-auth
   section? (Created as 0011 to avoid collision; trivially renumbered.)
-- **Q1 — Token-to-device binding for a clean REMOTE box:** the owner generates the installer
-  **before** the user's machine exists, so there is no fingerprint to pre-bind to. Options:
-  (a) **trust-on-first-use** — the first machine to present the token locks the fingerprint;
-  a second machine with the same token is rejected (catches stolen-media-after-first-use, not
-  before — manual approval + source-IP is the backstop there); (b) a separate identity-claim
-  step; (c) accept manual approval alone for v1. **Needs a steer.**
+- **Q1 — Token-to-device binding for a clean REMOTE box — RESOLVED = trust-on-first-use.**
+  The owner generates the installer before the user's machine exists, so the fingerprint
+  (now build-now, [hardware-stable-identifiers](../roadmap/hardware-stable-identifiers.md))
+  **locks on first enrollment**; a later presentation of the same token from a different
+  machine fails the match (review card → "NO — different machine"). Manual approval +
+  unforgeable server-observed source IP is the backstop for media stolen *before* first use.
 - **Q2 — Geo/privacy boundary:** confirm "coarse locale/timezone cross-check only, no precise
   geo collection" as the shipped policy (mirrors roadmap D1).
 - **Q3 — Pre-auth key sourcing:** admin-pasted per-installer now; confirm acceptable until
