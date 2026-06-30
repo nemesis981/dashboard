@@ -25,6 +25,21 @@ in a clean block:
    ```
 4. **Working tree status:** `git -C ~/dashboard status --short`
 5. **Read `docs/handoff/HANDOFF.md`** and state today's resume point.
+6. **Roadmap-vs-state audit (LIVE each session) — baseline diff, not header-trust:**
+   report the tally + flag drift vs the maintained baseline
+   (`docs/audits/roadmap-state-audit-YYYY-MM-DD.md`, latest date wins). Do NOT classify
+   off each file's `Status:` header — headers go stale on shipping (the 3 currently-shipped
+   items still say "parked"), so trusting them hides the exact drift this check exists to
+   catch. Instead, each morning:
+   - **File-set drift:** `ls ~/dashboard/docs/roadmap/*.md` → compare names/count to the
+     baseline's 43. Report any ADDED or REMOVED files.
+   - **Shipping drift:** the baseline's 9 non-parked items (3 SHIPPED + 6 PARTIAL) plus any
+     newly-added files get a quick code/`git log` re-check (confirm/upgrade status). For the
+     34 baseline-PARKED items, scan recent `git log --oneline` subjects for roadmap keywords
+     — a parked item with a fresh feat commit has likely shipped; verify it.
+   - This is a READ-ONLY audit (Rule 1) — report only, change nothing. When drift is found,
+     refresh the baseline audit doc at closeout (new dated file).
+   - Baseline (2026-06-30): **3 SHIPPED / 6 PARTIAL / 34 PARKED** (43 total).
 
 Format the output as:
 ```
@@ -34,6 +49,7 @@ Last commits: [3 lines]
 Services: dashboard=active watchdog=active ...
 Tree: clean / [N files modified]
 Resume: [one sentence from HANDOFF]
+Roadmap: N shipped / N partial / N parked (M total) — [drift note or "no change"]
 ------------------------------
 ```
 Then ask: **"What would you like to work on today?"** This replaces the manual catch-up

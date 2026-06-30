@@ -1,6 +1,6 @@
 # Roadmap stub — diagnostics: productize the connectivity/VPN watcher as a Nemesis tool
 
-**Status:** parked (what + why — do NOT build yet). Likely the **best first concrete piece**
+**Status:** SHIPPED (`53975ea`–`086a659`) — watcher service, VPN probes, dashboard card, systemd unit. Was the **best first concrete piece**
 of the diagnostics subsystem (already works hand-run; modest to productize).
 
 ## What

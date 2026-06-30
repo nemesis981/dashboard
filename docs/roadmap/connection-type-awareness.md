@@ -1,6 +1,6 @@
 # Roadmap stub — Connection-type awareness (ethernet / wifi / unknown)
 
-**Status:** parked (capture-only — what + why; do NOT build yet). **Folds into** the
+**Status:** SHIPPED (`b3146fe`) — link_type WiFi/ethernet across platforms, stored in `agent_devices`, shown in dashboard. **Folds into** the
 [agent rebuild](agent-rebuild-config-driven.md), the device-detail-page build, and the
 `HEALTH_SERVICES` Suricata check. Related: ADR 0005 (device identity), the header status
 lights + diagnostics tiered-display patterns (`PUNCHLIST.md`).

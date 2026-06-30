@@ -1,6 +1,6 @@
 # Roadmap stub — diagnostics: Anthropic system-status banner
 
-**Status:** parked (likely a fast win — what + why; detail later, do NOT build yet).
+**Status:** SHIPPED (`b7b7174`) — `_poll_anthropic_status()` in `ai_engine/module.py`.
 
 ## What
 Scrape the Anthropic system-status page and display its current state as a banner at
