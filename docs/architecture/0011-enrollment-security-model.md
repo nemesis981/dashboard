@@ -71,6 +71,26 @@ Owner action: **APPROVE or REJECT** from the card.
   the cross-check only; **precise geo deferred/avoided pending an explicit privacy decision**
   (Open question Q2).
 
+### Email / invite delivery role — addendum (2026-06-30, capture only)
+**ROLE: email is a DELIVERY channel + WEAK CORROBORATION only — NEVER a trust gate.**
+- **Delivery.** The dashboard can auto-send the generated installer/link to an
+  admin-entered recipient address — replacing today's manual copy-link-and-send. Ties to
+  parked **PL-5 / installer-email-delivery**.
+- **Corroboration.** The entered recipient ("issued for `<addr>`") surfaces on the
+  enrollment review card as **INFORMATIONAL** context at approval — labeled **untrusted**,
+  helps catch honest mismatches, **never trust-determining on its own** (same posture as the
+  geo cross-check above).
+- **Trust still rides ONLY on:** server-observed tailnet IP + TOFU hardware lock + single-use
+  short-TTL token + manual approval. Email going astray **cannot enroll anything silently.**
+- **SPF/DKIM/DMARC:** apply to **OUTBOUND** support/notification mail (anti-spoof of our own
+  domain, deliverability) — explicitly **NOT** a mechanism for verifying enrollment identity.
+- **Security note:** automated delivery is **NOT a new risk surface** — it replaces the
+  existing manual email path (clipboard + personal mail client) with a controlled, loggable
+  one; equal-or-lower exposure.
+- **PRIORITY: TIME-PERMITTING admin convenience.** Layered on a trust model that stands
+  without it; the install works hand-delivered or auto-sent. Build only if the window has
+  room after trip-critical pieces land; otherwise defers cleanly, **blocks nothing.**
+
 ### DEFERRED (design here, implement post-trip; SSH-home capable)
 - **Keypair pinning after first enroll.**
 - **Full token-to-identity binding** (beyond device fingerprint).
