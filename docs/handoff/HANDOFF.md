@@ -75,6 +75,10 @@
 - **ADRs:** 0006 (Data Manager), 0007 (device-user model), 0008 (impossible travel),
   0009 (security inspection proxy), 0010 (agent ping monitor).
 - `docs/roadmap/` — full capture set. `docs/audits/roadmap-capture-audit-2026-06-29.md`.
+- **Roadmap-vs-state baseline:** `docs/audits/roadmap-state-audit-2026-06-30.md` (3 SHIPPED /
+  6 PARTIAL / 34 PARKED, 43 total). Morning Status step 6 re-audits live each session by
+  diffing reality against this baseline (not header-trust). On closeout, if drift showed up
+  that day, refresh the baseline as a NEW dated `roadmap-state-audit-YYYY-MM-DD.md`.
 - `docs/operation/OPERATION.md` (nginx = official entrypoint), `CONFIG_CHANGE_PROCEDURE.md`,
   `WINDOWS_AGENT_SETUP.md` + the 3-tier Windows install guides.
 - `core/manage.py` (SSH recovery CLI).
