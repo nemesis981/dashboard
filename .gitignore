@@ -29,3 +29,6 @@ nemesis_agent/lhm/
 
 # Generated morning briefing/audit reports (local-only, regenerated each session)
 docs/briefing/
+
+# Collaboration/working-style notes (local-only; @-imported into CLAUDE.md from disk)
+docs/COLLABORATION.md

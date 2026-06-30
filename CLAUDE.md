@@ -5,6 +5,9 @@ the project's core operating discipline (Tier 1) plus Nemesis-specific rules. Re
 before doing anything. Also read, in this order, before starting work:
 `ARCHITECTURE.md` → `docs/architecture/` (ADRs) → `docs/handoff/HANDOFF.md`.
 
+Working-style notes (local-only, gitignored; auto-loaded from disk via @-import):
+@docs/COLLABORATION.md
+
 ---
 
 ### Morning Status (run on session start)
