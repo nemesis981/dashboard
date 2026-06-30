@@ -637,3 +637,51 @@ INSTALLER SIZE OPTIMIZATION (post-trip):
                shows "Downloading security scanner...".
     Result: small installer, same end state; saves ~240MB/user.
   Same model as the Chrome installer (small stub -> downloads the rest).
+
+### [WINDOWS-INSTALL] — v1.0.6 doc-driven install test findings (2026-06-30)
+Full detail + verdict: `docs/audits/windows-install-doc-test-2026-06-30.md`. Test HELD at the
+install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE to ADR/roadmap
+(per Rule 7) — listed here for tracking, not as small fixes.
+
+**Graduate to ADR/roadmap (project-sized — do NOT treat as quick fixes):**
+- [ ] **PL-3 (High) — Tailscale onboarding has no working/documented mechanism.** Frozen
+  `Setup.exe` hard-gates on Tailscale (`installer_gui.py:194-198,245`); no pre-auth-key/invite
+  flow exists; Beginner doc implies sharing the owner's account login (insecure). Blocks every
+  real remote user. → design a pre-auth-key / device-invite flow; decide LAN-skip policy. (roadmap/ADR)
+- [ ] **PL-6 (High) — enrollment is a bearer-token model; device keypair ≠ stolen-media
+  protection.** auto_approve default + media over `:80` HTTP cleartext. → security review;
+  fold into **ADR 0005** (device-auth): bind token to invited identity, default manual approval,
+  out-of-band delivery, HTTPS media, shorter TTL, keypair pinning.
+- [ ] **PL-8 (High) — dashboard "Generate Windows Installer" serves the LEGACY system-Python
+  `install_windows.ps1`, not a v1.0.6 frozen equivalent** (needs Python+pip; runs `python
+  agent.py`). Contradicts the frozen "no system Python" model. → dashboard should serve the
+  frozen installer. (roadmap/ADR)
+- [ ] **PL-4 (Med) — the two installers disagree on Tailscale** (GUI `Setup.exe` mandatory
+  hard-gate vs token `.ps1` optional/skippable). Pick one policy; align both + the doc.
+
+**Small fixes (PUNCHLIST-sized):**
+- [ ] **PL-9 — Python detection fooled by the Windows App-Execution-Alias stub.**
+  `install_windows.ps1:35` `Get-Command python` matches `...\WindowsApps\python.exe` → passes
+  falsely, dies later at `pip`. Fix: require `python --version` success AND source not under
+  `WindowsApps`.
+- [ ] **PL-1 — Beginner Step 0 Tailscale login has no account/new-tailnet warning.** Caused the
+  operator to create a NEW empty tailnet. Add: name the exact account; "if it shows an empty
+  network or offers to *create* a tailnet, you used the wrong account."
+  (`docs/operation/INSTALL_WINDOWS_BEGINNER.md`)
+- [ ] **PL-7 — no owner/admin doc for the invite-generation step.** All 3 tier guides say "the
+  installer your admin sent you" but never how to mint/deliver it. Add an owner guide:
+  dashboard → Devices → Generate Windows Installer → deliver link.
+- [ ] **W-1 — Beginner guide says "you do NOT need any passwords/accounts/settings," but the
+  generic released `Setup.exe` prompts for Server address + Install code.** Reconcile (assumes a
+  pre-baked installer the doc never explains). `docs/operation/INSTALL_WINDOWS_BEGINNER.md`
+- [ ] **PL-5 — dashboard invite doesn't auto-send + links pinned to `<tailnet-ip>`.** Returns
+  zip/exe/ps1 links the owner forwards manually (email delivery already parked — see the
+  installer-email-delivery note above); `NEMESIS_PUBLIC_URL` pins links to the tailnet so LAN
+  devices can't use the handed-out link. Carries no Tailscale info (ties to PL-3).
+- [ ] **PL-2 — `[SUPPORT_CONTACT]` placeholder ships raw** in the Beginner guide. Substitute at
+  deploy, or explain it's filled by the helper.
+- [ ] **W-2 — time estimates** ("~5 min" / install "~2 min") vs a 272MB bundle. Adjust.
+
+**Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
+bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
+SSH automation all worked.
