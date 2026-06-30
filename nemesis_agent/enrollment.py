@@ -216,6 +216,18 @@ def _base_url(conf):
     return f"http://{conf.get('nemesis_ip', '')}:{conf.get('nemesis_port', '5001')}"
 
 
+def _fingerprint():
+    """Hardware-stable-ID fingerprint for the enrollment payload (TYPES + hashes only;
+    raw serials never leave hwid). Never raises — a fingerprint failure must not block
+    enrollment (degrade-visibly principle, ADR 0011)."""
+    try:
+        import hwid
+        return hwid.compute_fingerprint()
+    except Exception:
+        return {"schema_version": 1, "stable_id": "", "signals_used": [],
+                "signal_hashes": {}, "confidence": "low", "is_virtual": False}
+
+
 def enroll(conf=None):
     """POST the signed enrollment request. Returns (device_id, status) or (None, None)."""
     conf = conf or config.load()
@@ -239,6 +251,7 @@ def enroll(conf=None):
         "signature": _sign(message),
         "pre_enrollment_scan": json.dumps(scan),
         "link_type": _link_type(conf),
+        "hardware_fingerprint": _fingerprint(),
     }
     # Single-use installer token (if the installer baked one in) → server auto-approves.
     _tok = (conf.get("enrollment_token") or "").strip()

@@ -205,7 +205,14 @@ def init_db():
                 last_heartbeat_data TEXT,
                 pre_enrollment_scan TEXT,
                 enrollment_has_findings INTEGER DEFAULT 0,
-                link_type TEXT
+                link_type TEXT,
+                hw_stable_id TEXT,
+                hw_signals_used TEXT,
+                hw_signal_hashes TEXT,
+                hw_fp_confidence TEXT,
+                hw_fp_schema_version INTEGER,
+                hw_fp_locked_at REAL,
+                hw_is_virtual INTEGER DEFAULT 0
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
@@ -273,7 +280,15 @@ def init_db():
                           # ── pre-enrollment scan (scan-before-trust) ──
                           ("pre_enrollment_scan", "TEXT"),
                           ("enrollment_has_findings", "INTEGER DEFAULT 0"),
-                          ("link_type", "TEXT")):
+                          ("link_type", "TEXT"),
+                          # ── hardware-stable-ID fingerprint (ADR 0011 / TOFU) ──
+                          ("hw_stable_id",        "TEXT"),
+                          ("hw_signals_used",     "TEXT"),
+                          ("hw_signal_hashes",    "TEXT"),
+                          ("hw_fp_confidence",    "TEXT"),
+                          ("hw_fp_schema_version", "INTEGER"),
+                          ("hw_fp_locked_at",     "REAL"),
+                          ("hw_is_virtual",       "INTEGER DEFAULT 0")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1850,6 +1865,25 @@ def _verify_enroll_signature(public_key_pem, message, signature_b64):
         return False
 
 
+_HWID_MOD = None
+
+
+def _match_fingerprint(incoming, stored):
+    """TOFU "same device?" comparison, delegating to the canonical pure implementation in
+    nemesis_agent/hwid.py (loaded by absolute path — single source of truth, no drift, no
+    sys.path mutation). Returns (outcome, matched_device_id, matched_signal_count) with
+    outcome 'exact' | 'partial' | 'none'. Informational — never gates enrollment."""
+    global _HWID_MOD
+    if _HWID_MOD is None:
+        import importlib.util
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "nemesis_agent", "hwid.py")
+        spec = importlib.util.spec_from_file_location("nemesis_hwid", path)
+        _HWID_MOD = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_HWID_MOD)
+    return _HWID_MOD.match_fingerprint(incoming, stored)
+
+
 def _create_enrollment(payload, remote_ip):
     """Verify the signed request, create a PENDING agent_devices row, open an
     approval ticket. Returns (device_id, status) or (None, error_str)."""
@@ -1890,6 +1924,22 @@ def _create_enrollment(payload, remote_ip):
     else:
         scan_summary = f"Pre-enrollment scan: ✅ Clean (ClamAV: {clam_f} findings, YARA: {yara_f} findings)"
 
+    # ── hardware-stable-ID fingerprint (ADR 0011) — parse; degrade-visibly, NEVER gate ──
+    fp = payload.get("hardware_fingerprint")
+    if isinstance(fp, str):
+        try:
+            fp = json.loads(fp)
+        except Exception:
+            fp = {}
+    if not isinstance(fp, dict):
+        fp = {}
+    hw_stable_id      = fp.get("stable_id") or None
+    hw_signals_used   = json.dumps(fp.get("signals_used") or [])
+    hw_signal_hashes  = json.dumps(fp.get("signal_hashes") or {})
+    hw_confidence     = fp.get("confidence") or None
+    hw_schema_version = fp.get("schema_version")
+    hw_is_virtual     = 1 if fp.get("is_virtual") else 0
+
     import uuid as _uuid
     import time as _time
     device_id = _uuid.uuid4().hex
@@ -1925,16 +1975,35 @@ def _create_enrollment(payload, remote_ip):
                         device_name = hint.strip()
             except Exception:
                 log.exception("enrollment token check failed; falling back to pending")
+        # ── TOFU "same device?" — compare against PRIOR fingerprints (informational; the
+        #    match NEVER blocks enrollment — degrade-visibly principle, ADR 0011). ──
+        if hw_stable_id:
+            try:
+                prior = conn.execute(
+                    "SELECT device_id, hw_stable_id, hw_signal_hashes FROM agent_devices "
+                    "WHERE hw_stable_id IS NOT NULL").fetchall()
+                outcome, matched_id, matched_n = _match_fingerprint(fp, prior)
+                log.info("enroll fingerprint: outcome=%s confidence=%s is_virtual=%s "
+                         "signals=%d matched_device=%s matched_signals=%s",
+                         outcome, hw_confidence, bool(hw_is_virtual),
+                         len(fp.get("signals_used") or []), matched_id, matched_n)
+            except Exception:
+                log.exception("fingerprint match failed (non-fatal)")
+
         conn.execute(
             "INSERT INTO agent_devices (device_id, device_name, os, os_version, "
             "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen, "
-            "pre_enrollment_scan, enrollment_has_findings, enrolled_by, enrolled_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "pre_enrollment_scan, enrollment_has_findings, enrolled_by, enrolled_at, "
+            "hw_stable_id, hw_signals_used, hw_signal_hashes, hw_fp_confidence, "
+            "hw_fp_schema_version, hw_fp_locked_at, hw_is_virtual) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (device_id, device_name, os_name, payload.get("os_version", ""),
              payload.get("hardware_summary", ""), public_key, enroll_status, remote_ip, now,
              scan_json, has_findings,
              (token_creator if enroll_status == "approved" else None),
-             (now if enroll_status == "approved" else None)))
+             (now if enroll_status == "approved" else None),
+             hw_stable_id, hw_signals_used, hw_signal_hashes, hw_confidence,
+             hw_schema_version, _time.time(), hw_is_virtual))
         conn.commit()   # token claim + device insert commit together (or both roll back)
         conn.close()
     except Exception:
