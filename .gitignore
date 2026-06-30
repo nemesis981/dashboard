@@ -32,3 +32,7 @@ docs/briefing/
 
 # Collaboration/working-style notes (local-only; @-imported into CLAUDE.md from disk)
 docs/COLLABORATION.md
+
+# Installer sidecar conf — can hold a live enrollment token + Tailscale pre-auth key
+# (build_installer.py --token bakes one locally); must NEVER be committed (Rule 8).
+nemesis_install.conf

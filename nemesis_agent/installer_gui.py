@@ -30,27 +30,57 @@ STEPS = [
 
 
 def _bundled_dir():
-    """Where PyInstaller unpacked our bundled data (or this file's dir if not frozen)."""
+    """Where PyInstaller unpacked our BAKED-IN bundle data (or this file's dir if not
+    frozen). NOTE: this is _MEIPASS — a temp extraction dir — NOT where a sidecar conf
+    distributed beside the exe lives. Use _exe_dir() for the on-disk sidecar."""
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 
 
+def _exe_dir():
+    """On-disk directory of the running program. When frozen, this is the folder the Setup
+    exe actually sits in — where the distributed zip's adjacent nemesis_install.conf
+    sidecar lives (os.path.dirname(sys.executable), NOT _MEIPASS). When not frozen, this
+    file's directory."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _resolve_conf_path():
+    """Resolve nemesis_install.conf. Prefer the SIDECAR next to the exe on disk (the
+    self-onboard zip model); fall back to a conf BAKED into the bundle (_MEIPASS) if one
+    was frozen in. Returns the existing path, or '' if neither is present (→ GUI prompt)."""
+    sidecar = os.path.join(_exe_dir(), "nemesis_install.conf")
+    if os.path.isfile(sidecar):
+        return sidecar
+    baked = os.path.join(_bundled_dir(), "nemesis_install.conf")
+    if os.path.isfile(baked):
+        return baked
+    return ""
+
+
 def _read_baked_config():
-    """Return (server, token, device_name) from an adjacent nemesis_install.conf, if any."""
-    path = os.path.join(_bundled_dir(), "nemesis_install.conf")
-    if not os.path.isfile(path):
-        return "", "", "Windows Device", "your administrator"
+    """Return (server, token, device_name, support_contact, preauth_key, conf_path) from the
+    resolved nemesis_install.conf (sidecar-next-to-exe preferred). conf_path is retained so
+    the file can be consumed-and-deleted once install begins."""
+    path = _resolve_conf_path()
+    if not path:
+        return "", "", "Windows Device", "your administrator", "", ""
     cfg = configparser.ConfigParser()
     cfg.read(path)
     g = lambda k, d="": cfg.get("nemesis", k, fallback=d)
     return (g("nemesis_ip"), g("enrollment_token"), g("device_name", "Windows Device"),
-            g("support_contact", "your administrator"))
+            g("support_contact", "your administrator"), g("preauth_key"), path)
 
 
 class InstallerApp:
-    def __init__(self, root, server, token, device_name, support_contact="your administrator"):
+    def __init__(self, root, server, token, device_name, support_contact="your administrator",
+                 preauth_key="", conf_path=""):
         self.root = root
         self.server = server
         self.token = token
+        self.preauth_key = preauth_key
+        self.conf_path = conf_path
         self.device_name = device_name or "Windows Device"
         self.support_contact = support_contact or "your administrator"
         root.title("Nemesis Security — Setup")
@@ -238,13 +268,99 @@ class InstallerApp:
         self.btn.config(text="Retry", state="normal", command=self.start)
         return False
 
+    def _install_tailscale(self):
+        """Install Tailscale on a BARE box (the master baseline ships none). winget first,
+        official MSI fallback. Best-effort; returns True iff tailscale.exe is present after."""
+        import subprocess
+        try:
+            subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale", "--silent",
+                            "--accept-package-agreements", "--accept-source-agreements"],
+                           check=False, capture_output=True, timeout=300)
+        except Exception:
+            pass
+        if self._tailscale_installed():
+            return True
+        try:
+            import tempfile, urllib.request
+            msi = os.path.join(tempfile.gettempdir(), "tailscale-setup.msi")
+            urllib.request.urlretrieve(
+                "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi", msi)
+            subprocess.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
+                           check=False, capture_output=True, timeout=300)
+        except Exception:
+            pass
+        return self._tailscale_installed()
+
+    def _join_tailnet_with_preauth_key(self):
+        """PL-3 self-onboard: join the tailnet with the conf's SINGLE-USE pre-auth key.
+        CONDITIONAL + LINEAR — NOT a retry loop:
+          1. Check ONCE whether Tailscale is installed; if not, install it, then proceed.
+          2. Attempt ``tailscale up --authkey=<key>`` exactly ONCE. The key is single-use, so
+             a failure almost always means it is SPENT — do NOT retry the auth; stop clean.
+          3. After a SUCCESSFUL up, BOUNDED-poll the connection STATE until 'connected'
+             (timeout). This waits on an in-progress success; it never re-fires --authkey.
+        Returns True to proceed, or False after a clean, visible stop (never half-installs)."""
+        import subprocess, time
+        # 1. Tailscale present? (checked ONCE) — a bare box has none, so install it first.
+        if not self._tailscale_installed():
+            self.set_status("Installing the secure tunnel (Tailscale)...")
+            if not self._install_tailscale():
+                self.set_status("Could not install the secure tunnel automatically. "
+                                "Contact " + self.support_contact + ".")
+                self.btn.config(text="Close", state="normal", command=self.root.destroy)
+                return False
+        if self._tailscale_state() == "not_running":
+            self._start_tailscale_service()
+        # 2. Single-use pre-auth join — attempt ONCE. Failure => spent => stop clean.
+        self.set_status("Joining your secure network...")
+        try:
+            p = subprocess.run([self._tailscale_exe(), "up",
+                                "--authkey=" + self.preauth_key, "--timeout=30s"],
+                               capture_output=True, text=True, timeout=90)
+            ok = (p.returncode == 0)
+        except Exception:
+            ok = False
+        if not ok:
+            # Single-use key: do NOT retry the auth. Fail clean + visible; no half-install.
+            self.set_status("This installer is spent. Ask your admin to generate a new one.")
+            self.btn.config(text="Close", state="normal", command=self.root.destroy)
+            return False
+        # 3. Post-success connection-state poll ONLY (bounded; never re-attempts --authkey).
+        for _ in range(15):                      # ~30s, polling state, no re-auth
+            if self._tailscale_state() == "connected":
+                return True
+            time.sleep(2)
+        self.set_status("The secure network is taking too long to connect. Open Tailscale to "
+                        "check, then re-run setup. Contact " + self.support_contact + ".")
+        self.btn.config(text="Close", state="normal", command=self.root.destroy)
+        return False
+
+    def _consume_conf(self):
+        """Security: delete the sidecar nemesis_install.conf once install begins. Its values
+        (enrollment token + pre-auth key) are already in memory; they must NOT linger in
+        plaintext on the user's machine post-install."""
+        path = getattr(self, "conf_path", "")
+        if path and os.path.isfile(path):
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+        self.conf_path = ""
+
     def _run(self):
         try:
-            # Phase 7: Tailscale is the tunnel to the Nemesis server. Validate its full
-            # state (installed / service running / connected) before touching the system.
-            if not self._ensure_tailscale():
+            # Consume-and-delete the sidecar conf the instant install begins — the token +
+            # pre-auth key are already in memory and must not linger in plaintext on disk.
+            self._consume_conf()
+            # PL-3 self-onboard: with a baked pre-auth key, AUTO-JOIN the tailnet (installing
+            # Tailscale first on a bare box). Without a key (no-conf path), fall back to the
+            # manual Tailscale-required flow + the GUI server/token input fields.
+            if self.preauth_key:
+                if not self._join_tailnet_with_preauth_key():
+                    return
+            elif not self._ensure_tailscale():
                 return
-            # Connection chain: Tailscale connected → verify the server actually answers.
+            # Connection chain: tailnet up → verify the server actually answers.
             if not self._verify_nemesis_reachable():
                 return
             self.set_status(STEPS[0], 1)
@@ -400,7 +516,7 @@ class InstallerApp:
 
 
 def main():
-    server, token, device_name, support_contact = _read_baked_config()
+    server, token, device_name, support_contact, preauth_key, conf_path = _read_baked_config()
     # CLI overrides: --server X --token Y --device-name Z
     args = sys.argv[1:]
     for i, a in enumerate(args):
@@ -411,7 +527,7 @@ def main():
         elif a == "--device-name" and i + 1 < len(args):
             device_name = args[i + 1]
     root = tk.Tk()
-    InstallerApp(root, server, token, device_name, support_contact)
+    InstallerApp(root, server, token, device_name, support_contact, preauth_key, conf_path)
     root.mainloop()
 
 
