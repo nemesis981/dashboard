@@ -26,3 +26,6 @@ nemesis_agent/dist/
 nemesis_agent/build/
 *.spec
 nemesis_agent/lhm/
+
+# Generated morning briefing/audit reports (local-only, regenerated each session)
+docs/briefing/
