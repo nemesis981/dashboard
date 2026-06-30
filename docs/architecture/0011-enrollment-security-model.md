@@ -1,11 +1,13 @@
 # ADR 0011 — Enrollment Security Model
 
-- **Status:** Proposed (direction decided 2026-06-30; design captured, **no code changed**).
+- **Status:** **ACCEPTED — BUILD-READY** (2026-06-30; all open questions Q0–Q3 resolved, D2
+  resolved in [installer-unified-v1.0.6](../roadmap/installer-unified-v1.0.6.md)). Design of
+  record; **no code changed by this ADR** — the build lands via the installer-roadmap prompt.
 - **Date:** 2026-06-30
 - **Numbering note:** the source request named this "ADR-0005," but 0005 is already
   [DNS-firewall / device-auth](0005-dns-firewall-device-auth-architecture.md). Created as
-  **0011** to avoid a collision. *Owner decision pending:* keep as standalone 0011, or fold
-  into / supersede 0005's device-auth section (see Open questions Q0).
+  **0011** to avoid a collision. **RESOLVED (Q0): kept standalone as 0011** — not folded into /
+  superseding 0005's device-auth section.
 - **Affects:** the installer-baked credentials, `/enroll` + the enrollment payload,
   `enrollment_tokens`, the install-media transport, the owner approval UX.
 - **Depends on:** [0005 — device-auth](0005-dns-firewall-device-auth-architecture.md) (the
@@ -45,6 +47,12 @@ an auth-bypass on `/install/windows/`, so the token is interceptable in transit 
   ACL), **per-installer**, never reusable or long-lived.
 - **Baked credentials = per-installer secrets.** Expired/used → **HARD FAIL, no fallback.**
   Rule-8 out of all logs/docs/commits.
+- **ClamAV engine/sig policy (scan-before-trust dependency).** The box serves a **PINNED engine
+  (`==` the agent's pinned engine, manual bump only, never auto-updated while pinned agents are
+  attached)** and **freely-`freshclam`'d signatures** (newer-engine-reads-older-sigs is normal;
+  box holds back only a sig that needs an engine newer than the pinned one — "block the serve,
+  not the client"). Full rule:
+  [installer-unified-v1.0.6 §D2](../roadmap/installer-unified-v1.0.6.md) **— RESOLVED.**
 
 ### Owner enrollment-review checkpoint (informed manual approval)
 Before approving, the owner sees a **REVIEW CARD** aggregating signals that **mostly already
@@ -75,8 +83,8 @@ Owner action: **APPROVE or REJECT** from the card.
   weak supplementary flag, explicitly labeled **"untrusted / informational."**
 - **Privacy:** do **NOT** collect precise location (GPS / WiFi-SSID geolocation / IP-geo
   lookups) from the client — liability for the public product. Coarse locale/timezone for
-  the cross-check only; **precise geo deferred/avoided pending an explicit privacy decision**
-  (Open question Q2).
+  the cross-check only; **precise geo collection is avoided — RESOLVED policy (Q2)**, not a
+  pending decision.
 
 ### Email / invite delivery role — addendum (2026-06-30, capture only)
 **ROLE: email is a DELIVERY channel + WEAK CORROBORATION only — NEVER a trust gate.**
@@ -112,24 +120,27 @@ give the owner an **informed** approve/reject decision even before token-to-fing
 binding is fully built. Tailnet-only transport removes the cleartext interception path.
 Auto-approve (the riskiest default) is off.
 
-## Open questions (owner decisions)
+## Open questions (owner decisions) — ALL RESOLVED 2026-06-30
 
-- **Q0 — ADR numbering:** standalone **0011**, or fold into/supersede 0005's device-auth
-  section? (Created as 0011 to avoid collision; trivially renumbered.)
+- **Q0 — ADR numbering — RESOLVED = keep standalone as 0011.** Not folded into / superseding
+  0005's device-auth section; 0011 stands on its own (cross-refs 0005 for the chokepoint/seam).
 - **Q1 — Token-to-device binding for a clean REMOTE box — RESOLVED = trust-on-first-use.**
   The owner generates the installer before the user's machine exists, so the fingerprint
   (now build-now, [hardware-stable-identifiers](../roadmap/hardware-stable-identifiers.md))
   **locks on first enrollment**; a later presentation of the same token from a different
   machine fails the match (review card → "NO — different machine"). Manual approval +
   unforgeable server-observed source IP is the backstop for media stolen *before* first use.
-- **Q2 — Geo/privacy boundary:** confirm "coarse locale/timezone cross-check only, no precise
-  geo collection" as the shipped policy (mirrors roadmap D1).
-- **Q3 — Pre-auth key sourcing:** admin-pasted per-installer now; confirm acceptable until
-  API auto-minting lands post-trip.
+- **Q2 — Geo/privacy boundary — RESOLVED/CONFIRMED.** Shipped policy = **coarse locale/timezone
+  cross-check only, NO precise-location collection**; the **server-observed tailnet IP is the
+  trust signal**. Policy text is the "Geographic signal" section above (mirrors roadmap D1).
+- **Q3 — Pre-auth key sourcing — RESOLVED = admin-pasted per-installer.** Key is **manually
+  generated from the Tailscale console** for now; **API auto-minting is post-trip.** Acceptable
+  for trip scope.
 
 ## Status / next
 
-Proposed. Build only after the owner resolves Q0–Q3. Next step: the build prompt referencing
+**ACCEPTED — BUILD-READY.** Q0–Q3 resolved; D2 (engine/sig alignment) resolved in the
+installer roadmap. Next step: the build prompt referencing
 [installer-unified-v1.0.6](../roadmap/installer-unified-v1.0.6.md) + this ADR as the single
 authority; specify the tailnet-only serving routes (through the ADR 0005 `firewall.py`
 chokepoint), the review-card data sources, and the token/pre-auth-key lifecycle.

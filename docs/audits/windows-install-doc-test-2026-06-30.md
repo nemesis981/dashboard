@@ -130,9 +130,11 @@ installer (token-baked), not the legacy `.ps1`.
 - [ ] Tailscale onboarding mechanism in place (pre-auth key / invite link), documented.
 - [ ] Decide LAN-skip-Tailscale policy; align both installers (PL-4).
 - [ ] Dashboard serves frozen v1.0.6 installer (PL-8) — or Python-required path documented.
-- [ ] Re-run from Phase 0 on a clean VM: baseline → install → enroll → **auto-approve** →
-      authenticated heartbeat (`/hw_data` 200, `source=nemesis_agent`, `link_type` populated)
-      → `uninstall_windows.ps1` (best-effort 404 OK, Tailscale untouched) → final clean.
+- [ ] Re-run from Phase 0 on a clean VM: baseline → install → enroll → **MANUAL APPROVAL
+      (lands `pending` → owner approves via the review card; auto-approve is a deferred opt-in,
+      per ADR 0011 + installer-roadmap trip-test)** → authenticated heartbeat (`/hw_data` 200,
+      `source=nemesis_agent`, `link_type` populated) → `uninstall_windows.ps1` (best-effort
+      404 OK, Tailscale untouched) → final clean.
 
 *Live punchlist scratch:
 `/tmp/.../scratchpad/install-doc-punchlist.md` (PL-1…PL-9 + positives), to fold into

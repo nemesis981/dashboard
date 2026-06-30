@@ -43,11 +43,13 @@ detection stack already watches — **no installer work is needed for box-side d
    fixes PL-1's "use the admin's account" insecurity.
 3. **Client pulls the PINNED ClamAV engine from the BOX over the tailnet.** Version-
    controlled — the box hosts a pinned engine, no drift; same reachability path as
-   enrollment, **no second internet dependency.** **Caveat (document + own):** the box
-   engine version must stay aligned with the agent's pinned engine, or box-produced sigs
-   may outrun the client engine. (See Open decisions §D2.)
+   enrollment, **no second internet dependency.** The box **ENGINE is PINNED == the agent's
+   pinned engine, manual bump only — never auto-updated while pinned agents are attached**
+   (an engine bump changes what the pinned client can load). Signatures are handled
+   separately (Stage 4). **(See Open decisions §D2 — RESOLVED.)**
 4. **Client pulls ClamAV SIGNATURES from the box via ONE versioned ClamAV pipe** carrying:
-   stock CVDs (fresh because the box `freshclam`s) + Nemesis custom ClamAV sigs + (future)
+   stock CVDs (fresh because **the box `freshclam`s freely — sigs flow continuously while the
+   engine stays pinned, per D2**) + Nemesis custom ClamAV sigs + (future)
    community-feed ClamAV sigs — all ClamAV-format, **version-stamped** (e.g. `clam-set vNN`)
    as the anchor for incremental updates + future community content. **Requires** a
    validation step before serving (an invalid sig format makes `clamscan` reject the whole
@@ -115,8 +117,19 @@ security posture**, not a happy-path auto-approve.
 
 - **D1 — Geo/privacy** (also in ADR 0011): precise client geolocation is **deferred/avoided**
   pending an explicit privacy decision. Owner must decide the collection boundary.
-- **D2 — Engine/sig version-alignment ownership:** how the box engine version is kept aligned
-  with the agent's pinned engine (who bumps, how mismatch is detected/blocked). Stage-3 caveat.
+- **D2 — Engine/sig version-alignment — RESOLVED = SEPARATE engine vs signature update policy.**
+  The box owns alignment. Two distinct policies:
+  - **ENGINE: PINNED, manual bump only.** The box's ClamAV **engine** is held `==` the agent's
+    pinned engine and is **NEVER auto-updated while pinned agents are attached** — an engine
+    bump can change what the pinned client engine can load. Bumping is **manual + deliberate**,
+    done in lockstep across box + agent pin.
+  - **SIGNATURES: `freshclam` freely.** Fresh sigs are the **intended feature** — newly-enrolled
+    clients get the box's current curated defs. Newer-engine-reads-older-sigs is ClamAV's
+    normal supported config, so a pinned (older-or-equal) client engine reads box-served sigs
+    fine.
+  - **EDGE — "block the serve, not the client":** the box holds back a **specific** sig update
+    **only** in the rare case that sig requires an engine **newer** than the pinned one. Narrow
+    and sig-specific — **not** a blanket signature freeze. Sigs otherwise flow continuously.
 - **D3 — Token binding for a clean remote box — RESOLVED = trust-on-first-use.** The
   fingerprint isn't knowable before the user's box exists, so it **locks on first enrollment**
   (TOFU); a later presentation from a different machine fails the match. (ADR 0011 Q1 resolved.)
