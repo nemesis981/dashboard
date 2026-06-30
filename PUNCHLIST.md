@@ -652,10 +652,12 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   protection.** auto_approve default + media over `:80` HTTP cleartext. → security review;
   fold into **ADR 0005** (device-auth): bind token to invited identity, default manual approval,
   out-of-band delivery, HTTPS media, shorter TTL, keypair pinning.
-- [ ] **PL-8 (High) — dashboard "Generate Windows Installer" serves the LEGACY system-Python
-  `install_windows.ps1`, not a v1.0.6 frozen equivalent** (needs Python+pip; runs `python
-  agent.py`). Contradicts the frozen "no system Python" model. → dashboard should serve the
-  frozen installer. (roadmap/ADR)
+- [x] **PL-8 (High) — dashboard "Generate Windows Installer" serves the LEGACY system-Python
+  `install_windows.ps1`, not a v1.0.6 frozen equivalent.** **RESOLVED (Phase-1 delivery
+  foundation):** `/install/windows/<token>/zip` now serves a frozen-exe bundle (generic
+  `NemesisAgent-Setup.exe` + per-installer `nemesis_install.conf`); the legacy `.ps1` route is
+  retired (410). See the [INSTALLER-DELIVERY Phase 1] follow-ups below for the remaining
+  infra/consumption work.
 - [ ] **PL-4 (Med) — the two installers disagree on Tailscale** (GUI `Setup.exe` mandatory
   hard-gate vs token `.ps1` optional/skippable). Pick one policy; align both + the doc.
 
@@ -685,3 +687,33 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
 **Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
 bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
 SSH automation all worked.
+
+### [INSTALLER-DELIVERY Phase 1] — follow-ups from the delivery-foundation build (2026-06-30)
+The Phase-1 delivery foundation (frozen-exe bundle serving, baked token + single-use Tailscale
+pre-auth key + tailnet target, download-side uses-check, TTL 24h→2h) landed code-side. Remaining:
+
+- [ ] **INFRA (not code) — serve install media over the TAILNET only, not cleartext `:80`.**
+  Code is now tailnet-AWARE (links + baked `nemesis_ip` prefer the tailnet via
+  `NEMESIS_TAILNET_ADDR` / `NEMESIS_PUBLIC_URL`), but the actual `:80`-cleartext→tailnet-only
+  **enforcement is a box infra change**, deliberately NOT done in the repo (nginx is external).
+  Capture-only proposal: **nginx `listen` bound to the tailnet interface only** for
+  `/install/windows/*`, and the inbound rule added **via `alert_manager/firewall.py`** (the
+  ADR 0005 ufw chokepoint — no ad-hoc `ufw`/`nft`). Apply on the box; verify the cleartext
+  `:80` install path is gone.
+- [ ] **OPS DEP — stage the generic frozen exe on the box.** `/install/windows/<token>/zip`
+  assembles the bundle from a prebuilt generic `NemesisAgent-Setup.exe` at **`NEMESIS_AGENT_EXE`**
+  (no per-request PyInstaller — the box is Linux). Build it on Windows/CI (`nemesis_agent/
+  build_installer.py`) and place it at that path, else the route hard-fails 503. (Roadmap
+  D-dep-2.)
+- [ ] **FOLLOW-UP (installer-side, Fork 4 consumption) — consume the baked conf safely.** The
+  served `nemesis_install.conf` carries the token + single-use pre-auth key in plaintext. The
+  installer MUST: (a) read it, run `tailscale up --authkey=<key>`, then **consume-and-delete the
+  conf** so creds do not linger on disk; (b) on a spent/failed key, show a clear **"this installer
+  is spent — ask your admin for a new one"** message (no silent retry/loop/half-install). A
+  **`CUSTOM_*.md` Tailscale guide** ships with that consumption code (Tier-2 vendor rule).
+- [ ] **FOLLOW-UP — purge spent pre-auth keys at rest.** `enrollment_tokens.preauth_key` is a
+  secret stored plaintext in `alerts.db` (mitigated by single-use + 2h TTL + revocable). When the
+  enroll path is built (Phase 2), **null the column on use/expiry** so spent keys do not linger.
+- [ ] **PHASE-2 NOTE — auto-approve default unchanged here.** This window left
+  `enrollment_tokens.auto_approve = 1` untouched (the manual-approval-default flip per ADR 0011
+  belongs with the enrollment-review card, Phase 2). Do not assume it flipped.

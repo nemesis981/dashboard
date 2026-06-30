@@ -39,25 +39,29 @@ function nemesisCopyText(text, btn) {
 var _nemesisZipUrl = '';
 function nemesisCopyZip(btn) { if (_nemesisZipUrl) nemesisCopyText(_nemesisZipUrl, btn); }
 
-/* Generate a single-use Windows installer link (token auto-approve). */
+/* Generate a single-use Windows installer link (frozen-exe bundle + baked conf). */
 function genWindowsInstaller() {
   var hint = (document.getElementById('installerHint') || {}).value || 'Windows Device';
+  var pre = (document.getElementById('installerPreauth') || {}).value || '';
   var out = document.getElementById('installerResult');
   if (out) { out.textContent = 'Generating...'; out.style.color = '#888'; }
   fetch('/api/agent/installer/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_name_hint: hint })
+    body: JSON.stringify({ device_name_hint: hint, preauth_key: pre })
   })
     .then(function (r) { return r.json(); })
     .then(function (d) {
       if (!d || !d.ok) { throw new Error((d && d.error) || 'failed'); }
       _nemesisZipUrl = d.zip_url || '';
       var when = new Date(d.expires_at * 1000).toLocaleString();
+      var keyNote = d.preauth_key_baked
+        ? ' A single-use Tailscale pre-auth key is baked in (the agent self-joins the tailnet).'
+        : ' No pre-auth key baked &mdash; the device must join the tailnet by hand.';
       out.style.color = '#ddd';
       out.innerHTML =
         '<div style="color:#aaa;font-size:0.82em;margin-bottom:4px">Share this link with your user ' +
-        '(includes the installer and setup guide; expires ' + when + '):</div>' +
+        '(self-contained Windows installer; expires ' + when + ').' + keyNote + '</div>' +
         '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
         '<input readonly value="' + d.zip_url + '" onclick="this.select()" ' +
         'style="background:#11111f;border:1px solid #00d4ff55;color:#00d4ff;border-radius:6px;' +
@@ -66,8 +70,7 @@ function genWindowsInstaller() {
         'border:1px solid #00d4ff;border-radius:6px;padding:5px 12px;cursor:pointer">📋 Copy link</button>' +
         '</div>' +
         '<div style="color:#666;font-size:0.78em;margin-top:6px">Advanced: ' +
-        '<a href="' + d.exe_url + '" style="color:#888">.exe only</a> &middot; ' +
-        '<a href="' + d.ps1_url + '" style="color:#888">.ps1 (advanced)</a></div>';
+        '<a href="' + d.exe_url + '" style="color:#888">generic .exe only (no baked config)</a></div>';
     })
     .catch(function () {
       if (out) { out.style.color = '#ff6666'; out.textContent = 'Could not generate installer — try again.'; }

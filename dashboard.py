@@ -1389,22 +1389,28 @@ def api_agent_reject(device_id):
 
 
 # ── Windows installer generator (token-based auto-approve enrollment) ─────────
-def _nemesis_server_host() -> str:
-    """Bare host to bake into a generated installer (Rule-8 safe: env override
-    NEMESIS_SERVER_IP, else the host the user reached the dashboard on). The agent
+def _nemesis_tailnet_host() -> str:
+    """Bare host to bake into a generated installer as the agent's server target.
+    Media + enrollment are intended to ride the TAILNET (ADR 0011), so prefer the
+    tailnet address: env NEMESIS_TAILNET_ADDR, else NEMESIS_SERVER_IP, else the host
+    the dashboard was reached on (Rule-8 safe — no hardcoded box specifics). The agent
     posts to this host on the hw_monitor port (5001)."""
-    host = os.environ.get("NEMESIS_SERVER_IP", "").strip() or (request.host or "127.0.0.1")
+    host = (os.environ.get("NEMESIS_TAILNET_ADDR", "").strip()
+            or os.environ.get("NEMESIS_SERVER_IP", "").strip()
+            or (request.host or "127.0.0.1"))
     return host.split(":")[0]
 
 
 def _valid_installer_token(token):
-    """Return the token row if it exists, is not revoked, and has not expired.
-    (Does NOT check uses — download is repeatable; enrollment claims the use.)"""
+    """Return the token row if it exists, is not revoked, not expired, and not yet used.
+    A spent (used), revoked, or expired token HARD-FAILS the download — no fallback
+    (ADR 0011 immediate hardening; Phase 1 delivery, Fork 3 uses-check)."""
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
-            "SELECT * FROM enrollment_tokens WHERE token=? AND revoked=0 AND expires_at > ?",
+            "SELECT * FROM enrollment_tokens "
+            "WHERE token=? AND revoked=0 AND uses < max_uses AND expires_at > ?",
             (token, time.time())).fetchone()
         conn.close()
         return row
@@ -1412,81 +1418,71 @@ def _valid_installer_token(token):
         return None
 
 
-_PS1_INSTALLER_TEMPLATE = r'''# Nemesis Agent installer (auto-generated, single-use, expires 24h)
-#Requires -RunAsAdministrator
-$ErrorActionPreference = "Stop"
-$NemesisIP   = "__SERVER__"
-$DeviceName  = "__HINT__"
-$EnrollToken = "__TOKEN__"
-
-Write-Host "Installing Nemesis Agent for $DeviceName ..." -ForegroundColor Cyan
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-
-# Pre-seed config including the single-use enrollment token (enables auto-approval).
-$conf = @"
-[nemesis]
-nemesis_ip = $NemesisIP
-nemesis_port = 5001
-nemesis_subnet =
-device_name = $DeviceName
-device_id =
-poll_interval = 300
-suricata_enabled = false
-suricata_profile = auto
-scan_on_reconnect = true
-last_scan_at =
-enrollment_token = $EnrollToken
-"@
-Set-Content -Path (Join-Path $ScriptDir "nemesis_agent.conf") -Value $conf -Encoding utf8
-
-# Hand off to the full installer (installs deps, copies files, registers the service).
-& (Join-Path $ScriptDir "install_windows.ps1") -NemesisIP $NemesisIP -DeviceName $DeviceName
-Write-Host "Done. This device will be approved automatically." -ForegroundColor Green
-'''
-
-
-def _render_windows_installer_ps1(server_host: str, token: str, hint: str) -> str:
+def _render_install_conf(server_host: str, token: str, hint: str,
+                         preauth_key: str = "") -> str:
+    """Build the per-installer nemesis_install.conf baked into the served frozen-exe
+    zip. Matches the frozen installer's reader (nemesis_agent/installer_gui.py
+    `_read_baked_config`). `preauth_key` = single-use Tailscale pre-auth key; the
+    installer MUST consume-and-delete this conf right after reading it so the live
+    credentials do not linger in plaintext on disk (installer-consumption follow-up,
+    see installer-roadmap). Rule-8: the live token/key never hit logs."""
     safe_hint = re.sub(r"[^A-Za-z0-9 _.-]", "", hint or "Windows Device")[:60] or "Windows Device"
-    return (_PS1_INSTALLER_TEMPLATE
-            .replace("__SERVER__", server_host)
-            .replace("__HINT__", safe_hint)
-            .replace("__TOKEN__", token))
+    lines = ["[nemesis]",
+             f"nemesis_ip = {server_host}",
+             "nemesis_port = 5001",
+             f"device_name = {safe_hint}",
+             f"enrollment_token = {token}"]
+    if preauth_key:
+        lines.append(f"preauth_key = {preauth_key}")
+    return "\n".join(lines) + "\n"
 
 
 @app.route("/api/agent/installer/generate", methods=["POST"])
 def api_agent_installer_generate():
-    """Owner action: mint a single-use, 24h, auto-approve enrollment token and
-    return download links for the Windows installer (.ps1 now; .exe via CI)."""
+    """Owner action (auth-gated): mint a single-use, short-TTL enrollment token and
+    return the download link for the v1.0.6 FROZEN-exe installer bundle (zip = generic
+    frozen exe + a per-installer nemesis_install.conf). Optionally bakes a single-use
+    Tailscale pre-auth key (admin-pasted) so the agent self-joins the tailnet. The
+    legacy system-Python .ps1 path is RETIRED for this flow (PL-8). Rule-8: the live
+    token/pre-auth-key are never logged."""
     data = request.get_json(silent=True) or request.form
     hint = (data.get("device_name_hint") or "Windows Device").strip()[:60] or "Windows Device"
+    # Admin-pasted Tailscale pre-auth key (Q3: manual from the Tailscale console now;
+    # API auto-minting is post-trip). Optional — install still works hand-joined.
+    preauth_key = (data.get("preauth_key") or "").strip()[:256]
     token   = secrets.token_hex(16)
     now     = time.time()
-    expires = now + 24 * 3600
+    expires = now + 2 * 3600   # short TTL (ADR 0011: 1-2h), was 24h
     creator = current_user.username if current_user.is_authenticated else "unknown"
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
-            " device_name_hint, revoked) VALUES (?,?,?,?,1,0,1,?,0)",
-            (token, creator, now, expires, hint))
+            " device_name_hint, revoked, preauth_key) VALUES (?,?,?,?,1,0,1,?,0,?)",
+            (token, creator, now, expires, hint, preauth_key or None))
         conn.commit()
         conn.close()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+    # Rule-8: log the token prefix only; NEVER the pre-auth key.
     _audit(action="installer_token_generate", rule_id=token[:8])
-    # Shareable links must use the PUBLIC entrypoint (nginx :80), not the internal
-    # Flask port. NEMESIS_PUBLIC_URL overrides; else fall back to the request host.
+    # Shareable links should ride the TAILNET (ADR 0011). NEMESIS_PUBLIC_URL overrides
+    # (operator sets it to the tailnet URL); else build from NEMESIS_TAILNET_ADDR; else
+    # fall back to the request host. (:80-cleartext->tailnet-only enforcement = infra
+    # punchlist, not code — see PUNCHLIST.md.)
+    tailnet_addr = os.environ.get("NEMESIS_TAILNET_ADDR", "").strip()
     base = (os.environ.get("NEMESIS_PUBLIC_URL", "").strip().rstrip("/")
+            or (f"http://{tailnet_addr}" if tailnet_addr else "")
             or request.host_url.rstrip("/"))
     return jsonify({
         "ok": True,
         "token": token,
         "device_name_hint": hint,
         "expires_at": expires,
-        "zip_url": f"{base}/install/windows/{token}/zip",   # primary: exe + setup guides
-        "exe_url": f"{base}/install/windows/{token}/exe",
-        "ps1_url": f"{base}/install/windows/{token}",
+        "preauth_key_baked": bool(preauth_key),
+        "zip_url": f"{base}/install/windows/{token}/zip",   # primary: frozen exe + baked conf
+        "exe_url": f"{base}/install/windows/{token}/exe",   # advanced: generic exe, no baked conf
     })
 
 
@@ -1501,15 +1497,14 @@ def api_health():
 
 @app.route("/install/windows/<token>")
 def install_windows_download(token):
-    """PUBLIC (token is the credential): serve the pre-baked PowerShell installer."""
-    row = _valid_installer_token(token)
-    if not row:
-        return Response("This installer link is invalid, revoked, or expired.\n",
-                        status=410, mimetype="text/plain")
-    ps1 = _render_windows_installer_ps1(_nemesis_server_host(), token,
-                                        row["device_name_hint"] or "Windows Device")
-    return Response(ps1, mimetype="text/plain", headers={
-        "Content-Disposition": f'attachment; filename="install-nemesis-{token[:8]}.ps1"'})
+    """PUBLIC: the legacy system-Python PowerShell installer is RETIRED for this flow
+    (PL-8 — it required Python the clean box lacks). Old links hard-fail with a pointer
+    to the frozen-exe bundle (the /zip link your admin generated)."""
+    return Response(
+        "The PowerShell installer has been retired in v1.0.6. Ask your administrator "
+        "to generate a new installer link — it now delivers the self-contained Windows "
+        "installer (no Python required).\n",
+        status=410, mimetype="text/plain")
 
 
 @app.route("/install/windows/<token>/exe")
@@ -1517,33 +1512,47 @@ def install_windows_exe(token):
     """PUBLIC: redirect to the CI-built Windows .exe (latest GitHub release asset).
     Repo is env-driven (NEMESIS_GH_REPO) — no account/repo hardcoded (Rule 8)."""
     if not _valid_installer_token(token):
-        return Response("This installer link is invalid, revoked, or expired.\n",
+        return Response("This installer link is invalid, revoked, expired, or already "
+                        "used. Ask your administrator to generate a new one.\n",
                         status=410, mimetype="text/plain")
     repo = os.environ.get("NEMESIS_GH_REPO", "").strip()
     if not repo:
-        return Response("The Windows .exe build target is not configured yet "
-                        "(set NEMESIS_GH_REPO). Use the .ps1 installer in the meantime.\n",
+        return Response("The generic Windows .exe target is not configured yet "
+                        "(set NEMESIS_GH_REPO). Use the bundle (/zip) link instead.\n",
                         status=503, mimetype="text/plain")
     return redirect(f"https://github.com/{repo}/releases/latest/download/NemesisAgent-Setup.exe")
 
 
 @app.route("/install/windows/<token>/zip")
 def install_windows_zip(token):
-    """PUBLIC: redirect to the CI-built bundle zip (exe + install guides) — the latest
-    GitHub release asset. Repo + version are env-driven (NEMESIS_GH_REPO /
-    NEMESIS_AGENT_VERSION); no account/version hardcoded (Rule 8)."""
-    if not _valid_installer_token(token):
-        return Response("This installer link is invalid, revoked, or expired.\n",
+    """PUBLIC (token is the credential): serve the v1.0.6 FROZEN-exe installer bundle —
+    a zip of the prebuilt generic NemesisAgent-Setup.exe + a per-installer
+    nemesis_install.conf carrying this token, the (single-use) Tailscale pre-auth key,
+    and the box's tailnet target. Assembled on the box (NO per-request PyInstaller); the
+    generic exe is a CI/Windows artifact staged at NEMESIS_AGENT_EXE. Spent/expired token
+    or unstaged exe => hard fail, no legacy fallback. Rule-8: token/key never logged."""
+    row = _valid_installer_token(token)
+    if not row:
+        return Response("This installer link is invalid, revoked, expired, or already "
+                        "used. Ask your administrator to generate a new one.\n",
                         status=410, mimetype="text/plain")
-    repo = os.environ.get("NEMESIS_GH_REPO", "").strip()
-    ver = os.environ.get("NEMESIS_AGENT_VERSION", "").strip().lstrip("vV")
-    if not (repo and ver):
-        return Response("The Windows installer bundle is not configured yet "
-                        "(set NEMESIS_GH_REPO and NEMESIS_AGENT_VERSION). "
-                        "Use the .ps1 installer in the meantime.\n",
+    exe_path = os.environ.get("NEMESIS_AGENT_EXE", "").strip()
+    if not (exe_path and os.path.isfile(exe_path)):
+        return Response("The Windows installer bundle is not available yet — the frozen "
+                        "agent exe is not staged on the server (set NEMESIS_AGENT_EXE to "
+                        "the built NemesisAgent-Setup.exe). Contact your administrator.\n",
                         status=503, mimetype="text/plain")
-    return redirect(f"https://github.com/{repo}/releases/latest/download/"
-                    f"NemesisAgent-v{ver}-Windows.zip")
+    preauth = row["preauth_key"] if "preauth_key" in row.keys() else ""
+    conf = _render_install_conf(_nemesis_tailnet_host(), token,
+                                row["device_name_hint"] or "Windows Device",
+                                preauth or "")
+    import io, zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(exe_path, arcname="NemesisAgent-Setup.exe")
+        zf.writestr("nemesis_install.conf", conf)
+    return Response(buf.getvalue(), mimetype="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="NemesisAgent-Setup-{token[:8]}.zip"'})
 
 
 def _render_agent_devices_html() -> str:
@@ -1569,10 +1578,18 @@ def _render_agent_devices_html() -> str:
          'padding:10px 12px;margin-bottom:14px">'
          '<h3 style="color:#00d4ff;font-size:0.95em;margin-top:0">Generate Windows Installer</h3>'
          '<p style="color:#888;font-size:0.82em;margin:4px 0">Creates a single-use link '
-         '(expires in 24 hours) that installs the agent and approves this device automatically.</p>'
+         '(expires in about 2 hours) that delivers the self-contained Windows installer '
+         'for this device &mdash; no Python required.</p>'
          '<input id="installerHint" type="text" value="Windows Device" maxlength="60" '
          'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
          'padding:5px 8px;font-size:0.85em;width:200px" placeholder="Device name"> '
+         '<input id="installerPreauth" type="text" maxlength="256" '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:280px;margin-left:6px" '
+         'placeholder="Tailscale pre-auth key (optional)"> '
+         '<div style="color:#666;font-size:0.78em;margin:4px 0 6px">Paste a single-use '
+         'pre-auth key from the Tailscale admin console to let the agent self-join the '
+         'tailnet. Leave blank to join the device by hand.</div>'
          '<button onclick="genWindowsInstaller()" style="background:#00d4ff22;color:#00d4ff;'
          'border:1px solid #00d4ff;border-radius:6px;padding:5px 14px;cursor:pointer">'
          'Generate Windows Installer</button>'

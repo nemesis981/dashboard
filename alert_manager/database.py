@@ -195,11 +195,18 @@ def init_enrollment_tokens_table():
                 uses             INTEGER DEFAULT 0,
                 auto_approve     INTEGER DEFAULT 1,
                 device_name_hint TEXT,
-                revoked          INTEGER DEFAULT 0
+                revoked          INTEGER DEFAULT 0,
+                preauth_key      TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_token "
                   "ON enrollment_tokens(token)")
+        # Migration (ADR 0001 guarded ALTER): preauth_key = single-use Tailscale pre-auth
+        # key baked into the generated installer conf. Secret-at-rest, mitigated by single-
+        # use + short TTL (1-2h) + revocable; NEVER logged. (Delivery foundation, Phase 1.)
+        _cols = {r[1] for r in c.execute("PRAGMA table_info(enrollment_tokens)").fetchall()}
+        if "preauth_key" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN preauth_key TEXT")
         conn.commit()
     finally:
         conn.close()
