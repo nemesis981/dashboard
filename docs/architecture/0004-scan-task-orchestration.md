@@ -5,7 +5,9 @@
 - **Affects:** scan triggering/dispatch, the malware module, hw_monitor, reporting,
   the agent fleet, the `scan_*` / `malware_*` tables
 - **Depends on:** [0001-database-and-module-architecture](0001-database-and-module-architecture.md)
-  (single shared DB + module prefix ownership) — built AFTER Pass 0 lands.
+  (single shared DB + module prefix ownership) — gated on Pass 0. **Dependency SATISFIED:**
+  Pass 0 completed 2026-06-26 (worklog `2026-06-26-001`), so 0004 is now unblocked — but
+  still unbuilt (Status remains Proposed).
 - **Related:** [0003-database-resilience-and-recovery](0003-database-resilience-and-recovery.md);
   evidence base = `docs/audits/scan-task-architecture-audit.md`
 
@@ -67,6 +69,7 @@ c. **Where the five `scan_*` tables migrate** — scheduler-owned `scan_*` prefi
 
 ## Status / next
 
-Proposed. Build only after Pass 0 Stage 4 cleanup completes. Next step is the full
+Proposed. Pass 0 Stage 4 cleanup is complete (2026-06-26), so the build gate is now open;
+direction decided, nothing built yet. Next step is the full
 ADR: answer (a)/(b)/(c), specify the module contracts and the migration of the
 `scan_*` tables, and the cutover from the hw_monitor-welded dispatch.
