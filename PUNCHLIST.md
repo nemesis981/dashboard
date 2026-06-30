@@ -684,6 +684,18 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   deploy, or explain it's filled by the helper.
 - [ ] **W-2 — time estimates** ("~5 min" / install "~2 min") vs a 272MB bundle. Adjust.
 
+- [ ] **PL-10 — Tailscale GUI auto-launches a redundant "Log in" window after the silent
+  `--authkey` join (v1.0.7 self-onboard UX wart).** Found in the clone (.80) install audit:
+  the installer auto-installs Tailscale (`_install_tailscale` → winget/MSI) and joins headlessly
+  via `tailscale up --authkey`, but Tailscale's own GUI app auto-starts on first run and shows a
+  "Log in" prompt — confusing the operator into thinking they must connect manually (they did).
+  Functional join was the key; the prompt is cosmetic/parallel. ALSO: the installer's first-screen
+  instructional text still says "install Tailscale (tailscale.com/download), log in…" — now STALE
+  (the installer does this itself). Fix direction: suppress/skip the Tailscale GUI launch (or
+  `tailscale up --unattended` / config to prevent the login window surfacing), and update the
+  installer_gui.py first-screen text to reflect auto-onboard. Polish, NOT a blocker — the
+  mechanism works. (installer_gui.py `_install_tailscale` / `steps_text`.)
+
 **Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
 bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
 SSH automation all worked.
