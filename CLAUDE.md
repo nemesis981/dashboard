@@ -141,6 +141,21 @@ notes that read as internal, but the repo is public — they leak just like code
   supplement is distilled from at closeout. Cadence: worklog (live) →
   supplement (closeout, curated) → HANDOFF.md (closeout, current state).
 - I provide the WHEN (I say "I'm done" / "fresh session"); the rule provides the WHAT.
+- **Closeout health check (READ-ONLY — runs EVERY closeout, automatically; the LAST thing
+  before the day is called done).** AFTER the supplement + HANDOFF refresh are committed AND
+  pushed, run a read-only verification and report a one-line verdict. Confirm:
+  1. **Working tree clean** — nothing uncommitted/untracked (`git status --short` empty). Call
+     out separately anything that's a *concurrent session's* WIP (not mine to commit).
+  2. **Closeout commit is HEAD** — the supplement/HANDOFF commit is the tip.
+  3. **local == origin (0/0)** — `git rev-parse HEAD` == `git rev-parse origin/main` (after a
+     `git fetch`); the closeout was actually PUSHED, not just committed.
+  4. **HEAD touched only expected docs** — `git show --stat HEAD` shows only handoff/docs
+     files, no stray code.
+  5. **Rule-8 spot-check on the committed diff** — `git show HEAD` carries no real
+     IPs/hosts/keys/tokens (placeholders only).
+  6. **Open / before-next-session fixes are durably captured** in `PUNCHLIST.md` / `HANDOFF.md`
+     (not living only in the conversation).
+  Verdict: **"clean + synced + leak-free + open items captured"** — or list exactly what's off.
 
 ---
 
