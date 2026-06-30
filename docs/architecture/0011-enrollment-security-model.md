@@ -53,8 +53,15 @@ exist — this is surfacing, not new detection:**
 - **Server-observed enrolling source** — the **tailnet IP the enrollment connection arrived
   from**. Authoritative and **UNFORGEABLE** "from where."
 - **Hardware-stable-ID match** — does the presented device fingerprint match the fingerprint
-  the installer's token was generated FOR? **YES/NO.** A **NO** = token presented from a
-  different machine than intended (stolen/copied-media signature) → flag prominently.
+  the installer's token was generated FOR? **YES / partial (k/n) / NO.** A **NO** = token
+  presented from a different machine than intended (stolen/copied-media signature) → flag
+  prominently. (TOFU: locks on first enrollment — see [hardware-stable-identifiers](../roadmap/hardware-stable-identifiers.md).)
+- **Fingerprint confidence + signal count + `is_virtual`** — strength of the fingerprint and
+  whether it's a virtualized environment. **INFORMATIONAL ONLY — NEVER auto-gating.** Per the
+  hardware-stable-identifiers **PRINCIPLE** (confidence modulates trust-weight, never
+  protection-availability): a low-confidence or virtual device **still enrolls and is fully
+  protected** — these signals only tell the owner how much to lean on manual approval + other
+  signals. The two conditions (`is_virtual`; low-confidence) surface **separately**.
 - **Token metadata** — TTL remaining, single-use status, when/for-whom generated.
 
 Owner action: **APPROVE or REJECT** from the card.

@@ -23,6 +23,30 @@ A **composite of multiple signals** (not one magic ID), **hashed before storage*
 composite hash, the per-signal hashes, and the *types* of signals used; **never raw hardware
 data**.
 
+## PRINCIPLE — confidence modulates TRUST-WEIGHT, never PROTECTION-AVAILABILITY (product requirement)
+
+**Degrade visibly, never fail.** The fingerprint **ALWAYS computes** and the device **ALWAYS
+enrolls** (subject to manual approval) and **ALWAYS gets protected** — the full agent: ClamAV,
+heartbeat, everything. A weak or virtualized fingerprint gets a **LABELED low-confidence**
+result, **never a rejection.**
+
+Confidence (and `hw_is_virtual`) only adjust:
+- the **strength of the TOFU "same device?" guarantee** (a low-confidence lock is a weaker
+  guarantee, *surfaced as such*), and
+- how much the owner leans on **manual approval + other signals** when deciding.
+
+Confidence must **NEVER gate enrollment, protection, or feature availability anywhere
+downstream.** "Is a VM" or "thin signals" must not block anything. This is a hard product
+requirement: **VMs, thin-hardware, VDI, mini-PCs, and privacy-focused setups are LEGITIMATE
+deployment targets** (common in SMB + personal use). Denying them protection because they're
+hard to fingerprint would be catastrophic and inverts the product's purpose.
+**Detect-and-label, protect-regardless.**
+
+*Real-target reality:* the actual trip installs are full physical laptops (owner laptop +
+daughter's PC) → strong fingerprints → solid TOFU lock (this is where strength matters). The
+**VM and the server are the WEAK end and exist only as the TEST rig** — they must enroll
+cleanly with honest low-confidence / virtual labels so testing is never blocked.
+
 ## Signal sets (build-now: Windows + Linux)
 
 No single signal is required — **every signal is optional**; the composite degrades
@@ -59,6 +83,24 @@ and may be **empty/garbage on VMs/OEM** (`"To be filled by O.E.M."`, all-zero UU
    present; `medium` if exactly 1 strong; `low` if only `cpu_id`/weak signals.
 7. `schema_version = 1`.
 
+## Two visible-degrade conditions (informational, NEVER auto-gating)
+
+Surfaced **separately** on the review card; the owner decides. Neither blocks enrollment.
+
+1. **`hw_is_virtual` — virtualized environment detected.** Detect hypervisor/VM and set a
+   boolean flag. Detection signals: SMBIOS vendor/product strings (`VMware`, `VirtualBox`,
+   `innotek GmbH`, `QEMU`, `KVM`, `Xen`, `Microsoft Corporation`/Hyper-V), the CPUID
+   hypervisor-present bit, virtual disk/NIC identifiers; on Linux prefer `systemd-detect-virt`
+   /`/sys/class/dmi/id/{sys_vendor,product_name}`, on Windows `Win32_ComputerSystem`
+   Manufacturer/Model. **Detect-and-LABEL, not detect-and-block.** On real deployments this is
+   a soft "expected?" prompt; during testing the VM/server are legitimate and MUST enroll.
+2. **Low-confidence fingerprint** — too few/weak signals to lock strongly (**independent of
+   VM-ness**: a thin physical box can be low-confidence; a well-provisioned VM can be medium).
+   Surface the **confidence score + signal count** so the owner approves knowingly.
+
+TOFU still locks at whatever confidence level — a low-confidence lock is simply a weaker
+"same device?" guarantee, surfaced as such, not a failure (see PRINCIPLE above).
+
 ## Data model + storage (LOCKED — must not reshape)
 
 Owned by the core/agent table `agent_devices` (write-own; the CLAUDE.md actor seam is added
@@ -71,6 +113,7 @@ here, not twice). Schema change uses the ADR-0001 guarded `PRAGMA table_info` +
 | `hw_signals_used` | TEXT (JSON array) | contributing **types only** |
 | `hw_signal_hashes` | TEXT (JSON object) | `{type: signal_hash}` — for quorum match |
 | `hw_fp_confidence` | TEXT | `high` / `medium` / `low` |
+| `hw_is_virtual` | INTEGER | virtualized environment detected (bool); informational, never gates |
 | `hw_fp_schema_version` | INTEGER | `1` |
 | `hw_fp_locked_at` | REAL | TOFU lock timestamp (set on first enrollment) |
 
@@ -87,9 +130,14 @@ Rides the existing `enroll()` payload (`enrollment.py`), stored by `_create_enro
   "stable_id": "<sha256 hex>",
   "signals_used": ["machine_id", "system_uuid", "disk_serial"],
   "signal_hashes": {"machine_id": "<h>", "system_uuid": "<h>", "disk_serial": "<h>"},
-  "confidence": "high"
+  "confidence": "high",
+  "is_virtual": false
 }
 ```
+
+Review card reads `confidence`, signal count (= `len(signals_used)`), and `is_virtual` →
+stored as `hw_fp_confidence` / `hw_is_virtual`. All three are **informational only** (see the
+PRINCIPLE) — none gates enrollment, protection, or any downstream feature.
 
 ## Platform interface (clean — Mac is a drop-in)
 
