@@ -13,6 +13,7 @@ key-id prefix. Creds live in /etc/nemesis.env (640 root:nemesis), never in the r
 integration — see CUSTOM_TAILSCALE_OAUTH.md.
 """
 import os
+import re
 import time
 import logging
 
@@ -74,6 +75,17 @@ def _get_access_token():
     return tok
 
 
+def _safe_key_description(device_hint):
+    """Tailscale rejects auth-key descriptions containing characters outside its allowed
+    set (letters, digits, spaces, hyphens, underscores) — notably DOTS, which return
+    HTTP 400 'keys: description had invalid characters'. Strip to that charset. (The
+    installer conf renderer keeps its own separate, looser rule; only THIS Tailscale
+    description needs the stricter charset.)"""
+    raw = "nemesis installer " + (device_hint or "device")
+    safe = re.sub(r"[^A-Za-z0-9 _-]", "", raw).strip()
+    return (safe or "nemesis installer")[:100]
+
+
 def mint_preauth_key(device_hint="", ttl_seconds=3600):
     """Mint a SINGLE-USE, non-reusable, non-ephemeral, PRE-AUTHORIZED, tagged auth key.
     Returns (key_string, key_id). Raises TailscaleAPIError on any failure so the caller can
@@ -89,7 +101,7 @@ def mint_preauth_key(device_hint="", ttl_seconds=3600):
             "tags": [tag],
         }}},
         "expirySeconds": int(ttl_seconds),
-        "description": ("nemesis installer " + (device_hint or "device"))[:100],
+        "description": _safe_key_description(device_hint),
     }
     try:
         r = requests.post(_KEYS_URL.format(tailnet=tailnet),
