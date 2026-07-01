@@ -61,6 +61,40 @@ prompt — session is oriented in under 30 seconds.
 
 ---
 
+## Window Roles (multi-window workflow)
+
+This project is worked across two role-assigned Claude Code windows. Each window is
+told its role in the operator's FIRST message ("you are the build window" / "you are
+the docs window"). A window has no way to know its own identity otherwise — the role
+comes from that load-time assignment, not from open order or timestamps. If a window
+is reopened after a crash, the operator re-states its role.
+
+### BUILD window
+- Owns all CODE changes (dashboard.py, database.py, agent files, installers, etc.).
+- Runs Rule-3 verification (real output: py_compile, isolated tests, live checks) on
+  every code change before commit.
+- Owns the MORNING BRIEFING and the full MORNING ROADMAP-VS-STATE AUDIT (read-only).
+- Does NOT author ADRs, roadmap entries, handoff docs, or build specs — that is the
+  docs window's job.
+- Code work takes priority: never let a read-only audit or doc request preempt
+  trip-critical or scheduled code work in this window.
+
+### DOCS window
+- Owns ALL document work: ADRs, roadmap entries, handoff/supplements, build specs,
+  doc audits, cross-references.
+- Docs-only + read-only. NEVER touches code files. If a task would require a code
+  change, stop and flag it for the build window.
+
+### Both windows (shared discipline)
+- pull --ff-only before every commit (concurrent windows are standing practice).
+- Rule 8 leak-scan every diff (placeholders only — no PII/IPs/hosts/accounts).
+- Commit-first, then push. HOLD the push for operator review on anything non-trivial
+  (ADRs, security-default code, schema changes).
+- Read-only audits and doc-writes never share a window with trip-critical code work.
+- One logical change per commit; don't batch unrelated work.
+
+---
+
 ## TIER 1 — Core operating rules
 
 ### 1. Audit-first, then act
