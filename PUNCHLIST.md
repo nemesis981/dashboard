@@ -685,7 +685,7 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
 - [ ] **W-2 — time estimates** ("~5 min" / install "~2 min") vs a 272MB bundle. Adjust.
 
 - [ ] **PL-10 — Tailscale GUI auto-launches a redundant "Log in" window after the silent
-  `--authkey` join (v1.0.7 self-onboard UX wart).** Found in the clone (.80) install audit:
+  `--authkey` join (v1.0.7 self-onboard UX wart).** Found in the test VM install audit:
   the installer auto-installs Tailscale (`_install_tailscale` → winget/MSI) and joins headlessly
   via `tailscale up --authkey`, but Tailscale's own GUI app auto-starts on first run and shows a
   "Log in" prompt — confusing the operator into thinking they must connect manually (they did).
@@ -696,7 +696,7 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   installer_gui.py first-screen text to reflect auto-onboard. Polish, NOT a blocker — the
   mechanism works. (installer_gui.py `_install_tailscale` / `steps_text`.)
 - [ ] **PL-11 (Doc) — hardware-monitor prompt is PawnIO; install docs must tell users to approve
-  it.** Found in the test-2 VM install (`.82`, screenshot
+  it.** Found in the test-2 VM install (screenshot
   `docs/audits/trip-1.0.8-test2-vm-screenshot-2026-07-01.png`): LibreHardwareMonitor 0.9.x pops
   **"PawnIO is not installed, do you want to install it?"** (PawnIO = the kernel I/O driver LHM
   uses for hardware sensor access). This is the "hardware monitor needs a program download
