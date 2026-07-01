@@ -718,6 +718,43 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   (redundant auto-launched Tailscale GUI). Do NOT change guidance until the safe-to-close stage is
   confirmed by test.
 
+- [ ] **PL-13 — Uninstall consent-UX enhancement (when we next touch the agent).** Builds on the
+  Phase-3 consent checklist already in `uninstaller_gui.py`. Cross-ref: Phase-3 consent UX + the
+  PawnIO never-remove decision (**1f495ad**).
+  - **Explicit confirmation** before teardown: *"Really uninstall the Nemesis Firewall Agent?"*
+  - **List ALL components Nemesis put on the machine** (full transparency), as **CHECKBOXES**
+    (independent per-item toggles — **NOT radio buttons**) so the user chooses which to remove vs
+    keep. **Never default everything to remove.**
+  - **Provenance-driven, conservative defaults** — annotate each component by manifest provenance:
+    * **`pre_existing`** (we did NOT install it — it was there before Nemesis): tag *"may be in use
+      by [detected consumer if known] — installed before Nemesis."* **Default KEEP** (or don't offer
+      removal). **The prior presence IS the evidence** something else owns it — it's theirs, we
+      won't remove it.
+    * **`installed_by_nemesis` + shared kernel driver** (e.g. **PawnIO**): **conservative default
+      KEEP**, tag *"other hardware tools (Fan Control / OpenRGB) may use this."* (kernel-driver
+      never-remove backstop, 1f495ad).
+    * **`installed_by_nemesis` + clearly ours** (e.g. our agent files): **offer removal, default
+      CHECKED.**
+  - **Best-effort "needed elsewhere?" detection — NOT a definitive claim:**
+    * Manifest provenance is the **primary** signal (`pre_existing` vs `installed_by_nemesis`).
+    * At uninstall, **also run a live check** for other likely consumers where feasible — e.g. for
+      PawnIO, detect whether **Fan Control / OpenRGB** are installed, or whether the PawnIO service
+      is referenced by non-Nemesis processes → surface *"another tool may use this — recommend
+      keep."*
+    * The **"may be in use by X" tag primarily attaches to `pre_existing` components** — that's the
+      honest, evidence-based signal. Kernel-driver never-remove is the **backstop** for the harder
+      *"we installed it but something adopted it later"* case.
+    * **Present HONESTLY:** state what was detected AND that other software **MAY** still depend on a
+      component even if not detected. **Default to KEEP when uncertain** (especially kernel
+      drivers). **Never claim a definitive "safe to remove"** for shared components.
+    * **Why best-effort:** dependencies formed **AFTER** our install (user installs Fan Control
+      later, which reuses our PawnIO) leave **no trace in our manifest**, so detection can never be
+      authoritative — hence conservative defaults + honest "may be used elsewhere" language.
+  - **Per-item context line so the choice is informed**, e.g.:
+    * *"PawnIO — hardware sensor driver; Fan Control / OpenRGB may use it — recommend keep."*
+    * *"Tailscale — you had this before Nemesis; it's yours, we won't remove it."* (`pre_existing`)
+    * *"Tailscale — installed by Nemesis; safe to remove if not used elsewhere."* (`installed_by_nemesis`)
+
 **Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
 bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
 SSH automation all worked.
