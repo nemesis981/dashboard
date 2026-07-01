@@ -1,6 +1,6 @@
 # Nemesis Firewall — Windows Setup Guide
 
-> **⚠️ Windows Support Status:** The Windows/VM installation path is currently under development. The documentation and scripts in this repository represent the planned architecture but have not been fully tested end-to-end. We recommend Linux native installation for v1.0. Windows support is planned for a future release. Community contributions to the Windows installer are welcome — see `windows_agent/` for the current work in progress.
+> **ℹ️ How Nemesis is structured (server vs agent):** The Nemesis **server** runs on **Linux (Ubuntu)** — that's the box that does the monitoring, alerting, and dashboard. The **client agents** are **cross-platform (Windows, Mac, Linux)**, and the **Windows agent is working and self-onboarding as of v1.0.7** (verified). So you do **not** need Linux to protect a Windows machine: to put an agent on a Windows PC, follow the tiered agent guides — [Beginner](operation/INSTALL_WINDOWS_BEGINNER.md) · [Intermediate](operation/INSTALL_WINDOWS_INTERMEDIATE.md) · [Pro](operation/INSTALL_WINDOWS_PRO.md). **This page** covers the separate option of running the **full Nemesis server inside a VM on a Windows PC** (for when you don't have a dedicated Linux box).
 
 Installation and configuration reference for Windows users running Nemesis via a virtual machine.
 

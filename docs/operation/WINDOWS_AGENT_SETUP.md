@@ -1,5 +1,14 @@
 # Windows Agent Setup Guide
 
+> **⚠️ SUPERSEDED — legacy hardware-only agent.** This page documents the older
+> hardware-only Windows agent (LibreHardwareMonitor + `install.ps1`) and is **no
+> longer the current path.** The `.ps1` installer route has been **retired**
+> (`GET /install/windows/{token}` now returns HTTP 410). For the current
+> **self-onboarding** agent — which joins the network automatically and needs no
+> manual Tailscale setup or account — follow the tiered install guides instead:
+> **[Beginner](INSTALL_WINDOWS_BEGINNER.md) · [Intermediate](INSTALL_WINDOWS_INTERMEDIATE.md) · [Pro](INSTALL_WINDOWS_PRO.md)**.
+> The content below is retained for reference only.
+
 ## What the Windows agent does
 The Nemesis Windows agent runs on Windows devices and reports hardware health, network
 status, and security events back to your Nemesis Firewall dashboard. It gives you visibility

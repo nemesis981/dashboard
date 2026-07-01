@@ -2,36 +2,16 @@
 
 *A friendly, step-by-step guide. No computer experience required.*
 
-## Step 0: Install Tailscale first (required)
-
-Before installing Nemesis, you need one free app
-called Tailscale. This connects your computer
-securely to your home security system.
-
-1. Open your web browser and go to:
-   tailscale.com/download
-
-2. Click Download for Windows
-
-3. Double-click the downloaded file to install it
-   (just like any normal Windows program)
-
-4. When Tailscale opens, click Log in
-   → Use the account details your admin sent you
-   → OR ask [SUPPORT_CONTACT] which account to use
-
-5. When Tailscale shows a green light or checkmark:
-   ✅ You're done with this step
-   Continue to Step 1 below
-
-Note: Tailscale must be connected (green) before
-the Nemesis installer will work.
-
-## What this does
+## What this is
 
 This puts a small, quiet helper on your computer that keeps an eye on its
 security and lets your helper look after it for you. You don't have to manage
 it — once it's installed, it just works in the background.
+
+**You do NOT need Linux. You do NOT need Tailscale or any accounts.** The
+installer sets up its own secure connection automatically. (You may have heard
+Nemesis "runs on Linux" — that's the *server* your helper runs on their end. The
+app you're installing runs normally on Windows.)
 
 ## Before you start
 
@@ -54,12 +34,24 @@ That's it. You do **not** need any passwords, accounts, or settings.
 5. **Done!** When it finishes, the window says **"Done! Your device is now
    protected."** You can close it.
 
+## One last step — your helper switches it on
+
+For safety, a brand-new device doesn't turn itself on. After you install, **your
+helper approves your device** from their Nemesis dashboard — it shows up on their
+end as waiting for approval. You don't have to do anything technical for this:
+just tell your helper *"I've finished installing,"* and they'll switch it on.
+
+*(Some helpers set this to happen automatically — if yours did, there's nothing
+to wait for and it's already on.)*
+
+Once it's approved, Nemesis runs **quietly and invisibly** in the background;
+there's nothing you need to keep open or check.
+
 ## How to know it's working
 
-When the installer says **"Done! Your device is now protected,"** that's your
-confirmation — it's set up. Nemesis then runs **quietly and invisibly** in the
-background; there's nothing you need to keep open or check. Your helper can also
-see your device is connected on their end.
+When the installer says **"Done! Your device is now protected,"** the install
+part is finished. After your helper approves it, your device shows as connected
+on their end — they can confirm that for you.
 
 ## Something looks wrong?
 

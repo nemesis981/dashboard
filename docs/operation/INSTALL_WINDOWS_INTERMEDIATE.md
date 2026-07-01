@@ -4,44 +4,31 @@
 
 ## What this installs
 
-- **The Nemesis Agent** — a small Python program that runs in the background
+- **The Nemesis Agent** — a small background program that runs on Windows
   (started automatically when you log in).
-- **A connection to your Nemesis dashboard** at `[your Nemesis server]` (your
-  helper/admin provides this address; it's baked into the installer).
+- **A secure connection to your Nemesis dashboard** at `[your Nemesis server]`
+  (your helper/admin provides this address; it's baked into the installer).
 - **Enrollment** — on first run the agent creates a key pair and registers
-  itself, proving this device is yours. With a generated installer it is
-  **approved automatically**; otherwise it waits for the admin to approve it.
+  itself, proving this device is yours.
 - **A pre-enrollment scan** — before the device is trusted, the agent runs a
   quick malware scan (ClamAV, and YARA if installed) so a compromised machine
   isn't enrolled blindly. "Not available" simply means a scanner isn't installed
   — it's not an error.
 
+> **Linux vs Windows — clearing up a common confusion:** the Nemesis **server**
+> runs on Linux (your admin runs it). The **agent** you're installing here runs
+> natively on **Windows** — you do **not** need Linux, and you do **not** need to
+> install or log in to Tailscale. The installer connects itself to the private
+> network automatically, using a one-time key that was baked in when your admin
+> generated your installer.
+
 ## Requirements
 
 - Windows 10 or 11 (Home or Pro — both fine).
 - ~50 MB of free disk space.
-- Network access to the Nemesis server (LAN, or Tailscale if you're remote).
 - The ability to approve the **UAC** prompt (admin rights on the machine).
 
-## Prerequisites
-
-### Tailscale (required — install first)
-Tailscale creates an encrypted tunnel between your
-device and the Nemesis server, enabling protection
-both at home and away from your network.
-
-1. Download from tailscale.com/download
-2. Install normally (standard Windows installer)
-3. Log in with the account your admin provides
-4. Confirm Tailscale shows Connected (green icon
-   in system tray) before running Nemesis installer
-
-⚠️ Tailscale must be connected before enrolling.
-   The Nemesis installer will fail silently if
-   Tailscale is not running.
-
-### Admin rights
-Have your Windows password ready for the UAC prompt.
+(No Tailscale account and no manual network setup — the installer self-connects.)
 
 ## Installation steps
 
@@ -55,10 +42,22 @@ Have your Windows password ready for the UAC prompt.
 4. **Watch the progress stages:**
    - *Checking system requirements* — prepares the install folder.
    - *Installing Nemesis Agent* — copies files to `%APPDATA%\Nemesis`.
-   - *Connecting to your security dashboard* — generates keys, runs the
-     pre-enrollment scan, and enrolls with the server.
+   - *Connecting securely* — joins the private network with its built-in one-time
+     key, generates its keys, runs the pre-enrollment scan, and enrolls with the
+     server.
    - *Done! Your device is now protected.*
 5. **Close the window** when it shows the completion message.
+
+## Approval — your device waits until the admin approves it
+
+By default, a newly enrolled device lands in a **PENDING** state — it is **not**
+active until the admin approves it. The admin approves it in the dashboard under
+**Settings → Devices**, where the device appears under *Pending approval*.
+
+*(If the admin ticked the **"auto-approve"** option when generating your
+installer, the device is approved automatically and there's nothing to wait for.
+**Manual approval is the default** — the safe behavior — so in most cases expect a
+short wait for the admin to approve.)*
 
 ## Verifying the install
 
@@ -66,11 +65,11 @@ Have your Windows password ready for the UAC prompt.
   **`NemesisAgent`** (trigger: *At log on*). *(Note: the agent has no system-tray
   icon yet — it runs headless in the background.)*
 - **Dashboard:** **Settings → Devices** → your device should appear under
-  **Enrolled devices** (or **Pending approval** if no auto-approve token was
-  used). Approve it there if pending.
-- **Healthy heartbeat:** the agent POSTs to the server every ~5 minutes, so the
-  device's **"last seen"** time in the dashboard should stay recent (within the
-  last few minutes) and its status shown as active.
+  **Pending approval** (approve it there), and move to **Enrolled devices** once
+  approved.
+- **Healthy heartbeat:** after approval, the agent POSTs to the server every
+  ~5 minutes, so the device's **"last seen"** time in the dashboard should stay
+  recent (within the last few minutes) and its status shown as active.
 
 ## Troubleshooting
 
@@ -80,12 +79,15 @@ Have your Windows password ready for the UAC prompt.
 - **The UAC prompt didn't appear.** The installer needs elevation. Right-click
   `NemesisAgent-Setup.exe` → **Run as administrator**.
 - **The progress bar stopped.** Most often the server isn't reachable. Confirm
-  you can reach `[your Nemesis server]` (on the LAN, or that Tailscale is up if
-  remote), then re-run the installer. The window's status line shows where it
-  paused.
-- **Device not showing in the dashboard.** Check **Settings → Devices** for a
-  **Pending** entry and approve it. If nothing appears, enrollment didn't reach
-  the server — re-run after confirming network access.
+  you can reach `[your Nemesis server]`, then re-run the installer. (You do **not**
+  need to check Tailscale yourself — the installer manages its own connection.)
+  The window's status line shows where it paused.
+- **Device shows as "Pending" and never activates.** That's expected until the
+  admin approves it under **Settings → Devices**. Approve it there, or ask your
+  admin to.
+- **Device not showing in the dashboard at all.** Check **Settings → Devices**
+  for a **Pending** entry. If nothing appears, enrollment didn't reach the
+  server — re-run after confirming network access.
 
 ## Uninstalling
 
