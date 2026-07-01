@@ -695,6 +695,15 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   `tailscale up --unattended` / config to prevent the login window surfacing), and update the
   installer_gui.py first-screen text to reflect auto-onboard. Polish, NOT a blocker — the
   mechanism works. (installer_gui.py `_install_tailscale` / `steps_text`.)
+- [ ] **PL-11 (Doc) — hardware-monitor prompt is PawnIO; install docs must tell users to approve
+  it.** Found in the test-2 VM install (`.82`, screenshot
+  `docs/audits/trip-1.0.8-test2-vm-screenshot-2026-07-01.png`): LibreHardwareMonitor 0.9.x pops
+  **"PawnIO is not installed, do you want to install it?"** (PawnIO = the kernel I/O driver LHM
+  uses for hardware sensor access). This is the "hardware monitor needs a program download
+  approved" prompt the operator hit. Not a bug — LHM works, but **temps/fans need PawnIO
+  installed** (click OK/approve). Fix: the install guides (INSTALL_WINDOWS_*.md / beginner walk-
+  through) must tell users to **expect and approve the PawnIO install** for temperature/fan data;
+  without it the agent still runs but skips temps/fans. Docs-only, no code change.
 
 **Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
 bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
