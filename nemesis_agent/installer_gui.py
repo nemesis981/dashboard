@@ -443,23 +443,34 @@ class InstallerApp:
         return False
 
     def _install_tailscale(self):
-        """Install Tailscale on a BARE box (the master baseline ships none). winget first,
-        official MSI fallback. Best-effort; returns True iff tailscale.exe is present after."""
+        """Install Tailscale on a BARE box (the master baseline ships none). The official MSI
+        with the documented **TS_NOLAUNCH** property (any non-empty string; silent-install only)
+        prevents the Tailscale GUI client from launching — so the 'You're all set' window never
+        appears (avoids user confusion AND the #16086 premature-close hang: suppress, don't close).
+        MSI is the PRIMARY path here precisely so TS_NOLAUNCH always applies (winget-first would
+        install + launch the GUI before we ever reached the MSI). The tailnet join is driven
+        separately by the CLI `tailscale up --authkey` against tailscaled (started explicitly in
+        _join_tailnet_with_preauth_key) — it does NOT depend on the GUI launching, so no-GUI is
+        safe. winget is the fallback, also passing TS_NOLAUNCH via --override. Best-effort;
+        returns True iff tailscale.exe is present after."""
         import subprocess
-        try:
-            subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale", "--silent",
-                            "--accept-package-agreements", "--accept-source-agreements"],
-                           check=False, capture_output=True, timeout=300)
-        except Exception:
-            pass
-        if self._tailscale_installed():
-            return True
+        # Primary: official MSI + TS_NOLAUNCH (guaranteed GUI suppression).
         try:
             import tempfile, urllib.request
             msi = os.path.join(tempfile.gettempdir(), "tailscale-setup.msi")
             urllib.request.urlretrieve(
                 "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi", msi)
-            subprocess.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
+            subprocess.run(["msiexec", "/i", msi, 'TS_NOLAUNCH=1', "/quiet", "/norestart"],
+                           check=False, capture_output=True, timeout=300)
+        except Exception:
+            pass
+        if self._tailscale_installed():
+            return True
+        # Fallback: winget, threading TS_NOLAUNCH through to the underlying MSI via --override.
+        try:
+            subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale",
+                            "--accept-package-agreements", "--accept-source-agreements",
+                            "--override", "/quiet /norestart TS_NOLAUNCH=1"],
                            check=False, capture_output=True, timeout=300)
         except Exception:
             pass
