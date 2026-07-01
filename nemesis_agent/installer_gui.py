@@ -4,8 +4,9 @@
 RUNS ON WINDOWS (bundled by build_installer.py via PyInstaller). A small tkinter
 window shows progress while it: resolves the server + enrollment token, copies the
 agent into %APPDATA%\\Nemesis, generates a keypair, runs the pre-enrollment scan,
-sends the enrollment request (with the token → auto-approve), registers a
-logon auto-start task, and reports completion.
+sends the enrollment request (the device then awaits owner approval in the dashboard
+unless the installer token opted into auto-approve — default is manual approval),
+registers a logon auto-start task, and reports completion.
 
 Server + token resolution order: command-line args → adjacent nemesis_install.conf
 → the window's input fields.
@@ -21,12 +22,86 @@ from tkinter import ttk
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
 
+# ── Operator-approved copy (1.0.8). FIXED wording — NOT tier-varied. ──
+TAILSCALE_GUIDANCE = (
+    "A window from a tool called Tailscale may pop up during setup and ask you to sign "
+    "in. Please don't touch it, and don't sign in. We're connecting this device for you "
+    "automatically. Leave that window open — we'll tell you when it's safe to close it."
+)
+COMPLETION_TEXT = (
+    "Setup is complete. If that Tailscale window is still open, you can close it now. "
+    "Your device is enrolled and waiting for approval. Once approved, protection turns "
+    "on automatically — you don't need to do anything else."
+)
+
 STEPS = [
     "Checking system requirements...",
     "Installing Nemesis Agent...",
     "Connecting to your security dashboard...",
-    "Done! Your device is now protected.",
+    COMPLETION_TEXT,
 ]
+
+# ── Explanation tier: controls the INSTALLER'S messaging depth ONLY (install behavior
+# is identical across tiers). Seeding a dashboard/server tier is deferred (post-trip). ──
+TIER_DEFAULT = "intermediate"
+TIERS = [
+    ("beginner",     "Beginner",     "Plain-language guidance with extra reassurance."),
+    ("intermediate", "Intermediate", "Balanced detail — clear steps, no hand-holding."),
+    ("pro",          "Pro",          "Terse, technical status. Minimal explanation."),
+]
+
+
+def _pick_tier(tier, beginner, intermediate, pro):
+    """Return the messaging variant for the selected tier (default: intermediate)."""
+    if tier == "beginner":
+        return beginner
+    if tier == "pro":
+        return pro
+    return intermediate
+
+
+def _first_screen_text(has_preauth_key, tier):
+    """Conditional first-screen instructions (PL-10). With a baked pre-auth key the
+    installer self-onboards (auto-installs Tailscale + auto-joins the tailnet), so the
+    user must NOT be told to install/sign into Tailscale by hand — the manual-Tailscale
+    text is shown ONLY on the no-key fallback path. Depth varies by messaging tier."""
+    if has_preauth_key:
+        return _pick_tier(
+            tier,
+            beginner=(
+                "You don't need to install anything else or sign in anywhere. When you're "
+                "ready, click \"OK, start installation\" below. Setup takes about 2 minutes "
+                "and securely connects this device on its own. If Windows asks for "
+                "permission, click Yes — this came from your own security system."
+            ),
+            intermediate=(
+                "No manual setup needed — the installer securely connects this device on "
+                "its own. Click \"OK, start installation\". If Windows asks permission, "
+                "click Yes. Takes about 2 minutes."
+            ),
+            pro=(
+                "Self-onboarding: auto-installs Tailscale, joins via a single-use key, "
+                "enrolls. Click start; approve the UAC prompt."
+            ),
+        )
+    return _pick_tier(
+        tier,
+        beginner=(
+            "Before you start: install Tailscale (tailscale.com/download), sign in with the "
+            "account your admin gave you, and wait for its green checkmark. Then click "
+            "\"OK, start installation\". If Windows asks for permission, click Yes — this "
+            "came from your own security system. Setup takes about 2 minutes."
+        ),
+        intermediate=(
+            "First install Tailscale (tailscale.com/download) and sign in with the account "
+            "your admin provided, then click \"OK, start installation\". If Windows asks "
+            "permission, click Yes."
+        ),
+        pro=(
+            "Prereq: install Tailscale + sign in (admin-provided account). Then start; "
+            "approve UAC."
+        ),
+    )
 
 
 def _bundled_dir():
@@ -84,25 +159,47 @@ class InstallerApp:
         self.device_name = device_name or "Windows Device"
         self.support_contact = support_contact or "your administrator"
         root.title("Nemesis Security — Setup")
-        root.geometry("480x420")
+        root.geometry("500x640")
 
-        tk.Label(root, text="Nemesis Security Agent", font=("Segoe UI", 14, "bold")).pack(pady=(16, 2))
-        # Option C: inline beginner instructions on the first screen (no separate file to open).
-        steps_text = (
-            "Before you start: install Tailscale (tailscale.com/download), log in with the "
-            "account your admin gave you, and wait for its green checkmark.\n\n"
-            "Then install Nemesis:\n"
-            "1. Click Install below.\n"
-            "2. If Windows asks permission, click Yes — this is safe; it came from your own "
-            "security system.\n"
-            "3. Watch the progress bar (about 2 minutes).\n"
-            "4. When it says \"Done! Your device is now protected,\" you can close this window."
-        )
-        tk.Message(root, text=steps_text, width=440, justify="left",
-                   font=("Segoe UI", 9)).pack(padx=16, pady=(2, 8))
-        self.status = tk.Label(root, text="Ready to install.", font=("Segoe UI", 10))
+        tk.Label(root, text="Nemesis Security Agent",
+                 font=("Segoe UI", 14, "bold")).pack(pady=(14, 2))
+
+        # ── Welcome ──
+        tk.Message(root, width=460, justify="left", font=("Segoe UI", 9),
+                   text=("Welcome. This sets up security monitoring on your device. First, "
+                         "choose how much detail you'd like during setup — this changes only "
+                         "the wording, not what gets installed.")).pack(padx=16, pady=(0, 6))
+
+        # ── Tier picker (messaging depth only; default Intermediate) ──
+        self.tier_var = tk.StringVar(value=TIER_DEFAULT)
+        tier_frame = tk.LabelFrame(root, text="Detail level", padx=8, pady=4)
+        tier_frame.pack(padx=16, fill="x")
+        self._tier_radios = []
+        for key, label, desc in TIERS:
+            rb = tk.Radiobutton(tier_frame, variable=self.tier_var, value=key,
+                                text=label + " — " + desc, anchor="w", justify="left",
+                                wraplength=430, font=("Segoe UI", 9),
+                                command=self._render_instructions)
+            rb.pack(fill="x", anchor="w")
+            self._tier_radios.append(rb)
+
+        # ── Conditional first-screen instructions (PL-10: preauth_key-aware) ──
+        self.instructions = tk.Message(root, width=460, justify="left", font=("Segoe UI", 9))
+        self.instructions.pack(padx=16, pady=(8, 4))
+
+        # ── Tailscale-window guidance — SELF-ONBOARD path only. The "don't sign in" copy
+        # is false for the manual fallback (there the user DOES sign in), so gate on key. ──
+        if self.preauth_key:
+            tk.Message(root, width=460, justify="left", fg="#0a7a3a",
+                       font=("Segoe UI", 9, "italic"),
+                       text=TAILSCALE_GUIDANCE).pack(padx=16, pady=(0, 6))
+
+        self._render_instructions()
+
+        self.status = tk.Label(root, text="Ready when you are.", font=("Segoe UI", 10),
+                               wraplength=460, justify="left")
         self.status.pack(pady=6)
-        self.bar = ttk.Progressbar(root, length=360, mode="determinate", maximum=len(STEPS))
+        self.bar = ttk.Progressbar(root, length=380, mode="determinate", maximum=len(STEPS))
         self.bar.pack(pady=8)
 
         # If the server/token weren't baked in, ask for them.
@@ -116,8 +213,14 @@ class InstallerApp:
                 e = tk.Entry(frm, width=28); e.insert(0, val); e.grid(row=i, column=1, pady=2)
                 self.entries[key] = e
 
-        self.btn = tk.Button(root, text="Install", width=14, command=self.start)
+        self.btn = tk.Button(root, text="OK, start installation", width=22, command=self.start)
         self.btn.pack(pady=10)
+
+    def _render_instructions(self):
+        """Re-render the first-screen instructions for the current tier + preauth_key path.
+        Called on build and whenever the user changes the detail-level radio."""
+        self.instructions.config(
+            text=_first_screen_text(bool(self.preauth_key), self.tier_var.get()))
 
     def set_status(self, text, step=None):
         self.status.config(text=text)
@@ -129,6 +232,9 @@ class InstallerApp:
         if self.entries:
             self.server = self.entries["server"].get().strip() or self.server
             self.token = self.entries["token"].get().strip() or self.token
+        self.tier = self.tier_var.get()          # lock the messaging tier for this run
+        for rb in getattr(self, "_tier_radios", []):
+            rb.config(state="disabled")
         self.btn.config(state="disabled")
         threading.Thread(target=self._run, daemon=True).start()
 
@@ -482,8 +588,9 @@ class InstallerApp:
             cfg.write(f)
 
     def _enroll(self):
-        """Generate the keypair, run the pre-enrollment scan, and send the
-        token-bearing enrollment request (server auto-approves on a valid token).
+        """Generate the keypair, run the pre-enrollment scan, and send the token-bearing
+        enrollment request. The device lands PENDING for owner approval unless the installer
+        token was minted with auto-approve opted in (default is manual approval).
         Uses the agent source bundled INTO the setup exe; writes keys + device_id
         into %APPDATA%\\Nemesis so the frozen agent picks them up on first run."""
         sys.path.insert(0, _bundled_dir())
