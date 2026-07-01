@@ -34,6 +34,17 @@ That's it. You do **not** need any passwords, accounts, or settings.
 5. **Done!** When it finishes, the window says **"Done! Your device is now
    protected."** You can close it.
 
+## A small box may pop up during install — click OK
+
+While it's installing, you might briefly see a little window titled
+**LibreHardwareMonitor** that says:
+
+> **"PawnIO is not installed, do you want to install it?"**  — with **OK** and **Cancel** buttons.
+
+**Click OK** (not Cancel). This is a normal part of setup — it lets Nemesis read your
+computer's **temperatures and fan speeds**. If you click Cancel by mistake, everything else
+still works, but that hardware information won't show up. It's safe to say OK.
+
 ## One last step — your helper switches it on
 
 For safety, a brand-new device doesn't turn itself on. After you install, **your

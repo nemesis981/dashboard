@@ -48,6 +48,13 @@
    - *Done! Your device is now protected.*
 5. **Close the window** when it shows the completion message.
 
+> **PawnIO prompt during install — click OK.** Partway through, a
+> **LibreHardwareMonitor** dialog may appear: **"PawnIO is not installed, do you want to
+> install it?"** (**OK** / **Cancel**). **Click OK.** PawnIO is LibreHardwareMonitor 0.9.x's
+> kernel I/O driver for hardware-sensor access — without it, temperature/fan monitoring won't
+> work (other metrics still do). Clicking Cancel does not break the install, only hardware
+> sensors.
+
 ## Approval — your device waits until the admin approves it
 
 By default, a newly enrolled device lands in a **PENDING** state — it is **not**

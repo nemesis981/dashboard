@@ -704,6 +704,19 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   installed** (click OK/approve). Fix: the install guides (INSTALL_WINDOWS_*.md / beginner walk-
   through) must tell users to **expect and approve the PawnIO install** for temperature/fan data;
   without it the agent still runs but skips temps/fans. Docs-only, no code change.
+  *(Guide guidance ADDED — Beginner + Intermediate INSTALL_WINDOWS_*.md now tell users to click OK
+  on the PawnIO prompt.)*
+
+- [ ] **PL-12 — Tailscale "You're all set" window vs. our close-it guidance (REVIEW FLAG — record,
+  do not resolve yet).** From the test-2 screenshot
+  (`docs/audits/trip-1.0.8-test2-vm-screenshot-2026-07-01.png`): the auto-launched Tailscale window
+  at the **"You're all set"** stage ("Now that you're connected, you can manage your settings…")
+  offers **Open local settings** / **Close**. QUESTION to confirm: does the installer's two-part
+  Tailscale guidance (open-it-leave-it → now-safe-to-close) correctly account for **this specific
+  "You're all set" stage**? Need to verify whether closing **at this stage** is safe or still risks
+  the Tailscale **#16086** hang, so the completion-message timing is accurate. Cross-ref **PL-10**
+  (redundant auto-launched Tailscale GUI). Do NOT change guidance until the safe-to-close stage is
+  confirmed by test.
 
 **Positives (no action — confirmed working):** generate endpoint is auth-gated; LAN download
 bakes a LAN-reachable server address + correct token; git acquire + release-asset download +
