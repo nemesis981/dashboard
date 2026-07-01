@@ -103,6 +103,46 @@ skip the question and confirm the role instead.
 
 ---
 
+## State Snapshots (rollback safety)
+
+Before any STATE-CHANGING action, the build window MUST create a complete,
+dated backup set on the USB drive. This exists so any change is reversible —
+roll back to a known-good state and preserve the broken state to debug later.
+
+### What counts as state-changing (snapshot required)
+- Deploying / restarting a service that affects live behavior
+- Any database migration or direct DB edit
+- Editing live config (/etc/nemesis.env or equivalent)
+Pure code commits that do NOT touch the running system do NOT need a DB
+snapshot — they are already reversible via git.
+
+### Backup location and mount safety
+- Backup root: /run/media/<user>/storage/nemesis-state-backups/
+- This is a USB MOUNT POINT. Before writing, verify the drive is actually
+  mounted: `mountpoint -q /run/media/<user>/storage` (the directory can exist
+  empty when the drive is unplugged — never trust path-exists alone).
+- If the drive is NOT mounted: HALT and prompt the operator. NEVER skip the
+  snapshot and NEVER write it anywhere else.
+
+### Set structure (complete matched pair)
+Create a dated set folder:
+  /run/media/<user>/storage/nemesis-state-backups/YYYY-MM-DD-HHMM-<what-it-precedes>/
+Each set contains BOTH halves so a rollback is self-contained:
+- alerts.db          — snapshot of the live DB (integrity-checked)
+- STATE.txt          — the live git commit hash + tag, `systemctl is-active`
+                       for the six services, and a one-line description of
+                       the change this set precedes
+Rolling back the DB without the matching code (or vice versa) is the subtle
+failure this pair prevents.
+
+### Behavior
+Take the snapshot, then PAUSE and report what is about to change + confirm the
+set was written. Wait for operator go-ahead before performing the
+state-changing action. Dated sets are never overwritten — every state change
+gets its own folder, so any prior state remains recoverable.
+
+---
+
 ## TIER 1 — Core operating rules
 
 ### 1. Audit-first, then act
