@@ -1450,6 +1450,12 @@ def api_agent_installer_generate():
     # Admin-pasted Tailscale pre-auth key (Q3: manual from the Tailscale console now;
     # API auto-minting is post-trip). Optional — install still works hand-joined.
     preauth_key = (data.get("preauth_key") or "").strip()[:256]
+    # Auto-approve is OPT-IN (ADR 0012): default 0 (manual approval via Settings ->
+    # Devices). Only an explicit truthy flag from the form flips it to 1. Absent or
+    # falsy -> 0. Handles JSON bool/int and form strings.
+    _aa = data.get("auto_approve")
+    auto_approve = 1 if (_aa in (True, 1)
+                         or str(_aa).strip().lower() in ("1", "true", "on", "yes")) else 0
     token   = secrets.token_hex(16)
     now     = time.time()
     expires = now + 2 * 3600   # short TTL (ADR 0011: 1-2h), was 24h
@@ -1459,8 +1465,8 @@ def api_agent_installer_generate():
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
-            " device_name_hint, revoked, preauth_key) VALUES (?,?,?,?,1,0,1,?,0,?)",
-            (token, creator, now, expires, hint, preauth_key or None))
+            " device_name_hint, revoked, preauth_key) VALUES (?,?,?,?,1,0,?,?,0,?)",
+            (token, creator, now, expires, auto_approve, hint, preauth_key or None))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1590,6 +1596,14 @@ def _render_agent_devices_html() -> str:
          '<div style="color:#666;font-size:0.78em;margin:4px 0 6px">Paste a single-use '
          'pre-auth key from the Tailscale admin console to let the agent self-join the '
          'tailnet. Leave blank to join the device by hand.</div>'
+         '<div style="margin:4px 0 8px">'
+         '<label style="color:#ddd;font-size:0.82em;cursor:pointer">'
+         '<input id="installerAutoApprove" type="checkbox" '
+         'style="vertical-align:middle;margin-right:5px">'
+         'Auto-approve devices enrolled with this installer</label>'
+         '<div style="color:#ffcc00;font-size:0.78em;margin:2px 0 0 20px">&#9888; '
+         'Only enable for devices you own and physically control.</div>'
+         '</div>'
          '<button onclick="genWindowsInstaller()" style="background:#00d4ff22;color:#00d4ff;'
          'border:1px solid #00d4ff;border-radius:6px;padding:5px 14px;cursor:pointer">'
          'Generate Windows Installer</button>'

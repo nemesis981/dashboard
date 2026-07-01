@@ -499,6 +499,14 @@ class InstallerApp:
             raise RuntimeError(
                 "Connection to security server failed. Make sure Tailscale is connected to "
                 "the correct network. Contact " + self.support_contact)
+        # Persist the server-assigned device_id + status so the frozen agent's
+        # ensure_enrolled() (enrollment.py) finds it on first boot and does NOT re-enroll
+        # (an unpersisted id causes a second pending row ~11s later). Mirrors the runtime
+        # persist path at enrollment.py:296-299.
+        conf = agent_config.load()
+        conf["device_id"] = device_id
+        conf["enrollment_status"] = _status or "pending"
+        agent_config.save(conf)
 
     def _register_autostart(self):
         """Register a logon auto-start task pointing at the frozen agent exe
