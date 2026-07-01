@@ -26,6 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "dist")
 SEP = ";" if os.name == "nt" else ":"   # PyInstaller --add-data separator
+UNINSTALLER = "NemesisUninstall.exe"    # shipped in the pack once Phase 3 builds it
 
 # The persistent agent dynamically imports its platform + collector modules, so
 # they must be frozen in explicitly.
@@ -97,6 +98,11 @@ def main(argv=None):
         p = os.path.join(HERE, sub)
         if os.path.exists(p):
             setup_datas.append(f"{p}{SEP}{sub if os.path.isdir(p) else '.'}")
+    # Ship the uninstaller in the pack (clean-uninstall spec §3). Bundled if the Phase-3
+    # uninstaller build produced it; skip-if-absent so the build never breaks before then.
+    uninstall_exe = os.path.join(DIST, UNINSTALLER)
+    if os.path.exists(uninstall_exe):
+        setup_datas.append(f"{uninstall_exe}{SEP}.")
     if args.token:
         setup_datas.append(f"{_bake_config(args.server, args.token, args.device_name)}{SEP}.")
     _pyinstaller("installer_gui.py", "NemesisAgent-Setup", windowed=True,

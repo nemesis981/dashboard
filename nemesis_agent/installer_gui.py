@@ -15,12 +15,19 @@ import os
 import sys
 import threading
 import configparser
+import json
+from datetime import datetime, timezone
 
 import tkinter as tk
 from tkinter import ttk
 
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
+
+AGENT_VERSION = os.environ.get("NEMESIS_AGENT_VERSION", "1.0.8")
+UNINSTALLER   = "NemesisUninstall.exe"
+# Add/Remove Programs (Settings -> Apps) registry key — HKCU (per-user %APPDATA% install).
+ARP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\NemesisFirewallAgent"
 
 # ── Operator-approved copy (1.0.8). FIXED wording — NOT tier-varied. ──
 TAILSCALE_GUIDANCE = (
@@ -148,6 +155,53 @@ def _read_baked_config():
             g("support_contact", "your administrator"), g("preauth_key"), path)
 
 
+def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_version=None,
+                    lhm=False, clam=False, version=AGENT_VERSION, installed_at=None):
+    """Pure builder for install-manifest.json (clean-uninstall-build-spec v1). Records each
+    component + whether it was ALREADY PRESENT vs installed by us. The critical rule: a
+    PRE-EXISTING Tailscale is marked removal='never' (the uninstaller must not remove the
+    user's own software); one we installed is removal='offer'. Kept pure for unit testing."""
+    tasks = ["NemesisAgent"] + (["NemesisLHM"] if lhm else [])
+    return {
+        "manifest_version": 1,
+        "nemesis_version": version,
+        "installed_at": installed_at or datetime.now(timezone.utc).isoformat(),
+        "install_dir": install_dir,
+        "components": {
+            "tailscale": {
+                "kind": "system_app",
+                "pre_existing": bool(ts_pre_existing),
+                "installed_by_nemesis": bool(ts_now and not ts_pre_existing),
+                "detected_version": ts_version,
+                "install_path": ts_path,
+                "removal": "never" if ts_pre_existing else "offer",
+            },
+            "librehardwaremonitor": {
+                "kind": "bundled_files", "pre_existing": False,
+                "installed_by_nemesis": bool(lhm),
+                "path": os.path.join(install_dir, "lhm"), "removal": "auto",
+            },
+            "clamav": {
+                "kind": "bundled_files", "pre_existing": False,
+                "installed_by_nemesis": bool(clam),
+                "path": os.path.join(install_dir, "clamav"), "removal": "auto",
+            },
+            "scheduled_tasks": {
+                "kind": "scheduled_tasks",
+                "installed_by_nemesis": tasks, "removal": "auto",
+            },
+            "defender_exclusion": {
+                "kind": "defender_exclusion", "pre_existing": False,
+                "installed_by_nemesis": True, "path": install_dir, "removal": "auto",
+            },
+            "registry": {
+                "kind": "registry", "arp_key": "HKCU\\" + ARP_KEY,
+                "installed_by_nemesis": True, "removal": "auto",
+            },
+        },
+    }
+
+
 class InstallerApp:
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
                  preauth_key="", conf_path=""):
@@ -190,6 +244,8 @@ class InstallerApp:
         # ── Tailscale-window guidance — SELF-ONBOARD path only. The "don't sign in" copy
         # is false for the manual fallback (there the user DOES sign in), so gate on key. ──
         if self.preauth_key:
+            tk.Label(root, text="IMPORTANT", font=("Segoe UI", 10, "bold"),
+                     fg="#c0392b").pack(padx=16, anchor="w", pady=(2, 0))
             tk.Message(root, width=460, justify="left", fg="#0a7a3a",
                        font=("Segoe UI", 9, "italic"),
                        text=TAILSCALE_GUIDANCE).pack(padx=16, pady=(0, 6))
@@ -455,6 +511,9 @@ class InstallerApp:
 
     def _run(self):
         try:
+            # Provenance probe FIRST — capture whether Tailscale already existed BEFORE we
+            # (maybe) install it, so the uninstaller never removes a user's pre-existing copy.
+            self._probe_preinstall_state()
             # Consume-and-delete the sidecar conf the instant install begins — the token +
             # pre-auth key are already in memory and must not linger in plaintext on disk.
             self._consume_conf()
@@ -478,6 +537,11 @@ class InstallerApp:
             self.set_status(STEPS[2], 3)
             self._enroll()
             self._register_autostart()
+            # Clean-uninstall spec (Phase 1): record provenance + make Nemesis discoverable
+            # and removable like any Windows app. Best-effort — never fail the install.
+            self._write_install_manifest()
+            self._register_arp()
+            self._create_start_menu()
             self._start_agent_now()      # Phase 9: run now, not just at next logon
             self.set_status(STEPS[3], 4)
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
@@ -578,6 +642,12 @@ class InstallerApp:
         lhm_src = os.path.join(src, "lhm")
         if os.path.isdir(lhm_src):
             shutil.copytree(lhm_src, os.path.join(INSTALL_DIR, "lhm"), dirs_exist_ok=True)
+        # Ship the uninstaller (clean-uninstall spec §3): place NemesisUninstall.exe on the
+        # machine so Settings -> Apps can invoke it. Copied from the bundle if present
+        # (built by build_installer.py; skip-if-absent until the Phase-3 uninstaller exists).
+        unins_src = os.path.join(src, UNINSTALLER)
+        if os.path.isfile(unins_src):
+            shutil.copy2(unins_src, os.path.join(INSTALL_DIR, UNINSTALLER))
         cfg = configparser.ConfigParser()
         cfg.add_section("nemesis")
         cfg.set("nemesis", "nemesis_ip", self.server)
@@ -626,6 +696,97 @@ class InstallerApp:
         ]
         try:
             subprocess.run(cmd, check=False)
+        except Exception:
+            pass
+
+    # ── clean-uninstall spec: provenance manifest + ARP + Start Menu (Phase 1) ──────
+    def _probe_preinstall_state(self):
+        """Capture provenance BEFORE any install action — chiefly whether Tailscale already
+        existed, so the uninstaller never removes a user's pre-existing Tailscale."""
+        self._ts_pre_existing = self._tailscale_installed()
+
+    def _tailscale_version(self):
+        try:
+            import subprocess
+            p = subprocess.run([self._tailscale_exe(), "version"],
+                               capture_output=True, text=True, timeout=10)
+            if p.returncode == 0:
+                return (p.stdout.splitlines() or [""])[0].strip() or None
+        except Exception:
+            pass
+        return None
+
+    def _write_install_manifest(self):
+        """Write %APPDATA%\\Nemesis\\install-manifest.json (spec v1). Best-effort."""
+        ts_pre = bool(getattr(self, "_ts_pre_existing", False))
+        ts_now = self._tailscale_installed()
+        manifest = _build_manifest(
+            INSTALL_DIR, ts_pre, ts_now,
+            ts_path=(self._tailscale_exe() if ts_now else None),
+            ts_version=(self._tailscale_version() if ts_now else None),
+            lhm=os.path.isdir(os.path.join(INSTALL_DIR, "lhm")),
+            clam=os.path.isdir(os.path.join(INSTALL_DIR, "clamav")))
+        try:
+            os.makedirs(INSTALL_DIR, exist_ok=True)
+            with open(os.path.join(INSTALL_DIR, "install-manifest.json"), "w",
+                      encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+        except Exception:
+            pass
+
+    def _register_arp(self):
+        """Register in Add/Remove Programs (Settings -> Apps) via the HKCU Uninstall key,
+        matching Tailscale's discoverability. UninstallString -> the shipped uninstaller."""
+        if os.name != "nt":
+            return
+        try:
+            import winreg
+        except Exception:
+            return
+        uninstaller = os.path.join(INSTALL_DIR, UNINSTALLER)
+        vals = {
+            "DisplayName":     "Nemesis Firewall Agent",
+            "DisplayVersion":  AGENT_VERSION,
+            "Publisher":       "Nemesis",
+            "InstallLocation": INSTALL_DIR,
+            "DisplayIcon":     os.path.join(INSTALL_DIR, "NemesisAgent.exe"),
+            "UninstallString": '"' + uninstaller + '"',
+        }
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, ARP_KEY)
+            for name, val in vals.items():
+                winreg.SetValueEx(key, name, 0, winreg.REG_SZ, val)
+            winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
+            winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+            winreg.CloseKey(key)
+        except Exception:
+            pass
+
+    def _make_shortcut(self, lnk_path, target):
+        """Create a .lnk via WScript.Shell (PowerShell — no pywin32 dependency)."""
+        import subprocess
+        ps = ("$s=(New-Object -COM WScript.Shell).CreateShortcut(" + repr(lnk_path) + "); "
+              "$s.TargetPath=" + repr(target) + "; $s.Save()")
+        try:
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           check=False, capture_output=True, timeout=20)
+        except Exception:
+            pass
+
+    def _create_start_menu(self):
+        """Start Menu 'Nemesis' folder: 'Open Nemesis Dashboard' (.url) + 'Uninstall Nemesis'."""
+        if os.name != "nt":
+            return
+        folder = os.path.join(APPDATA, "Microsoft", "Windows", "Start Menu",
+                              "Programs", "Nemesis")
+        try:
+            os.makedirs(folder, exist_ok=True)
+            self._make_shortcut(os.path.join(folder, "Uninstall Nemesis.lnk"),
+                                os.path.join(INSTALL_DIR, UNINSTALLER))
+            if self.server:
+                with open(os.path.join(folder, "Open Nemesis Dashboard.url"), "w",
+                          encoding="utf-8") as f:
+                    f.write("[InternetShortcut]\nURL=http://" + self.server + "\n")
         except Exception:
             pass
 
