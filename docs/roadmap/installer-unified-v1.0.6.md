@@ -1,8 +1,10 @@
 # Roadmap — Unified v1.0.6 "near-end" installer rebuild (design of record)
 
-- **Status:** Captured design of record (NOT built). Every subsequent build prompt
-  references THIS doc + [ADR 0011](../architecture/0011-enrollment-security-model.md) as the
-  single authority.
+- **Status:** **PARTIAL / building.** v1.0.7 self-onboards end-to-end (proven on a real
+  clone over live Tailscale) — commits `2e27a60` (Phase-1 delivery foundation) + `a21b782`
+  (self-onboard / pre-auth-key join). Two before-trip fixes remain (auto_approve default,
+  double-enroll). This doc + [ADR 0011](../architecture/0011-enrollment-security-model.md)
+  remain the single authority every subsequent build prompt references.
 - **Date:** 2026-06-30
 - **Resolves audit findings:** PL-3 (Tailscale onboarding), PL-4 (installer Tailscale
   inconsistency), PL-8 (dashboard serves legacy Python installer), and the 272MB→~30MB
