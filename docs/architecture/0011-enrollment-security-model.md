@@ -17,6 +17,9 @@
 - **Related:** roadmap [installer-unified-v1.0.6](../roadmap/installer-unified-v1.0.6.md)
   (the build that carries this); [0008 — impossible-travel](0008-impossible-travel-detection.md)
   (deferred geo scoring).
+- **Built on by:** [0012 — enrollment trust modes](0012-enrollment-trust-modes.md) — this ADR's
+  manual-approval default (`auto_approve = 0`) is the foundation 0012's four-mode system
+  (MANUAL / BULK MANUAL / FLEET AUTO / VENUE AUTO) is layered on top of.
 - **Evidence base:** PL-6 in `docs/audits/windows-install-doc-test-2026-06-30.md`.
 - **Rule 8:** placeholders only (`<tailnet-ip>`, `<token>`, `<preauth-key>`). Baked
   credentials are per-installer secrets — out of all logs/docs/commits.

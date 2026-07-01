@@ -8,6 +8,8 @@
   ([agent-rebuild-config-driven.md](../roadmap/agent-rebuild-config-driven.md)), a Tailscale
   exit node, and [0006-data-manager](0006-data-manager.md) (Data Manager)
 - **Related:** [0008-impossible-travel-detection](0008-impossible-travel-detection.md);
+  [0012-enrollment-trust-modes](0012-enrollment-trust-modes.md) (VENUE guest/monitored
+  enrollments are the natural consumers of this route-and-inspect verdict path);
   [connection-type-awareness.md](../roadmap/connection-type-awareness.md);
   [venue-guest-network.md](../roadmap/venue-guest-network.md);
   [msp-central-management.md](../roadmap/msp-central-management.md)
