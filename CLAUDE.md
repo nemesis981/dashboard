@@ -35,14 +35,15 @@ in a clean block:
    items still say "parked"), so trusting them hides the exact drift this check exists to
    catch. Instead, each morning:
    - **File-set drift:** `ls ~/dashboard/docs/roadmap/*.md` → compare names/count to the
-     baseline's 43. Report any ADDED or REMOVED files.
-   - **Shipping drift:** the baseline's 9 non-parked items (3 SHIPPED + 6 PARTIAL) plus any
+     baseline's 44. Report any ADDED or REMOVED files.
+   - **Shipping drift:** the baseline's 10 non-parked items (4 SHIPPED + 7 PARTIAL) plus any
      newly-added files get a quick code/`git log` re-check (confirm/upgrade status). For the
-     34 baseline-PARKED items, scan recent `git log --oneline` subjects for roadmap keywords
+     33 baseline-PARKED items, scan recent `git log --oneline` subjects for roadmap keywords
      — a parked item with a fresh feat commit has likely shipped; verify it.
    - This is a READ-ONLY audit (Rule 1) — report only, change nothing. When drift is found,
      refresh the baseline audit doc at closeout (new dated file).
-   - Baseline (2026-06-30): **3 SHIPPED / 6 PARTIAL / 34 PARKED** (43 total).
+   - Baseline (2026-07-01): **4 SHIPPED / 7 PARTIAL / 33 PARKED** (44 total) —
+     `docs/audits/roadmap-state-audit-2026-07-01.md`.
 
 Format the output as:
 ```
