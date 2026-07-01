@@ -94,6 +94,33 @@ data" hold at real traffic volumes.
 - Cache is per-device (a destination trusted for one device isn't automatically trusted for
   another). Data Manager candidate (ADR 0006) for the read/write + expiry sweep.
 
+### Cache warm-up / pre-built seed
+**The cold-cache problem:** a freshly-installed agent has an empty verdict cache, so EVERY
+destination is "new" and backhauls for inspection. The first few days (before the cache warms) are
+the worst-latency, heaviest-backhaul period — and also the user's first impression. Steady-state
+performance can look fine while first-run experience quietly drives users off. Cold-cache days and
+warm-cache steady-state must be measured SEPARATELY (this is a key trip-test data point — see the
+Starlink feasibility unknown in §6).
+
+**Mitigation — pre-built allowlist seed (recommended, SAFE version):** at install, the server
+pushes a curated allowlist of known-good high-volume destinations (top few-thousand domains/IPs:
+major platforms, CDNs, OS-update servers, AbuseIPDB-clean heavy-hitters). Common traffic then
+egresses direct from minute one; the cold-start penalty applies only to genuinely-unusual
+destinations — which is exactly the traffic that SHOULD be inspected anyway. The cache still learns
+the user's specific pattern over following days.
+
+**Risk boundary — do NOT broadly pre-seed "clean" VERDICTS:** a verdict cache is a trust cache.
+Shipping a stale "clean" for a destination compromised after seed-build time tells every fresh
+install to skip inspection on a now-bad target. The allowlist version sidesteps most of this
+(known-good infrastructure changes slowly). Any broader verdict-seeding requires a conservative TTL
++ versioning/refresh mechanism. Record allowlist-seed as the safe default; broad-verdict-seed as
+needing freshness discipline before it's viable.
+
+**Infrastructure synergy:** this reuses the community threat-intelligence feed distribution
+machinery (the compressed daily JSON, tiered review) — instead of shipping known-BAD down to
+clients, ship known-GOOD as the cache primer over the same download/refresh pipeline. Not a new
+system; a second payload on already-designed infrastructure.
+
 ---
 
 ## 5. Build-state grounding (per the 2026-06-30 ADR 0009 audit — Win 3)
