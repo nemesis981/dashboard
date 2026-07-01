@@ -59,6 +59,9 @@ function genWindowsInstaller() {
       var keyNote = d.preauth_key_baked
         ? ' A single-use Tailscale pre-auth key is baked in (the agent self-joins the tailnet).'
         : ' No pre-auth key baked &mdash; the device must join the tailnet by hand.';
+      if (d.preauth_warning) {
+        keyNote = ' ⚠ ' + d.preauth_warning;
+      }
       out.style.color = '#ddd';
       out.innerHTML =
         '<div style="color:#aaa;font-size:0.82em;margin-bottom:4px">Share this link with your user ' +

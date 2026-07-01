@@ -55,6 +55,7 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table)
 from ip_enrichment import enrich_ip
+import tailscale_api
 from firewall import parse_alert, ufw_delete, ufw_deny_append
 import hw_monitor
 import modules_loader
@@ -1447,9 +1448,29 @@ def api_agent_installer_generate():
     token/pre-auth-key are never logged."""
     data = request.get_json(silent=True) or request.form
     hint = (data.get("device_name_hint") or "Windows Device").strip()[:60] or "Windows Device"
-    # Admin-pasted Tailscale pre-auth key (Q3: manual from the Tailscale console now;
-    # API auto-minting is post-trip). Optional — install still works hand-joined.
-    preauth_key = (data.get("preauth_key") or "").strip()[:256]
+    # Tailscale pre-auth key — HYBRID (ADR 0011): prefer programmatic minting via the
+    # Tailscale OAuth API; on failure fall back to an admin-pasted key; else no baked key
+    # (the installer hand-joins via _ensure_tailscale). NEVER hard-fail generate. Rule 8:
+    # the minted key / client_secret are never logged.
+    pasted_key = (data.get("preauth_key") or "").strip()[:256]
+    preauth_key = ""
+    preauth_source = "none"
+    preauth_warning = ""
+    if tailscale_api.is_configured():
+        try:
+            minted, _kid = tailscale_api.mint_preauth_key(device_hint=hint, ttl_seconds=2 * 3600)
+            preauth_key, preauth_source = minted, "api"
+        except tailscale_api.TailscaleAPIError as e:
+            _audit(action="tailscale_key_mint_fail", rule_id=str(e)[:40])
+            if pasted_key:
+                preauth_key, preauth_source = pasted_key, "pasted_fallback"
+            else:
+                preauth_source = "none"
+                preauth_warning = ("Tailscale key minting is unavailable right now — this "
+                                   "installer has no baked key, so the device will need a "
+                                   "manual tailnet join.")
+    elif pasted_key:
+        preauth_key, preauth_source = pasted_key, "pasted"
     # Auto-approve is OPT-IN (ADR 0012): default 0 (manual approval via Settings ->
     # Devices). Only an explicit truthy flag from the form flips it to 1. Absent or
     # falsy -> 0. Handles JSON bool/int and form strings.
@@ -1487,6 +1508,8 @@ def api_agent_installer_generate():
         "device_name_hint": hint,
         "expires_at": expires,
         "preauth_key_baked": bool(preauth_key),
+        "preauth_source": preauth_source,       # api | pasted_fallback | pasted | none
+        "preauth_warning": preauth_warning,     # non-empty => show the user a caution note
         "zip_url": f"{base}/install/windows/{token}/zip",   # primary: frozen exe + baked conf
         "exe_url": f"{base}/install/windows/{token}/exe",   # advanced: generic exe, no baked conf
     })
