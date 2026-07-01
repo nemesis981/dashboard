@@ -88,6 +88,14 @@ def main(argv=None):
     if sys.platform == "win32" and not os.path.exists(agent_exe):
         raise SystemExit("NemesisAgent.exe was not produced")
 
+    # 1b) Uninstaller exe (manifest-driven, clean-uninstall spec Phase 3). Built before the
+    #     setup exe so it can be bundled into the pack. Needs UAC (schtasks/Defender/Tailscale).
+    _pyinstaller("uninstaller_gui.py", "NemesisUninstall", windowed=True,
+                 hidden=["requests", "cryptography"], uac=True)
+    uninstall_exe = os.path.join(DIST, "NemesisUninstall.exe")
+    if sys.platform == "win32" and not os.path.exists(uninstall_exe):
+        raise SystemExit("NemesisUninstall.exe was not produced")
+
     # 2) Setup exe — bundles the agent exe + agent source (for in-process enrollment).
     setup_datas = []
     if os.path.exists(agent_exe):
