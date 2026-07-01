@@ -288,7 +288,10 @@ def init_db():
                           ("hw_fp_confidence",    "TEXT"),
                           ("hw_fp_schema_version", "INTEGER"),
                           ("hw_fp_locked_at",     "REAL"),
-                          ("hw_is_virtual",       "INTEGER DEFAULT 0")):
+                          ("hw_is_virtual",       "INTEGER DEFAULT 0"),
+                          # ── de-enroll on uninstall (clean-uninstall build spec) ──
+                          ("uninstalled_at",      "TEXT"),
+                          ("uninstalled_by",      "TEXT")):   # actor seam (device self / admin)
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1884,6 +1887,52 @@ def _match_fingerprint(incoming, stored):
     return _HWID_MOD.match_fingerprint(incoming, stored)
 
 
+def _create_uninstall(payload, remote_ip):
+    """De-enroll (soft) — a device signs off its own enrollment (clean-uninstall build spec §4).
+    Proof-of-possession per ADR 0011: the request must be signed by the ENROLLED device's keypair
+    (verified against the STORED public key, and the submitted key must match on file), so an
+    attacker who only knows a device_id cannot de-enroll it. On success, marks the row
+    enrollment_status='uninstalled' + uninstalled_at/uninstalled_by (actor seam). IDEMPOTENT:
+    unknown or already-uninstalled device returns (True, <status>) — no error. Never deletes the
+    row (preserves history / TOFU record; a hard 'forget device' is a separate admin action).
+    Signed message contract: 'uninstall|<device_id>|<signed_at>' (PKCS1v15 / SHA-256)."""
+    device_id  = (payload.get("device_id") or "").strip()
+    public_key = payload.get("public_key", "") or ""
+    signed_at  = payload.get("signed_at", "") or ""
+    signature  = payload.get("signature", "") or ""
+    if not device_id:
+        return (False, "missing_device_id")
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT enrollment_status, public_key FROM agent_devices "
+                           "WHERE device_id=?", (device_id,)).fetchone()
+        if row is None:
+            conn.close()
+            return (True, "not_found")          # idempotent: nothing to de-enroll
+        stored_pub = row["public_key"] or ""
+        msg = f"uninstall|{device_id}|{signed_at}"
+        authed = (bool(stored_pub) and public_key == stored_pub
+                  and _verify_enroll_signature(stored_pub, msg, signature))
+        if not authed:
+            conn.close()
+            return (False, "bad_signature")
+        if row["enrollment_status"] == "uninstalled":
+            conn.close()
+            return (True, "uninstalled")        # idempotent: already done
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute("UPDATE agent_devices SET enrollment_status='uninstalled', "
+                     "uninstalled_at=?, uninstalled_by=? WHERE device_id=?",
+                     (now, "agent:self", device_id))   # actor: device-initiated (signed)
+        conn.commit()
+        conn.close()
+        log.info("agent de-enroll: %s marked uninstalled", device_id)
+        return (True, "uninstalled")
+    except Exception:
+        log.exception("de-enroll failed")
+        return (False, "db_error")
+
+
 def _create_enrollment(payload, remote_ip):
     """Verify the signed request, create a PENDING agent_devices row, open an
     approval ticket. Returns (device_id, status) or (None, error_str)."""
@@ -2079,9 +2128,25 @@ def _start_windows_agent_listener():
             log.info("agent enroll: %s pending approval (%s)", device_id, payload.get("device_name"))
             self._json(200, {"device_id": device_id, "status": status})
 
+        def _handle_uninstall(self):
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except Exception:
+                self._json(400, {"error": "bad request"})
+                return
+            ok, status = _create_uninstall(payload, self.client_address[0])
+            if not ok:
+                self._json(401 if status == "bad_signature" else 400, {"error": status})
+                return
+            self._json(200, {"status": status})
+
         def do_POST(self):
             if self.path == "/enroll":
                 self._handle_enroll()
+                return
+            if self.path == "/api/agent/uninstall":
+                self._handle_uninstall()
                 return
             if self.path != "/hw_data":
                 self.send_response(404)
