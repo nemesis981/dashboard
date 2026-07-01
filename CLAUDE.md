@@ -93,6 +93,14 @@ is reopened after a crash, the operator re-states its role.
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
+### Role self-check (first response)
+If you have NOT been told your role (build or docs) in this session, do not begin
+any task. Your first response must be to ask: "Which window am I this session —
+BUILD or DOCS?" and then wait for the operator's answer before proceeding. Once
+assigned, operate under that role's contract for the rest of the session. If the
+operator's first message already states the role ("you are the build window"),
+skip the question and confirm the role instead.
+
 ---
 
 ## TIER 1 — Core operating rules
