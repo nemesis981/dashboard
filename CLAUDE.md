@@ -347,3 +347,4 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
     device-scanner, watchdog, dashboard) + shared `alerts.db`
   - `/home/<user>/dashboard/modules/` — pluggable modules
   - `/etc/nemesis.env` — environment/secrets, mode `640 root:nemesis`
+  - `docs/CUSTOM_TAILSCALE_OAUTH.md` — Tailscale OAuth auth-key minting setup (the four `TAILSCALE_OAUTH_*`/`TAILSCALE_TAG` env vars + installer self-onboard hybrid fallback)
