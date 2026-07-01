@@ -121,6 +121,17 @@ machinery (the compressed daily JSON, tiered review) — instead of shipping kno
 clients, ship known-GOOD as the cache primer over the same download/refresh pipeline. Not a new
 system; a second payload on already-designed infrastructure.
 
+**Phasing (data-maturity gated):**
+- **v1 (ship first): STATIC curated allowlist** — hand-built list of known-good heavy-hitters
+  (public knowledge; no user data required). This is the placeholder that works from day one.
+- **v2 (after the community backend is live + has accumulated user data): DATA-DRIVEN seed** — the
+  allowlist reflects aggregate known-good destinations observed across the real user base
+  (destinations many clean installs hit without incident). Falls out of the same data pipeline
+  already gathering the known-BAD threat feed, and ships on the same distribution rails. v2
+  gracefully replaces v1 without changing the client mechanism.
+- **Rationale:** the dynamic seed cannot exist before there is a user base to observe; the static
+  allowlist is the only viable v1. Sequencing is **data-gated, not a compromise.**
+
 ---
 
 ## 5. Build-state grounding (per the 2026-06-30 ADR 0009 audit — Win 3)
