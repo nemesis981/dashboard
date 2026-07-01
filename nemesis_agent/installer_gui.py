@@ -156,7 +156,8 @@ def _read_baked_config():
 
 
 def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_version=None,
-                    lhm=False, clam=False, version=AGENT_VERSION, installed_at=None):
+                    lhm=False, clam=False, pawnio_pre_existing=False, pawnio_installed=False,
+                    version=AGENT_VERSION, installed_at=None):
     """Pure builder for install-manifest.json (clean-uninstall-build-spec v1). Records each
     component + whether it was ALREADY PRESENT vs installed by us. The critical rule: a
     PRE-EXISTING Tailscale is marked removal='never' (the uninstaller must not remove the
@@ -180,6 +181,17 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
                 "kind": "bundled_files", "pre_existing": False,
                 "installed_by_nemesis": bool(lhm),
                 "path": os.path.join(install_dir, "lhm"), "removal": "auto",
+            },
+            "pawnio": {
+                # LibreHardwareMonitor's kernel I/O driver (sensor access). SHARED — Fan
+                # Control / OpenRGB / other hardware tools use it too. removal is ALWAYS
+                # 'never' (conservative posture for a security product): do NOT remove a
+                # shared kernel driver even when we installed it. (Could later become an
+                # 'offer'-with-warning if we decide; the uninstaller must honor 'never'.)
+                "kind": "system_driver",
+                "pre_existing": bool(pawnio_pre_existing),
+                "installed_by_nemesis": bool(pawnio_installed and not pawnio_pre_existing),
+                "removal": "never",
             },
             "clamav": {
                 "kind": "bundled_files", "pre_existing": False,
@@ -533,6 +545,7 @@ class InstallerApp:
             self.set_status(STEPS[1], 2)
             self._install_files()
             self._start_freshclam()      # Phase 4: fetch AV definitions in background
+            self._install_pawnio()       # pre-install LHM's PawnIO driver (silent) BEFORE LHM runs
             self._setup_lhm()            # Phase 5: start LibreHardwareMonitor + logon task
             self.set_status(STEPS[2], 3)
             self._enroll()
@@ -701,9 +714,52 @@ class InstallerApp:
 
     # ── clean-uninstall spec: provenance manifest + ARP + Start Menu (Phase 1) ──────
     def _probe_preinstall_state(self):
-        """Capture provenance BEFORE any install action — chiefly whether Tailscale already
-        existed, so the uninstaller never removes a user's pre-existing Tailscale."""
+        """Capture provenance BEFORE any install action — whether Tailscale AND PawnIO already
+        existed, so the uninstaller never removes a user's pre-existing shared software."""
         self._ts_pre_existing = self._tailscale_installed()
+        self._pawnio_pre_existing = self._pawnio_present()
+
+    def _pawnio_present(self):
+        """Is PawnIO (LHM's shared kernel driver) already installed? Probe the install dir +
+        the driver service — check BEFORE we touch it so we never reinstall/claim a user's."""
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        if os.path.isdir(os.path.join(pf, "PawnIO")):
+            return True
+        try:
+            import subprocess
+            p = subprocess.run(["sc", "query", "PawnIO"], capture_output=True, text=True, timeout=15)
+            return p.returncode == 0 and ("RUNNING" in (p.stdout or "") or "STOPPED" in (p.stdout or ""))
+        except Exception:
+            return False
+
+    def _pawnio_installer(self):
+        """Locate the PawnIO installer bundled inside LibreHardwareMonitor (LHM ships it at
+        lhm\\Resources\\PawnIO_setup.exe; fall back to the lhm root). Returns path or None —
+        we REUSE the bundled installer, never re-fetch."""
+        for rel in (("Resources", "PawnIO_setup.exe"), ("PawnIO_setup.exe",)):
+            p = os.path.join(INSTALL_DIR, "lhm", *rel)
+            if os.path.isfile(p):
+                return p
+        return None
+
+    def _install_pawnio(self):
+        """Silently pre-install PawnIO BEFORE LibreHardwareMonitor first runs, so the
+        'PawnIO is not installed, do you want to install it?' prompt never appears. Official
+        silent switch: PawnIO_setup.exe -install -silent. Needs elevation (the installer runs
+        under UAC). SKIPPED if PawnIO already present (never touch a user's shared driver).
+        Best-effort — LHM still works (with the prompt) if this is unavailable."""
+        if getattr(self, "_pawnio_pre_existing", False):
+            return
+        setup = self._pawnio_installer()
+        if not setup:
+            return
+        import subprocess
+        try:
+            self.set_status("Installing sensor driver (PawnIO)...")
+            subprocess.run([setup, "-install", "-silent"], check=False,
+                           capture_output=True, timeout=180)
+        except Exception:
+            pass
 
     def _tailscale_version(self):
         try:
@@ -725,7 +781,9 @@ class InstallerApp:
             ts_path=(self._tailscale_exe() if ts_now else None),
             ts_version=(self._tailscale_version() if ts_now else None),
             lhm=os.path.isdir(os.path.join(INSTALL_DIR, "lhm")),
-            clam=os.path.isdir(os.path.join(INSTALL_DIR, "clamav")))
+            clam=os.path.isdir(os.path.join(INSTALL_DIR, "clamav")),
+            pawnio_pre_existing=bool(getattr(self, "_pawnio_pre_existing", False)),
+            pawnio_installed=self._pawnio_present())
         try:
             os.makedirs(INSTALL_DIR, exist_ok=True)
             with open(os.path.join(INSTALL_DIR, "install-manifest.json"), "w",
