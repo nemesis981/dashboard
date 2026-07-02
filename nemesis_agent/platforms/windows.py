@@ -1,11 +1,42 @@
-"""Windows hardware collection via LibreHardwareMonitor HTTP API."""
+"""Windows hardware collection.
+
+cpu%/RAM come from psutil (always available, no driver). Temperatures, fan RPM
+and GPU power/fan come from the in-process LibreHardwareMonitor library
+(platforms.lhm_inproc, pythonnet) -- no LHM.exe, no HTTP web server, no port 8085.
+The legacy HTTP scraper is retained dormant as _read_lhm_http() until Phase 3
+retires the LHM.exe launch / NemesisLHM task / manifest entry."""
 import logging
 import re
 import subprocess
 import requests
+import psutil
+
+from platforms import lhm_inproc
 
 LHM_URL = "http://localhost:8085/data.json"
 log = logging.getLogger("nemesis_agent.platforms.windows")
+
+
+def get_hardware_metrics():
+    """Windows hardware metrics.
+
+    cpu%/RAM from psutil (proven, driverless); temps/fans/GPU merged from the
+    in-process LHM library. Returns whatever it can -- an empty/partial dict never
+    raises, so a missing driver or pythonnet only costs the extra sensors."""
+    hw = {}
+    try:
+        hw["cpu_pct"] = round(psutil.cpu_percent(interval=0.3), 1)
+    except Exception as e:
+        log.warning("psutil cpu_percent failed: %s", e)
+    try:
+        hw["ram_mb"] = round(psutil.virtual_memory().used / (1024 ** 2), 0)
+    except Exception as e:
+        log.warning("psutil virtual_memory failed: %s", e)
+    try:
+        hw.update(lhm_inproc.read_sensors())
+    except Exception as e:
+        log.warning("in-process sensor read failed: %s", e)
+    return hw
 
 
 def _find(nodes, path_parts):
@@ -43,8 +74,11 @@ def _parse_value(text):
         return None
 
 
-def get_hardware_metrics():
-    """Return hardware dict from LibreHardwareMonitor. Returns {} on failure."""
+def _read_lhm_http():
+    """DORMANT (retired in Phase 3): legacy hardware read via LibreHardwareMonitor's
+    HTTP web server on :8085. Superseded by the in-process lhm_inproc reader. Kept
+    only so Phase 3 removes the LHM.exe launch / NemesisLHM task / port in one clean
+    commit. Returns {} on failure."""
     try:
         resp = requests.get(LHM_URL, timeout=5)
         data = resp.json()

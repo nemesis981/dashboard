@@ -2,3 +2,4 @@ requests
 psutil
 watchdog
 plyer
+pythonnet; sys_platform == "win32"
