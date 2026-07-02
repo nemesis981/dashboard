@@ -28,6 +28,8 @@ DEFAULTS = {
     "scan_on_reconnect": "true",
     "last_scan_at": "",
     "reputation_cache_enabled": "true",   # Feature 6: observation-only IP-rep cache (never enforces)
+    "dns_enforce_enabled": "false",       # L1: default OFF (plumbing; not pointed at tunnel Pi-hole yet — ADR 0005)
+    "dns_enforce_target": "",             # L1: DNS server(s) to set when enabled; blank = no-op
     # ── owner-gated enrollment (keypair lives alongside this .conf) ──
     "enrollment_status": "",          # mirrors the server: 'pending'|'approved'|'rejected'
     "enrollment_token": "",           # single-use installer token → server auto-approves

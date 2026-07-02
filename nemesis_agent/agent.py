@@ -371,6 +371,13 @@ def _shutdown(*_):
     _running = False
     if _suricata_mod:
         _suricata_mod.stop()
+    # L1 fail-safe: if DNS enforcement was active, revert it on shutdown so the box is
+    # never left with enforced DNS when the agent stops. No-op if never enforced.
+    try:
+        import dns_enforce
+        dns_enforce.restore()
+    except Exception:
+        pass
     sys.exit(0)
 
 
@@ -414,6 +421,16 @@ def main():
             log.warning("Suricata IDS init failed: %s", e)
 
     _start_command_listener()
+
+    # L1 (DNS plumbing, default OFF): apply a configured DNS target only if explicitly
+    # enabled (dns_enforce_enabled=true + dns_enforce_target set) — otherwise a no-op.
+    # FAIL-OPEN: any failure restores the original DNS. NOT yet pointed at the tunnel
+    # Pi-hole (ADR 0005 blocker). Restored on shutdown by _shutdown().
+    try:
+        import dns_enforce
+        dns_enforce.enforce_if_configured(_conf)
+    except Exception:
+        log.exception("dns enforce (L1) init failed — continuing")
 
     # Feature 6 (observation-only): build + measure the local IP-reputation cache
     # once at startup. Best-effort — NEVER enforces, blocks, or touches traffic, and
