@@ -879,9 +879,11 @@ class InstallerApp:
             return False
 
     def _pawnio_installer(self):
-        """Locate the PawnIO installer bundled inside LibreHardwareMonitor (LHM ships it at
-        lhm\\Resources\\PawnIO_setup.exe; fall back to the lhm root). Returns path or None —
-        we REUSE the bundled installer, never re-fetch."""
+        """Locate the bundled PawnIO installer. The LHM release zip does NOT ship it, so the
+        CI build fetches PawnIO_setup.exe (official source: pawnio.eu -> namazso/PawnIO.Setup)
+        into lhm\\Resources\\PawnIO_setup.exe; build_installer bundles the lhm dir into the
+        setup exe. We REUSE that bundled installer, never re-fetch at install time (no network
+        dependency on a possibly-poor trip link). Falls back to the lhm root; None if absent."""
         for rel in (("Resources", "PawnIO_setup.exe"), ("PawnIO_setup.exe",)):
             p = os.path.join(INSTALL_DIR, "lhm", *rel)
             if os.path.isfile(p):

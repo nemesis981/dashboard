@@ -60,6 +60,22 @@ jobs:
           Copy-Item $from $dest -Recurse -Force
           Write-Host "LHM staged into $dest"
 
+      - name: Fetch PawnIO installer (temps/fans provisioning on real hardware)
+        continue-on-error: true   # a download hiccup must NOT fail the exe build
+        shell: pwsh
+        run: |
+          # PawnIO = LHM's kernel sensor driver (ring-0 temp/fan/voltage reads). The LHM
+          # release zip does NOT ship the installer, so the installer's _install_pawnio step
+          # was skipping ("installer not found in bundle"). Fetch it from the official source
+          # (pawnio.eu -> namazso/PawnIO.Setup) into the exact path _pawnio_installer() looks
+          # for: lhm\Resources\PawnIO_setup.exe. build_installer bundles the whole lhm dir
+          # (incl. Resources\) into the setup exe, so it lands at %APPDATA%\Nemesis\lhm\Resources.
+          $dest = "nemesis_agent/lhm/Resources"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          $url = "https://github.com/namazso/PawnIO.Setup/releases/latest/download/PawnIO_setup.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$dest/PawnIO_setup.exe" -UseBasicParsing
+          Write-Host "PawnIO installer staged into $dest"
+
       - name: Build NemesisAgent-Setup.exe
         run: python nemesis_agent/build_installer.py
 
