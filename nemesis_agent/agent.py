@@ -49,6 +49,13 @@ _scan_on_reconnect_done = False
 POLL_INTERVAL_DEFAULT = 300
 POLL_INTERVAL_FLOOR = 15
 
+# Startup ramp: the first few inter-beat gaps are short so a fresh start/reconnect gets
+# quick data (and seeds the future tuning baseline), then it settles to poll_interval.
+# Re-armed on EVERY process start (remote workers change networks often). Simple +
+# best-effort; full adaptive logic is deferred to the connection-tuning work.
+RAMP_START = 30   # seconds — first ramp gap
+RAMP_BEATS = 4    # number of ramping beats (geometric doubling) before settling
+
 
 def _resolve_poll_interval(conf):
     """Heartbeat interval (seconds) from conf, floor-clamped and robust to non-numeric
@@ -58,6 +65,18 @@ def _resolve_poll_interval(conf):
     except (TypeError, ValueError):
         v = POLL_INTERVAL_DEFAULT
     return max(POLL_INTERVAL_FLOOR, v)
+
+
+def _ramp_interval(beat_index, poll_interval):
+    """Sleep (seconds) to wait AFTER heartbeat number `beat_index` (0-based). During the
+    startup ramp the gap doubles from RAMP_START (30,60,120,240) then settles to
+    poll_interval. Never below POLL_INTERVAL_FLOOR, and never SLOWER than poll_interval
+    (so a user who set a fast steady cadence isn't slowed by the ramp). Separable +
+    best-effort — the deferred adaptive tuning replaces this later."""
+    if beat_index >= RAMP_BEATS:
+        return poll_interval
+    ramp = RAMP_START * (2 ** beat_index)
+    return max(POLL_INTERVAL_FLOOR, min(ramp, poll_interval))
 
 
 def _load_platform_module():
@@ -198,6 +217,11 @@ def _post_payload(conf, payload):
 
 def _poll_loop():
     global _conf, _scan_on_reconnect_done
+    # Startup ramp re-arms on every process start: beat counter resets to 0 here, so a
+    # restart (or a new machine/network) gets fast fresh beats before settling.
+    beat = 0
+    log.info("heartbeat ramp armed: %s -> steady poll_interval (RAMP_BEATS=%d)",
+             ",".join(str(RAMP_START * (2 ** i)) for i in range(RAMP_BEATS)), RAMP_BEATS)
     while _running:
         try:
             _conf = config.load()
@@ -215,7 +239,9 @@ def _poll_loop():
         except Exception as e:
             log.exception("poll_loop error: %s", e)
 
-        interval = _resolve_poll_interval(_conf)
+        steady = _resolve_poll_interval(_conf)
+        interval = _ramp_interval(beat, steady)
+        beat += 1
         _interruptible_sleep(interval)
 
 
