@@ -223,6 +223,35 @@ working checklist (these are project-sized — they graduate to roadmap specs wh
     at both the card and metric level is complete personalization for the non-expert user who
     builds a specific mental map of where things are.
 
+- [ ] **[POST-TRIP EVAL] Tunnel-transport portability — Tailscale vs WireGuard / other mesh VPNs.**
+  **Evaluation/test item, NOT a committed rebuild** — assess coupling first, then decide if a
+  transport abstraction is worth building. The agent tunnel is currently **Tailscale-specific**:
+  OAuth key minting, pre-auth-key enrollment, tailnet join, and "reachable over the tailnet"
+  assumptions are baked into onboarding (`nemesis_agent/enrollment.py`,
+  `alert_manager/tailscale_api.py`, installer Tailscale join steps, the `:5001`/`:5002`
+  reachability assumptions, `docs/CUSTOM_TAILSCALE_OAUTH.md`). Post-trip, test/evaluate whether
+  the product holds up when the transport is a DIFFERENT mesh/VPN tech — raw **WireGuard**, or
+  Tailscale-alternatives (**Headscale, Netbird, ZeroTier**, etc.).
+  - **Questions to answer:** (1) How tightly is the agent coupled to Tailscale specifically vs.
+    treating the tunnel as a **swappable transport**? (2) Could an SMB with existing WireGuard/mesh
+    infra run Nemesis over THEIR tunnel instead of Tailscale? (3) Is the transport a clean
+    abstraction, or is Tailscale hardcoded through **enrollment/heartbeat/reachability** — the same
+    coupling shape as the LHM issue (heavy vendor path baked in before the boundary was drawn; see
+    `docs/audits/architecture-debt-audit-2026-07-02.md`)?
+  - **Value:** robustness (not locked to one vendor's mesh) + commercial/SMB fit (businesses often
+    have their own VPN infra). Onboarding just needs the agent reachable at a stable address on a
+    private network — the mesh tech that provides it should ideally be a detail, not a hard
+    dependency.
+  - **Method:** read-only coupling audit first (grep the Tailscale touchpoints across enrollment /
+    installer / reachability / heartbeat), then a spike over raw WireGuard to see what breaks.
+  - **Graduation:** if the audit finds hard coupling worth fixing → graduate to a roadmap
+    stub/ADR ("tunnel-transport abstraction") with the eval as its evidence. If coupling is already
+    thin → document the "bring-your-own-tunnel" path and close. Project-sized; do NOT build now.
+  - **Sibling (runtime FEATURE version):** this is the *test/measure* item. The shipped-agent
+    detect-and-adapt feature is tracked separately at
+    `docs/roadmap/agent-tunnel-environment-awareness.md` (2-step: inventory → adapt). **This eval's
+    coupling verdict gates that item's Step 2.**
+
 - [ ] **Dashboard header status lights — global green/amber/red health indicator.** Always
   visible in the header regardless of the current layout — this **solves the layout-memory
   blind-spot**: a user's preferred layout may have the alerts card off-screen, but the header is
