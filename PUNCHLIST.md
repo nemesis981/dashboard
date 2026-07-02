@@ -817,3 +817,31 @@ pre-auth key + tailnet target, download-side uses-check, TTL 24h→2h) landed co
 - [ ] **PHASE-2 NOTE — auto-approve default unchanged here.** This window left
   `enrollment_tokens.auto_approve = 1` untouched (the manual-approval-default flip per ADR 0011
   belongs with the enrollment-review card, Phase 2). Do not assume it flipped.
+
+### [UNINSTALL / DE-ENROLL] — complete-uninstall follow-ups
+Ties to the de-enroll endpoint (`docs/roadmap/clean-uninstall-build-spec.md` §4, `:5001`
+`POST /api/agent/uninstall`) and the VM `.83` uninstall remnants (R1/R2 in that spec).
+
+- [ ] **Automate stale tailnet-node removal on uninstall (SERVER-side).** After an agent
+  uninstall the client does `tailscale logout` (leaves the tailnet), but the device's **node
+  record lingers in the Tailscale admin console** as an offline machine and must be removed
+  **manually** (admin console → Machines → offline node → Remove). For no-IT-department users
+  that's an orphaned-node rough edge they may not know how to clean. **Automate it server-side:**
+  on receiving the signed de-enroll (Finding-1 / `:5001` endpoint), the server — which already
+  holds the Tailscale **OAuth creds** used for key minting (`alert_manager/tailscale_api.py`,
+  currently `mint_preauth_key` only; no device-delete yet) — should ALSO call the Tailscale API to
+  **remove that device's tailnet node** (`DELETE /api/v2/device/{deviceId}`), so uninstall leaves
+  no orphaned node.
+  - **Why server-side, not the client uninstaller:** node removal needs tailnet-**admin** API
+    access; the client must NOT hold admin creds. This belongs on the server that already
+    de-enrolls + already has the OAuth token.
+  - **Wire into the existing de-enroll flow:** agent de-enrolls → server marks `uninstalled`
+    (already built) → **server removes the tailnet node** (new step, same handler).
+  - **Guards:** (a) **only remove nodes tagged `tag:nemesis-agent`** — never touch the user's other
+    nodes; (b) **idempotent** — handle the node already being gone (manually removed / already
+    deleted) without error; (c) map `device_id` → Tailscale `deviceId` (the server needs to know /
+    look up the node id for the enrolled device).
+  - **Vendor rule:** the node-removal code is Tailscale-specific → extend/ship the
+    `CUSTOM_TAILSCALE_*.md` guide (Tier-2 vendor-integration rule).
+  - **Value:** closes the "no orphaned node" gap for the complete-uninstall promise; pure server
+    add on an existing flow, no client change.
