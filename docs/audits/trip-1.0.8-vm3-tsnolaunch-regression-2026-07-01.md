@@ -54,6 +54,40 @@ Any of these is a code change + CI rebuild + regenerate + re-test:
 - Live diagnostic: `tailscale_exe_installed=True`, `tailscaled_service=Running`,
   `BackendState=NoState`, `tailscale_ip=False`, `reach_5001=False`, `nemesis_dir=False`.
 
+## Fix plan (next session) — FIRST task
+
+**Root cause (recap):** `TS_NOLAUNCH` suppressed the Tailscale GUI, but the GUI initializes the IPN
+backend. Suppressed → backend stuck `NoState` → `tailscale up --authkey` had nothing to join
+through → join failed on `.83`.
+
+### Approach to try FIRST — launch the GUI MINIMIZED (not suppressed)
+1. **Test empirically on a fresh VM:** launch the Tailscale GUI in a **minimized** window state —
+   **Windows-side** (e.g. `Start-Process -WindowStyle Minimized`), **NOT** a Tailscale flag
+   ("start minimized" is not a Tailscale feature — see open request **#19080**). Check whether
+   `BackendState` transitions `NoState → Running` with the window merely minimized.
+   - **If YES** (backend wakes while minimized): the window sits minimized/unobtrusive, the join
+     works, and possibly **no close step is needed** — best outcome.
+   - **If NO** (backend needs the window rendered/foregrounded): fall back to launch-visible.
+
+2. **OPTIONAL close-after-verify** (only if leaving it minimized is unacceptable): close the window
+   **ONLY after the join is GENUINELY verified** — poll until `BackendState=Running` **AND** a
+   tailnet IP is assigned **AND** the device enrolled, THEN close. **NEVER close on a fixed timer**
+   (re-triggers the #16086 hang). Verify-then-close is safe; timer-then-close is not.
+
+### Fallback (if neither works cleanly)
+Revert `TS_NOLAUNCH`, keep the window visible, and rely on the existing "leave this window alone"
+guidance text — **test-2-proven** to join successfully (the PL-10 cosmetic wart returns, acceptable).
+
+### Then
+CI rebuild → regenerate → re-test on a fresh VM. **This re-test also validates SILENT PawnIO
+(`1f495ad`)**, which never executed tonight (`_install_pawnio` runs *after* the join, so it was
+gated behind the failed Tailscale step — PawnIO is **untested, not failed**).
+
+### Safety net
+- Pre-improvement setup exe backed up: `NemesisAgent-Setup.exe.pre-vm3-20260701-183705`.
+- v1.0.7 proven; test-2 passed (build without these two improvements).
+- Working exe re-staged as default (if that step was done at closeout).
+
 ---
-*Captured 2026-07-01. Banks the regression so tomorrow's fix starts fresh. No code changed here —
-docs-only.*
+*Captured 2026-07-01. Banks the regression + next-session fix plan so tomorrow's fix starts fresh.
+No code changed here — docs-only.*
