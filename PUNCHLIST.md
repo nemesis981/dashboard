@@ -845,3 +845,41 @@ Ties to the de-enroll endpoint (`docs/roadmap/clean-uninstall-build-spec.md` §4
     `CUSTOM_TAILSCALE_*.md` guide (Tier-2 vendor-integration rule).
   - **Value:** closes the "no orphaned node" gap for the complete-uninstall promise; pure server
     add on an existing flow, no client change.
+
+### [DOCS-SYNC] — reflect today's agent changes in install/uninstall docs + agent text (2026-07-02)
+**When:** post-install-test (do the edits AFTER the fresh-VM test confirms the new behavior — some
+of this — Method B, PawnIO self-install, launch-minimized — is not yet VM-proven, so documenting it
+before the test risks writing behavior that still shifts). Capture-only now so the pass isn't
+missed. Docs-window work.
+
+- [ ] **1. Method B (in-process sensors) — LHM no longer runs as a separate program.** No
+  `LHM.exe` launch, no **port 8085** web server, no `NemesisLHM` scheduled task; sensors read
+  in-process via pythonnet. **Update every doc/text that describes LHM as a running component /
+  HTTP API:**
+  - `docs/SETUP_WINDOWS.md` — heavy: lines ~64, 78, 110, 116, 119–123, 156, 268, 270 all describe
+    the old "run LHM as Administrator → Options → Web Server → port 8085 → `/data.json`" model and
+    the discovery-script HTTP fetch. Rewrite to the in-process read (no manual LHM web-server setup,
+    no 8085, no leaving LHM running).
+  - `ARCHITECTURE.md` — line ~104 mermaid node `LibreHardwareMonitor\nlocalhost:8085`; update the
+    agent diagram/text to in-process sensor read.
+  - Agent user-facing text — any string referencing LHM.exe / port 8085 / the NemesisLHM task.
+  - Cross-ref: arch-debt audit `docs/audits/architecture-debt-audit-2026-07-02.md` (LHM cluster,
+    Findings 3/4/11) — the docs are the last face of that retirement.
+- [ ] **2. PawnIO self-provisioning.** Install now silently installs PawnIO via `_install_pawnio()`
+  (LHM no longer auto-installs it). Update install docs + **PawnIO-approval guidance (PL-11):** if a
+  **UAC / driver-install prompt** appears during install, docs must tell users to **approve it**
+  (needed for temps/fans). Reconcile with PL-11 wherever it's tracked.
+- [ ] **3. Tailscale launch-minimized.** Install now briefly shows a **minimized** Tailscale window
+  during setup, then **closes it after join**. Update any install-step description of the Tailscale
+  behavior (was: suppressed/GUI notes) so testers aren't surprised by the brief window.
+- [ ] **4. Finding-1 security fix (changelog / security-notes, NOT user-facing install docs).**
+  The legacy `windows_agent` `/hw_data` ingress route was **removed** (closed the ungated-ingress
+  hole — arch-debt audit Finding 1, build commit `f9ee9b5`). Add a **changelog / security-notes**
+  entry; no install-doc change.
+- [ ] **5. Clean-uninstall behavior (user-facing uninstall docs).** The uninstaller **de-enrolls
+  (signed)**, removes Nemesis components + **Tailscale (only if we installed it)**, and **KEEPS
+  PawnIO** *(⚠️ operator message was truncated here — "KEEPS…"; inferred as the established
+  never-remove-shared-kernel-driver rule for PawnIO per HANDOFF/PL-11 — **confirm the intended
+  ending**)*. Update uninstall docs to describe this teardown honestly (what's removed vs kept, and
+  why PawnIO is kept). Cross-ref `docs/roadmap/clean-uninstall-build-spec.md` + the owed
+  `CUSTOM_TAILSCALE_UNINSTALL.md`.
