@@ -379,4 +379,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--lhm-probe" in sys.argv:
+        # Diagnostic (Windows/Method B): exercise the in-process LibreHardwareMonitor
+        # sensor binding and print the stage-by-stage result, then exit WITHOUT
+        # starting the agent. Validates the frozen bundle; also a field-debug tool.
+        from platforms import lhm_inproc
+        print(json.dumps(lhm_inproc.probe(), indent=2, default=str))
+        lhm_inproc.close()
+    else:
+        main()

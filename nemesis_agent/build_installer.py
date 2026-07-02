@@ -48,7 +48,7 @@ def _bake_config(server, token, device_name):
     return path
 
 
-def _pyinstaller(entry, name, *, windowed, datas=(), hidden=(), uac=False):
+def _pyinstaller(entry, name, *, windowed, datas=(), hidden=(), collect=(), uac=False):
     cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--noconfirm",
            "--name", name, "--paths", HERE]
     cmd += ["--windowed"] if windowed else ["--console"]
@@ -56,6 +56,8 @@ def _pyinstaller(entry, name, *, windowed, datas=(), hidden=(), uac=False):
         cmd += ["--uac-admin"]
     for h in hidden:
         cmd += ["--hidden-import", h]
+    for c in collect:
+        cmd += ["--collect-all", c]
     for d in datas:
         cmd += ["--add-data", d]
     cmd.append(os.path.join(HERE, entry))
@@ -82,8 +84,23 @@ def main(argv=None):
         p = os.path.join(HERE, sub)
         if os.path.isdir(p):
             agent_datas.append(f"{p}{SEP}{sub}")
+    agent_hidden = list(AGENT_HIDDEN)
+    agent_collect = []
+    # Method B (Windows only): in-process LHM sensor read via pythonnet. Freeze the
+    # pythonnet CLR loader (--collect-all grabs Python.Runtime.dll + the runtime DLLs
+    # via pythonnet's own PyInstaller hook) and bundle LibreHardwareMonitorLib.dll
+    # ALONG WITH its managed sibling deps (System.Memory.dll et al.) into lhm/ --
+    # LibreHardwareMonitorLib fails to Open() without them (verified frozen on VM .83).
+    if sys.platform == "win32":
+        agent_hidden += ["clr", "platforms.lhm_inproc"]
+        agent_collect += ["pythonnet", "clr_loader"]
+        lhm_src = os.path.join(HERE, "lhm")
+        if os.path.isdir(lhm_src):
+            for f in sorted(os.listdir(lhm_src)):
+                if f.lower().endswith(".dll"):
+                    agent_datas.append(f"{os.path.join(lhm_src, f)}{SEP}lhm")
     _pyinstaller("agent.py", "NemesisAgent", windowed=True,
-                 datas=agent_datas, hidden=AGENT_HIDDEN)
+                 datas=agent_datas, hidden=agent_hidden, collect=agent_collect)
     agent_exe = os.path.join(DIST, "NemesisAgent.exe")
     if sys.platform == "win32" and not os.path.exists(agent_exe):
         raise SystemExit("NemesisAgent.exe was not produced")
