@@ -260,3 +260,40 @@ Settings → Apps:
 - Manifest-driven uninstall: ghost cleared, tailnet node gone, Tailscale removed **only** when we
   installed it, no residue — proven on both bare and pre-existing-Tailscale clones.
 - A `CUSTOM_TAILSCALE_UNINSTALL.md` ships with the Tailscale-removal code (vendor-integration rule).
+
+---
+
+## Post-trip remnants (from the VM `.83` uninstall audit)
+
+Two findings from running the real uninstall on VM `.83`. **Post-trip, complete-uninstall work** —
+capture only, no build now.
+
+### R1 — SELF-DELETE GAP: `NemesisUninstall.exe` + `%APPDATA%\Nemesis\` left behind (fix owed)
+**Finding:** after uninstall, `NemesisUninstall.exe` remains on disk, which keeps
+`%APPDATA%\Nemesis\` alive — a running exe can't delete its own file (or its own directory).
+**Why:** the intended fix is already named in §3 (lines 152–153) — **self-relaunch from `%TEMP%`**:
+copy the uninstaller to `%TEMP%` and relaunch that copy so it can delete the original dir cleanly.
+The VM `.83` audit shows that trick is **either not wired or not working** — the original exe/dir
+survive. So the uninstall is not yet "no residue" (violates the Definition-of-done "no
+`%APPDATA%\Nemesis`" line and Test-plan step 4 "Local: no `%APPDATA%\Nemesis`").
+**To do (complete-uninstall build):** wire/repair the `%TEMP%` self-relaunch so the last stage
+runs from outside `%APPDATA%\Nemesis\`, deletes the dir + the original `NemesisUninstall.exe`, and
+leaves no residue; re-verify on a fresh clone (Test-plan step 4).
+**Severity:** the visible "complete uninstall" promise fails without it — real remnant, owed before
+this spec is DONE.
+
+### R2 — MANIFEST-COVERAGE PRINCIPLE (design guardrail, confirmed by a non-bug)
+**Finding:** the `NemesisOvernightLog` scheduled task **survived** uninstall because it was created
+**out-of-band** (not via the agent manifest), so the manifest-driven uninstaller never saw it.
+**Not a bug in this instance** — `NemesisOvernightLog` is a dev/diagnostic artifact, not a shipped
+product component, so nothing should have removed it. But it **confirms the guardrail** this spec
+is built on (§1: "Manifest is the single source of truth the uninstaller reads"):
+> **ANYTHING the product installs — scheduled task, registry key, service, file, driver, Defender
+> exclusion, firewall rule — MUST be recorded in `install-manifest.json`, or uninstall will not
+> remove it.** Out-of-band creation = guaranteed residue. Manifest coverage is the invariant; any
+> new install-side action must add its manifest entry in the same change (definition of done for
+> that action).
+**To do:** no fix for the task itself (correctly ignored). Keep this as a standing design rule for
+every future install-side feature; consider a build-time/CI check that flags install actions with
+no matching manifest field.
+**Severity:** guardrail, not a defect — cheap to honor now, expensive residue later if ignored.
