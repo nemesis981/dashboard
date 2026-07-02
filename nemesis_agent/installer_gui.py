@@ -162,7 +162,9 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
     component + whether it was ALREADY PRESENT vs installed by us. The critical rule: a
     PRE-EXISTING Tailscale is marked removal='never' (the uninstaller must not remove the
     user's own software); one we installed is removal='offer'. Kept pure for unit testing."""
-    tasks = ["NemesisAgent"] + (["NemesisLHM"] if lhm else [])
+    # LibreHardwareMonitorLib.dll is loaded IN-PROCESS by NemesisAgent.exe (pythonnet);
+    # LibreHardwareMonitor.exe is no longer launched, so there is no NemesisLHM task.
+    tasks = ["NemesisAgent"]
     return {
         "manifest_version": 1,
         "nemesis_version": version,
@@ -181,6 +183,9 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
                 "kind": "bundled_files", "pre_existing": False,
                 "installed_by_nemesis": bool(lhm),
                 "path": os.path.join(install_dir, "lhm"), "removal": "auto",
+                # LibreHardwareMonitorLib.dll is loaded in-process by the agent
+                # (pythonnet); LibreHardwareMonitor.exe is not launched (no web server).
+                "role": "in_process_dll",
             },
             "pawnio": {
                 # LibreHardwareMonitor's kernel I/O driver (sensor access). SHARED — Fan
@@ -556,8 +561,7 @@ class InstallerApp:
             self.set_status(STEPS[1], 2)
             self._install_files()
             self._start_freshclam()      # Phase 4: fetch AV definitions in background
-            self._install_pawnio()       # pre-install LHM's PawnIO driver (silent) BEFORE LHM runs
-            self._setup_lhm()            # Phase 5: start LibreHardwareMonitor + logon task
+            self._install_pawnio()       # PawnIO driver — kernel sensor access for the in-process LHM lib
             self.set_status(STEPS[2], 3)
             self._enroll()
             self._register_autostart()
@@ -613,28 +617,6 @@ class InstallerApp:
                              cwd=os.path.join(INSTALL_DIR, "clamav"),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=flags)
-        except Exception:
-            pass
-
-    def _setup_lhm(self):
-        """Phase 5: start LibreHardwareMonitor (temps/fans web server on :8085) and
-        register a logon task so it runs each login. Best-effort; the agent works
-        without it (psutil-only metrics). Web server may need a one-time enable
-        (Options -> Web Server), matching the .ps1 behaviour."""
-        import subprocess
-        exe = os.path.join(INSTALL_DIR, "lhm", "LibreHardwareMonitor.exe")
-        if not os.path.isfile(exe):
-            return
-        flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
-        try:
-            subprocess.Popen([exe], cwd=os.path.join(INSTALL_DIR, "lhm"),
-                             creationflags=flags)
-        except Exception:
-            pass
-        try:
-            subprocess.run(["schtasks", "/Create", "/F", "/SC", "ONLOGON", "/RL", "HIGHEST",
-                            "/TN", "NemesisLHM", "/TR", f'"{exe}"'],
-                           check=False, capture_output=True, timeout=30)
         except Exception:
             pass
 
