@@ -1,0 +1,2 @@
+﻿[2026-07-02 05:59:10] agent_running=True tailscale=Running ip=<tailnet-ip> cpu%=6 ram_gb=2.64
+[2026-07-02 06:04:01] agent_running=True tailscale=Running ip=<tailnet-ip> cpu%=2 ram_gb=2.59
