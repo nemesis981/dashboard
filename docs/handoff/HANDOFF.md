@@ -1,82 +1,88 @@
 # HANDOFF — current state
 
-> Current project state, last updated 2026-06-30 (closeout). Overwritten at each closeout
+> Current project state, last updated 2026-07-01 (closeout). Overwritten at each closeout
 > (latest state wins). Durable history: `docs/handoff/supplements/` (append-only); raw step
 > log: `docs/handoff/worklog/`.
 > Real IPs/hosts/accounts/names live in `~/work/nemesis-private/local-config.md` (outside the
 > repo) — placeholders here per Rule 8 (public repo).
 
 ## Current state
-- **v1.0.7 installer SELF-ONBOARDS end-to-end** — PROVEN on a real clone (`<clone-ip>`) over
-  live Tailscale tonight: download credentialed `/zip` → install Tailscale on a bare box → join
-  the tailnet via the **baked single-use pre-auth key** → **consume + delete** the sidecar conf →
-  enroll. Only manual step is approval. This replaces the morning's two dead ends (Tailscale
-  hard-gate + legacy-Python `.ps1`).
-- **PL-3 RESOLVED (functionally):** conf read/consumed/deleted; clone joined the **PROJECT
-  tailnet under the project account** via the key (an operator login can't reach it — the key did
-  it). Frozen exe confirmed built from `a21b782` (CI headSha match). **Single-use verified:**
-  enrollment token `uses=1/1` spent; Tailscale pre-auth key consumed + gone from the registry.
-- **Fingerprint shipped + live (`daf273f`):** hardware-stable-identifiers (Windows+Linux), TOFU
-  match, `agent_devices` migration, enrollment-payload wiring. Tested both platforms; live `/enroll`
-  probe confirmed storage (`is_virtual` flows through). Mac = interface-only (deferred).
-- **Design locked:** ADR 0011 **BUILD-READY** (enrollment security); `hardware-stable-identifiers`
-  built+tested; unified-installer **design of record** (`docs/roadmap/installer-unified-v1.0.6.md`).
-- **Concurrent sessions active on `main`** — pull-before-commit is standing practice.
-- **Header light: green.** All 6 services active.
-- **Wisconsin trip: Friday, 2 weeks.** Installer self-onboards, but **two before-trip fixes remain**
-  (below) → not yet trip-shippable.
+- **Clean-install/uninstall overhaul BUILT (all 3 phases) + de-enroll endpoint DEPLOYED live.**
+  Per `docs/roadmap/clean-uninstall-build-spec.md`:
+  - **Phase 1 (`9321cfe`)** — install writes a provenance `install-manifest.json`, registers in
+    Add/Remove Programs (HKCU), adds a Start Menu folder, and ships `NemesisUninstall.exe`
+    (bundled INSIDE the setup exe). **All four PROVEN live on test-2 VM.**
+  - **Phase 2 (`5b03260`)** — `POST /api/agent/uninstall` on **:5001** (hw_monitor): signed
+    (device keypair, ADR 0011), soft-marks `enrollment_status='uninstalled'` +
+    `uninstalled_at`/`uninstalled_by`, idempotent. **DEPLOYED** — hw-monitor restarted 17:27,
+    migration applied, endpoint verified live (400/401 not 404).
+  - **Phase 3 (`14ce142`)** — manifest-driven `NemesisUninstall.exe` + consent UX (signed
+    de-enroll → leave tailnet → Tailscale-remove-if-installed_by_nemesis → teardown → ARP/Start
+    Menu). Built + unit-verified (sign/verify cross-contract passes). **Uninstall NOT yet run
+    end-to-end on a VM.**
+- **Test-2 (66d190b build) PASSED** — self-onboard + OAuth-minted key + enroll + **fix #3
+  (no double-enroll)** + Phase-1 manifest/ARP/Start-Menu, all confirmed on a fresh VM.
+- **Two installer UX improvements built — one REGRESSED:**
+  - `1f495ad` **silent PawnIO** pre-install + provenance (never-remove for shared kernel driver)
+    — **UNTESTED** (gated behind the Tailscale step, never reached on VM-3).
+  - `739e435` **TS_NOLAUNCH** (suppress Tailscale GUI) — **REGRESSION: breaks the tailnet join.**
+    See ⚠️ below.
+- **PawnIO identified** as the "hardware monitor download prompt" (LHM's kernel driver) — PL-11;
+  install docs must tell users to approve it.
+- **Header light: green.** All 7 services active (incl. hw-monitor). De-enroll endpoint live.
+- **Wisconsin trip: ~2 weeks out (mid-July).** Enroll path is trip-ready on the known-good build;
+  the uninstall/clean-teardown work is new and still needs its end-to-end VM proof.
 
-## ⚠️ NOT fully trip-ready — two before-trip fixes (found by tonight's verify pass)
-1. **SECURITY — auto-approve default contradicts ADR 0011.** `api_agent_installer_generate` mints
-   tokens with `auto_approve=1`; the "approved" device appeared via the **token's own flag**, not a
-   manual approval. Must default `auto_approve=0`; auto-approve = explicit opt-in.
-2. **DOUBLE-ENROLL — one device, two rows.** Installer `_enroll` doesn't persist `device_id`, so the
-   agent re-enrolls ~11s later. Fix: persist `device_id`/status into `nemesis_agent.conf`.
+## ⚠️ VM-3 REGRESSION — TS_NOLAUNCH breaks the Tailscale join (FIX FIRST next session)
+`739e435` installs Tailscale with `TS_NOLAUNCH=1` to suppress the GUI, but the GUI initializes
+Tailscale's IPN backend. Suppressed → backend stuck **`NoState`** → `tailscale up --authkey` had
+nothing to join through → **join fails** (no tailnet IP, install blocked before file-copy; retry
+did not recover). Full finding + fix plan: **`docs/audits/trip-1.0.8-vm3-tsnolaunch-regression-2026-07-01.md`**.
 
 ## Next-session resume (IN ORDER)
-1. **Fix (1) auto-approve default → `auto_approve=0` + explicit opt-in** [BEFORE-TRIP, security].
-2. **Fix (2) double-enroll → persist `device_id` into the conf** [before-trip].
-3. **Regenerate a fresh installer + a FRESH single-use Tailscale pre-auth key.**
-4. **Laptop test over Starlink** — real physical device, remote/tailnet (the real trip topology;
-   `is_virtual=False` expected).
-5. **Cleanup pass → assess where things stand.**
+1. **FIX the TS_NOLAUNCH regression** (per the fix plan in the regression doc): try **launch GUI
+   MINIMIZED** first (`Start-Process -WindowStyle Minimized`; not a Tailscale flag — req #19080);
+   optional **verify-then-close** (NEVER timer-close — re-triggers #16086); fallback = **revert
+   TS_NOLAUNCH**, keep the window + guidance text (test-2-proven).
+2. **CI rebuild → regenerate → re-test on a fresh VM.** This also finally **validates silent
+   PawnIO** (`1f495ad`), untested tonight.
+3. **Run the full UNINSTALL lifecycle test** (never done): install → approve → **uninstall from
+   Settings → Apps** → confirm de-enroll clears the server ghost (`uninstalled` +
+   `uninstalled_at`/`by`), tailnet left, Tailscale removed (installed_by_nemesis), PawnIO KEPT
+   (never-remove), no residue.
 
 ## Open items (carry)
-- **Phase 2 integration (NOT built):** TOFU lock wiring into the live approval path,
-  scan-in-enrollment, owner **review card**, the manual-approval flip (= fix #1), enroll-time
-  used-token behavior.
-- **Infra: nginx `:80` → tailnet-only** for media + `/enroll` (ADR 0011 IMMEDIATE; removes the
-  cleartext interception path).
-- **PL-10 (post-trip UX):** Tailscale GUI auto-launches a redundant login window after the silent
-  `--authkey` join; installer first-screen text stale. Suppress GUI / `--unattended` + fix text.
-- **Installer size: 272MB → ~30MB** (post-trip; small stub + fetch ClamAV on first run).
-- **`/api/agent/uninstall` endpoint** doesn't exist yet (uninstall script POSTs best-effort).
-- VPN-off workaround still in place (ADR 0005 real fix deferred).
-- Rule-6 backups parked in scratchpad (`alerts-PRE-HWID-MIGRATION-20260630.db`,
-  `alerts-PRE-DASH-RESTART-20260630.db`).
+- **Staged installer = known-good `66d190b` (test-2) build** (re-staged as `NEMESIS_AGENT_EXE`).
+  The regressed build is preserved at `nemesis-dist/NemesisAgent-Setup.exe.REGRESSED-739e435-tsnolaunch`
+  (reference only — tomorrow's fix rebuilds from source `main`@`739e435` + the fix).
+- **Uninstall lifecycle test still UNRUN** — test-2's uninstall was deferred; VM-3 blocked before it.
+- **Held screenshot** `docs/audits/trip-1.0.8-test2-startmenu-uninstall-2026-07-01.png` (untracked)
+  — shows the Start-Menu "Uninstall Nemesis" entry but also the "Test-User" account name; awaiting
+  a Rule-8 decision (commit as-is / redact / leave uncommitted). First screenshot (`…vm-screenshot…`)
+  already committed (`43395fd`).
+- **`CUSTOM_TAILSCALE_UNINSTALL.md`** owed (vendor-integration rule) — docs window.
+- **PL-11 (PawnIO)** — install guides must tell users to approve the PawnIO install for temps/fans.
+- VPN-off workaround still in place (ADR 0005 deferred).
+- Rule-6 backups parked in `alert_manager/` + scratchpad (`alerts-PRE-DEENROLL-DEPLOY-20260701-172012.db`).
 
 ## Resolved today
-- **Installer self-onboard (PL-3)** — built (`a21b782`/v1.0.7), proven on the clone.
-- **Hardware-stable-identifiers** — built + tested + live (`daf273f`).
-- **`/zip` 503** — `NEMESIS_AGENT_EXE` was unset; staged the frozen exe + restarted dashboard → 200.
-- **Master VM** — frozen as the reusable bare baseline (no agent/Python/Git/Tailscale; SSH preserved).
-- **Roadmap-vs-state baseline** refreshed (`docs/audits/roadmap-state-audit-2026-06-30.md`).
+- Clean-uninstall Phases 1–3 built; de-enroll endpoint (:5001) deployed live + migration applied.
+- Test-2 full self-onboard/enroll/fix-#3/Phase-1 PASS on a fresh VM.
+- PawnIO identified (PL-11); description-sanitize + OAuth-mint chain proven earlier today.
 
 ## Pointers
-- **ADRs:** 0006 (Data Manager), 0007 (device-user model), 0008 (impossible travel),
-  0009 (security inspection proxy), 0010 (agent ping monitor), **0011 (enrollment security — BUILD-READY)**.
-- **Installer design of record:** `docs/roadmap/installer-unified-v1.0.6.md` + ADR 0011.
-- **Today's audit + verify:** `docs/audits/windows-install-doc-test-2026-06-30.md`;
-  supplement `docs/handoff/supplements/2026-06-30-001.md`.
-- `docs/roadmap/` — full capture set. Roadmap-vs-state baseline `docs/audits/roadmap-state-audit-2026-06-30.md`.
-- `docs/operation/OPERATION.md` (nginx = official entrypoint), `WINDOWS_AGENT_SETUP.md` + 3-tier guides.
-- `~/work/nemesis-private/local-config.md` — real IPs/hosts/accounts/names (outside repo).
+- **Build spec:** `docs/roadmap/clean-uninstall-build-spec.md` (the contract for the 3 phases).
+- **Today's audits:** `docs/audits/trip-1.0.8-test2-vm-lifecycle-test-2026-07-01.md` (test-2 PASS +
+  uninstall baseline/§4b),  `docs/audits/trip-1.0.8-vm3-tsnolaunch-regression-2026-07-01.md`
+  (regression + fix plan).
+- **ADRs:** 0011 (enrollment security — de-enroll reuses its signing model), 0012 (enrollment modes).
+- `~/work/nemesis-private/local-config.md` — real IPs/hosts/accounts (outside repo).
+- **Session supplements today:** `2026-07-01-001.md` (docs window, mid-session),
+  `2026-07-01-002.md` (build window, closeout).
 
 ## Topology note (durable)
-- **:80** = nginx (Basic-auth), LAN-allowed, proxies to :5000; auth-bypass for `/install/windows/`
-  + `/api/health`. **ADR 0011 wants media + `/enroll` moved to tailnet-only (carry).**
-- **:5000** = Flask dashboard, ufw-blocked from LAN — internal only.
-- **:5001** = hw-monitor agent endpoint (`/enroll`, `/enrollment_status`, `/hw_data`),
-  LAN-subnet-allowed (+ tailnet reachable).
-- **`NEMESIS_AGENT_EXE`** = staged frozen `NemesisAgent-Setup.exe` (outside repo) that `/zip` re-zips
-  with a per-installer conf; set in `/etc/nemesis.env`.
+- **:80** = nginx (Basic-auth), LAN-allowed, auth-bypass for `/install/windows/` + `/api/health`.
+- **:5000** = Flask dashboard (ufw-blocked from LAN). **:5001** = hw-monitor agent endpoint
+  (`/enroll`, `/enrollment_status`, `/hw_data`, **now `/api/agent/uninstall`**), LAN + tailnet.
+- **`NEMESIS_AGENT_EXE`** = staged setup exe that `/zip` re-zips with a per-installer conf;
+  the uninstaller rides bundled INSIDE it (no separate staging).
