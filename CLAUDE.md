@@ -10,6 +10,13 @@ Working-style notes (local-only, gitignored; auto-loaded from disk via @-import)
 
 ---
 
+## Emergency fallback
+If something goes wrong during a live test (lost connectivity, laptop misbehaving): READ
+`docs/operations/backupproc.md` immediately. It has the exact recovery steps (laptop-side
+uninstall + server-side revert to the `pre-l1l2l3-build-known-good` tag).
+
+---
+
 ### Morning Status (run on session start)
 At the start of every new session, before anything else, run these and report the results
 in a clean block:
