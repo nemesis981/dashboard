@@ -301,6 +301,61 @@ class InstallerApp:
             self.bar["value"] = step
         self.root.update_idletasks()
 
+    # ── install-action logging (PERMANENT per-device diagnostic) ─────────────────
+    # Every install self-documents to a file on the device so a failure — especially
+    # on a remote/trip machine — leaves data to analyze. Not a debug toggle: always on.
+    # Rule 8: the pre-auth key + enrollment token are redacted; never logged raw.
+    def _init_install_log(self):
+        """Pick an always-writable log path and open it. Prefer %APPDATA%\\Nemesis\\
+        install.log (created NOW so the log survives a failure BEFORE the rest of the
+        install dir exists); fall back to %TEMP%\\nemesis-install.log if that can't be made."""
+        import tempfile
+        for p in (os.path.join(INSTALL_DIR, "install.log"),
+                  os.path.join(tempfile.gettempdir(), "nemesis-install.log")):
+            try:
+                os.makedirs(os.path.dirname(p), exist_ok=True)
+                with open(p, "a", encoding="utf-8"):
+                    pass
+                self._log_path = p
+                return
+            except Exception:
+                continue
+        self._log_path = None
+
+    def _redact(self, s):
+        """Rule 8: strip the pre-auth key + token out of any string before it is logged."""
+        s = str(s)
+        for secret in (getattr(self, "preauth_key", ""), getattr(self, "token", "")):
+            if secret and len(secret) >= 6:
+                s = s.replace(secret, "<redacted>")
+        return s
+
+    def _ilog(self, msg):
+        """Append a timestamped, secret-redacted line to the install log. Best-effort —
+        logging must NEVER break the install."""
+        if not getattr(self, "_log_path", None):
+            return
+        try:
+            with open(self._log_path, "a", encoding="utf-8", errors="replace") as f:
+                f.write(datetime.now().isoformat(timespec="seconds") + "  "
+                        + self._redact(msg) + "\n")
+        except Exception:
+            pass
+
+    def _ts_status(self):
+        """(BackendState, 'ip,ip') for diagnostic logging — best-effort; ('?','') on failure."""
+        import subprocess
+        try:
+            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+                               capture_output=True, text=True, timeout=15)
+            if p.returncode != 0 or not p.stdout.strip():
+                return ("unreachable", "")
+            j = json.loads(p.stdout) or {}
+            return (j.get("BackendState", "?"),
+                    ",".join((j.get("Self") or {}).get("TailscaleIPs") or []))
+        except Exception:
+            return ("?", "")
+
     def start(self):
         if self.entries:
             self.server = self.entries["server"].get().strip() or self.server
@@ -492,21 +547,26 @@ class InstallerApp:
             msi = os.path.join(tempfile.gettempdir(), "tailscale-setup.msi")
             urllib.request.urlretrieve(
                 "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi", msi)
-            subprocess.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
-                           check=False, capture_output=True, timeout=300)
-        except Exception:
-            pass
+            p = subprocess.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
+                               check=False, capture_output=True, timeout=300)
+            self._ilog("tailscale: msiexec /i rc=%s" % p.returncode)
+        except Exception as e:
+            self._ilog("tailscale: msiexec error: %s" % self._redact(str(e)))
         if self._tailscale_installed():
+            self._ilog("tailscale: installed via MSI")
             return True
         # Fallback: winget (also lets the underlying MSI auto-launch the GUI — no TS_NOLAUNCH).
         try:
-            subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale",
+            p = subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale",
                             "--accept-package-agreements", "--accept-source-agreements",
                             "--override", "/quiet /norestart"],
                            check=False, capture_output=True, timeout=300)
-        except Exception:
-            pass
-        return self._tailscale_installed()
+            self._ilog("tailscale: winget rc=%s" % p.returncode)
+        except Exception as e:
+            self._ilog("tailscale: winget error: %s" % self._redact(str(e)))
+        ok = self._tailscale_installed()
+        self._ilog("tailscale: install present=%s" % ok)
+        return ok
 
     def _join_tailnet_with_preauth_key(self):
         """PL-3 self-onboard: join the tailnet with the conf's SINGLE-USE pre-auth key.
@@ -532,10 +592,16 @@ class InstallerApp:
         # (see _install_tailscale) is what wakes the backend past NoState; bounded-wait for
         # that before firing --authkey (a NoState backend has nothing to join through).
         self.set_status("Starting the secure tunnel...")
+        _bs0, _ = self._ts_status()
+        self._ilog("backend-wait: start BackendState=%s (waiting for the MSI-launched GUI to init it)" % _bs0)
+        waited = 0
         for _ in range(15):                      # ~30s for the backend to leave NoState
             if self._backend_ready():
                 break
-            time.sleep(2)
+            time.sleep(2); waited += 2
+        _bs1, _ = self._ts_status()
+        self._ilog("backend-wait: end BackendState=%s after ~%ss (ready=%s)" % (
+            _bs1, waited, _bs1 not in ("", "NoState", "unreachable", "?")))
         # 2. Single-use pre-auth join — attempt ONCE. Failure => spent => stop clean.
         self.set_status("Joining your secure network...")
         try:
@@ -543,20 +609,27 @@ class InstallerApp:
                                 "--authkey=" + self.preauth_key, "--timeout=30s"],
                                capture_output=True, text=True, timeout=90)
             ok = (p.returncode == 0)
-        except Exception:
+            self._ilog("tailscale up --authkey=<redacted>: rc=%s %s" % (
+                p.returncode, self._redact((p.stderr or p.stdout or "").strip())[:200]))
+        except Exception as e:
             ok = False
+            self._ilog("tailscale up: exception %s" % self._redact(str(e)))
         if not ok:
             # Single-use key: do NOT retry the auth. Fail clean + visible; no half-install.
+            self._ilog("tailnet-join: FAILED at `up` (key spent, or backend never left NoState)")
             self.set_status("This installer is spent. Ask your admin to generate a new one.")
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
             return False
         # 3. Post-success connection-state poll ONLY (bounded; never re-attempts --authkey).
         for _ in range(15):                      # ~30s, polling state, no re-auth
             if self._tailscale_state() == "connected":
+                _bs, _ips = self._ts_status()
+                self._ilog("tailnet-join: CONNECTED BackendState=%s ip=%s" % (_bs, _ips))
                 # Build 1: leave the Tailscale GUI open (do NOT close it). The close step
                 # (verify-then-close) is added in build 2 after we capture its dialog text.
                 return True
             time.sleep(2)
+        self._ilog("tailnet-join: TIMEOUT — `up` returned ok but state never reached connected")
         self.set_status("The secure network is taking too long to connect. Open Tailscale to "
                         "check, then re-run setup. Contact " + self.support_contact + ".")
         self.btn.config(text="Close", state="normal", command=self.root.destroy)
@@ -575,10 +648,18 @@ class InstallerApp:
         self.conf_path = ""
 
     def _run(self):
+        self._init_install_log()
+        self._ilog("========== INSTALL START ==========")
+        self._ilog("version=%s device=%s dir=%s mode=%s log=%s" % (
+            AGENT_VERSION, self.device_name, INSTALL_DIR,
+            "self-onboard(preauth)" if self.preauth_key else "manual",
+            getattr(self, "_log_path", None)))
         try:
             # Provenance probe FIRST — capture whether Tailscale already existed BEFORE we
             # (maybe) install it, so the uninstaller never removes a user's pre-existing copy.
             self._probe_preinstall_state()
+            self._ilog("provenance: tailscale_pre_existing=%s pawnio_pre_existing=%s" % (
+                getattr(self, "_ts_pre_existing", "?"), getattr(self, "_pawnio_pre_existing", "?")))
             # Consume-and-delete the sidecar conf the instant install begins — the token +
             # pre-auth key are already in memory and must not linger in plaintext on disk.
             self._consume_conf()
@@ -586,17 +667,24 @@ class InstallerApp:
             # Tailscale first on a bare box). Without a key (no-conf path), fall back to the
             # manual Tailscale-required flow + the GUI server/token input fields.
             if self.preauth_key:
+                self._ilog("STEP tailnet-join (self-onboard): START")
                 if not self._join_tailnet_with_preauth_key():
+                    self._ilog("STEP tailnet-join: FAILED — install stopped before file-copy")
                     return
+                self._ilog("STEP tailnet-join: OK")
             elif not self._ensure_tailscale():
+                self._ilog("STEP ensure-tailscale (manual): FAILED — install stopped")
                 return
             # Connection chain: tailnet up → verify the server actually answers.
             if not self._verify_nemesis_reachable():
+                self._ilog("STEP server-reachability: FAILED (server=%s) — install stopped" % self.server)
                 return
+            self._ilog("STEP server-reachability: OK (server=%s:5001)" % self.server)
             self.set_status(STEPS[0], 1)
             self._check_requirements()
             self.set_status(STEPS[1], 2)
             self._install_files()
+            self._ilog("STEP file-copy: done -> %s" % INSTALL_DIR)
             self._start_freshclam()      # Phase 4: fetch AV definitions in background
             self._install_pawnio()       # PawnIO driver — kernel sensor access for the in-process LHM lib
             self.set_status(STEPS[2], 3)
@@ -608,16 +696,22 @@ class InstallerApp:
             self._register_arp()
             self._create_start_menu()
             self._start_agent_now()      # Phase 9: run now, not just at next logon
+            self._ilog("STEP start-agent: launched (runtime — in-process LHM open, enrollment "
+                        "heartbeat, hw_data posting — is logged separately in nemesis_agent.log)")
             self.set_status(STEPS[3], 4)
+            self._ilog("========== INSTALL COMPLETE ==========")
             self.btn.config(text="Close", state="normal", command=self.root.destroy)
         except Exception as e:                       # Phase 8: show the real error
             import traceback
+            tb = traceback.format_exc()
+            self._ilog("!! EXCEPTION: %s" % self._redact(str(e)))
+            self._ilog(self._redact(tb))
             self.set_status("Install failed: " + str(e)[:200])
             try:
                 os.makedirs(INSTALL_DIR, exist_ok=True)
                 logp = os.path.join(INSTALL_DIR, "install_error.log")
                 with open(logp, "w", encoding="utf-8") as f:
-                    f.write(traceback.format_exc())
+                    f.write(tb)
                 self.status.config(text=self.status.cget("text") + f"\n(details: {logp})")
             except Exception:
                 pass
@@ -662,12 +756,13 @@ class InstallerApp:
         isn't flagged/quarantined. Best-effort (needs admin — Setup runs elevated)."""
         import subprocess
         try:
-            subprocess.run(
+            p = subprocess.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Add-MpPreference -ExclusionPath '{INSTALL_DIR}'"],
                 check=False, capture_output=True, timeout=30)
-        except Exception:
-            pass
+            self._ilog("defender-exclusion: rc=%s" % p.returncode)
+        except Exception as e:
+            self._ilog("defender-exclusion: error %s" % self._redact(str(e)))
 
     def _install_files(self):
         """Copy the FROZEN agent exe into %APPDATA%\\Nemesis (no Python needed on the
@@ -699,6 +794,11 @@ class InstallerApp:
         cfg.set("nemesis", "enrollment_token", self.token)
         with open(os.path.join(INSTALL_DIR, "nemesis_agent.conf"), "w", encoding="utf-8") as f:
             cfg.write(f)
+        self._ilog("file-copy: agent=%s clamav=%s lhm=%s uninstaller=%s conf(server=%s)" % (
+            os.path.isfile(os.path.join(INSTALL_DIR, "NemesisAgent.exe")),
+            os.path.isdir(os.path.join(INSTALL_DIR, "clamav")),
+            os.path.isdir(os.path.join(INSTALL_DIR, "lhm")),
+            os.path.isfile(os.path.join(INSTALL_DIR, UNINSTALLER)), self.server))
 
     def _enroll(self):
         """Generate the keypair, run the pre-enrollment scan, and send the token-bearing
@@ -712,7 +812,10 @@ class InstallerApp:
         agent_config.CONF_PATH = os.path.join(INSTALL_DIR, "nemesis_agent.conf")
         conf = agent_config.load()
         enrollment.ensure_keypair()         # keys -> %APPDATA%\Nemesis\keys
+        self._ilog("enroll: POST to server (keypair ready, pre-enrollment scan running)")
         device_id, _status = enrollment.enroll(conf)   # token + pre-enrollment scan
+        self._ilog("enroll: device_id=%s status=%s" % (
+            (device_id[:8] if device_id else "NONE"), _status))
         if not device_id:
             # State 5: Tailscale connected but the server didn't answer — most often the
             # wrong tailnet, or the server isn't running.
@@ -738,9 +841,10 @@ class InstallerApp:
             "/TN", "NemesisAgent", "/TR", f'"{exe}"',
         ]
         try:
-            subprocess.run(cmd, check=False)
-        except Exception:
-            pass
+            p = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            self._ilog("autostart-task NemesisAgent: rc=%s" % p.returncode)
+        except Exception as e:
+            self._ilog("autostart-task: error %s" % self._redact(str(e)))
 
     # ── clean-uninstall spec: provenance manifest + ARP + Start Menu (Phase 1) ──────
     def _probe_preinstall_state(self):
@@ -779,17 +883,21 @@ class InstallerApp:
         under UAC). SKIPPED if PawnIO already present (never touch a user's shared driver).
         Best-effort — LHM still works (with the prompt) if this is unavailable."""
         if getattr(self, "_pawnio_pre_existing", False):
+            self._ilog("pawnio: SKIPPED (pre-existing — never touch a user's shared driver)")
             return
         setup = self._pawnio_installer()
         if not setup:
+            self._ilog("pawnio: installer not found in bundle — SKIPPED (LHM still works w/ prompt)")
             return
         import subprocess
         try:
             self.set_status("Installing sensor driver (PawnIO)...")
-            subprocess.run([setup, "-install", "-silent"], check=False,
-                           capture_output=True, timeout=180)
-        except Exception:
-            pass
+            p = subprocess.run([setup, "-install", "-silent"], check=False,
+                               capture_output=True, timeout=180)
+            self._ilog("pawnio: -install -silent rc=%s present_after=%s" % (
+                p.returncode, self._pawnio_present()))
+        except Exception as e:
+            self._ilog("pawnio: error %s" % self._redact(str(e)))
 
     def _tailscale_version(self):
         try:
