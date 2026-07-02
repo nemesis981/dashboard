@@ -1187,76 +1187,6 @@ def _bootstrap_fan_status():
         log.warning("fan_status bootstrap failed: %s", e)
 
 
-# ── Windows agent source ──────────────────────────────────────────────────────
-# When hw_map.json contains {"source": "windows_agent"}, hw_monitor skips all
-# lm-sensors reads and instead receives pre-labeled JSON sensor data from a
-# Python agent running on the Windows host via POST /hw_data on port 5001.
-#
-# UFW: allow inbound on port 5001 from the Windows host IP only, e.g.:
-#   sudo ufw allow from <host_ip> to any port 5001 proto tcp
-# Do NOT expose this port globally — the listener has no authentication.
-
-
-def _wa_payload_to_metrics(payload: dict) -> dict:
-    """Convert a Windows-agent POST body to the metrics dict used by insert_sample().
-
-    Expected payload shape:
-      {
-        "source": "windows_agent",
-        "timestamp": "2026-06-22T13:00:00",
-        "sensors": {
-          "cpu_temp":    {"value": 65.0, "unit": "°C"},
-          "gpu_temp":    {"value": 72.0, "unit": "°C"},
-          "nvme_temp":   {"value": 41.0, "unit": "°C"},
-          "ram_percent": {"value": 45.2, "unit": "%"},
-          "fan1":        {"value": 1200,  "unit": "RPM", "name": "CPU Fan"},
-          ...
-        }
-      }
-    """
-    sensors = payload.get("sensors", {})
-    ts = payload.get("timestamp") or datetime.now().isoformat(timespec="seconds")
-
-    def _val(key, cast=float):
-        entry = sensors.get(key)
-        if entry is None:
-            return None
-        try:
-            return cast(entry["value"])
-        except (KeyError, TypeError, ValueError):
-            return None
-
-    # Collect all fan* keys (excluding gpu_fan_percent which is its own field)
-    fans = []
-    for key, entry in sorted(sensors.items()):
-        if key.startswith("fan") and key != "gpu_fan_percent":
-            try:
-                rpm = int(float(entry["value"]))
-                label = entry.get("name") or key.replace("_", " ").title()
-                fans.append({"unique_key": key, "label": label, "rpm": rpm})
-            except (KeyError, TypeError, ValueError):
-                pass
-
-    return {
-        "cpu_temp":        _val("cpu_temp"),
-        "ambient_temp":    _val("ambient_temp"),
-        "nvme_temp":       _val("nvme_temp"),
-        "fans":            fans,
-        "cpu_percent":     _val("cpu_percent"),
-        "ram_used_gb":     _val("ram_used_gb"),
-        "ram_total_gb":    _val("ram_total_gb"),
-        "ram_percent":     _val("ram_percent"),
-        "gpu_temp":        _val("gpu_temp", int),
-        "gpu_fan_percent": _val("gpu_fan_percent", int),
-        "gpu_power_watts": _val("gpu_power_watts"),
-        "disk_read_mb":    _val("disk_read_mb"),
-        "disk_write_mb":   _val("disk_write_mb"),
-        "net_in_mb":       _val("net_in_mb"),
-        "net_out_mb":      _val("net_out_mb"),
-        "timestamp":       ts,
-    }
-
-
 def _nemesis_payload_to_metrics(payload):
     """Convert nemesis_agent payload format to the internal sample dict."""
     hw = payload.get("hardware", {})
@@ -2085,7 +2015,7 @@ def _create_enrollment(payload, remote_ip):
 
 
 def _start_windows_agent_listener():
-    """Start the background HTTP listener for both windows_agent and nemesis_agent POSTs.
+    """Start the background HTTP listener for nemesis_agent POSTs.
 
     Runs in a daemon thread so it exits automatically when the main process ends.
     Calls insert_sample() on every valid POST so the dashboard reads from the DB.
@@ -2165,7 +2095,9 @@ def _start_windows_agent_listener():
                 return
 
             source = payload.get("source", "")
-            if source not in ("windows_agent", "nemesis_agent"):
+            if source != "nemesis_agent":
+                # Finding 1: only the signed-enrollment nemesis_agent is accepted.
+                # The legacy ungated windows_agent ingress route is removed.
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -2174,33 +2106,24 @@ def _start_windows_agent_listener():
 
             try:
                 remote_ip = self.client_address[0]
-                if source == "nemesis_agent":
-                    # Enrollment gate: drop heartbeats from non-approved devices.
-                    if not _agent_approved(payload.get("device_id")):
-                        self.send_response(200)
-                        self.send_header("Content-Type", "application/json")
-                        self.end_headers()
-                        self.wfile.write(b'{"ok":false,"status":"not_approved"}')
-                        return
-                    metrics = _nemesis_payload_to_metrics(payload)
-                    _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
-                    _update_agent_device(payload, remote_ip=remote_ip)
-                    insert_sample(metrics)
-                    device_id = payload.get("device_id", "local")
-                    _dispatch_pending_scans(device_id, remote_ip)
-                    log.info(
-                        "nemesis_agent: sample device=%s cpu=%s°C gpu=%s°C conn=%s",
-                        device_id, metrics.get("cpu_temp"),
-                        metrics.get("gpu_temp"), payload.get("connection_type"),
-                    )
-                else:
-                    metrics = _wa_payload_to_metrics(payload)
-                    insert_sample(metrics)
-                    log.info(
-                        "windows_agent: sample cpu=%s°C gpu=%s°C fans=%d cpu%%=%s",
-                        metrics.get("cpu_temp"), metrics.get("gpu_temp"),
-                        len(metrics.get("fans", [])), metrics.get("cpu_percent"),
-                    )
+                # Enrollment gate: drop heartbeats from non-approved devices.
+                if not _agent_approved(payload.get("device_id")):
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":false,"status":"not_approved"}')
+                    return
+                metrics = _nemesis_payload_to_metrics(payload)
+                _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
+                _update_agent_device(payload, remote_ip=remote_ip)
+                insert_sample(metrics)
+                device_id = payload.get("device_id", "local")
+                _dispatch_pending_scans(device_id, remote_ip)
+                log.info(
+                    "nemesis_agent: sample device=%s cpu=%s°C gpu=%s°C conn=%s",
+                    device_id, metrics.get("cpu_temp"),
+                    metrics.get("gpu_temp"), payload.get("connection_type"),
+                )
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -2215,7 +2138,7 @@ def _start_windows_agent_listener():
     def _serve():
         try:
             server = HTTPServer(("0.0.0.0", WA_LISTEN_PORT), _WaHandler)
-            log.info("Agent listener started on port %d (windows_agent + nemesis_agent)", WA_LISTEN_PORT)
+            log.info("Agent listener started on port %d (nemesis_agent)", WA_LISTEN_PORT)
             server.serve_forever()
         except Exception as e:
             log.error("agent listener failed to start: %s", e)
