@@ -207,6 +207,11 @@ def init_enrollment_tokens_table():
         _cols = {r[1] for r in c.execute("PRAGMA table_info(enrollment_tokens)").fetchall()}
         if "preauth_key" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN preauth_key TEXT")
+        # Migration (ADR 0001 guarded ALTER): poll_interval = optional custom heartbeat
+        # cadence baked into the generated installer conf (floor-clamped at generation).
+        # NULL => the agent uses its own 300s default.
+        if "poll_interval" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN poll_interval INTEGER")
         conn.commit()
     finally:
         conn.close()

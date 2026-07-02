@@ -44,12 +44,14 @@ function genWindowsInstaller() {
   var hint = (document.getElementById('installerHint') || {}).value || 'Windows Device';
   var pre = (document.getElementById('installerPreauth') || {}).value || '';
   var auto = !!(document.getElementById('installerAutoApprove') || {}).checked;
+  var poll = ((document.getElementById('installerPoll') || {}).value || '').trim();
   var out = document.getElementById('installerResult');
   if (out) { out.textContent = 'Generating...'; out.style.color = '#888'; }
   fetch('/api/agent/installer/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ device_name_hint: hint, preauth_key: pre, auto_approve: auto })
+    body: JSON.stringify({ device_name_hint: hint, preauth_key: pre, auto_approve: auto,
+                           poll_interval: poll })
   })
     .then(function (r) { return r.json(); })
     .then(function (d) {

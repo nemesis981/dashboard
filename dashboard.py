@@ -1420,7 +1420,7 @@ def _valid_installer_token(token):
 
 
 def _render_install_conf(server_host: str, token: str, hint: str,
-                         preauth_key: str = "") -> str:
+                         preauth_key: str = "", poll_interval=None) -> str:
     """Build the per-installer nemesis_install.conf baked into the served frozen-exe
     zip. Matches the frozen installer's reader (nemesis_agent/installer_gui.py
     `_read_baked_config`). `preauth_key` = single-use Tailscale pre-auth key; the
@@ -1435,6 +1435,8 @@ def _render_install_conf(server_host: str, token: str, hint: str,
              f"enrollment_token = {token}"]
     if preauth_key:
         lines.append(f"preauth_key = {preauth_key}")
+    if poll_interval:
+        lines.append(f"poll_interval = {int(poll_interval)}")
     return "\n".join(lines) + "\n"
 
 
@@ -1477,6 +1479,16 @@ def api_agent_installer_generate():
     _aa = data.get("auto_approve")
     auto_approve = 1 if (_aa in (True, 1)
                          or str(_aa).strip().lower() in ("1", "true", "on", "yes")) else 0
+    # Optional custom heartbeat cadence (seconds). Floor-clamped at 15s so a mis-typed
+    # tiny value can't hammer the server; blank/invalid => NULL (agent uses its 300s
+    # default). The agent re-clamps on read (defence in depth).
+    _pi = str(data.get("poll_interval") or "").strip()
+    poll_interval = None
+    if _pi:
+        try:
+            poll_interval = max(15, int(float(_pi)))
+        except (TypeError, ValueError):
+            poll_interval = None
     token   = secrets.token_hex(16)
     now     = time.time()
     expires = now + 2 * 3600   # short TTL (ADR 0011: 1-2h), was 24h
@@ -1486,8 +1498,8 @@ def api_agent_installer_generate():
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
-            " device_name_hint, revoked, preauth_key) VALUES (?,?,?,?,1,0,?,?,0,?)",
-            (token, creator, now, expires, auto_approve, hint, preauth_key or None))
+            " device_name_hint, revoked, preauth_key, poll_interval) VALUES (?,?,?,?,1,0,?,?,0,?,?)",
+            (token, creator, now, expires, auto_approve, hint, preauth_key or None, poll_interval))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1572,9 +1584,10 @@ def install_windows_zip(token):
                         "the built NemesisAgent-Setup.exe). Contact your administrator.\n",
                         status=503, mimetype="text/plain")
     preauth = row["preauth_key"] if "preauth_key" in row.keys() else ""
+    poll_interval = row["poll_interval"] if "poll_interval" in row.keys() else None
     conf = _render_install_conf(_nemesis_tailnet_host(), token,
                                 row["device_name_hint"] or "Windows Device",
-                                preauth or "")
+                                preauth or "", poll_interval=poll_interval)
     import io, zipfile
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -1619,6 +1632,13 @@ def _render_agent_devices_html() -> str:
          '<div style="color:#666;font-size:0.78em;margin:4px 0 6px">Paste a single-use '
          'pre-auth key from the Tailscale admin console to let the agent self-join the '
          'tailnet. Leave blank to join the device by hand.</div>'
+         '<input id="installerPoll" type="number" min="15" max="86400" '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:180px" '
+         'placeholder="Heartbeat seconds (default 300)"> '
+         '<div style="color:#666;font-size:0.78em;margin:2px 0 6px">Optional: how often the '
+         'agent reports (seconds). Blank = 300 (5&nbsp;min). Minimum 15s. Lower = fresher '
+         'data + faster trip troubleshooting, but more traffic.</div>'
          '<div style="margin:4px 0 8px">'
          '<label style="color:#ddd;font-size:0.82em;cursor:pointer">'
          '<input id="installerAutoApprove" type="checkbox" '

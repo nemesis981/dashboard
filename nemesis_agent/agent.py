@@ -44,6 +44,21 @@ _suricata_mod = None
 _agent_start_time = time.time()
 _scan_on_reconnect_done = False
 
+# Heartbeat cadence. poll_interval is a live conf key (re-read each cycle); default 300s.
+# FLOOR clamps a mis-set/tiny value so it can never hammer the server.
+POLL_INTERVAL_DEFAULT = 300
+POLL_INTERVAL_FLOOR = 15
+
+
+def _resolve_poll_interval(conf):
+    """Heartbeat interval (seconds) from conf, floor-clamped and robust to non-numeric
+    values. Re-read every cycle so a conf edit takes effect on the next heartbeat."""
+    try:
+        v = int(conf.get("poll_interval", POLL_INTERVAL_DEFAULT))
+    except (TypeError, ValueError):
+        v = POLL_INTERVAL_DEFAULT
+    return max(POLL_INTERVAL_FLOOR, v)
+
 
 def _load_platform_module():
     global _platform_mod
@@ -200,7 +215,7 @@ def _poll_loop():
         except Exception as e:
             log.exception("poll_loop error: %s", e)
 
-        interval = int(_conf.get("poll_interval", 300))
+        interval = _resolve_poll_interval(_conf)
         _interruptible_sleep(interval)
 
 

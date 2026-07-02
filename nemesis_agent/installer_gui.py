@@ -149,12 +149,13 @@ def _read_baked_config():
     the file can be consumed-and-deleted once install begins."""
     path = _resolve_conf_path()
     if not path:
-        return "", "", "Windows Device", "your administrator", "", ""
+        return "", "", "Windows Device", "your administrator", "", "", ""
     cfg = configparser.ConfigParser()
     cfg.read(path)
     g = lambda k, d="": cfg.get("nemesis", k, fallback=d)
     return (g("nemesis_ip"), g("enrollment_token"), g("device_name", "Windows Device"),
-            g("support_contact", "your administrator"), g("preauth_key"), path)
+            g("support_contact", "your administrator"), g("preauth_key"),
+            g("poll_interval"), path)
 
 
 def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_version=None,
@@ -223,12 +224,13 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
 
 class InstallerApp:
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
-                 preauth_key="", conf_path=""):
+                 preauth_key="", conf_path="", poll_interval=""):
         self.root = root
         self.server = server
         self.token = token
         self.preauth_key = preauth_key
         self.conf_path = conf_path
+        self.poll_interval = poll_interval
         self.device_name = device_name or "Windows Device"
         self.support_contact = support_contact or "your administrator"
         root.title("Nemesis Security — Setup")
@@ -794,6 +796,14 @@ class InstallerApp:
         cfg.set("nemesis", "nemesis_port", "5001")
         cfg.set("nemesis", "device_name", self.device_name)
         cfg.set("nemesis", "enrollment_token", self.token)
+        # Optional custom heartbeat cadence (floor-clamped so a tiny value can't hammer the
+        # server). Only written when the installer conf carried one; else the agent uses its
+        # own 300s default. The agent re-clamps on read too (defence in depth).
+        try:
+            pi = int(self.poll_interval)
+            cfg.set("nemesis", "poll_interval", str(max(15, pi)))
+        except (TypeError, ValueError):
+            pass
         with open(os.path.join(INSTALL_DIR, "nemesis_agent.conf"), "w", encoding="utf-8") as f:
             cfg.write(f)
         self._ilog("file-copy: agent=%s clamav=%s lhm=%s uninstaller=%s conf(server=%s)" % (
@@ -990,7 +1000,8 @@ class InstallerApp:
 
 
 def main():
-    server, token, device_name, support_contact, preauth_key, conf_path = _read_baked_config()
+    (server, token, device_name, support_contact, preauth_key,
+     poll_interval, conf_path) = _read_baked_config()
     # CLI overrides: --server X --token Y --device-name Z
     args = sys.argv[1:]
     for i, a in enumerate(args):
@@ -1001,7 +1012,8 @@ def main():
         elif a == "--device-name" and i + 1 < len(args):
             device_name = args[i + 1]
     root = tk.Tk()
-    InstallerApp(root, server, token, device_name, support_contact, preauth_key, conf_path)
+    InstallerApp(root, server, token, device_name, support_contact, preauth_key, conf_path,
+                 poll_interval=poll_interval)
     root.mainloop()
 
 
