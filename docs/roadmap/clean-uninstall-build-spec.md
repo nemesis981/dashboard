@@ -1,7 +1,8 @@
 # Roadmap — Clean install/uninstall overhaul (build spec)
 
-- **Status:** BUILD-READY spec (design of record). Not built. Authored by the docs window from
-  the trip-1.0.8 uninstall audit.
+- **Status:** PARTIAL — phases 1–3 BUILT; de-enroll endpoint (`:5001`) DEPLOYED live; end-to-end
+  VM uninstall lifecycle test still PENDING. (`9321cfe` Phase 1 / `5b03260` Phase 2 / `14ce142`
+  Phase 3.) Design of record, authored by the docs window from the trip-1.0.8 uninstall audit.
 - **Date:** 2026-07-01
 - **Evidence / baseline:** `docs/audits/trip-1.0.8-vm-lifecycle-test-2026-07-01.md` (§4 uninstall
   baseline + §4b third-party inventory).
