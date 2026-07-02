@@ -26,7 +26,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install build dependencies
-        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer
+        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer pythonnet
 
       - name: Fetch ClamAV binaries (best-effort, no definitions)
         continue-on-error: true   # a download hiccup must NOT fail the exe build
