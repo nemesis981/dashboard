@@ -27,6 +27,7 @@ DEFAULTS = {
     "suricata_profile": "auto",
     "scan_on_reconnect": "true",
     "last_scan_at": "",
+    "reputation_cache_enabled": "true",   # Feature 6: observation-only IP-rep cache (never enforces)
     # ── owner-gated enrollment (keypair lives alongside this .conf) ──
     "enrollment_status": "",          # mirrors the server: 'pending'|'approved'|'rejected'
     "enrollment_token": "",           # single-use installer token → server auto-approves

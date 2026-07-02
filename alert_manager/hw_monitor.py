@@ -1779,6 +1779,23 @@ def _agent_enrollment_status(device_id):
         return None
 
 
+def _reputation_dataset():
+    """Feature 6 (observation-only): read the server's IP-reputation rows for an
+    approved agent's local measurement cache. Read-only, best-effort → [] on any
+    error (e.g. ip_enrichment table absent on a fresh box)."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        rows = conn.execute(
+            "SELECT ip, abuse_score, threat_level, total_reports, last_checked "
+            "FROM ip_enrichment").fetchall()
+        conn.close()
+        return [{"ip": r[0], "abuse_score": r[1], "threat_level": r[2],
+                 "total_reports": r[3], "last_checked": r[4]} for r in rows]
+    except Exception:
+        log.exception("reputation dataset read failed")
+        return []
+
+
 def _agent_approved(device_id):
     return _agent_enrollment_status(device_id) == "approved"
 
@@ -2040,6 +2057,16 @@ def _start_windows_agent_listener():
             if parsed.path == "/enrollment_status":
                 device_id = (parse_qs(parsed.query).get("device_id") or [""])[0]
                 self._json(200, {"status": _agent_enrollment_status(device_id) or "unknown"})
+                return
+            if parsed.path == "/reputation_dataset":
+                # Feature 6 (observation-only): serve the IP-reputation rows to an
+                # APPROVED agent for its local measurement cache. Read-only; light
+                # device_id gate (mirrors /hw_data trust; data is non-sensitive).
+                device_id = (parse_qs(parsed.query).get("device_id") or [""])[0]
+                if _agent_enrollment_status(device_id) != "approved":
+                    self._json(403, {"error": "not approved"})
+                    return
+                self._json(200, {"rows": _reputation_dataset()})
                 return
             self.send_response(404)
             self.end_headers()

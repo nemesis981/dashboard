@@ -415,6 +415,16 @@ def main():
 
     _start_command_listener()
 
+    # Feature 6 (observation-only): build + measure the local IP-reputation cache
+    # once at startup. Best-effort — NEVER enforces, blocks, or touches traffic, and
+    # any failure is swallowed so the poll loop / telemetry is unaffected.
+    if _conf.get("reputation_cache_enabled", "true").lower() == "true":
+        try:
+            import reputation_cache
+            reputation_cache.run(_conf)
+        except Exception:
+            log.exception("reputation cache (observational) init failed — continuing")
+
     # Block in poll loop
     _poll_loop()
 
