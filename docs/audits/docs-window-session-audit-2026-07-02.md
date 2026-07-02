@@ -121,8 +121,13 @@ misrepresented; statuses cross-referenced to the 2026-07-02 roadmap audit.
   interested?" doc is shaped from the features-benefits baseline later.
 - `CUSTOM_TAILSCALE_UNINSTALL.md` — still owed (vendor-integration rule) for the Phase-3
   uninstaller's Tailscale-removal code.
-- Held screenshot `docs/audits/trip-1.0.8-test2-startmenu-uninstall-2026-07-01.png` (untracked)
-  — still awaiting a Rule-8 decision (shows a "Test-User" account name).
+- ~~Held screenshot `docs/audits/trip-1.0.8-test2-startmenu-uninstall-2026-07-01.png` (untracked)
+  — awaiting a Rule-8 decision (shows a "Test-User" account name).~~ **RESOLVED (2026-07-02):
+  MOVED to `docs/screenshots/evidence/` (gitignored) per the new screenshot-directory system.**
+  It shows a "Test-User" account name (Rule 8), and the Start-Menu discoverability it documents is
+  already proven. The file is now **out of the repo (not committed), not deleted** — it lives as
+  local-only evidence under the gitignored `evidence/` dir. See `docs/audits/SCREENSHOTS-MOVED.md`.
+  No longer a carried open item.
 - PL-11 (PawnIO) — install guides must tell users to approve the PawnIO install for temps/fans.
 
 ## Method

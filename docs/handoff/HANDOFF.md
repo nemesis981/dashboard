@@ -56,10 +56,12 @@ did not recover). Full finding + fix plan: **`docs/audits/trip-1.0.8-vm3-tsnolau
   The regressed build is preserved at `nemesis-dist/NemesisAgent-Setup.exe.REGRESSED-739e435-tsnolaunch`
   (reference only — tomorrow's fix rebuilds from source `main`@`739e435` + the fix).
 - **Uninstall lifecycle test still UNRUN** — test-2's uninstall was deferred; VM-3 blocked before it.
-- **Held screenshot** `docs/audits/trip-1.0.8-test2-startmenu-uninstall-2026-07-01.png` (untracked)
-  — shows the Start-Menu "Uninstall Nemesis" entry but also the "Test-User" account name; awaiting
-  a Rule-8 decision (commit as-is / redact / leave uncommitted). First screenshot (`…vm-screenshot…`)
-  already committed (`43395fd`).
+- **Held screenshot** (`…test2-startmenu-uninstall-2026-07-01.png`) — **RESOLVED (2026-07-02):
+  MOVED to `docs/screenshots/evidence/` (gitignored)** per the new screenshot-directory system.
+  Shows a "Test-User" account name (Rule 8); the Start-Menu discoverability it documents is already
+  proven. Now **out of the repo (not committed), not deleted** — local-only evidence under the
+  gitignored `evidence/` dir. See `docs/audits/SCREENSHOTS-MOVED.md`. No longer an open item. First
+  screenshot (`…vm-screenshot…`) already committed (`43395fd`).
 - **`CUSTOM_TAILSCALE_UNINSTALL.md`** owed (vendor-integration rule) — docs window.
 - **PL-11 (PawnIO)** — install guides must tell users to approve the PawnIO install for temps/fans.
 - VPN-off workaround still in place (ADR 0005 deferred).

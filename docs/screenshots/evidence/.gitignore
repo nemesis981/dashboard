@@ -1,0 +1,4 @@
+# Test/working screenshots — gitignored by default.
+# Promote to ../showcase/ to include in the repo.
+*
+!.gitkeep
