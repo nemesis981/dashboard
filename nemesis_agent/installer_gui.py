@@ -365,6 +365,56 @@ class InstallerApp:
         except Exception:
             pass
 
+    def _launch_tailscale_gui_minimized(self):
+        """Launch the Tailscale GUI (tailscale-ipn.exe) MINIMIZED so its IPN backend
+        initializes. The Windows service alone leaves BackendState=NoState, which blocks
+        `tailscale up --authkey` (VM-3 regression, 2026-07-01) — only the GUI client inits
+        the backend. Minimize is Windows-side via Start-Process -WindowStyle Minimized
+        (Tailscale has no 'start minimized' flag, req #19080), so the window is present-but-
+        unobtrusive rather than suppressed. Best-effort."""
+        import subprocess
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        gui = os.path.join(pf, "Tailscale", "tailscale-ipn.exe")
+        if not os.path.isfile(gui):
+            return
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 'Start-Process -FilePath "' + gui + '" -WindowStyle Minimized'],
+                check=False, capture_output=True, timeout=30)
+        except Exception:
+            pass
+
+    def _backend_ready(self):
+        """True once the IPN backend has initialized past NoState (i.e. daemon reachable
+        AND BackendState is one of NeedsLogin/Starting/Running/Stopped). `tailscale up
+        --authkey` needs this — firing it against a NoState backend is what failed on VM-3."""
+        import subprocess, json
+        try:
+            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+                               capture_output=True, text=True, timeout=15)
+            if p.returncode != 0 or not p.stdout.strip():
+                return False
+            state = (json.loads(p.stdout) or {}).get("BackendState", "")
+        except Exception:
+            return False
+        return state not in ("", "NoState")
+
+    def _close_tailscale_gui(self):
+        """VERIFY-THEN-CLOSE: close the minimized Tailscale GUI, called ONLY from the
+        post-success path after the join is CONFIRMED connected. NEVER on a fixed timer —
+        a premature/timed close re-triggers the #16086 hang; closing after the backend is
+        Running + a tailnet IP is assigned is safe (the tunnel is held by the service, not
+        the GUI). Best-effort — a close failure never fails the install (connection is up)."""
+        import subprocess
+        try:
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "Stop-Process -Name tailscale-ipn -Force -ErrorAction SilentlyContinue"],
+                check=False, capture_output=True, timeout=15)
+        except Exception:
+            pass
+
     def _open_tailscale(self):
         """Launch the Tailscale UI (or trigger login) so the user can sign in."""
         import subprocess
@@ -449,17 +499,17 @@ class InstallerApp:
 
     def _install_tailscale(self):
         """Install Tailscale on a BARE box (the master baseline ships none). The official MSI
-        with the documented **TS_NOLAUNCH** property (any non-empty string; silent-install only)
-        prevents the Tailscale GUI client from launching — so the 'You're all set' window never
-        appears (avoids user confusion AND the #16086 premature-close hang: suppress, don't close).
-        MSI is the PRIMARY path here precisely so TS_NOLAUNCH always applies (winget-first would
-        install + launch the GUI before we ever reached the MSI). The tailnet join is driven
-        separately by the CLI `tailscale up --authkey` against tailscaled (started explicitly in
-        _join_tailnet_with_preauth_key) — it does NOT depend on the GUI launching, so no-GUI is
-        safe. winget is the fallback, also passing TS_NOLAUNCH via --override. Best-effort;
-        returns True iff tailscale.exe is present after."""
+        with **TS_NOLAUNCH** suppresses the MSI's OWN uncontrolled GUI auto-launch (the
+        "You're all set" window that both confuses users and, closed too early, hits the
+        #16086 hang). It does NOT mean run without the GUI: the IPN backend needs the GUI to
+        leave NoState (VM-3 regression 2026-07-01), so _join_tailnet_with_preauth_key launches
+        it MINIMIZED under our control, waits for the backend to init, joins, then closes it
+        only after a verified connection. MSI is the PRIMARY path so TS_NOLAUNCH always applies
+        (winget-first would auto-launch the GUI first); winget is the fallback, passing
+        TS_NOLAUNCH via --override. Best-effort; returns True iff tailscale.exe is present after."""
         import subprocess
-        # Primary: official MSI + TS_NOLAUNCH (guaranteed GUI suppression).
+        # Primary: official MSI + TS_NOLAUNCH (suppresses the MSI's own auto-launch; we
+        # launch the GUI minimized ourselves in _join_tailnet_with_preauth_key).
         try:
             import tempfile, urllib.request
             msi = os.path.join(tempfile.gettempdir(), "tailscale-setup.msi")
@@ -501,6 +551,15 @@ class InstallerApp:
                 return False
         if self._tailscale_state() == "not_running":
             self._start_tailscale_service()
+        # 1b. Init the IPN backend: the daemon/service alone leaves BackendState=NoState,
+        # which blocks `tailscale up --authkey` (VM-3 regression). Launch the GUI MINIMIZED
+        # to init the backend, then bounded-wait for it to leave NoState before joining.
+        self.set_status("Starting the secure tunnel...")
+        self._launch_tailscale_gui_minimized()
+        for _ in range(15):                      # ~30s for the backend to leave NoState
+            if self._backend_ready():
+                break
+            time.sleep(2)
         # 2. Single-use pre-auth join — attempt ONCE. Failure => spent => stop clean.
         self.set_status("Joining your secure network...")
         try:
@@ -518,6 +577,7 @@ class InstallerApp:
         # 3. Post-success connection-state poll ONLY (bounded; never re-attempts --authkey).
         for _ in range(15):                      # ~30s, polling state, no re-auth
             if self._tailscale_state() == "connected":
+                self._close_tailscale_gui()      # verify-then-close: ONLY now that it's confirmed connected
                 return True
             time.sleep(2)
         self.set_status("The secure network is taking too long to connect. Open Tailscale to "
