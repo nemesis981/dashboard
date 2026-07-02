@@ -7,6 +7,7 @@ import logging
 import subprocess
 import psutil
 
+import win_run
 from platforms import lhm_inproc
 
 log = logging.getLogger("nemesis_agent.platforms.windows")
@@ -39,8 +40,8 @@ _WIN_TUNNEL = ("tailscale", "tun", "tap", "wireguard", "wg", "nordlynx", "proton
 
 def _ps(cmd, timeout=8):
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-Command", cmd],
-                           capture_output=True, text=True, timeout=timeout)
+        r = win_run.run(["powershell", "-NoProfile", "-Command", cmd],
+                        capture_output=True, text=True, timeout=timeout)
         return (r.stdout or "").strip()
     except Exception:
         return ""
@@ -73,8 +74,8 @@ def get_link_type(server=None):
             return "ethernet"
         # Fallback: netsh wlan show interfaces lists connected wireless adapters.
         try:
-            wlan = subprocess.run(["netsh", "wlan", "show", "interfaces"],
-                                  capture_output=True, text=True, timeout=8).stdout or ""
+            wlan = win_run.run(["netsh", "wlan", "show", "interfaces"],
+                               capture_output=True, text=True, timeout=8).stdout or ""
         except Exception:
             wlan = ""
         if "State" in wlan and "connected" in wlan.lower() and alias.lower() in wlan.lower():

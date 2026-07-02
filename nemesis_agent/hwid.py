@@ -21,6 +21,7 @@ import hashlib
 import os
 import sys
 import subprocess
+import win_run
 
 SCHEMA_VERSION = 1
 
@@ -141,7 +142,7 @@ def match_fingerprint(incoming, stored):
 
 def _run(cmd, timeout=8):
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        p = win_run.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.stdout if p.returncode == 0 else ""
     except Exception:
         return ""

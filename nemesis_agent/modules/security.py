@@ -5,6 +5,7 @@ import platform
 import subprocess
 
 import psutil
+import win_run
 
 log = logging.getLogger("nemesis_agent.modules.security")
 
@@ -80,12 +81,12 @@ def _login_events(platform_name: str):
                     events.append({"event_id": r.EventID, "time": str(r.TimeGenerated)})
             win32evtlog.CloseEventLog(hand)
         elif platform_name == "Darwin":
-            out = subprocess.run(["last", "-10"], capture_output=True, text=True, timeout=5).stdout
+            out = win_run.run(["last", "-10"], capture_output=True, text=True, timeout=5).stdout
             for line in out.splitlines()[:10]:
                 if line.strip():
                     events.append({"raw": line.strip()})
         else:
-            out = subprocess.run(
+            out = win_run.run(
                 ["tail", "-n", "20", "/var/log/auth.log"],
                 capture_output=True, text=True, timeout=5,
             ).stdout
@@ -131,7 +132,7 @@ def _usb_events(platform_name: str):
     events = []
     try:
         if platform_name == "Linux":
-            out = subprocess.run(
+            out = win_run.run(
                 ["dmesg", "--time-format", "iso"],
                 capture_output=True, text=True, timeout=5,
             ).stdout
@@ -139,7 +140,7 @@ def _usb_events(platform_name: str):
                 if "usb" in line.lower() and ("new" in line.lower() or "disconnect" in line.lower()):
                     events.append({"raw": line.strip()})
         elif platform_name == "Darwin":
-            out = subprocess.run(
+            out = win_run.run(
                 ["system_profiler", "SPUSBDataType"],
                 capture_output=True, text=True, timeout=8,
             ).stdout
@@ -147,7 +148,7 @@ def _usb_events(platform_name: str):
                 if "Product ID:" in line or "Vendor ID:" in line:
                     events.append({"raw": line.strip()})
         elif platform_name == "Windows":
-            out = subprocess.run(
+            out = win_run.run(
                 ["wmic", "path", "Win32_USBHub", "get", "DeviceID,Description"],
                 capture_output=True, text=True, timeout=8,
             ).stdout

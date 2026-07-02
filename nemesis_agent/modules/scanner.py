@@ -2,6 +2,7 @@
 import logging
 import platform
 import subprocess
+import win_run
 import threading
 import time
 import uuid
@@ -47,7 +48,7 @@ def _run_scan(scan_id, path):
     threats = []
     files_scanned = 0
     try:
-        proc = subprocess.Popen(
+        proc = win_run.popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
         for line in proc.stdout:

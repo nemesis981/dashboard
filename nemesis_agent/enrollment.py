@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess
+import win_run
 import sys
 import socket
 import time
@@ -171,7 +172,7 @@ def pre_enrollment_scan():
     if clam:
         res["clamav_available"] = True
         try:
-            p = subprocess.run([clam, "-r", "-i", "--no-summary", *roots],
+            p = win_run.run([clam, "-r", "-i", "--no-summary", *roots],
                                capture_output=True, text=True, timeout=_SCAN_TIMEOUT)
             # clamscan rc: 0 clean, 1 infected found, 2 error. Count FOUND lines.
             res["clamav_findings"] = sum(1 for ln in p.stdout.splitlines()
@@ -190,7 +191,7 @@ def pre_enrollment_scan():
         res["yara_available"] = True
         remaining = max(5, _SCAN_TIMEOUT - int(time.monotonic() - started))
         try:
-            p = subprocess.run([yara, "-r", rules, *roots],
+            p = win_run.run([yara, "-r", rules, *roots],
                                capture_output=True, text=True, timeout=remaining)
             # yara prints one line per match: "<rule> <path>".
             res["yara_findings"] = sum(1 for ln in p.stdout.splitlines() if ln.strip())

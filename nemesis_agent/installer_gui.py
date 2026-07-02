@@ -18,6 +18,8 @@ import configparser
 import json
 from datetime import datetime, timezone
 
+import win_run
+
 import tkinter as tk
 from tkinter import ttk
 
@@ -346,7 +348,7 @@ class InstallerApp:
         """(BackendState, 'ip,ip') for diagnostic logging — best-effort; ('?','') on failure."""
         import subprocess
         try:
-            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+            p = win_run.run([self._tailscale_exe(), "status", "--json"],
                                capture_output=True, text=True, timeout=15)
             if p.returncode != 0 or not p.stdout.strip():
                 return ("unreachable", "")
@@ -391,7 +393,7 @@ class InstallerApp:
             return "not_installed"
         import subprocess, json
         try:
-            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+            p = win_run.run([self._tailscale_exe(), "status", "--json"],
                                capture_output=True, text=True, timeout=15)
         except Exception:
             return "not_running"
@@ -414,7 +416,7 @@ class InstallerApp:
         """State 4: try to start the Tailscale Windows service."""
         import subprocess
         try:
-            subprocess.run(["powershell", "-NoProfile", "-Command",
+            win_run.run(["powershell", "-NoProfile", "-Command",
                             "Start-Service Tailscale"],
                            check=False, capture_output=True, timeout=30)
         except Exception:
@@ -426,7 +428,7 @@ class InstallerApp:
         --authkey` needs this — firing it against a NoState backend is what failed on VM-3."""
         import subprocess, json
         try:
-            p = subprocess.run([self._tailscale_exe(), "status", "--json"],
+            p = win_run.run([self._tailscale_exe(), "status", "--json"],
                                capture_output=True, text=True, timeout=15)
             if p.returncode != 0 or not p.stdout.strip():
                 return False
@@ -442,7 +444,7 @@ class InstallerApp:
         Running is safe (the tunnel is held by the service, not the GUI). Best-effort."""
         import subprocess
         try:
-            subprocess.run(
+            win_run.run(
                 ["powershell", "-NoProfile", "-Command",
                  "Stop-Process -Name tailscale-ipn -Force -ErrorAction SilentlyContinue"],
                 check=False, capture_output=True, timeout=15)
@@ -459,7 +461,7 @@ class InstallerApp:
                 os.startfile(gui)            # type: ignore[attr-defined]  (Windows only)
             else:
                 # Fallback: `tailscale up` opens the login flow in the browser.
-                subprocess.Popen([self._tailscale_exe(), "up"])
+                win_run.popen([self._tailscale_exe(), "up"])
         except Exception:
             pass
 
@@ -547,7 +549,7 @@ class InstallerApp:
             msi = os.path.join(tempfile.gettempdir(), "tailscale-setup.msi")
             urllib.request.urlretrieve(
                 "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi", msi)
-            p = subprocess.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
+            p = win_run.run(["msiexec", "/i", msi, "/quiet", "/norestart"],
                                check=False, capture_output=True, timeout=300)
             self._ilog("tailscale: msiexec /i rc=%s" % p.returncode)
         except Exception as e:
@@ -557,7 +559,7 @@ class InstallerApp:
             return True
         # Fallback: winget (also lets the underlying MSI auto-launch the GUI — no TS_NOLAUNCH).
         try:
-            p = subprocess.run(["winget", "install", "--id", "Tailscale.Tailscale",
+            p = win_run.run(["winget", "install", "--id", "Tailscale.Tailscale",
                             "--accept-package-agreements", "--accept-source-agreements",
                             "--override", "/quiet /norestart"],
                            check=False, capture_output=True, timeout=300)
@@ -605,7 +607,7 @@ class InstallerApp:
         # 2. Single-use pre-auth join — attempt ONCE. Failure => spent => stop clean.
         self.set_status("Joining your secure network...")
         try:
-            p = subprocess.run([self._tailscale_exe(), "up",
+            p = win_run.run([self._tailscale_exe(), "up",
                                 "--authkey=" + self.preauth_key, "--timeout=30s"],
                                capture_output=True, text=True, timeout=90)
             ok = (p.returncode == 0)
@@ -731,7 +733,7 @@ class InstallerApp:
             return
         flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
         try:
-            subprocess.Popen([exe], cwd=INSTALL_DIR, creationflags=flags)
+            win_run.popen([exe], cwd=INSTALL_DIR, creationflags=flags)
         except Exception:
             pass
 
@@ -744,7 +746,7 @@ class InstallerApp:
             return
         try:
             flags = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW
-            subprocess.Popen([fc, f"--datadir={os.path.join(INSTALL_DIR, 'clamav')}"],
+            win_run.popen([fc, f"--datadir={os.path.join(INSTALL_DIR, 'clamav')}"],
                              cwd=os.path.join(INSTALL_DIR, "clamav"),
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              creationflags=flags)
@@ -756,7 +758,7 @@ class InstallerApp:
         isn't flagged/quarantined. Best-effort (needs admin — Setup runs elevated)."""
         import subprocess
         try:
-            p = subprocess.run(
+            p = win_run.run(
                 ["powershell", "-NoProfile", "-Command",
                  f"Add-MpPreference -ExclusionPath '{INSTALL_DIR}'"],
                 check=False, capture_output=True, timeout=30)
@@ -841,7 +843,7 @@ class InstallerApp:
             "/TN", "NemesisAgent", "/TR", f'"{exe}"',
         ]
         try:
-            p = subprocess.run(cmd, check=False, capture_output=True, text=True)
+            p = win_run.run(cmd, check=False, capture_output=True, text=True)
             self._ilog("autostart-task NemesisAgent: rc=%s" % p.returncode)
         except Exception as e:
             self._ilog("autostart-task: error %s" % self._redact(str(e)))
@@ -861,7 +863,7 @@ class InstallerApp:
             return True
         try:
             import subprocess
-            p = subprocess.run(["sc", "query", "PawnIO"], capture_output=True, text=True, timeout=15)
+            p = win_run.run(["sc", "query", "PawnIO"], capture_output=True, text=True, timeout=15)
             return p.returncode == 0 and ("RUNNING" in (p.stdout or "") or "STOPPED" in (p.stdout or ""))
         except Exception:
             return False
@@ -892,7 +894,7 @@ class InstallerApp:
         import subprocess
         try:
             self.set_status("Installing sensor driver (PawnIO)...")
-            p = subprocess.run([setup, "-install", "-silent"], check=False,
+            p = win_run.run([setup, "-install", "-silent"], check=False,
                                capture_output=True, timeout=180)
             self._ilog("pawnio: -install -silent rc=%s present_after=%s" % (
                 p.returncode, self._pawnio_present()))
@@ -902,7 +904,7 @@ class InstallerApp:
     def _tailscale_version(self):
         try:
             import subprocess
-            p = subprocess.run([self._tailscale_exe(), "version"],
+            p = win_run.run([self._tailscale_exe(), "version"],
                                capture_output=True, text=True, timeout=10)
             if p.returncode == 0:
                 return (p.stdout.splitlines() or [""])[0].strip() or None
@@ -964,7 +966,7 @@ class InstallerApp:
         ps = ("$s=(New-Object -COM WScript.Shell).CreateShortcut(" + repr(lnk_path) + "); "
               "$s.TargetPath=" + repr(target) + "; $s.Save()")
         try:
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+            win_run.run(["powershell", "-NoProfile", "-Command", ps],
                            check=False, capture_output=True, timeout=20)
         except Exception:
             pass

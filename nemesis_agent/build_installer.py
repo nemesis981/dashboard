@@ -31,7 +31,7 @@ UNINSTALLER = "NemesisUninstall.exe"    # shipped in the pack once Phase 3 build
 # The persistent agent dynamically imports its platform + collector modules, so
 # they must be frozen in explicitly.
 AGENT_HIDDEN = [
-    "requests", "psutil", "watchdog", "plyer", "cryptography",
+    "requests", "psutil", "watchdog", "plyer", "cryptography", "win_run",
     "platforms.windows", "platforms.linux", "platforms.mac",
     "modules.hardware", "modules.security", "modules.scanner", "modules.suricata_local",
 ]
