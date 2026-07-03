@@ -378,6 +378,13 @@ def _shutdown(*_):
         dns_enforce.restore()
     except Exception:
         pass
+    # L2 fail-safe: stop the divert loop + close the WinDivert handle so the filter is
+    # removed and traffic flows normally when the agent stops. No-op if never started.
+    try:
+        import l2_windivert
+        l2_windivert.stop()
+    except Exception:
+        pass
     sys.exit(0)
 
 
@@ -441,6 +448,17 @@ def main():
             reputation_cache.run(_conf)
         except Exception:
             log.exception("reputation cache (observational) init failed — continuing")
+
+    # L2 (WinDivert enforcement, default OFF): reputation-gated outbound-SYN blocking,
+    # fed by the Feature-6 cache. Fail-open on handle-open failure; a stall-watchdog
+    # force-closes the handle on a hang; any exception closes the handle (traffic
+    # restored). Runs in daemon threads — never blocks the poll loop.
+    if _conf.get("l2_enforce_enabled", "false").lower() == "true":
+        try:
+            import l2_windivert
+            l2_windivert.start_background(_conf)
+        except Exception:
+            log.exception("L2 WinDivert init failed — continuing (fail-open)")
 
     # Block in poll loop
     _poll_loop()

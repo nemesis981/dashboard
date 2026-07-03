@@ -94,6 +94,10 @@ def main(argv=None):
     if sys.platform == "win32":
         agent_hidden += ["clr", "platforms.lhm_inproc"]
         agent_collect += ["pythonnet", "clr_loader"]
+        # L2 WinDivert blocking: pydivert's wheel ships WinDivert.dll + WinDivert64.sys
+        # as package data, so --collect-all bundles the driver too (no separate payload).
+        agent_hidden += ["l2_windivert"]
+        agent_collect += ["pydivert"]
         lhm_src = os.path.join(HERE, "lhm")
         if os.path.isdir(lhm_src):
             for f in sorted(os.listdir(lhm_src)):
