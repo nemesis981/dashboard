@@ -97,6 +97,12 @@ is reopened after a crash, the operator re-states its role.
 - Rule 8 leak-scan every diff (placeholders only — no PII/IPs/hosts/accounts).
 - Commit-first, then push. HOLD the push for operator review on anything non-trivial
   (ADRs, security-default code, schema changes).
+- **Push coordination (concurrent windows).** Before ANY window runs `git push`, it must first run
+  `git log --oneline @{u}..HEAD` (or equivalent) to list ALL locally-unpushed commits — **not just
+  the ones it authored** — since a push publishes everything pending, regardless of which window is
+  pushing. Show the full list to the operator and get explicit confirmation before pushing. A "hold
+  push" instruction in one window is only meaningful if every window respects this — **ownership
+  does not limit what a push publishes.**
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
