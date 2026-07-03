@@ -21,6 +21,10 @@
 >
 > **Rule 8:** placeholders only — no real IPs/hosts/paths/accounts. Date: 2026-07-02.
 > **Status:** BASELINE (inventory + benefit translation + honest status). Authored by the docs window.
+> **Updated 2026-07-02 (build 1 + build 2):** installer/agent-reliability improvements shipped
+> (folded into §1); the L1 / L2 / IP-reputation network-inspection layers added as a new
+> **EXPERIMENTAL (built, default-OFF)** section (§4) — kept strictly separate from shipped
+> capability so nothing in-progress reads as a current feature.
 
 ---
 
@@ -31,6 +35,7 @@
 | **SHIPPED** | Built, deployed, and confirmed working in real use. |
 | **WORKING** | Built and functional today; early-stage (v1.x), part of the running product. |
 | **PARTIAL** | Real and useful now, but not fully proven end-to-end and/or some layers still pending. Called out explicitly. |
+| **EXPERIMENTAL** | Built and validated in testing, but **default-OFF and not enabled** — in-progress, **NOT a current capability.** Never presented as active/shipped. |
 | **PLANNED** | Designed / captured on the roadmap; **not built yet.** Lives in "Coming soon." |
 
 > The whole product is early and solo-built. "WORKING" means *it runs and does the job today* —
@@ -82,11 +87,13 @@
 
 ### Hardware & health monitoring
 - **FEATURE:** Collects CPU temperature, fan speeds, CPU/RAM usage and related sensor data — from
-  the Nemesis box (lm-sensors) and from enrolled endpoints (LibreHardwareMonitor on Windows,
-  lm-sensors on Linux) — and shows them on a live fleet view.
+  the Nemesis box (lm-sensors) and from enrolled endpoints (on Windows via **in-process** sensor
+  reading — "Method B", no separate sensor program or listening port, with the PawnIO driver bundled
+  so temps/fans provision automatically; lm-sensors on Linux) — and shows them on a live fleet view.
 - **BENEFIT:** So that you get an **early warning when a machine is overheating or straining**
   before it fails — across all your devices in one screen, not one machine at a time.
-- **STATUS:** WORKING.
+- **STATUS:** WORKING (Windows sensor reading is now **in-process** — "Method B" — and PawnIO is
+  bundled so temperature/fan sensors provision correctly; shipped in the 2026-07-02 build).
 
 ### Alerts, tickets & email notifications
 - **FEATURE:** Events are priority-classified, de-duplicated, and rate-limited; high/critical
@@ -160,6 +167,20 @@
 - **STATUS:** WORKING (roadmap-SHIPPED: connectivity watcher `53975ea`–`086a659`; Anthropic
   status banner `b7b7174`).
 
+### Reliable, quiet agent install & reporting (2026-07-02 build)
+- **FEATURE:** A batch of install/agent-reliability improvements, proven on real hardware: the
+  **Tailscale join fix** (installer auto-launches the MSI so the secure tunnel connects reliably —
+  resolves the prior join failure), **self-documenting install logging** (`install.log` records
+  exactly what the installer did), **in-process hardware sensor reading** ("Method B" — no separate
+  sensor program/port), **PawnIO bundled** so temp/fan sensors provision automatically, **silent
+  installs and heartbeats** (no stray console-window flashes), a **configurable heartbeat interval**
+  (with a safe floor), and a **startup reporting ramp** so a freshly installed or reconnected device
+  shows real data quickly.
+- **BENEFIT:** So that **installing Nemesis on a computer just works and stays out of the way** — it
+  connects the first time, doesn't pop up stray windows, records what it did if anything looks off,
+  and starts showing that machine's status fast instead of making you wait.
+- **STATUS:** SHIPPED (build 1 + build 2, proven on real hardware, 2026-07-02).
+
 ---
 
 ## 2. Roadmap-tracked SHIPPED features (audit-confirmed)
@@ -211,11 +232,46 @@ Honest staging so the showcase doc doesn't overclaim. Cross-ref roadmap audit (*
 
 ---
 
-## 4. Coming soon / in development (PLANNED — not built)
+## 4. In active development — BUILT but DEFAULT-OFF (experimental, NOT shipped)
+
+⚠️ **Do NOT present these as current capabilities.** They were **built and validated in testing on
+2026-07-02**, but ship **default-OFF** and are **not enabled** pending further validation. This is
+in-progress network-inspection work — real and promising, honestly labeled as not-yet-a-feature.
+For the showcase doc these belong (if used at all) in a "what's coming / under active development"
+framing, never in "what it does today."
+
+### Observational IP-reputation cache (Feature 6)
+- **FEATURE:** The agent pulls the server's existing IP-reputation data into a small local cache and
+  **measures only** — recording what it observes, with **no enforcement** (it blocks nothing).
+- **BENEFIT (once matured):** So that a device could eventually judge whether an IP it's talking to
+  is known-bad using local data — for now it purely *measures* to prove the approach and tune accuracy.
+- **STATUS:** **EXPERIMENTAL** — built, measurement-only, **default-OFF.** Not enforcing; not a
+  current protection.
+
+### L1 — DNS enforcement plumbing
+- **FEATURE:** The wiring to route/enforce DNS through Nemesis for a device, with a tested
+  **kill-switch** to disable it instantly.
+- **BENEFIT (once matured):** So that DNS-level protection could extend to a device over the tunnel.
+- **STATUS:** **EXPERIMENTAL** — plumbing built, kill-switch tested, **not pointed at production DNS
+  yet**, default-OFF.
+
+### L2 — WinDivert reputation blocking (with stall-watchdog fail-safe)
+- **FEATURE:** Connection-level blocking on Windows that can stop **both** a device connecting **out**
+  to a bad-reputation IP **and** a bad-reputation peer connecting **in** (bidirectional, at the TCP
+  handshake), backed by a **stall-watchdog** that auto-recovers normal networking within seconds if
+  the packet filter ever hangs.
+- **BENEFIT (once matured):** So that known-bad connections could be blocked in real time in both
+  directions — with a fail-safe that restores normal networking quickly if the filter stalls.
+- **STATUS:** **EXPERIMENTAL** — validated 2026-07-02 with real crash / hang / kill-switch tests on a
+  test VM; **still default-OFF pending further validation.** Promising, not shipped.
+
+---
+
+## 5. Coming soon / in development (PLANNED — not built)
 
 Genuinely planned items pulled from the parked roadmap (`docs/roadmap/*`, **39 parked** per the
-2026-07-02 audit). **Clearly not-yet-built** — for the forward-looking part of the showcase doc
-only; must be labeled as direction, not delivery.
+2026-07-02 audit; more design captures added since). **Clearly not-yet-built** — for the
+forward-looking part of the showcase doc only; must be labeled as direction, not delivery.
 
 | Planned item | Benefit it will offer (plain) | Roadmap file |
 |---|---|---|
@@ -229,6 +285,9 @@ only; must be labeled as direction, not delivery.
 | **MSP central management / multi-user** | One console managing many separate sites/customers — so a small IT shop could run Nemesis for its clients. | msp-central-management, responsive-dashboard-multiuser-ready |
 | **Support bundle & guided tutorials** | One-click diagnostic package + AI walkthroughs — so getting help (or helping yourself) is easy for a non-expert. | support-bundle, ai-generated-tutorial-walkthrough |
 | **Server-on-Windows** | Run the Nemesis server itself on Windows, not just Linux — so more people can host it on hardware they already own. | server-on-windows-roadmap |
+| **Dashboard L2 enable/disable toggle** | A per-device on/off switch for the L2 blocking above, with graceful fallback to measure-only mode — so an operator can turn enforcement off for a misbehaving device without it going dark. | dashboard-l2-toggle |
+| **Stumble-escalation (auto-disable + ticket)** | If a device's blocking keeps stumbling, Nemesis auto-disables it and files a support ticket — so a flaky device self-heals instead of staying broken. | l2-windivert-stumble-escalation |
+| **WiFi security inspection (ADR 0009)** | The full design for inspecting/enforcing on a device's live traffic (DNS + IP reputation + selective IDS), scoped with honest effort estimates before any build. | adr-0009-build-scope |
 
 > Many more parked design captures exist (diagnostics-AI set, malware sub-layers, enterprise/MSP,
 > device/agent tooling). The full, honestly-classified list is the roadmap-state audit; the table
@@ -236,7 +295,7 @@ only; must be labeled as direction, not delivery.
 
 ---
 
-## 5. Cross-cutting honesty notes (carry into the showcase doc)
+## 6. Cross-cutting honesty notes (carry into the showcase doc)
 
 - **The thesis is "built-in IT expertise for people without an IT department."** Nearly every
   benefit above should ladder back to that: it does the job a small IT team would, for someone who
@@ -249,8 +308,12 @@ only; must be labeled as direction, not delivery.
   the trust the polished doc needs.
 - **No pricing** appears anywhere in this baseline (separate thread).
 - **Maturity must be visible in the final doc:** WORKING/SHIPPED items can be shown as real;
-  PARTIAL items must carry their "built but not fully proven" honesty; PLANNED items must read as
-  direction, never delivery.
+  PARTIAL items must carry their "built but not fully proven" honesty; **EXPERIMENTAL items (§4 —
+  L1/L2/reputation) must NEVER be shown as current protection** (built, default-OFF, in validation);
+  PLANNED items must read as direction, never delivery.
+- **The network-inspection layers are the sharpest oversell risk.** L2 "blocks bad IPs both ways" is
+  genuinely exciting, but it is **default-OFF and unproven at scale** — describe it as *under active
+  development / validated in lab testing*, never as "Nemesis blocks malicious connections today."
 
 ---
 
@@ -261,3 +324,11 @@ approval, scan queue). Status classification cross-referenced to
 `docs/audits/roadmap-state-audit-2026-07-02.md`. This is the baseline; the polished "Are you
 interested?" doc is shaped from it later (brief: `docs/business/interest-document-brief.md` —
 not yet authored as of this baseline).
+
+**2026-07-02 build refresh:** shipped installer/agent-reliability items folded into §1 (per the
+build-1/build-2 changelog — Tailscale join fix, install.log, Method-B in-process sensors, console-
+flash suppression, configurable `poll_interval` + startup ramp, PawnIO bundling). The built-but-
+default-OFF inspection layers (Feature-6 reputation cache, L1 DNS plumbing, L2 WinDivert blocking)
+were added as the new EXPERIMENTAL §4 — deliberately NOT classified WORKING/SHIPPED. Tonight's
+design captures (`dashboard-l2-toggle`, `l2-windivert-stumble-escalation`, `adr-0009-build-scope`)
+added to §5 PLANNED.
