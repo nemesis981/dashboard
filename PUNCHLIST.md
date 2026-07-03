@@ -931,3 +931,10 @@ its sidecar conf — a per-installer opt-in with no schema/default change. **Opt
 baking it, so the dashboard UI can mint L2-enabled installers directly. **Security-default + schema
 change → audit-first, hold-for-review.** Deferred from tonight deliberately (Option B was the
 lower-risk path for one laptop pre-trip).
+
+### [LOW] `agent_devices.last_heartbeat_data` not populating (observed 2026-07-03, trip-laptop)
+- [ ] **`agent_devices.last_heartbeat_data` is not populating for trip-laptop despite
+  hw_metrics/agent_last_seen updating normally** — real telemetry (cpu/ram/temp) is landing
+  correctly via the metrics path, but whatever writes the `last_heartbeat_data` blob on the device
+  row isn't firing for this device. Low severity, not blocking, but check if any dashboard UI reads
+  that column directly.
