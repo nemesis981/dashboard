@@ -449,10 +449,12 @@ def main():
         except Exception:
             log.exception("reputation cache (observational) init failed — continuing")
 
-    # L2 (WinDivert enforcement, default OFF): reputation-gated outbound-SYN blocking,
-    # fed by the Feature-6 cache. Fail-open on handle-open failure; a stall-watchdog
-    # force-closes the handle on a hang; any exception closes the handle (traffic
-    # restored). Runs in daemon threads — never blocks the poll loop.
+    # L2 (WinDivert enforcement, default OFF): reputation-gated blocking on TCP
+    # handshake-initiation, BIDIRECTIONAL (outbound SYN + outbound SYN-ACK -> blocks
+    # outbound-to-bad-IP and inbound-from-bad-IP), fed by the Feature-6 cache. Fail-open
+    # on handle-open failure; a stall-watchdog force-closes the handle on a hang; any
+    # exception closes the handle (traffic restored). Runs in daemon threads -- never
+    # blocks the poll loop.
     if _conf.get("l2_enforce_enabled", "false").lower() == "true":
         try:
             import l2_windivert

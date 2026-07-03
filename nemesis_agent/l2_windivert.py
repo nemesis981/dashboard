@@ -1,10 +1,14 @@
-"""L2 — WinDivert outbound-SYN reputation blocking (Windows), with stall-watchdog.
+"""L2 — WinDivert reputation blocking on TCP handshake-initiation (Windows), with stall-watchdog.
 
-Opens a WinDivert handle on a NARROW filter (outbound TCP SYN only), and for each
-new connection attempt looks the destination IP up in the Feature-6 local reputation
-cache: KNOWN-BAD -> drop the SYN (connection never forms); clean OR unknown -> reinject
-the packet unmodified (connection proceeds). Only connection-initiating SYNs match the
-filter, so established flows are never touched.
+Opens a WinDivert handle on a NARROW filter (outbound TCP SYN-flagged packets) and, for
+each connection handshake, looks the peer IP up in the Feature-6 local reputation cache:
+KNOWN-BAD -> drop the packet (handshake never completes); clean OR unknown -> reinject
+unmodified (connection proceeds). The filter is BIDIRECTIONAL by design: tcp.Syn matches
+both an outbound pure SYN (this host connecting OUT to a bad IP) AND an outbound SYN-ACK
+(this host answering an INBOUND connection from a bad IP), so reputation blocking covers
+both directions of connection initiation -- intentional, not outbound-only, because
+blocking only outbound while accepting inbound from known-bad sources would be asymmetric
+protection for a security product. Established flows carry no SYN and are never diverted.
 
 DEFAULT OFF (l2_enforce_enabled=false). This is the only layer that can block real
 traffic, so it is fail-open by construction:
@@ -36,8 +40,12 @@ import logging
 
 log = logging.getLogger("nemesis_agent.l2_windivert")
 
-# Narrow filter: only outbound TCP connection-initiating SYNs. Established flows,
-# inbound, UDP, non-IP — all pass untouched (never diverted).
+# Narrow filter: outbound TCP SYN-flagged packets = connection handshakes in BOTH
+# directions -- outbound SYN (we initiate to a peer) AND outbound SYN-ACK (we answer an
+# inbound connect). Intentional bidirectional reputation coverage, NOT outbound-only.
+# Established flows (no SYN), UDP, and non-IP are never diverted. Tradeoff: because
+# SYN-ACK matches, a NEW inbound connection is briefly blocked during a stall (until the
+# watchdog recovers, ~stall_timeout); established sessions are unaffected.
 FILTER = "outbound and ip and tcp and tcp.Syn"
 DEFAULT_STALL_TIMEOUT = 5.0     # seconds a packet may be in-processing before the watchdog fires
 WATCHDOG_INTERVAL = 1.0
