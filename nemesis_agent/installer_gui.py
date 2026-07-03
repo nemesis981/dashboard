@@ -155,7 +155,7 @@ def _read_baked_config():
     g = lambda k, d="": cfg.get("nemesis", k, fallback=d)
     return (g("nemesis_ip"), g("enrollment_token"), g("device_name", "Windows Device"),
             g("support_contact", "your administrator"), g("preauth_key"),
-            g("poll_interval"), path)
+            g("poll_interval"), g("l2_enforce_enabled"), path)
 
 
 def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_version=None,
@@ -224,13 +224,14 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
 
 class InstallerApp:
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
-                 preauth_key="", conf_path="", poll_interval=""):
+                 preauth_key="", conf_path="", poll_interval="", l2_enforce=""):
         self.root = root
         self.server = server
         self.token = token
         self.preauth_key = preauth_key
         self.conf_path = conf_path
         self.poll_interval = poll_interval
+        self.l2_enforce = l2_enforce
         self.device_name = device_name or "Windows Device"
         self.support_contact = support_contact or "your administrator"
         root.title("Nemesis Security — Setup")
@@ -804,6 +805,12 @@ class InstallerApp:
             cfg.set("nemesis", "poll_interval", str(max(15, pi)))
         except (TypeError, ValueError):
             pass
+        # Optional L2 enforcement opt-in (per-installer). Only written when THIS installer's
+        # sidecar conf carried l2_enforce_enabled=true; the global config.py default stays OFF,
+        # so every other install remains default-off. (WinDivert reputation blocking; fail-open
+        # + stall-watchdog ship with it.)
+        if str(self.l2_enforce).strip().lower() == "true":
+            cfg.set("nemesis", "l2_enforce_enabled", "true")
         with open(os.path.join(INSTALL_DIR, "nemesis_agent.conf"), "w", encoding="utf-8") as f:
             cfg.write(f)
         self._ilog("file-copy: agent=%s clamav=%s lhm=%s uninstaller=%s conf(server=%s)" % (
@@ -1003,7 +1010,7 @@ class InstallerApp:
 
 def main():
     (server, token, device_name, support_contact, preauth_key,
-     poll_interval, conf_path) = _read_baked_config()
+     poll_interval, l2_enforce, conf_path) = _read_baked_config()
     # CLI overrides: --server X --token Y --device-name Z
     args = sys.argv[1:]
     for i, a in enumerate(args):
@@ -1015,7 +1022,7 @@ def main():
             device_name = args[i + 1]
     root = tk.Tk()
     InstallerApp(root, server, token, device_name, support_contact, preauth_key, conf_path,
-                 poll_interval=poll_interval)
+                 poll_interval=poll_interval, l2_enforce=l2_enforce)
     root.mainloop()
 
 
