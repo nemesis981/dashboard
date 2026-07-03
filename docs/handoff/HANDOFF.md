@@ -1,90 +1,149 @@
 # HANDOFF — current state
 
-> Current project state, last updated 2026-07-01 (closeout). Overwritten at each closeout
-> (latest state wins). Durable history: `docs/handoff/supplements/` (append-only); raw step
-> log: `docs/handoff/worklog/`.
-> Real IPs/hosts/accounts/names live in `~/work/nemesis-private/local-config.md` (outside the
-> repo) — placeholders here per Rule 8 (public repo).
+> Last updated **2026-07-02 (closeout)**. Overwritten each closeout (latest state wins).
+> Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys live
+> ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
+>
+> ⚠️ **OPERATOR AWAY 2026-07-03 → ~2026-07-06 (≈4 days, no computer access).**
+> ⚠️ **Windows are now SOLO** — Window 2 (docs) retired; one window does build + docs.
 
-## Current state
-- **Clean-install/uninstall overhaul BUILT (all 3 phases) + de-enroll endpoint DEPLOYED live.**
-  Per `docs/roadmap/clean-uninstall-build-spec.md`:
-  - **Phase 1 (`9321cfe`)** — install writes a provenance `install-manifest.json`, registers in
-    Add/Remove Programs (HKCU), adds a Start Menu folder, and ships `NemesisUninstall.exe`
-    (bundled INSIDE the setup exe). **All four PROVEN live on test-2 VM.**
-  - **Phase 2 (`5b03260`)** — `POST /api/agent/uninstall` on **:5001** (hw_monitor): signed
-    (device keypair, ADR 0011), soft-marks `enrollment_status='uninstalled'` +
-    `uninstalled_at`/`uninstalled_by`, idempotent. **DEPLOYED** — hw-monitor restarted 17:27,
-    migration applied, endpoint verified live (400/401 not 404).
-  - **Phase 3 (`14ce142`)** — manifest-driven `NemesisUninstall.exe` + consent UX (signed
-    de-enroll → leave tailnet → Tailscale-remove-if-installed_by_nemesis → teardown → ARP/Start
-    Menu). Built + unit-verified (sign/verify cross-contract passes). **Uninstall NOT yet run
-    end-to-end on a VM.**
-- **Test-2 (66d190b build) PASSED** — self-onboard + OAuth-minted key + enroll + **fix #3
-  (no double-enroll)** + Phase-1 manifest/ARP/Start-Menu, all confirmed on a fresh VM.
-- **Two installer UX improvements built — one REGRESSED:**
-  - `1f495ad` **silent PawnIO** pre-install + provenance (never-remove for shared kernel driver)
-    — **UNTESTED** (gated behind the Tailscale step, never reached on VM-3).
-  - `739e435` **TS_NOLAUNCH** (suppress Tailscale GUI) — **REGRESSION: breaks the tailnet join.**
-    See ⚠️ below.
-- **PawnIO identified** as the "hardware monitor download prompt" (LHM's kernel driver) — PL-11;
-  install docs must tell users to approve it.
-- **Header light: green.** All 7 services active (incl. hw-monitor). De-enroll endpoint live.
-- **Wisconsin trip: ~2 weeks out (mid-July).** Enroll path is trip-ready on the known-good build;
-  the uninstall/clean-teardown work is new and still needs its end-to-end VM proof.
+---
 
-## ⚠️ VM-3 REGRESSION — TS_NOLAUNCH breaks the Tailscale join (FIX FIRST next session)
-`739e435` installs Tailscale with `TS_NOLAUNCH=1` to suppress the GUI, but the GUI initializes
-Tailscale's IPN backend. Suppressed → backend stuck **`NoState`** → `tailscale up --authkey` had
-nothing to join through → **join fails** (no tailnet IP, install blocked before file-copy; retry
-did not recover). Full finding + fix plan: **`docs/audits/trip-1.0.8-vm3-tsnolaunch-regression-2026-07-01.md`**.
+## TL;DR
+Tonight shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
+latent build gap where pydivert/WinDivert was never actually bundled in any frozen agent**, so L2
+could not have run in production before tonight. Server-side Feature 6 endpoint is **LIVE**; L1/L2
+ship **default-OFF**. A **trip-laptop installer with L2 pre-enabled** was built and staged to the
+NEMESIS USB stick (now in the operator's possession). Emergency fallback (tag + Procedure A/B) is
+confirmed on origin. Nothing is in a half-deployed state.
 
-## Next-session resume (IN ORDER)
-1. **FIX the TS_NOLAUNCH regression** (per the fix plan in the regression doc): try **launch GUI
-   MINIMIZED** first (`Start-Process -WindowStyle Minimized`; not a Tailscale flag — req #19080);
-   optional **verify-then-close** (NEVER timer-close — re-triggers #16086); fallback = **revert
-   TS_NOLAUNCH**, keep the window + guidance text (test-2-proven).
-2. **CI rebuild → regenerate → re-test on a fresh VM.** This also finally **validates silent
-   PawnIO** (`1f495ad`), untested tonight.
-3. **Run the full UNINSTALL lifecycle test** (never done): install → approve → **uninstall from
-   Settings → Apps** → confirm de-enroll clears the server ghost (`uninstalled` +
-   `uninstalled_at`/`by`), tailnet left, Tailscale removed (installed_by_nemesis), PawnIO KEPT
-   (never-remove), no residue.
+## LIVE vs DEFAULT-OFF (and why)
 
-## Open items (carry)
-- **Staged installer = known-good `66d190b` (test-2) build** (re-staged as `NEMESIS_AGENT_EXE`).
-  The regressed build is preserved at `nemesis-dist/NemesisAgent-Setup.exe.REGRESSED-739e435-tsnolaunch`
-  (reference only — tomorrow's fix rebuilds from source `main`@`739e435` + the fix).
-- **Uninstall lifecycle test still UNRUN** — test-2's uninstall was deferred; VM-3 blocked before it.
-- **Held screenshot** (`…test2-startmenu-uninstall-2026-07-01.png`) — **RESOLVED (2026-07-02):
-  MOVED to `docs/screenshots/evidence/` (gitignored)** per the new screenshot-directory system.
-  Shows a "Test-User" account name (Rule 8); the Start-Menu discoverability it documents is already
-  proven. Now **out of the repo (not committed), not deleted** — local-only evidence under the
-  gitignored `evidence/` dir. See `docs/audits/SCREENSHOTS-MOVED.md`. No longer an open item. First
-  screenshot (`…vm-screenshot…`) already committed (`43395fd`).
-- **`CUSTOM_TAILSCALE_UNINSTALL.md`** owed (vendor-integration rule) — docs window.
-- **PL-11 (PawnIO)** — install guides must tell users to approve the PawnIO install for temps/fans.
-- VPN-off workaround still in place (ADR 0005 deferred).
-- Rule-6 backups parked in `alert_manager/` + scratchpad (`alerts-PRE-DEENROLL-DEPLOY-20260701-172012.db`).
+| Capability | State | Why |
+|---|---|---|
+| **Feature 6** — IP-reputation cache | **ON** (observation-only) | Never enforces; agent pulls the server dataset for local measurement. Proven end-to-end on `build3-83`. |
+| **Feature 6 server endpoint** `GET /reputation_dataset` | **LIVE** (HTTP 200) | hw-monitor restarted (DB snapshot taken first); serves real rows; no regression. |
+| **L1** — DNS enforcement plumbing | **default OFF** | Plumbing only. **NOT pointed at the tunnel Pi-hole** — blocked by the unresolved **ADR 0005** "Pi-hole refuses tunnel-sourced queries" problem. Enabling now exercises plumbing, **no real protection**. |
+| **L2** — WinDivert reputation blocking | **default OFF globally** | Design fully validated tonight (below). Only turned ON for the trip-laptop via a per-installer opt-in. |
+| **L2 on the trip-laptop** | **ON** (baked into that one installer) | Option B: installer reads `l2_enforce_enabled` from its own sidecar conf; global default unchanged. |
 
-## Resolved today
-- Clean-uninstall Phases 1–3 built; de-enroll endpoint (:5001) deployed live + migration applied.
-- Test-2 full self-onboard/enroll/fix-#3/Phase-1 PASS on a fresh VM.
-- PawnIO identified (PL-11); description-sanitize + OAuth-mint chain proven earlier today.
+## What shipped tonight (with hashes)
+
+**Tailscale saga → build 1** — join failure resolved by dropping `TS_NOLAUNCH` and letting the MSI
+auto-launch the Tailscale GUI (`41e9701`; the earlier launch-minimized attempt was `4ab35cd`).
+**Proven end-to-end.**
+
+**Build 2** — console-flash suppression (`650d036`), configurable `poll_interval` (`d7ff059`),
+startup heartbeat ramp (`ea40cfb`), PawnIO bundling (`60be3c5`). All shipped + verified.
+
+**Method B** (in-process LHM sensor via pythonnet) — `3a16f69` / `84301ba` / `7bacf54`. Confirmed
+working on `build3-83`.
+
+**WiFi-security layer:**
+- **Feature 6** (`a9ba84d`) — reputation cache, default ON, observation-only.
+- **L1** (`cd009ca`) — DNS set/restore + kill switch, default OFF.
+- **L2** (`a005ed0`) — WinDivert bidirectional handshake-initiation blocking + stall-watchdog, default OFF.
+  Scope corrected to bidirectional in docs + code comments (`d944703`, `455c998`). Validation kit `430a2fe`.
+
+**🔴 CRITICAL finding + fix — pydivert was NEVER bundled in any frozen agent.**
+`build_installer.py` does `--collect-all pydivert`, but the **CI workflow never `pip install`ed
+pydivert**, so there was nothing to collect → every shipped `NemesisAgent.exe` raised *"No module
+named 'pydivert'"* → **L2 fail-open (inert) in every build ever shipped.** Fixed by adding pydivert
+to the CI deps (**`6b88ccb`**) and **verified by direct contrast**: OLD build `00125a79` →
+`WinDivert64.sys`/`WinDivert.dll`/`pydivert` all **absent**; NEW build `1c8b8269` (provenance
+`49061c5`) → all **present**. **Implication: tonight's L2 Step-5 tests validated the LOGIC correctly
+(they ran `l2_windivert.py` under the VM's system Python), but no packaged agent could actually run
+L2 until this fix.**
+
+**Per-installer L2 opt-in** (`49061c5`) — Option B: `installer_gui.py` reads `l2_enforce_enabled`
+from its own sidecar conf and writes it to `nemesis_agent.conf` only when present. **No global
+default change, no dashboard schema change.**
+
+## L2 design validation (real evidence, 2026-07-02, on the test VM under system Python)
+- **`--test-normal`**: filter active, live outbound connections pass, `allowed=3 errors=0`.
+- **`--simulate-crash`**: injected crash caught → reinjected (fail-open), traffic keeps flowing.
+- **`--simulate-hang`**: **stall-watchdog fires at exactly 5.0s**, force-closes the handle, traffic restored.
+- **Kill switch**: `sc stop WinDivert` alone parks at STOP_PENDING (handle held) → **needs `taskkill`
+  too**; after both, WinDivert STOPPED + traffic restored.
+- **SYN-ACK / bidirectional finding**: `tcp.Syn` also matches SYN-ACK → L2 blocks **both**
+  outbound-to-bad-IP AND inbound-from-bad-IP handshake initiation. **Intentional** (blocking only
+  outbound = asymmetric protection). **Accepted tradeoff:** a *new inbound* connection is briefly
+  blocked during a hang (~5s until the watchdog recovers); **established sessions unaffected.**
+
+## Server-side deploy
+`GET /reputation_dataset` is **LIVE** — hw-monitor restarted (DB snapshot
+`2026-07-02-2148-pre-hwmon-restart-feature6-deploy` taken first on the independent USB, integrity
+`ok`), verified HTTP 200 with real rows, no regression to other endpoints (all 7 services active).
+
+## .83 test device (`build3-83`)
+Clean install via the **real compiled installer** (not the test harness): enrolled → **approved** →
+heartbeating; **Feature 6 confirmed pulling live server data**; **Method B sensors working**; L2
+remains **default-OFF** on this device. NOTE: earlier tonight `.83`'s conf was flipped to
+`l2_enforce_enabled=true` during testing, but L2 is **inert there** anyway (that device runs the
+pre-pydivert build). Optional cleanup: revert that flag / it's harmless.
+
+## Trip-laptop package (on the NEMESIS USB stick — operator holds it)
+Built via **Option B** and the real dashboard installer-generate flow. Verified written + synced to
+`NEMESIS/nemesis-laptop-install/` before the stick was unplugged:
+- `NemesisAgent-Setup.exe` — md5 **`1c8b8269d05b7074999e85cb2156b99a`** (new build, pydivert bundled)
+- `nemesis_install.conf` — `nemesis_ip=<tailnet-ip>`, `device_name=trip-laptop`, **real Tailscale
+  pre-auth key (not null)**, enrollment token, **`l2_enforce_enabled=true`**. (Runtime defaults fill
+  `l2_stall_timeout_sec=5`, `dns_enforce_enabled=false`, `reputation_cache_enabled=true`.)
+- `README-trip-laptop.txt` — install notes (no secrets).
+- **Enrollment token: single-use, ~2h TTL from mint (~01:12 tonight)** → install before it lapses or
+  re-mint. Device enrolls **pending** (`auto_approve=0`) → approve in Settings → Devices.
+- **Tailscale key TTL** = whatever was set in the Tailscale console (can't be read from the key string).
+- **`.83`'s install/config was NOT touched** by the laptop packaging (separate token row only).
+
+## Emergency fallback (CONFIRMED on origin)
+`docs/operations/backupproc.md` — **Procedure A** (local uninstall, no network) and **Procedure B**
+(son's exact Claude Code revert prompt, emailed separately). Revert tag
+**`pre-l1l2l3-build-known-good` → `14b066b`, verified on origin.**
+
+## Process note
+**Push-coordination rule** added to `CLAUDE.md` shared-discipline (`568b1c6`) after a same-file edit
+collision between windows tonight: any window must list ALL unpushed commits before pushing, not just
+its own.
+
+---
+
+## GAP LIST (designed / scoped, NOT built)
+- **Dashboard L2 on/off toggle per device** + graceful Feature-6 fallback + **stumble-escalation**
+  (3 watchdog recoveries / rolling window → auto-disable + ticket) + restart-attempt layer +
+  retroactive unvetted-connection evaluation. Fully designed:
+  `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`. **None built.**
+- **L3 (Suricata inspection)** — **Fork B** (tunnel-route suspicious flows to the server's working
+  Suricata) chosen over Fork A (agent-local; confirmed genuinely-unbuilt scaffold). Scoped in
+  `docs/roadmap/adr-0009-l3-fork-b-scope.md` (real session estimate; unknowns flagged: redirect
+  mechanism, server NAT/forwarding, fail-open). **Not built.**
+- **Mobile / Android agent** — needed for the venue/guest-device QR-onboarding vision. **Not started.**
+- **Option A** — full dashboard-integrated `l2_enforce_enabled` (token schema column + generate
+  endpoint + `_render_install_conf`; security-default + schema change). Deferred from tonight's
+  Option B shortcut. Captured in `PUNCHLIST.md`.
+- **ADR 0005 DNS posture** — Pi-hole refuses tunnel-sourced queries; box runs VPN-off as workaround.
+  Blocks L1 real use. Unbuilt design problem.
+- **Old `build2-83` ghost** device record — harmless; reject in Settings → Devices when convenient.
+
+## IF I HAVE 10 MINUTES ON THE TRIP (priorities)
+1. **Install the trip-laptop package NOW if not already** (token ~2h TTL). Then **approve `trip-laptop`
+   in Settings → Devices** (it enrolls pending). Confirm it heartbeats.
+2. **If anything looks wrong on any device** → don't debug in the field: run **Procedure A** (local
+   uninstall, no network) from `backupproc.md`. For a server-side problem, **Procedure B** (send son
+   the emailed revert prompt → tag `pre-l1l2l3-build-known-good`).
+3. **Do NOT enable L1** (no real protection until ADR 0005 is solved) and **do NOT globally enable L2**
+   (per-device toggle isn't built yet — only the trip-laptop is armed, intentionally).
 
 ## Pointers
-- **Build spec:** `docs/roadmap/clean-uninstall-build-spec.md` (the contract for the 3 phases).
-- **Today's audits:** `docs/audits/trip-1.0.8-test2-vm-lifecycle-test-2026-07-01.md` (test-2 PASS +
-  uninstall baseline/§4b),  `docs/audits/trip-1.0.8-vm3-tsnolaunch-regression-2026-07-01.md`
-  (regression + fix plan).
-- **ADRs:** 0011 (enrollment security — de-enroll reuses its signing model), 0012 (enrollment modes).
-- `~/work/nemesis-private/local-config.md` — real IPs/hosts/accounts (outside repo).
-- **Session supplements today:** `2026-07-01-001.md` (docs window, mid-session),
-  `2026-07-01-002.md` (build window, closeout).
+- Session narrative: `docs/handoff/supplements/2026-07-02-001.md`.
+- Fallback: `docs/operations/backupproc.md`; tag `pre-l1l2l3-build-known-good` (`14b066b`).
+- L2 design: `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`,
+  `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`.
+- ADRs: 0005 (DNS posture blocker), 0009 (inspection proxy), 0011 (enrollment), 0012 (enrollment modes).
+- Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
 
-## Topology note (durable)
-- **:80** = nginx (Basic-auth), LAN-allowed, auth-bypass for `/install/windows/` + `/api/health`.
-- **:5000** = Flask dashboard (ufw-blocked from LAN). **:5001** = hw-monitor agent endpoint
-  (`/enroll`, `/enrollment_status`, `/hw_data`, **now `/api/agent/uninstall`**), LAN + tailnet.
-- **`NEMESIS_AGENT_EXE`** = staged setup exe that `/zip` re-zips with a per-installer conf;
-  the uninstaller rides bundled INSIDE it (no separate staging).
+## Topology (durable)
+- `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`).
+- `:5000` Flask dashboard (ufw-blocked from LAN). `:5001` hw-monitor agent endpoint
+  (`/enroll`, `/enrollment_status`, `/hw_data`, `/api/agent/uninstall`, **`/reputation_dataset`** live).
+- `:5002` agent command listener — **localhost-bound + unauthenticated** (why the future L2 toggle
+  rides the heartbeat response, not `:5002`).

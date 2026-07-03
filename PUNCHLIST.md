@@ -914,3 +914,20 @@ both, driver reaches STOPPED and outbound+inbound restore. The documented pair
 (`sc stop WinDivert` + `taskkill /IM NemesisAgent.exe /F`) is correct — just confirm any runbook
 lists BOTH and notes the STOP_PENDING-until-handle-freed behavior so an operator doesn't stop at
 `sc stop` and think it failed.
+
+### [LOW] enrollment token: `auto_approve=0` tokens are never `uses`-consumed
+Found 2026-07-02. The enroll handler (`hw_monitor.py:1955-1956`) increments `uses` only
+`WHERE ... auto_approve=1`. So a **single-use** manual-approval (`auto_approve=0`) token is never
+marked spent — it stays valid until its TTL expires and could enroll multiple devices in that window.
+Low severity (short TTL + the device still lands PENDING for manual approval). The specific token
+found (`build3-83`) was **revoked** as cleanup. Fix option: increment `uses` for all valid tokens,
+or revoke-on-first-enroll regardless of `auto_approve`.
+
+### [FUTURE — Option A] dashboard-integrated per-device `l2_enforce_enabled`
+Tonight shipped **Option B** (`49061c5`): `installer_gui.py` honors a baked `l2_enforce_enabled` from
+its sidecar conf — a per-installer opt-in with no schema/default change. **Option A** is the full
+"same pattern as `poll_interval`" integration and is the real future work: a `l2_enforce` column on
+`enrollment_tokens` (schema migration) + the generate endpoint storing it + `/zip`/`_render_install_conf`
+baking it, so the dashboard UI can mint L2-enabled installers directly. **Security-default + schema
+change → audit-first, hold-for-review.** Deferred from tonight deliberately (Option B was the
+lower-risk path for one laptop pre-trip).
