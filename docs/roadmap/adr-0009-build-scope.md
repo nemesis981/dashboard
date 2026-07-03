@@ -143,6 +143,14 @@ DNS). Full path (b): **+5–10 sessions** and real driver risk.
 
 **Recommendation:** ship (a) for MVP; treat (b) as its own tracked spike, not a line item.
 
+> **Note (shipped L2 spike, 2026-07-02).** The delivered `nemesis_agent/l2_windivert.py` filter
+> (`outbound and ip and tcp and tcp.Syn`) is **bidirectional** by design, not outbound-only: `tcp.Syn`
+> matches outbound SYN *and* SYN-ACK, so reputation blocking covers both this device connecting OUT to
+> a bad IP and this device answering an INBOUND connection from a bad IP. The Phase-2 framing above
+> ("intercept outbound connections") describes the outbound use case; the shipped filter intentionally
+> covers both directions of handshake initiation. Accepted tradeoff: a new inbound connection is briefly
+> blocked during a stall until the watchdog recovers (~5s); established flows are untouched.
+
 ---
 
 ## Phase 3 — L3: selective Suricata routing

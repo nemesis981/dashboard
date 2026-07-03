@@ -12,6 +12,29 @@
 
 ---
 
+## L2 filter scope — bidirectional handshake-initiation (intentional)
+L2's WinDivert filter is `outbound and ip and tcp and tcp.Syn`. `tcp.Syn` matches EVERY
+SYN-flagged packet, so it covers TCP handshake-initiation in **both** directions:
+- **Outbound SYN** — this device connecting OUT to a bad-reputation IP (blocked).
+- **Outbound SYN-ACK** — this device answering an INBOUND connection from a bad-reputation
+  IP (also blocked).
+
+This is **intentional, not an accidental broadening.** For a security product, blocking only
+outbound connections while accepting inbound connections from known-bad sources would be
+asymmetric, incomplete protection — so reputation blocking deliberately applies to both your
+outbound connections AND inbound connection attempts from flagged peers. Established flows
+carry no SYN and are never diverted.
+
+**Known tradeoff (accepted, not a bug):** because outbound SYN-ACKs are also held during a
+stall/hang, a **NEW inbound** connection is briefly blocked too — for ~`l2_stall_timeout_sec`
+(default ~5s), until the local watchdog force-closes the handle and recovers. **Established
+sessions are unaffected.** (Verified live 2026-07-02 on the L2 test VM: an established SSH
+session survived a simulated hang while new inbound was blocked only for the ~5s watchdog
+window, then restored.) This brief new-inbound pause is the accepted cost of bidirectional
+coverage.
+
+---
+
 ## Full flow (as designed by the operator)
 1. **Hang occurs → local stall-watchdog recovers it automatically** (already built,
    `nemesis_agent/l2_windivert.py`).

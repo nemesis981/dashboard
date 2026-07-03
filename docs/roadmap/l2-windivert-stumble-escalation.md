@@ -20,6 +20,14 @@ L2 WinDivert blocking has a **local stall-watchdog** (default ~5s timeout) that 
 packet loop on the device. That local recovery already exists. **This note is about what happens
 AFTER local recovery** — the server noticing repeated stumbles and escalating proportionally.
 
+> **Scope note (bidirectional filter, intentional).** L2's filter (`outbound and ip and tcp and
+> tcp.Syn`) matches outbound SYN **and** SYN-ACK, so reputation blocking is bidirectional —
+> outbound-to-bad-IP *and* inbound-from-bad-IP handshake initiation — a deliberate security choice
+> (blocking only outbound would be asymmetric protection). A side effect during a stall: because
+> SYN-ACKs are held too, **NEW inbound** connections are also briefly blocked until the watchdog
+> recovers (~5s); **established sessions are unaffected.** Accepted cost of bidirectional coverage,
+> not a bug. Full detail: [dashboard-l2-toggle](dashboard-l2-toggle.md) ("L2 filter scope").
+
 ## Threshold (starting value — tune against real trip data, NOT final)
 **3 watchdog-triggered recoveries within a rolling 30–60 minute window on the same device** →
 **disable L2 for that device** + **auto-create a support ticket.**

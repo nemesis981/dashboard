@@ -883,3 +883,34 @@ missed. Docs-window work.
   ending**)*. Update uninstall docs to describe this teardown honestly (what's removed vs kept, and
   why PawnIO is kept). Cross-ref `docs/roadmap/clean-uninstall-build-spec.md` + the owed
   `CUSTOM_TAILSCALE_UNINSTALL.md`.
+
+### [RESOLVED — design decision 2026-07-02] L2 WinDivert filter catches SYN-ACK = intentional bidirectional coverage
+Found during the live L2 Step-5 battery on test VM (`build2-83`, 2026-07-02). The filter
+`nemesis_agent/l2_windivert.py:41` is `"outbound and ip and tcp and tcp.Syn"`. WinDivert
+`tcp.Syn` is true for ANY SYN-flagged packet — **including SYN-ACK**. So the outbound SYN-ACK
+that a device emits to complete an *inbound* connection's handshake also matches the filter.
+Proven live: during `--simulate-hang`, fresh inbound `:22` went UP -> DOWN(~6-9s) -> UP across
+the hang window; established sessions were untouched (the control SSH survived).
+- **DECISION (operator, 2026-07-02): KEEP AS-IS. This is intentional bidirectional
+  handshake-initiation coverage, NOT an accidental broadening.** Rationale: for a security
+  product, blocking only outbound connections to bad IPs while accepting inbound connections
+  FROM bad-reputation sources would be asymmetric/incomplete protection. Reputation blocking
+  covers both directions by design. The earlier "narrow with `and not tcp.Ack`" idea is
+  **rejected** — do NOT narrow the filter.
+- **Accepted tradeoff (documented, not a bug):** during a stall/hang, NEW inbound connections
+  are also briefly blocked (~`l2_stall_timeout_sec`, ~5s, until the watchdog recovers);
+  established sessions are unaffected.
+- Docs corrected to bidirectional framing (`dashboard-l2-toggle.md`, `l2-windivert-stumble-
+  escalation.md`, `adr-0009-build-scope.md`). **OPEN:** the code docstring/comments still say
+  "outbound-only" and `l2_windivert.py:39-41` still claims "inbound ... pass untouched (never
+  diverted)" which is now inaccurate — pending a build-window follow-up to reword (behavior
+  unchanged).
+
+### [NOTE] — kill switch requires BOTH commands for a hung process
+Same live test. `sc stop WinDivert` on a *hung* agent (handle still open) parks the service at
+**STOP_PENDING** and does NOT restore traffic — the filter stays in effect until the handle is
+released. It's the **`taskkill` (process death → OS closes the handle)** that frees it; after
+both, driver reaches STOPPED and outbound+inbound restore. The documented pair
+(`sc stop WinDivert` + `taskkill /IM NemesisAgent.exe /F`) is correct — just confirm any runbook
+lists BOTH and notes the STOP_PENDING-until-handle-freed behavior so an operator doesn't stop at
+`sc stop` and think it failed.
