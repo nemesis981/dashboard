@@ -26,14 +26,13 @@ Flask routes registered by get_routes():
 
 import os
 import json
-import sqlite3
 import html as _html
 import logging
 from datetime import datetime, timedelta
 from flask import request, jsonify
 from flask_login import current_user
 
-from modules import NemesisModule, get_db
+from modules import NemesisModule, get_data_manager
 
 log = logging.getLogger("nemesis.tickets")
 
@@ -53,11 +52,12 @@ _SETTINGS_DEFAULTS = {
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
-    conn = get_db()
-    conn.row_factory = sqlite3.Row
-    return conn
+def _conn():
+    # ADR 0006: route tickets DB access through the Data Manager (write-own access
+    # control + operation logging). Drop-in for the old get_db() — the connection's
+    # row_factory is applied by connect(). tickets writes only tickets* tables, so
+    # every write passes the namespace check.
+    return get_data_manager().connect("tickets")
 
 
 def _init_db() -> None:
@@ -109,15 +109,15 @@ def _init_db() -> None:
     conn.close()
 
 
-def _next_ticket_number(conn) -> str:
-    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
-    # Increment-and-read in ONE statement: RETURNING gives the post-increment value,
-    # so `next_number - 1` is the number assigned to this ticket. No SELECT-then-UPDATE
-    # window, so two concurrent open_ticket() calls can never get the same number.
-    n = conn.execute(
-        "UPDATE tickets_seq SET next_number = next_number + 1 WHERE id=1 "
-        "RETURNING next_number - 1"
-    ).fetchone()[0]
+def _next_ticket_number() -> str:
+    # DATA MANAGER v1 — atomic sequence via the Data Manager's next_sequence() helper
+    # (the formal home of the tickets_seq v0 fix). Allocates a unique NF number with no
+    # read-modify-write window; two concurrent open_ticket() calls can never collide
+    # (race-free, proven in test_data_manager). NOTE: next_sequence() commits the
+    # increment in its own atomic step, so the number is allocated independently of the
+    # ticket INSERT — a failed insert can leave a gap in NF numbering. That is acceptable
+    # (gaps are normal for sequences) and the no-duplicate guarantee is preserved.
+    n = get_data_manager().next_sequence("tickets", "tickets_seq")
     return f"{TICKET_PREFIX}-{n:04d}"
 
 
@@ -286,7 +286,7 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
         scores = _score_relevance(
             conn, rule_id, sensor_key, src_ip, dst_ip, priority, body, now
         )
-        ticket_number = _next_ticket_number(conn)
+        ticket_number = _next_ticket_number()
         cur = conn.execute(
             """INSERT INTO tickets
                  (type, rule_id, sensor_key, src_ip, dst_ip, priority,
