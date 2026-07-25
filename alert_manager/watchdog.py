@@ -331,7 +331,7 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
         logging.error("HW alert email failed: %s (cooldown still recorded)", key)
 
     try:
-        import sys, os
+        import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
         # ADR 0001 Stage 3: tickets now reaches the shared DB via the module accessor.
         # watchdog is a SEPARATE process that never runs modules_loader.init(), so register
