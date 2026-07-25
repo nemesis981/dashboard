@@ -49,8 +49,10 @@ in a clean block:
      — a parked item with a fresh feat commit has likely shipped; verify it.
    - This is a READ-ONLY audit (Rule 1) — report only, change nothing. When drift is found,
      refresh the baseline audit doc at closeout (new dated file).
-   - Baseline (2026-07-02): **4 SHIPPED / 8 PARTIAL / 39 PARKED** (51 total) —
-     `docs/audits/roadmap-state-audit-2026-07-02.md`.
+   - Baseline (2026-07-25): **4 SHIPPED / 8 PARTIAL / 47 PARKED** (59 total) —
+     `docs/audits/roadmap-state-audit-2026-07-25.md`. (Superseded the 2026-07-02 baseline —
+     the +8 file-count drift flagged against it traced entirely to same-session 07-02 work
+     the original baseline doc under-counted; no shipping change.)
 
 Format the output as:
 ```
