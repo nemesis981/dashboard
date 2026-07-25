@@ -283,17 +283,29 @@ TIER 1 Rule 5 and Window Roles above (Window 2 is the sole git-writer).
   become debt the future firewall engine (ADR 0005) must reconcile. (Readiness audit
   2026-06-27.)
 
-### Data Manager (ADR 0006 — enforced when built)
-- Modules MUST use the Data Manager for ALL DB operations **after it is built**. Direct
-  `sqlite3.connect()` or bare `get_db()` calls from module code are **FORBIDDEN**.
-- The loader enforces this — a module that bypasses the Data Manager **does not load. No
-  exceptions.**
+### Data Manager (ADR 0006 — v1 SHIPPED 2026-07-25; loader-enforcement still pending)
+- `alert_manager/data_manager.py` is built and **all 6 modules are migrated**
+  (diagnostics, community_queue, tickets, ai_engine, anomaly_detection, malware_detection).
+  New/changed module code MUST use `get_data_manager().connect(module)` for DB operations —
+  direct `sqlite3.connect()` or bare `get_db()` calls from module code are **FORBIDDEN** going
+  forward, matching what every existing module already does.
+- **Correction — the loader does NOT enforce this yet.** `modules_loader.py` has no Data
+  Manager check; a module that bypassed it would still load today. What IS real: at the
+  connection level, `GuardedConnection` raises `AccessDenied` on any write outside a module's
+  namespace (fail-closed). So access control is live per-write, but compliance is currently
+  voluntary-by-migration, not loader-guaranteed. Don't describe this as "does not load, no
+  exceptions" until the loader check actually exists — see ADR 0006's "Status/next" for the gap.
 - The four atomic SQL fixes (`tickets_seq`, `ai_engine` rate, `community_queue`,
-  `anomaly_incidents`) are the **Data Manager v0 seed**. Label new atomic operations as Data
-  Manager functions with a pointer to ADR 0006.
-- **Actor is applied automatically** by the Data Manager on every write. Modules do NOT pass
-  `actor` manually after the Data Manager is built — they pass identity context and the Data
-  Manager handles it.
+  `anomaly_incidents`) — the **Data Manager v0 seed** — are now formalized as the real
+  `next_sequence`/`increment_counter`/`upsert` methods on `DataManager`, not scattered inline
+  SQL. Label new atomic operations as calls to those methods, with a pointer to ADR 0006.
+- **Actor mechanism is live but currently unwired.** The Data Manager stamps
+  `current_actor()` on every logged write automatically (atomic-helper AND raw passthrough
+  writes alike — proven in `test_data_manager.py`), so once a caller sets an actor it needs no
+  per-write plumbing. But **no caller sets it yet** — confirmed 2026-07-25, nothing in the
+  codebase calls `set_actor()` — so every write's logged actor is `NULL` in practice today.
+  Wiring real identity context into `set_actor()` at the request/session boundary is separate,
+  unstarted work.
 
 ### Vendor-specific integrations
 **VENDOR-SPECIFIC INTEGRATIONS: whenever a vendor-specific probe, plugin, or integration is
