@@ -17,12 +17,11 @@ import os
 import json
 import time
 import logging
-import sqlite3
 import threading
 import urllib.request
 from datetime import datetime, timedelta
 
-from modules import NemesisModule, get_db as _shared_get_db
+from modules import NemesisModule, get_data_manager
 
 log = logging.getLogger("nemesis.ai_engine")
 
@@ -39,12 +38,11 @@ _RATE_DAY_DEFAULT  = 50
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _conn():
-    # ADR 0001 Stage 3: all ai_engine reads/writes go to the shared alerts.db
-    # ai_* tables via the Stage-1 accessor (WAL + busy_timeout), not the legacy
-    # per-module ai_engine.db. Single switch point — every caller uses _conn().
-    c = _shared_get_db()
-    c.row_factory = sqlite3.Row
-    return c
+    # ADR 0006: route ai_engine DB access through the Data Manager (write-own access
+    # control + operation logging). Drop-in for the old shared accessor — the
+    # connection's row_factory is applied by connect(). ai_engine writes only ai_*
+    # tables, so every write passes the namespace check. Single switch point.
+    return get_data_manager().connect("ai_engine")
 
 
 def _init_db() -> None:
@@ -317,7 +315,13 @@ def _increment_rate(conn) -> None:
             _set_rate_state(conn, win_key, now)
             _set_rate_state(conn, cnt_key, "1")
         else:
-            # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+            # DATA MANAGER v1 — atomic in-window increment, now routed through the Data
+            # Manager guarded connection (access control + audit log). Kept inline rather
+            # than folded into increment_counter(): this write shares analyze()'s conn with
+            # _increment_usage() and the window-reset _set_rate_state() writes above, all
+            # committed as ONE transaction. increment_counter() opens its own self-committing
+            # connection, which would split that transaction and desync the hour/day counters
+            # on rollback. The atomic ON CONFLICT statement itself is unchanged.
             # In-window increment in ONE statement (mirrors _increment_usage's
             # INSERT … ON CONFLICT DO UPDATE). Concurrent calls can no longer read the same
             # count and write back the same +1, so increments are never lost.
