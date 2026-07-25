@@ -9,11 +9,10 @@ import os
 import json
 import time
 import logging
-import sqlite3
 import html as _html
 from datetime import datetime
 
-from modules import NemesisModule, get_db
+from modules import NemesisModule, get_data_manager
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -36,11 +35,12 @@ _AI_CONFIDENCE_ORDER = {"high": 0, "uncertain": 1, "low": 2}
 # DB
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
-    c = get_db()
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    # ADR 0006: route community_queue DB access through the Data Manager (write-own
+    # access control + operation logging). Drop-in for the old get_db() — the
+    # connection's row_factory is applied by connect(). community_queue writes only
+    # community_* tables, so every write passes the namespace check.
+    return get_data_manager().connect("community_queue")
 
 
 def _init_db() -> None:
@@ -128,7 +128,12 @@ def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
     """
     try:
         conn = _conn()
-        # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+        # DATA MANAGER v1 — atomic op, now routed through the Data Manager guarded
+        # connection (access control + audit log). Kept as explicit SQL rather than the
+        # generic upsert() helper: the conditional DO UPDATE (WHERE ... > ...) and the
+        # literal ai_reviewed reset are bespoke, and the v1 design routes conditional
+        # upserts through connect() instead of forcing them into the helper. Behaviour
+        # is unchanged — same single atomic ON CONFLICT statement.
         # Single idempotent upsert against the UNIQUE(domain_or_ip, submitted) index.
         # A concurrent second call for the same pending target hits ON CONFLICT instead of
         # inserting a duplicate row; the DO UPDATE only overwrites when the new detection is
@@ -158,7 +163,7 @@ def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
 # AI analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_ai_prompt(row: sqlite3.Row) -> str:
+def _build_ai_prompt(row) -> str:
     return f"""You are Nemesis, a home network security AI. Assess whether the following anomaly detection should be submitted to a community threat intelligence feed so other home users can be protected.
 
 Domain/IP: {row["domain_or_ip"]}
@@ -179,7 +184,7 @@ confidence=uncertain: Possibly suspicious but could be legitimate software — m
 confidence=low: Likely a false positive or benign behaviour — do not share."""
 
 
-def _analyse_one(row: sqlite3.Row) -> dict:
+def _analyse_one(row) -> dict:
     """Run AI analysis on one queue item. Returns parsed AI result dict."""
     prompt = _build_ai_prompt(row)
     result = ai_analyze(
@@ -227,7 +232,7 @@ def _conf_badge(conf: str | None) -> str:
     )
 
 
-def _render_row(row: sqlite3.Row) -> str:
+def _render_row(row) -> str:
     rid      = row["id"]
     domain   = _html.escape(row["domain_or_ip"])
     dtype    = _html.escape(row["detection_type"] or "Unknown")
