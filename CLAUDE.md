@@ -17,9 +17,9 @@ uninstall + server-side revert to the `pre-l1l2l3-build-known-good` tag).
 
 ---
 
-### Morning Status (run on session start)
-At the start of every new session, before anything else, run these and report the results
-in a clean block:
+### Morning Status (run on session start — Window 2)
+Run by **Window 2** (the docs/audit window — see Window Roles below) at the start of its
+session, before anything else. Run these and report the results in a clean block:
 
 1. **Total code lines:**
    ```
@@ -42,10 +42,10 @@ in a clean block:
    items still say "parked"), so trusting them hides the exact drift this check exists to
    catch. Instead, each morning:
    - **File-set drift:** `ls ~/dashboard/docs/roadmap/*.md` → compare names/count to the
-     baseline's 51. Report any ADDED or REMOVED files.
-   - **Shipping drift:** the baseline's 12 non-parked items (4 SHIPPED + 8 PARTIAL) plus any
-     newly-added files get a quick code/`git log` re-check (confirm/upgrade status). For the
-     39 baseline-PARKED items, scan recent `git log --oneline` subjects for roadmap keywords
+     baseline's file count. Report any ADDED or REMOVED files.
+   - **Shipping drift:** the baseline's non-parked items (SHIPPED + PARTIAL) plus any
+     newly-added files get a quick code/`git log` re-check (confirm/upgrade status). For
+     baseline-PARKED items, scan recent `git log --oneline` subjects for roadmap keywords
      — a parked item with a fresh feat commit has likely shipped; verify it.
    - This is a READ-ONLY audit (Rule 1) — report only, change nothing. When drift is found,
      refresh the baseline audit doc at closeout (new dated file).
@@ -72,55 +72,63 @@ prompt — session is oriented in under 30 seconds.
 
 ## Window Roles (multi-window workflow)
 
-This project is worked across two role-assigned Claude Code windows. Each window is
-told its role in the operator's FIRST message ("you are the build window" / "you are
-the docs window"). A window has no way to know its own identity otherwise — the role
-comes from that load-time assignment, not from open order or timestamps. If a window
-is reopened after a crash, the operator re-states its role.
+Fixed assignment — **window identity, model, and git-write privilege** are pinned as
+follows. The operator identifies a window by number in the FIRST message ("you are
+Window 1" / "you are Window 2"). A window has no way to know its own identity
+otherwise — the role comes from that load-time assignment, not from open order or
+timestamps. If a window is reopened after a crash, the operator re-states its number.
 
-### BUILD window
+### Window 1 — BUILD window (model: Opus)
+- Set once per session: `/model opus`.
 - Owns all CODE changes (dashboard.py, database.py, agent files, installers, etc.).
 - Runs Rule-3 verification (real output: py_compile, isolated tests, live checks) on
-  every code change before commit.
-- Owns the MORNING BRIEFING and the full MORNING ROADMAP-VS-STATE AUDIT (read-only).
-- Does NOT author ADRs, roadmap entries, handoff docs, or build specs — that is the
-  docs window's job.
+  every code change.
+- **Does NOT commit or push — ever.** When a change is ready, STOP and report it as
+  ready-to-commit; hand off to Window 2, which performs the actual git write.
+- Does NOT author ADRs, roadmap entries, handoff docs, or build specs — that's Window 2.
+- Does NOT run the morning briefing or roadmap-vs-state audit — that's Window 2.
 - Code work takes priority: never let a read-only audit or doc request preempt
   trip-critical or scheduled code work in this window.
 
-### DOCS window
-- Owns ALL document work: ADRs, roadmap entries, handoff/supplements, build specs,
-  doc audits, cross-references.
-- Docs-only + read-only. NEVER touches code files. If a task would require a code
-  change, stop and flag it for the build window.
+### Window 2 — DOCS/AUDIT window (model: Sonnet) — sole git-writer
+- Set once per session: `/model sonnet`.
+- Owns ALL document work: ADRs, roadmap entries, handoff/supplements, build specs, doc
+  audits, cross-references.
+- Owns the MORNING BRIEFING and the full MORNING ROADMAP-VS-STATE AUDIT.
+- **Sole git-writer.** ALL commits and pushes happen ONLY in this window — both for its
+  own doc work AND for code Window 1 reports as ready. Pull `--ff-only` before every
+  commit. Rule-8 leak-scan every diff before committing.
+- Does NOT edit code file CONTENT — code arrives pre-written by Window 1 and is
+  committed as reviewed (Rule-8-scanned), not rewritten. (Committing is not the same as
+  editing; staging/committing Window 1's finished code is in-scope. If a task would
+  require actually writing/changing code, stop and flag it for Window 1.)
+- **Save locations (no exceptions):**
+  - Morning briefings → `docs/briefing/` (gitignored, local-only, latest run wins).
+  - Audits (roadmap-vs-state, install/doc tests, security/PL findings, etc.) →
+    `docs/audits/`, dated filename (e.g. `docs/audits/<topic>-audit-<date>.md`).
 
 ### Both windows (shared discipline)
-- pull --ff-only before every commit (concurrent windows are standing practice).
-- Rule 8 leak-scan every diff (placeholders only — no PII/IPs/hosts/accounts).
-- Commit-first, then push. HOLD the push for operator review on anything non-trivial
-  (ADRs, security-default code, schema changes).
-- **Push coordination (concurrent windows).** Before ANY window runs `git push`, it must first run
-  `git log --oneline @{u}..HEAD` (or equivalent) to list ALL locally-unpushed commits — **not just
-  the ones it authored** — since a push publishes everything pending, regardless of which window is
-  pushing. Show the full list to the operator and get explicit confirmation before pushing. A "hold
-  push" instruction in one window is only meaningful if every window respects this — **ownership
-  does not limit what a push publishes.**
+- Commit-first, then push (performed in Window 2). HOLD the push for operator review on
+  anything non-trivial (ADRs, security-default code, schema changes).
+- **Push coordination.** Before ANY push, list ALL locally-unpushed commits
+  (`git log --oneline @{u}..HEAD`) — a push publishes everything pending, not just what
+  was just committed. Show the full list to the operator and get explicit confirmation
+  before pushing.
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
 ### Role self-check (first response)
-If you have NOT been told your role (build or docs) in this session, do not begin
-any task. Your first response must be to ask: "Which window am I this session —
-BUILD or DOCS?" and then wait for the operator's answer before proceeding. Once
-assigned, operate under that role's contract for the rest of the session. If the
-operator's first message already states the role ("you are the build window"),
-skip the question and confirm the role instead.
+If you have NOT been told your window number this session, do not begin any task. Your
+first response must be to ask: **"Which window am I this session — Window 1 (build,
+Opus) or Window 2 (docs/audit, Sonnet, sole git-writer)?"** and wait for the operator's
+answer before proceeding. If the operator's first message already states it, skip the
+question and confirm instead (window number + role + model).
 
 ---
 
 ## State Snapshots (rollback safety)
 
-Before any STATE-CHANGING action, the build window MUST create a complete,
+Before any STATE-CHANGING action, the build window (Window 1) MUST create a complete,
 dated backup set on the USB drive. This exists so any change is reversible —
 roll back to a known-good state and preserve the broken state to debug later.
 
@@ -181,7 +189,8 @@ Always send a SCOPED prompt stating exactly what to do and where to STOP. Never 
 ### 5. Commit-first → deploy → verify; respect the chat/Code split
 - chat-Claude: design, architecture, review. Read-only externally (fetches public URLs;
   cannot push/write/commit).
-- Code: builds, edits, commits, runs on the machine.
+- Code: builds, edits, commits, runs on the machine. (See Window Roles above for exactly
+  which window performs the commit/push — Window 2 is the sole git-writer.)
 - Commit BEFORE deploy; verify after (process IDs/paths, journals, browser).
 
 ### 6. Backup-first before touching live data
@@ -228,8 +237,8 @@ notes that read as internal, but the repo is public — they leak just like code
 - **Per session:** when a new chat/work session starts, create a dated supplemental at
   `docs/handoff/supplements/YYYY-MM-DD-NNN.md` logging that session's actions and decisions
   (APPEND-ONLY, never overwritten — these are the durable log/history).
-- **Session start:** read `ARCHITECTURE.md`, `docs/architecture/` (ADRs), and
-  `docs/handoff/HANDOFF.md` first to load conventions + current state.
+- **Session start:** read-order is given at the top of this file (`ARCHITECTURE.md` →
+  `docs/architecture/` ADRs → `docs/handoff/HANDOFF.md`).
 - **Live worklog (append-as-you-go):** during a work session, maintain a raw
   chronological log at `docs/handoff/worklog/YYYY-MM-DD-NNN.md` (mirrors the
   supplement's date/number). Append an entry the moment each discrete step
@@ -260,11 +269,8 @@ notes that read as internal, but the repo is public — they leak just like code
 ## TIER 2 — Nemesis-specific rules
 
 ### Read-order & roles
-- Start every session by reading `ARCHITECTURE.md`, then `docs/architecture/` (ADRs),
-  then `docs/handoff/HANDOFF.md`.
-- **chat-Claude = design/review, READ-ONLY externally.** It does not build or commit.
-- **Code = build/commit.** Commit *before* deploy; then verify live with `ps` /
-  `journalctl` / the browser. Never report success without that real output.
+Read-order is given at the top of this file. Chat/Code split and commit ownership: see
+TIER 1 Rule 5 and Window Roles above (Window 2 is the sole git-writer).
 
 ### Architecture
 - **Everything new is a MODULE.** A module is `modules/<name>/` with `manifest.json` +
@@ -355,7 +361,11 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
   `127.0.0.1` or read from `/etc/nemesis.env`. Defaults must be correct for ANY user, not
   this machine. (This is Rule 8; the `<pihole-ip>` `PIHOLE_IP` default is a known instance
   pending fix.)
-- **Model string:** `claude-sonnet-4-6`.
+- **Model string:** `claude-sonnet-4-6`. **⚠ FLAG — VERIFY BEFORE TRUSTING:** this looks
+  potentially stale given the current Anthropic model lineup (Sonnet 5 / Opus 4.8 / Fable 5).
+  Confirm what this actually refers to in the live code (likely a hardcoded string in the
+  dashboard's own AI-integration, e.g. `ai_engine/module.py` — NOT Claude Code's own model
+  selection) before changing it; don't guess-update a value real code depends on.
 - **Key paths** (public-repo placeholders — substitute the real install user locally):
   - dashboard: `/home/<user>/dashboard/dashboard.py`
   - `/home/<user>/dashboard/alert_manager/` — core services (alert-watcher, hw-monitor,
