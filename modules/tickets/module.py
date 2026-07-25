@@ -28,6 +28,7 @@ import os
 import json
 import html as _html
 import logging
+import threading
 from datetime import datetime, timedelta
 from flask import request, jsonify
 from flask_login import current_user
@@ -60,7 +61,30 @@ def _conn():
     return get_data_manager().connect("tickets")
 
 
+# One-time schema-init guard (ADR 0006 follow-up): the schema init below is
+# idempotent, but its CREATE / INSERT-OR-IGNORE / ALTER statements are audited by the
+# Data Manager on EVERY run — calling it on every open_ticket()/add_note() flooded the
+# DM operation log with repeated init statements alongside each real write. Run it
+# exactly ONCE per process (first use), thread-safe for concurrent first-callers. The
+# init's own behaviour is unchanged; only its call frequency is. All existing call
+# sites keep calling _init_db() and now hit this guard.
+_init_lock = threading.Lock()
+_init_done = False
+
+
 def _init_db() -> None:
+    """Run-once, thread-safe wrapper around _init_schema() (see guard note above)."""
+    global _init_done
+    if _init_done:
+        return
+    with _init_lock:
+        if _init_done:
+            return
+        _init_schema()
+        _init_done = True
+
+
+def _init_schema() -> None:
     conn = _conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS tickets (
