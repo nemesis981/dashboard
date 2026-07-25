@@ -1,7 +1,16 @@
 # ADR 0001 — Database & Module Architecture: Restoring the Single Shared DB
 
-- **Status:** Proposed — **revised** (migration plan tightened: test-restore, copy→cutover safety, scheduled path fixes, WAL prerequisite); no code or data changed
-- **Date:** 2026-06-25
+- **Status:** **Partially implemented** (verified 2026-07-25 — code + `git log` re-check, header
+  was stale). **Stages 0–3 SHIPPED**: all four modules (tickets `6f6b6c3`, community_queue
+  `290c2db`, ai_engine `181c14c`, malware_detection pre-existing) cut over to the shared
+  `alert_manager/alerts.db` via the shared accessor; old module `.db` files are unreferenced.
+  **Stage 4 (dedupe + retire 0-byte ghosts) DONE**: `quarantines`/`hw_alerts`/`scan_jobs` each
+  have exactly one `CREATE TABLE` owner; the orphaned 0-byte `dashboard.db` and
+  `malware_detection/malware.db` are gone. **Stage 5 (SQLite-safe single-DB backup + discover
+  service units) NOT done** — `dashboard.py:36` still hardcodes `HEALTH_SERVICES` rather than
+  scanning `*.service` units. **Stage 6 (retire old module DBs) NOT done** — `ai_engine.db`,
+  `tickets.db`, `community_queue.db` still on disk, unreferenced but not archived/deleted.
+- **Date:** 2026-06-25 (implementation verified 2026-07-25)
 - **Affects:** Core DB layer, all modules, backup, install/deploy
 - **Related:** [0002-vpn-aware-dns-routing](0002-vpn-aware-dns-routing.md)
 
