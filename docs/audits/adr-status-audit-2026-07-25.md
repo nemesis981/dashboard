@@ -5,9 +5,10 @@
 > to `roadmap-state-audit-2026-07-25.md`. First audit of its kind; no prior baseline to diff
 > against, so this doc *is* the baseline going forward.
 
-**Tally: 1 fully shipped (header was stale, fixed this session) · 1 superseded/shipped ·
-2 partial (seed/data-collection only) · 1 design-accepted with execution tracked elsewhere
-as PARTIAL · 7 proposed/unbuilt — 12 total.**
+**Tally (updated same day, post-audit — see note on the ADR 0006 row): 2 fully shipped
+(headers were stale, fixed this session) · 1 superseded/shipped · 1 partial
+(data-collection only) · 1 design-accepted with execution tracked elsewhere as PARTIAL ·
+7 proposed/unbuilt — 12 total.**
 
 ## Findings
 
@@ -18,7 +19,7 @@ as PARTIAL · 7 proposed/unbuilt — 12 total.**
 | 0003 | Database resilience & recovery | Proposed | **Confirmed unbuilt.** No code. Matches roadmap PARKED `db-resilience-backup-promotion`. |
 | 0004 | Scan task orchestration | Proposed | **Confirmed unbuilt.** File already self-notes "Status remains Proposed." |
 | 0005 | DNS/firewall device-auth architecture | Proposed | **Confirmed unbuilt/blocked.** Direction decided, design not specified; HANDOFF (07-02) names the unresolved Pi-hole tunnel-query-refusal blocker (blocks L1 real use). |
-| 0006 | Data Manager | Proposed | **Confirmed PARTIAL — v0 only.** 4-fix seed shipped (`2d200e0`, ADR 0006 seed: tickets_seq / ai_engine-rate / community_queue / anomaly_incidents race fixes). v1 (formal `data_manager.py` + access control), v2 (schema gatekeeper), v3 (contributor-scale enforcement) not started. Header already accurately says this ("only the v0 seed exists"); no fix needed. |
+| 0006 | Data Manager | Proposed (at audit time) → **v1 SHIPPED — COMPLETE (updated later same day, 2026-07-25)** | **Superseded by same-day build, not just a stale-header fix.** At audit time only the v0 seed existed, matching the header — no fix was needed then. Later the same day, v1 shipped in full: `alert_manager/data_manager.py` (`GuardedConnection`, `next_sequence`/`increment_counter`/`upsert`, `dm_operation_log` audit trail, actor context on every write incl. raw passthrough), all 6 DB-using modules migrated (`dhcp` discovered DB-free, no migration needed), and `modules_loader.py` updated to statically reject raw `sqlite3`/bare `get_db()` at load time (AST-based, verified against all 7 real modules + synthetic violation cases). v2 (schema gatekeeper) is now explicitly **deferred** pending L3 producing real schemas to design against, not merely unstarted. v3 unchanged (not started). ADR 0006 doc and CLAUDE.md's Data Manager section both updated to match. |
 | 0007 | Device/user model | Proposed | **Confirmed not started.** Commercial-tier build target, explicitly deferred. |
 | 0008 | Impossible travel + concurrent session detection | Proposed — v2 target | **Confirmed PARTIAL — data collection only.** `login_events` table + tiered lockout + concurrent-session seam shipped (`21c8931`, `c521d57`). Detection *logic* itself still v2/unbuilt. Header already accurately scoped this; no fix needed. |
 | 0009 | Security inspection proxy | Proposed | **Confirmed unbuilt.** Design captured; Fork B (tunnel-routed central Suricata) chosen over Fork A in the two 0009 scoping docs (`adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`). No code. |
@@ -29,8 +30,12 @@ as PARTIAL · 7 proposed/unbuilt — 12 total.**
 ## Action taken this session
 - **ADR 0001** header rewritten in place (`docs/architecture/0001-database-and-module-architecture.md`)
   to reflect verified per-stage status instead of the stale "Proposed — revised." No other ADR
-  needed a header fix — 0006, 0008, and 0011 already scope their partial/pending state accurately
-  in their own headers.
+  needed a header fix at audit time — 0006, 0008, and 0011 accurately scoped their partial/
+  pending state in their own headers as of the audit.
+- **ADR 0006 row updated later the same day** (docs-only follow-up, separate from this morning's
+  audit run): v1 shipped in full between the audit and this update. This is a real-time
+  amendment to a point-in-time audit doc, not a re-audit — flagged explicitly in the row itself
+  so a future reader doesn't mistake it for what the original audit pass found.
 
 ## Follow-ups (flagged, not done)
 - Consider archiving the three orphaned per-module `.db` files (`tickets.db`, `community_queue.db`,

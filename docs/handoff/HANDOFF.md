@@ -7,8 +7,9 @@
 > ✅ **Operator trip window (07-03 → ~07-06) has passed; session active again as of 2026-07-25.**
 > ✅ **Windows are back to a numbered split** — Window 1 (build, Opus) / Window 2 (docs+audit+sole
 > git-writer, Sonnet). See `CLAUDE.md` Window Roles.
-> ✅ **Today was capture-only, docs-only** (Window 2) — no code was built. One pre-existing 1-line
-> `watchdog.py` cleanup was committed on operator request; everything else is docs/architecture.
+> ✅ **Today shipped real code, not just docs**: the full ADR 0006 Data Manager v1 build (see
+> below) — this banner's earlier "docs-only" framing covered only the morning/afternoon; the
+> evening Window 1/Window 2 build cycle shipped a real capability with loader-level enforcement.
 
 ---
 
@@ -78,6 +79,47 @@ Full detail: `docs/handoff/supplements/2026-07-25-002.md`. Summary:
   often enough today that they may deserve a durable `CLAUDE.md` mention — operator's call.
 - **Explicitly out of scope**: the c-store/Hungry-Howie's market document is held outside the
   repo by the operator; not referenced or committed as part of today's work.
+
+## 2026-07-25 evening: ADR 0006 Data Manager v1 — SHIPPED, complete (real code)
+Window 1 built, Window 2 reviewed/tested/committed, one migration at a time, each verified with
+real output before commit. **v1 is now complete — no remaining gap.** 9 commits: `60e4514`
+(the Data Manager itself + diagnostics), `cca9cfb` (community_queue), `1cb52ae` + `c825407`
+(tickets + its schema-init run-once follow-up fix), `e2e3d87` (ai_engine), `37a02d0`
+(anomaly_detection), `70cb926` (malware_detection — 6th and originally "final" module), then
+`97d6260` + `3454a75` (ADR 0006 + `CLAUDE.md` status docs), and finally the loader-enforcement
+close-out covered by this section.
+
+- **`alert_manager/data_manager.py`** (new): `GuardedConnection` (write-own access control,
+  fail-closed on an unidentifiable write target), the atomic ops layer
+  (`next_sequence`/`increment_counter`/`upsert` — the v0 seed's formal home), the
+  `dm_operation_log` audit trail (metadata only, no row values), and actor context stamped on
+  every write, atomic-helper AND raw passthrough alike.
+- **All 6 DB-using modules migrated**: diagnostics, community_queue, tickets, ai_engine,
+  anomaly_detection, malware_detection — none calls `get_db()` directly anymore. `dhcp`
+  discovered as a 7th module during the sweep: DB-free, passes the contract with no migration.
+- **`modules_loader.py` updated with real loader-level enforcement** (closes the one gap the
+  morning's ADR 0006 status fix had flagged as open): an AST-based static check
+  (`_check_data_manager_contract()`) parses each module's `module.py` before running any of its
+  code and refuses to load one that imports raw `sqlite3` or the bare `get_db` accessor, naming
+  the module + violation + line. Verified both ways: all 7 real modules pass; synthetic
+  raw-`sqlite3`/bare-`get_db`-import/bare-`get_db()`-call/syntax-error cases are all correctly
+  refused.
+- **Every migration was verified with real output before commit** — `py_compile` clean,
+  `python3 alert_manager/test_data_manager.py` (43/43 PASS incl. a race-free concurrency proof)
+  re-run after each change, and each module's external callers checked (e.g.
+  `anomaly_detection.py` borrows `ai_engine`'s private `_conn()` for a read-only rate-limit
+  check — confirmed safe; `malware_canary.py` is a separate process that already calls
+  `set_shared_db_path()` before import, so the Data Manager's lazy-build works there with no
+  extra wiring).
+- **Docs updated to match, same day**: ADR 0006 status corrected from "Proposed, v0 only" to
+  "v1 SHIPPED — complete," `CLAUDE.md`'s Data Manager section corrected (it previously claimed
+  loader enforcement that didn't exist yet — now true), a new standing rule added alongside the
+  Window 1/2 split and push-coordination, and the `adr-status-audit-2026-07-25.md` ADR 0006 row
+  updated in place (flagged as a same-day amendment, not a re-audit).
+- **v2 (schema gatekeeper) is explicitly DEFERRED, not merely unstarted** — waiting on the L3
+  zero-day work (behavioral-trigger telemetry, TLS interception) to produce real new schemas to
+  design the gatekeeper against, rather than designing it now against only today's 6 stable
+  schemas. v3 (contributor-scale enforcement) remains not started.
 
 ## TL;DR (last shipped work — 2026-07-02 closeout, still current)
 That night shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
@@ -205,12 +247,21 @@ its own.
    `adr-0009-l3-behavioral-trigger-scope.md` and `tls-interception-sterilization-scope.md` both
    deliberately carry no session estimate. Don't skip straight to building from the addendum —
    the scoping pass comes first, and Open Item 3 (no target hardware baseline) blocks even that.
-3. **ADR 0001 Stages 5–6** (service-discovery instead of hardcoded `HEALTH_SERVICES`; retire the
-   3 orphaned per-module `.db` files) are open and low-risk — good small-fix candidates.
-4. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
+3. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
    toggle still unbuilt — `dashboard-l2-toggle.md`) — both still true, unchanged since 07-02.
-5. If picking up the L3/TLS work: read the ADR 0009 addendum's "Open items from this session"
+4. If picking up the L3/TLS work: read the ADR 0009 addendum's "Open items from this session"
    section FIRST — 4 unresolved design questions block real progress on either new scoping doc.
+5. **New module authors: the Data Manager is now loader-enforced**, not a style guideline — a
+   `module.py` importing raw `sqlite3` or the bare `get_db` accessor will be refused at load
+   time with a named error. Route all DB access through `get_data_manager().connect(module)`.
+   See ADR 0006 for the full contract.
+
+## DONE TODAY (moved out of priorities, kept for continuity)
+- **ADR 0001 Stages 5–6** (service-discovery instead of hardcoded `HEALTH_SERVICES`; retire the
+  3 orphaned per-module `.db` files) — completed earlier today (`af08a19`). ADR 0001's full
+  migration plan (Stages 0–6) is now done.
+- **ADR 0006 Data Manager v1** — completed today, see the dedicated section above. v2 (schema
+  gatekeeper) is intentionally deferred pending L3, not an open TODO for the next session.
 
 ## Pointers
 - Session narratives: `docs/handoff/supplements/2026-07-02-001.md`, `2026-07-25-001.md` (morning
@@ -223,9 +274,13 @@ its own.
 - Business model: `docs/roadmap/product-thesis-built-in-it-expertise.md` (expanded 07-25 —
   tier/pricing/resource-philosophy/AI-optional sections), `network-resource-scaling-advisor.md`
   (new 07-25, distinct from `nemesis-overhead-meter.md`).
-- ADRs: 0001 (DB/module architecture — header fixed 07-25), 0005 (DNS posture blocker), 0009
+- ADRs: 0001 (DB/module architecture — Stages 0–6 all done 07-25), 0005 (DNS posture blocker),
+  0006 (Data Manager — **v1 SHIPPED, loader-enforced, 07-25**; v2 deferred pending L3), 0009
   (inspection proxy — L3 addendum 07-25), 0011 (enrollment), 0012 (enrollment modes).
-- Latest audits: `docs/audits/roadmap-state-audit-2026-07-25.md`, `docs/audits/adr-status-audit-2026-07-25.md`.
+- Data Manager: `alert_manager/data_manager.py`, `alert_manager/test_data_manager.py` (43/43
+  PASS), enforcement in `modules_loader.py` (`_check_data_manager_contract`).
+- Latest audits: `docs/audits/roadmap-state-audit-2026-07-25.md`, `docs/audits/adr-status-audit-2026-07-25.md`
+  (ADR 0006 row amended same-day post-audit).
 - Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
 - **Not in this repo, intentionally:** the c-store/Hungry-Howie's market document — held outside
   the repo by the operator, not part of this project's docs.

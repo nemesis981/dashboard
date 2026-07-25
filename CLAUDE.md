@@ -114,6 +114,11 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
   (`git log --oneline @{u}..HEAD`) — a push publishes everything pending, not just what
   was just committed. Show the full list to the operator and get explicit confirmation
   before pushing.
+- **Data Manager (ADR 0006) — loader-enforced, not convention.** All module DB access goes
+  through `get_data_manager()` / `data_manager.connect(module)`. This is not a style
+  preference: `modules_loader.py` statically refuses to load a module that imports raw
+  `sqlite3` or the bare `get_db` accessor, before any of its code runs. See ADR 0006 for the
+  full design (access control, audit trail, atomic ops) — not duplicated here.
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
@@ -283,29 +288,21 @@ TIER 1 Rule 5 and Window Roles above (Window 2 is the sole git-writer).
   become debt the future firewall engine (ADR 0005) must reconcile. (Readiness audit
   2026-06-27.)
 
-### Data Manager (ADR 0006 — v1 SHIPPED 2026-07-25; loader-enforcement still pending)
-- `alert_manager/data_manager.py` is built and **all 6 modules are migrated**
-  (diagnostics, community_queue, tickets, ai_engine, anomaly_detection, malware_detection).
-  New/changed module code MUST use `get_data_manager().connect(module)` for DB operations —
-  direct `sqlite3.connect()` or bare `get_db()` calls from module code are **FORBIDDEN** going
-  forward, matching what every existing module already does.
-- **Correction — the loader does NOT enforce this yet.** `modules_loader.py` has no Data
-  Manager check; a module that bypassed it would still load today. What IS real: at the
-  connection level, `GuardedConnection` raises `AccessDenied` on any write outside a module's
-  namespace (fail-closed). So access control is live per-write, but compliance is currently
-  voluntary-by-migration, not loader-guaranteed. Don't describe this as "does not load, no
-  exceptions" until the loader check actually exists — see ADR 0006's "Status/next" for the gap.
+### Data Manager (ADR 0006 — v1 SHIPPED + loader-enforced, 2026-07-25)
+- Standing rule and enforcement mechanism: see Window Roles → "Both windows (shared
+  discipline)" above. Full design (access control, audit trail, atomic ops, build sequence):
+  ADR 0006 — not duplicated here.
 - The four atomic SQL fixes (`tickets_seq`, `ai_engine` rate, `community_queue`,
   `anomaly_incidents`) — the **Data Manager v0 seed** — are now formalized as the real
   `next_sequence`/`increment_counter`/`upsert` methods on `DataManager`, not scattered inline
   SQL. Label new atomic operations as calls to those methods, with a pointer to ADR 0006.
-- **Actor mechanism is live but currently unwired.** The Data Manager stamps
-  `current_actor()` on every logged write automatically (atomic-helper AND raw passthrough
-  writes alike — proven in `test_data_manager.py`), so once a caller sets an actor it needs no
-  per-write plumbing. But **no caller sets it yet** — confirmed 2026-07-25, nothing in the
-  codebase calls `set_actor()` — so every write's logged actor is `NULL` in practice today.
-  Wiring real identity context into `set_actor()` at the request/session boundary is separate,
-  unstarted work.
+- **Actor mechanism is live but currently unwired** — flagged here because it's easy to miss
+  and ADR 0006 doesn't call it out. The Data Manager stamps `current_actor()` on every logged
+  write automatically (atomic-helper AND raw passthrough writes alike — proven in
+  `test_data_manager.py`), so once a caller sets an actor it needs no per-write plumbing. But
+  **no caller sets it yet** — nothing in the codebase calls `set_actor()` — so every write's
+  logged actor is `NULL` in practice today. Wiring real identity context into `set_actor()` at
+  the request/session boundary is separate, unstarted work.
 
 ### Vendor-specific integrations
 **VENDOR-SPECIFIC INTEGRATIONS: whenever a vendor-specific probe, plugin, or integration is
