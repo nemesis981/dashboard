@@ -1,7 +1,17 @@
 # ADR 0006 — Data Manager
 
-- **Status:** Proposed (direction captured; design not yet specified — only the v0 seed exists)
-- **Date:** 2026-06-28
+- **Status:** **v1 SHIPPED** (verified 2026-07-25 — code + `alert_manager/test_data_manager.py`
+  re-check, header was stale). `alert_manager/data_manager.py` is built: access control
+  (write-own, fail-closed), operation logging (`dm_operation_log`, metadata-only), and the
+  atomic ops layer (`next_sequence`/`increment_counter`/`upsert`, the formal home of the v0
+  seed) are all live. **All 6 modules migrated** (diagnostics, community_queue, tickets,
+  ai_engine, anomaly_detection, malware_detection) — none still calls `get_db()` directly.
+  **Gap vs. this ADR's own v1 definition:** the module **loader** (`modules_loader.py`) does
+  NOT enforce Data Manager routing at load time — a module bypassing the Data Manager would
+  still load today; enforcement is currently voluntary (every module happens to comply) not
+  loader-guaranteed. See "Enforcement" and "Build sequence" below — that piece is unbuilt.
+  v2 (schema gatekeeper) and v3 (contributor capability enforcement) are **not started**.
+- **Date:** 2026-06-28 (v1 shipped + verified: 2026-07-25)
 - **Affects:** all module/service DB access, `modules_loader.py` (load-time enforcement), the
   four 2026-06-28 race-fix sites (the v0 seed), attribution (`actor`), access control
   (write-own/read-scoped), the schema gatekeeper, third-party module trust
@@ -13,7 +23,8 @@
   (2026-06-26 session); `CONTRIBUTING.md`
 
 > Paths sanitized for the public repo. This ADR **records** the decided direction; it does not
-> design the implementation. Only "Data Manager v0" (the four atomic race fixes) is built.
+> design the implementation. **v1 is built and all 6 modules are migrated** (2026-07-25); the
+> loader-enforcement piece of v1's own definition, and v2/v3, are not.
 
 ---
 
@@ -67,33 +78,48 @@ modules / services
     alerts.db (SQLite, WAL mode, busy_timeout)
 ```
 
-## Enforcement (mandatory, not optional)
+## Enforcement (mandatory design intent — NOT yet loader-enforced)
 
-- The module loader (`_load_module` in `modules_loader.py`) checks that every module routes DB
-  access through the Data Manager **before instantiating it**. A module that imports `sqlite3`
-  directly or calls `get_db()` outside the Data Manager contract is **REJECTED at load time**.
-- This is not a convention or a guideline. It is a **loader-enforced hard requirement**. No
-  Data Manager routing = no module load.
-- The Data Manager is the **SOLE path to DB access for modules**. Core services (watchdog,
-  alert_watcher, etc.) use it too but have a higher-trust path for performance-critical
-  operations.
+- The module loader (`_load_module` in `modules_loader.py`) is **intended** to check that every
+  module routes DB access through the Data Manager **before instantiating it**, rejecting at
+  load time a module that imports `sqlite3` directly or calls `get_db()` outside the Data
+  Manager contract. **This check does not exist yet** — confirmed 2026-07-25, `modules_loader.py`
+  has no reference to the Data Manager at all. Today, compliance is voluntary: all 6 modules
+  happen to route through it because they were migrated, not because the loader would reject
+  one that didn't.
+- **Access control that IS live**, at the connection level (not the loader): `GuardedConnection`
+  raises `AccessDenied` on any write outside a module's declared namespace, fail-closed on an
+  unidentifiable target. This is real enforcement — just scoped to writes made through
+  `get_data_manager().connect(module)`, not to whether a module uses that path in the first
+  place.
+- The Data Manager is the **intended SOLE path to DB access for modules**; core services
+  (watchdog, alert_watcher, etc.) use it too but have a higher-trust path for
+  performance-critical operations. The loader-rejection gap above means this "sole path" claim
+  is enforced by convention today, not by the loader.
 
-## Seed (already built — "Data Manager v0")
+## Seed (superseded by v1 — "Data Manager v0")
 
-The four atomic SQL fixes from the 2026-06-28 race audit are the **first concrete functions of
-the Data Manager's atomic operations layer**. They are labeled as such in the code with a
-pointer to this ADR. Future builds grow the Data Manager from this seed.
+The four atomic SQL fixes from the 2026-06-28 race audit were the **first concrete functions of
+the Data Manager's atomic operations layer**, originally landed as inline SQL labeled with a
+pointer to this ADR. **v1 (`alert_manager/data_manager.py`) formalizes them as the real
+`next_sequence`/`increment_counter`/`upsert` methods** — the v0 seed's logic now lives there,
+not as scattered inline SQL.
 
 ## Build sequence
 
-- **v0 (NOW):** atomic SQL fixes for the four races (seed functions).
-- **v1 (pre-commercial):** formalize as `alert_manager/data_manager.py`; move atomic operations
-  into it; add operation logging; add access-control enforcement; update the module loader to
-  enforce routing.
-- **v2 (with schema-gatekeeper ADR):** add mandatory schema declaration + validation at load
-  time.
-- **v3 (open-source contributor scale):** add capability-declaration manifest enforcement;
-  consider process isolation.
+- **v0 (SHIPPED, 2026-06-28):** atomic SQL fixes for the four races (seed functions).
+- **v1 (SHIPPED, 2026-07-25 — partial per this section's own original definition):**
+  formalized as `alert_manager/data_manager.py`; atomic operations moved into it
+  (`next_sequence`/`increment_counter`/`upsert`); operation logging added
+  (`dm_operation_log`); access-control enforcement added (`GuardedConnection`, write-own,
+  fail-closed); **all 6 modules migrated** to route through it. **NOT done:** "update the
+  module loader to enforce routing" — `modules_loader.py` has no Data Manager check; a
+  non-compliant module would still load. This is the one piece of v1's original scope left
+  for a follow-up, not a v2/v3 item.
+- **v2 (with schema-gatekeeper ADR) — NOT STARTED:** add mandatory schema declaration +
+  validation at load time.
+- **v3 (open-source contributor scale) — NOT STARTED:** add capability-declaration manifest
+  enforcement; consider process isolation.
 
 ## SQLite longevity note
 
@@ -123,7 +149,17 @@ volume or user count**.
 
 ## Status / next
 
-Proposed. Only the v0 seed (the four atomic race fixes) is built. Next steps in sequence:
-land the v0 fixes (audit-then-fix, one at a time), then formalize `data_manager.py` (v1) with
-operation logging + access-control enforcement + loader routing-enforcement, then fold in the
-schema gatekeeper (v2), then contributor-scale capability enforcement (v3).
+**v1 SHIPPED (2026-07-25).** `alert_manager/data_manager.py` is live: atomic ops
+(`next_sequence`/`increment_counter`/`upsert`), operation logging (`dm_operation_log`), and
+connection-level access control (`GuardedConnection`, write-own, fail-closed) all built and
+verified (`test_data_manager.py`, 43/43 PASS, incl. a race-free concurrency proof). **All 6
+modules migrated** — diagnostics, community_queue, tickets, ai_engine, anomaly_detection,
+malware_detection — none calls `get_db()` directly anymore.
+
+**Immediate next step (completes v1's original scope):** add the `modules_loader.py` check that
+rejects a module at load time if it bypasses the Data Manager. Today that's the only gap between
+what's built and what this ADR originally specified for v1 — access control is real but
+currently voluntary-by-migration, not loader-guaranteed.
+
+**After that:** fold in the schema gatekeeper (v2), then contributor-scale capability
+enforcement (v3) — both **not started**.
