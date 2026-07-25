@@ -37,10 +37,9 @@ from modules import NemesisModule, get_db
 
 log = logging.getLogger("nemesis.tickets")
 
-# ADR 0001 Stage 3: tickets now reads/writes the shared alerts.db (tickets / tickets_seq /
-# tickets_settings) via the shared accessor. DB_PATH is retained only as a fallback pointer
-# to the old per-module file (NOT deleted, NOT opened anymore).
-DB_PATH   = os.path.join(os.path.dirname(__file__), "tickets.db")
+# ADR 0001 Stage 3: tickets reads/writes the shared alerts.db (tickets / tickets_seq /
+# tickets_settings) via the shared accessor. Stage 6: the old per-module tickets.db has been
+# retired (data migrated to the shared DB) — no per-module DB path remains.
 
 TICKET_PREFIX = "NF"
 

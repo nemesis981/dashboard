@@ -1091,13 +1091,8 @@ restore_from_backup() {
         ok "Restored: alert_manager/alerts.db"
     fi
 
-    # tickets.db
-    if [[ -f "$tmp_dir/modules/tickets/tickets.db" ]]; then
-        mkdir -p "$DASHBOARD_DIR/modules/tickets"
-        cp "$tmp_dir/modules/tickets/tickets.db" "$DASHBOARD_DIR/modules/tickets/tickets.db"
-        chown "$SUDO_USER" "$DASHBOARD_DIR/modules/tickets/tickets.db" 2>/dev/null || true
-        ok "Restored: modules/tickets/tickets.db"
-    fi
+    # ADR 0001 Stage 6: the old per-module tickets.db has been retired — tickets data
+    # now lives in the shared alerts.db (restored above). No separate restore step.
 
     # hw_map.json
     if [[ -f "$tmp_dir/alert_manager/hw_map.json" ]]; then

@@ -25,11 +25,9 @@ from modules.ai_engine import (
 
 log = logging.getLogger("nemesis.community_queue")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-# ADR 0001 Stage 3: community_queue now reads/writes the shared alerts.db
-# (community_queue table) via the shared accessor. _DB_PATH is retained only as a
-# fallback pointer to the old per-module file (NOT deleted, NOT opened anymore).
-_DB_PATH = os.path.join(_HERE, "community_queue.db")
+# ADR 0001 Stage 3: community_queue reads/writes the shared alerts.db (community_queue
+# table) via the shared accessor. Stage 6: the old per-module community_queue.db has been
+# retired (data migrated to the shared DB) — no per-module DB path remains.
 
 _AI_CONFIDENCE_ORDER = {"high": 0, "uncertain": 1, "low": 2}
 

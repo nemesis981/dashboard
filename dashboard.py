@@ -33,12 +33,34 @@ _VPN_CACHE_TTL = 30.0
 _drilldown_cache = {"ts": 0.0, "data": None, "date": None}
 _DRILLDOWN_CACHE_TTL = 30.0
 
-HEALTH_SERVICES = [
-    "pihole-FTL", "clamav-daemon", "suricata",
-    "dashboard", "device-scanner",
-    "alert-watcher", "hw-monitor", "watchdog",
-    "malware-canary", "diagnostics-watcher",
-]
+# External OS / third-party services Nemesis depends on but does NOT own: they
+# ship no repo `.service` unit and never will (OS packages), so they stay an
+# explicit list. This is the external-dependency set, NOT a duplicate registry
+# of Nemesis units — those are discovered from their unit files below.
+EXTERNAL_HEALTH_SERVICES = ["pihole-FTL", "clamav-daemon", "suricata"]
+
+
+def _discover_health_services():
+    """Build the health-check target list: external OS deps + auto-discovered
+    Nemesis units. Nemesis units are discovered by scanning the repo's
+    `*.service` unit files under alert_manager/ and core/ (the same files
+    install.sh deploys), so a newly-added unit is health-checked the moment it
+    exists — no hand-maintained list to drift out of sync. (ADR 0001 Stage 5.)
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    discovered = set()
+    for sub in ("alert_manager", "core"):
+        unit_dir = os.path.join(here, sub)
+        try:
+            for fname in os.listdir(unit_dir):
+                if fname.endswith(".service"):
+                    discovered.add(fname[:-len(".service")])
+        except FileNotFoundError:
+            continue
+    return list(EXTERNAL_HEALTH_SERVICES) + sorted(discovered)
+
+
+HEALTH_SERVICES = _discover_health_services()
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHDOG_LOG_PATH = os.path.join(_HERE, "alert_manager", "watchdog.log")
@@ -5354,8 +5376,10 @@ def api_uninstall():
 def _backup_candidates():
     """Return list of (src_path, archive_name) tuples for backup."""
     files = [
+        # ADR 0001 Stage 6: tickets data now lives in the shared alerts.db
+        # (tickets/tickets_seq/tickets_settings), captured by the alerts.db entry above.
+        # The old per-module tickets.db has been retired, so it is no longer a candidate.
         (os.path.join(_HERE, "alert_manager", "alerts.db"), "alerts.db"),
-        (os.path.join(_HERE, "modules", "tickets", "tickets.db"), "modules/tickets/tickets.db"),
         (os.path.join(_HERE, "alert_manager", "hw_map.json"), "alert_manager/hw_map.json"),
         ("/etc/nemesis.env", "etc_nemesis.env"),
     ]

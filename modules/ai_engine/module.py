@@ -10,7 +10,7 @@ Public API (importable from any module):
     get_settings()      → dict
 
 DB: shared alerts.db (ai_* tables), reached via the Stage-1 module accessor.
-    modules/ai_engine/ai_engine.db is retained as a fallback only (ADR 0001 Stage 3).
+    The old per-module ai_engine.db was retired in ADR 0001 Stage 6.
 """
 
 import os
@@ -26,10 +26,8 @@ from modules import NemesisModule, get_db as _shared_get_db
 
 log = logging.getLogger("nemesis.ai_engine")
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-# Legacy per-module DB path. Retained as a fallback file only (not used for live
-# connections after the ADR 0001 Stage 3 cutover); removed in a later stage.
-_DB_PATH = os.path.join(_HERE, "ai_engine.db")
+# ADR 0001 Stage 6: the legacy per-module ai_engine.db has been retired (data migrated to
+# the shared alerts.db ai_* tables at the Stage 3 cutover) — no per-module DB path remains.
 
 # Defaults — overridden by ai_settings table
 _RATE_HOUR_DEFAULT = 10
