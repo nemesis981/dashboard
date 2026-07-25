@@ -45,11 +45,55 @@ def get_db(**kwargs) -> sqlite3.Connection:
     Applies a 5s busy_timeout explicitly (not relying on Python's default) so the
     connection waits rather than erroring under the concurrent-writer load the
     shared DB sees in WAL mode (ADR 0001 Stage-2 prerequisite).
+
+    ADR 0006: this is becoming an *internal* detail the Data Manager wraps. Core
+    services (higher-trust path) may still use it; migrated modules go through
+    ``get_data_manager()`` instead.
     """
     kwargs.setdefault("timeout", 5.0)
     conn = sqlite3.connect(get_shared_db_path(), **kwargs)
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+# ---------------------------------------------------------------------------
+# Data Manager accessor  (ADR 0006, v1)
+# ---------------------------------------------------------------------------
+# The single authoritative DB layer (alert_manager/data_manager.py). Exposed here
+# so modules keep their existing import style (`from modules import
+# get_data_manager`). Built lazily from the shared DB path the loader already
+# publishes, so every entrypoint that calls set_shared_db_path() (dashboard AND
+# the core-service processes) gets a working Data Manager with no extra wiring.
+_data_manager = None
+
+
+def set_data_manager(dm) -> None:
+    """Register a Data Manager instance explicitly (e.g. from the loader)."""
+    global _data_manager
+    _data_manager = dm
+
+
+def get_data_manager():
+    """Return the process-wide Data Manager, building it lazily from the shared
+    DB path if one hasn't been registered yet. Raises if the loader/service
+    hasn't published the shared path."""
+    global _data_manager
+    if _data_manager is None:
+        _data_manager = _build_default_data_manager(get_shared_db_path())
+    return _data_manager
+
+
+def _build_default_data_manager(path: str):
+    # data_manager.py lives in alert_manager/ (a sys.path dir, not a package) —
+    # ensure it is importable regardless of which entrypoint we're running under.
+    import os
+    import sys
+    here = os.path.dirname(os.path.abspath(__file__))          # <repo>/modules
+    alert_mgr = os.path.join(os.path.dirname(here), "alert_manager")
+    if alert_mgr not in sys.path:
+        sys.path.insert(0, alert_mgr)
+    import data_manager
+    return data_manager.DataManager(path)
 
 
 class NemesisModule:

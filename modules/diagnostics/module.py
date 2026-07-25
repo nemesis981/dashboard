@@ -24,11 +24,10 @@ no card (provides_dashboard_card=false until Pass 2), no routes.
 import html
 import time
 import logging
-import sqlite3
 
 from flask import jsonify, request
 
-from modules import NemesisModule, get_db
+from modules import NemesisModule, get_data_manager
 
 log = logging.getLogger("nemesis.diagnostics")
 
@@ -50,11 +49,13 @@ DEFAULT_SETTINGS = {
 
 
 # ── Database helpers ──────────────────────────────────────────────────────────
-def _conn() -> sqlite3.Connection:
-    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
-    c = get_db()
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    # ADR 0006: route diagnostics DB access through the Data Manager (write-own
+    # access control + operation logging). Drop-in for the old get_db() — the
+    # connection's row_factory is applied by connect(). The standalone watcher.py
+    # uses this same _conn(), so its writes are covered too. diagnostics writes
+    # only diagnostics_* tables, so every write passes the namespace check.
+    return get_data_manager().connect("diagnostics")
 
 
 def _init_db() -> None:
