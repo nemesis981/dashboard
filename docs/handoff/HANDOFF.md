@@ -1,21 +1,42 @@
 # HANDOFF — current state
 
-> Last updated **2026-07-02 (closeout)**. Overwritten each closeout (latest state wins).
-> Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys live
-> ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
+> Last updated **2026-07-25 (docs-review session, Window 2)**. Overwritten each closeout (latest
+> state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
+> live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
 >
-> ⚠️ **OPERATOR AWAY 2026-07-03 → ~2026-07-06 (≈4 days, no computer access).**
-> ⚠️ **Windows are now SOLO** — Window 2 (docs) retired; one window does build + docs.
+> ✅ **Operator trip window (07-03 → ~07-06) has passed; session active again as of 2026-07-25.**
+> ✅ **Windows are back to a numbered split** — Window 1 (build, Opus) / Window 2 (docs+audit+sole
+> git-writer, Sonnet). See `CLAUDE.md` Window Roles.
 
 ---
 
-## TL;DR
-Tonight shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
+## 2026-07-25 review session (read-only audit, no code shipped)
+23 days passed with **zero code commits** since the 07-02 closeout below (only one docs-only
+punchlist entry, `8cdb120`). This session (Window 2) re-ran the morning status + a full
+roadmap-vs-state and ADR audit, and made three doc fixes:
+- **ADR 0001 header corrected** — was stale ("Proposed — revised"); actual state is Stages 0–3
+  shipped (all 4 modules on the shared DB), Stage 4 done, **Stages 5–6 still open** (hardcoded
+  `HEALTH_SERVICES` in `dashboard.py:36`; three orphaned per-module `.db` files not yet retired).
+  Detail: `docs/audits/adr-status-audit-2026-07-25.md`.
+- **Roadmap baseline refreshed**: `docs/audits/roadmap-state-audit-2026-07-25.md` — tally unchanged
+  at 4 SHIPPED / 8 PARTIAL, parked count now 47 (was 39; the +8 files all trace to the 07-02 session
+  itself, not new drift). `CLAUDE.md`'s Morning-Status baseline line now points here.
+- **Trip-laptop appears to have installed and operated successfully** — the one commit since 07-02
+  (`8cdb120`) is a PUNCHLIST entry observed *on* the trip-laptop on 2026-07-03: `hw_metrics` /
+  `agent_last_seen` telemetry landing normally, only `agent_devices.last_heartbeat_data` not
+  populating (low severity, non-blocking, still open). No evidence any fallback procedure was needed.
+- **Open, uncommitted, not acted on**: `alert_manager/watchdog.py` has a 1-line uncommitted diff
+  (drops a redundant local `os` re-import — `os` is already imported at module scope, so this looks
+  like safe Window-1 cleanup WIP) — not committed because it hasn't been reported ready-to-commit
+  this session. `hw_monitor.log.1` (untracked, looks like a rotated log) also sitting in the tree.
+
+## TL;DR (last shipped work — 2026-07-02 closeout, still current)
+That night shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
 latent build gap where pydivert/WinDivert was never actually bundled in any frozen agent**, so L2
-could not have run in production before tonight. Server-side Feature 6 endpoint is **LIVE**; L1/L2
+could not have run in production before then. Server-side Feature 6 endpoint is **LIVE**; L1/L2
 ship **default-OFF**. A **trip-laptop installer with L2 pre-enabled** was built and staged to the
-NEMESIS USB stick (now in the operator's possession). Emergency fallback (tag + Procedure A/B) is
-confirmed on origin. Nothing is in a half-deployed state.
+NEMESIS USB stick. Emergency fallback (tag + Procedure A/B) is confirmed on origin. Nothing is in a
+half-deployed state. (Nothing below has changed since — no code commits landed in the 23 days after.)
 
 ## LIVE vs DEFAULT-OFF (and why)
 
@@ -124,21 +145,26 @@ its own.
   Blocks L1 real use. Unbuilt design problem.
 - **Old `build2-83` ghost** device record — harmless; reject in Settings → Devices when convenient.
 
-## IF I HAVE 10 MINUTES ON THE TRIP (priorities)
-1. **Install the trip-laptop package NOW if not already** (token ~2h TTL). Then **approve `trip-laptop`
-   in Settings → Devices** (it enrolls pending). Confirm it heartbeats.
-2. **If anything looks wrong on any device** → don't debug in the field: run **Procedure A** (local
-   uninstall, no network) from `backupproc.md`. For a server-side problem, **Procedure B** (send son
-   the emailed revert prompt → tag `pre-l1l2l3-build-known-good`).
-3. **Do NOT enable L1** (no real protection until ADR 0005 is solved) and **do NOT globally enable L2**
-   (per-device toggle isn't built yet — only the trip-laptop is armed, intentionally).
+## NEXT-SESSION PRIORITIES (post-trip; trip window has passed)
+1. **Decide on the uncommitted `watchdog.py` cleanup** sitting in the tree — confirm with Window 1
+   whether it's ready, then Window 2 reviews/Rule-8-scans/commits it (its own commit, not batched).
+2. **Low-severity trip-laptop bug still open**: `agent_devices.last_heartbeat_data` not populating
+   for trip-laptop (PUNCHLIST, `8cdb120`). Not blocking; pick up when convenient.
+3. **installer-unified-v1.0.6's two pre-trip fixes are still outstanding** (auto_approve default,
+   double-enroll) — these were deferred *for* the trip and the trip has now happened; worth deciding
+   whether they're still wanted or superseded.
+4. **ADR 0001 Stages 5–6** (service-discovery instead of hardcoded `HEALTH_SERVICES`; retire the
+   3 orphaned per-module `.db` files) are open and low-risk — good small-fix candidates.
+5. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
+   toggle still unbuilt — `dashboard-l2-toggle.md`) — both still true, unchanged since 07-02.
 
 ## Pointers
-- Session narrative: `docs/handoff/supplements/2026-07-02-001.md`.
+- Session narratives: `docs/handoff/supplements/2026-07-02-001.md`, `2026-07-25-001.md`.
 - Fallback: `docs/operations/backupproc.md`; tag `pre-l1l2l3-build-known-good` (`14b066b`).
 - L2 design: `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`,
   `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`.
 - ADRs: 0005 (DNS posture blocker), 0009 (inspection proxy), 0011 (enrollment), 0012 (enrollment modes).
+- Latest audits: `docs/audits/roadmap-state-audit-2026-07-25.md`, `docs/audits/adr-status-audit-2026-07-25.md`.
 - Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
 
 ## Topology (durable)
