@@ -17,6 +17,7 @@ Public API:
 """
 
 import os
+import ast
 import json
 import importlib.util
 import sqlite3
@@ -31,6 +32,12 @@ _db_path: str | None = None
 _app = None
 _manifests: dict = {}   # name -> manifest dict (always populated after init)
 _loaded: dict = {}      # name -> Module instance (only enabled modules)
+
+
+class ModuleEnforcementError(RuntimeError):
+    """A module violates the ADR 0006 Data Manager contract by reaching the DB
+    directly (raw sqlite3 / bare get_db) instead of through the Data Manager.
+    Raised by the loader BEFORE any module code runs — no routing, no load."""
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +166,10 @@ def _load_all_enabled() -> None:
         if _is_enabled(name):
             try:
                 _load_module(name)
+            except ModuleEnforcementError as e:
+                # Loud + specific, no traceback noise — the message names the module,
+                # the failed check, and the line. The module simply does not load.
+                log.error("modules_loader: REFUSED to load module — %s", e)
             except Exception:
                 log.exception("modules_loader: failed to load %s", name)
 
@@ -186,6 +197,51 @@ def _set_enabled_in_db(name: str, enabled: bool, actor: str = None) -> None:
     conn.close()
 
 
+def _check_data_manager_contract(name: str, module_file: str) -> None:
+    """ADR 0006 Step 3 — enforce the Data Manager contract statically, BEFORE the
+    module's code is executed. A module that reaches the DB directly is refused
+    load. Rejects, naming the specific violation + line:
+      * ANY `import sqlite3` / `from sqlite3 import ...` (incl. aliases), and
+      * ANY bare `get_db` — a call (`get_db()`, `self.get_db()`, `modules.get_db()`)
+        or `from modules import get_db`.
+    `get_data_manager()` / `data_manager.connect()` are the sanctioned path and are
+    NOT flagged. Core services (watchdog, hw_monitor, …) do not pass through this
+    loader and keep their higher-trust direct path.
+    """
+    try:
+        with open(module_file) as f:
+            tree = ast.parse(f.read(), module_file)
+    except SyntaxError as e:
+        raise ModuleEnforcementError(
+            f"module {name!r} rejected — module.py failed to parse ({e})") from e
+
+    hint = ("ADR 0006: route DB access through the Data Manager via "
+            "get_data_manager() / data_manager.connect()")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name == "sqlite3" or a.name.startswith("sqlite3."):
+                    raise ModuleEnforcementError(
+                        f"module {name!r} rejected — raw sqlite3 import at "
+                        f"module.py:{node.lineno} ({hint})")
+        elif isinstance(node, ast.ImportFrom):
+            if (node.module or "").split(".")[0] == "sqlite3":
+                raise ModuleEnforcementError(
+                    f"module {name!r} rejected — raw sqlite3 import at "
+                    f"module.py:{node.lineno} ({hint})")
+            if node.module == "modules" and any(a.name == "get_db" for a in node.names):
+                raise ModuleEnforcementError(
+                    f"module {name!r} rejected — imports the bare get_db accessor at "
+                    f"module.py:{node.lineno} ({hint})")
+        elif isinstance(node, ast.Call):
+            fn = node.func
+            if (isinstance(fn, ast.Name) and fn.id == "get_db") or \
+               (isinstance(fn, ast.Attribute) and fn.attr == "get_db"):
+                raise ModuleEnforcementError(
+                    f"module {name!r} rejected — bare get_db() call at "
+                    f"module.py:{node.lineno} ({hint})")
+
+
 def _load_module(name: str) -> None:
     if name in _loaded:
         return  # already running
@@ -197,6 +253,10 @@ def _load_module(name: str) -> None:
     module_file = os.path.join(manifest["_dir"], "module.py")
     if not os.path.isfile(module_file):
         raise FileNotFoundError(f"No module.py in {manifest['_dir']}")
+
+    # ADR 0006 Step 3: enforce the Data Manager contract before running ANY module
+    # code. A module that reaches the DB directly is refused load (raises).
+    _check_data_manager_contract(name, module_file)
 
     # Dynamic import — each module gets its own namespace
     spec = importlib.util.spec_from_file_location(f"nemesis_module_{name}", module_file)
