@@ -25,11 +25,10 @@ import json
 import time
 import threading
 import logging
-import sqlite3
 import html as _html
 from datetime import datetime, timedelta
 
-from modules import NemesisModule, get_db
+from modules import NemesisModule, get_data_manager
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -191,11 +190,12 @@ class Module(NemesisModule):
 # Database helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _conn() -> sqlite3.Connection:
-    # Shared alerts.db accessor (WAL + busy_timeout already applied by get_db()).
-    c = get_db()
-    c.row_factory = sqlite3.Row
-    return c
+def _conn():
+    # ADR 0006: route anomaly_detection DB access through the Data Manager (write-own
+    # access control + operation logging). Drop-in for the old get_db() — the connection's
+    # row_factory is applied by connect(). anomaly_detection writes only anomaly_* tables,
+    # so every write passes the namespace check.
+    return get_data_manager().connect("anomaly_detection")
 
 
 def _init_db() -> None:
@@ -712,7 +712,11 @@ def _create_or_update_incident(conn, domain: str, data: dict, signals: dict,
               signals["incident_type"], row["id"]))
         return row["id"], new_score
 
-    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+    # DATA MANAGER v1 — atomic op, now routed through the Data Manager guarded connection
+    # (access control + audit log). Kept inline rather than folded into upsert(): the conflict
+    # target is a PARTIAL unique index (ON CONFLICT(offending_target) WHERE status='open')
+    # which the generic helper can't express, and the write is embedded in this bounded
+    # merge/retry loop on a shared conn. The atomic ON CONFLICT statement itself is unchanged.
     # A recent open incident → merge. Otherwise open a new one with an upsert guarded by the
     # partial UNIQUE(offending_target) WHERE status='open' index: if a concurrent writer — or
     # an open incident OLDER than the merge window — already holds the single open slot, the
