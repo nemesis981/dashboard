@@ -35,6 +35,12 @@ depending on where CPU cost and CA-trust are easiest to manage.
   reputation OR behavioral escalation) — i.e., this is a **deeper inspection capability within
   the existing catch layer**, not a third parallel layer. Not yet confirmed; flag for the
   dedicated scoping session.
+- **If agent-local: inherits the same redirect-ownership rule.** The ADR 0009 addendum's
+  now-RESOLVED Open Item 1 (origin agent owns the redirect when origin is enrolled; destination
+  agent owns it when origin is not) would presumably also govern *which* agent performs TLS
+  interception for a given flow, if interception happens agent-side rather than server-side —
+  same ownership question, not a separate one. Not confirmed; depends on Piece A's
+  agent-local-vs-server-side decision above.
 - **Agent role, if agent-local:** would need to stay consistent with the hard "agent is sensor/
   enforcement only" principle (ADR 0009 addendum §3) — the agent could perform the mechanical
   decrypt/re-encrypt operation as directed, but must not decide what's inspected or judge the
@@ -121,8 +127,10 @@ caveat.
 
 ## Cross-references
 [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) (the L3 direction this
-extends), [adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md)
-(the other new-scope item from this session; likely shares the catch-layer invocation point),
+extends, incl. the now-RESOLVED Open Item 1 on agent-to-agent redirect ownership — see Piece A),
+[adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md)
+(the other new-scope item from this session; likely shares the catch-layer invocation point, and
+scopes Open Item 1's new peer-enrollment-lookup dependency as its own Piece 5),
 [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the tunnel transport TLS
 interception would presumably ride, if server-side), base [ADR 0009](../architecture/0009-security-inspection-proxy.md)
 ("tunnel carries decisions, not data" — the principle Piece C's resource tension weighs against),

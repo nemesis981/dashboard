@@ -226,9 +226,47 @@ fleet** scope (across one owner's enrolled devices). Related shapes, different s
 for later consolidation, do not build three parallel aggregation-and-pushback systems.**
 
 ### Open items from this session (see also the two companion scoping docs)
-1. **Agent-to-agent WiFi traffic** (both ends enrolled): **which end's agent redirects** —
-   UNRESOLVED. Needs a design decision before the behavioral-trigger engine (Step 2 scoping
-   doc) gets built.
+1. **Agent-to-agent WiFi traffic** (both ends enrolled): **which end's agent redirects.**
+   **RESOLVED (2026-07-25).**
+   - **DECISION — one redirect owner per flow:**
+     - **Origin (initiating) agent owns the redirect when the origin is ENROLLED.**
+     - **Destination agent owns the redirect when the origin is NOT enrolled.**
+   - **Rationale:** consistency with the already-locked origin-based selection rule (§1
+     above — one rule, not two ends of the same flow independently deciding), and avoiding
+     duplicate tunneling of the same flow. **Resource cost is the deciding constraint here,
+     not correctness alone** — either end could in principle apply the rule correctly; only
+     one should pay the tunneling cost.
+   - **New dependency, NOT built, must be scoped:** the destination-owns-it clause requires
+     an agent to know whether an arbitrary peer is itself enrolled. Agents do not have that
+     state today. Implies fleet-roster distribution or a peer-enrollment lookup on the
+     heartbeat. Named as its own piece —
+     [adr-0009-l3-behavioral-trigger-scope.md](../roadmap/adr-0009-l3-behavioral-trigger-scope.md)
+     Piece 5.
+   - **Principle clarification:** peer-enrollment lookup is **enforcement routing** (which
+     already-enrolled agent applies an already-server-decided rule), **NOT detection
+     judgment**. On a fast read this looks like the agent making a decision — it isn't. The
+     agent still never scores or classifies anything; it only resolves which of two
+     equally-valid enforcement points applies the redirect. Does **not** violate §3's
+     agent-is-a-sensor-only principle.
+   - **Server-side backstop:** if the server ever receives the same 5-tuple tunneled from
+     two different agents, that is a **bug in the ownership rule's implementation** — log
+     it; do **not** enforce on it (no additional blocking/dropping triggered by the
+     duplicate itself).
+   - **Unresolved sub-item — recorded, not resolved:** the ownership decision above stands
+     either way, but whether it actually **protects the receiving end** depends on whether
+     Fork B's tunnel is **INLINE** (origin → server → destination; server can drop before
+     forwarding) or **MIRROR** (traffic goes direct; a copy is sent for inspection only). If
+     MIRROR, an origin-owned redirect never gates traffic reaching the destination — it can
+     only alert after the fact. **`adr-0009-l3-fork-b-scope.md` does not state which**:
+     Piece 2 describes the server forwarding + NAT'ing the flow (sounds inline), but Piece 3
+     adds Suricata via a passive `af-packet` capture interface (the same passive-capture
+     mechanism as the existing LAN tap) without ever stating whether the forward is gated on
+     Suricata's verdict. **Recorded here as a documentation gap in the Fork-B scope doc**,
+     not resolved by this addendum.
+   - **Flagged edge case — detail documented internally, not in the public repo (2026-07-26
+     disclosure audit).** Enrolled-to-enrolled WiFi traffic on the same AP has a real,
+     unresolved cost-to-value tension with the origin-based rule (§1). Not resolved here; a
+     source-visibility decision, not a feature-gating one.
 2. **Does the new behavioral-trigger engine reuse the EXISTING lateral-movement risk-scoring
    engine (this ADR's "Enrollment enriches detection" table) or run as a separate system?** —
    UNRESOLVED.

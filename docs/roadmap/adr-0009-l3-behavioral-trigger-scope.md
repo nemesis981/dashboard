@@ -114,17 +114,54 @@ consolidation question with the community-signal systems.
 
 ---
 
+## Piece 5 — Peer-enrollment lookup / fleet-roster distribution (redirect-ownership dependency)
+**What:** the mechanism letting an agent determine whether an arbitrary WiFi peer is itself an
+enrolled Nemesis agent. Required by the [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md)'s
+**now-RESOLVED Open Item 1** (agent-to-agent redirect ownership: origin owns the redirect when
+the origin is ENROLLED; destination owns it when the origin is NOT enrolled). This is a **new
+dependency surfaced by resolving that open item** — not previously scoped anywhere, including in
+this doc's original four pieces.
+
+- **Two candidate mechanisms, not decided here:**
+  1. **Fleet-roster distribution** — the server periodically pushes the set of enrolled device
+     identifiers to every agent. Likely rides the **same delivery channel as Piece 4's**
+     fleet-wide verdict push-back rather than a second push mechanism.
+  2. **Peer-enrollment lookup on the heartbeat** — an agent asks the server, per new peer
+     connection, "is this destination itself enrolled?" — a pull instead of a push.
+  Roster-push is likely cheaper at typical fleet sizes (one periodic broadcast vs. a lookup per
+  new peer) but goes stale between pushes; lookup-on-heartbeat is always current but adds a
+  round-trip on the connection's critical path.
+- **Principle note (restated from the addendum):** this lookup is **enforcement routing**
+  (which already-enrolled agent applies an already-server-decided rule), **not detection
+  judgment** — it requires no local scoring/classification and does not weaken the hard
+  agent-is-a-sensor-only principle (addendum §3).
+- **Server-side backstop is a safety net, not a substitute:** the addendum's backstop (log a
+  same-5-tuple double-tunnel as a bug, don't enforce on it) covers the failure case where this
+  piece's mechanism gets it wrong — it doesn't reduce the need for the mechanism to be mostly
+  correct.
+- **Depends on the same-AP tension (addendum §1, Open Item 1's flagged-not-decided note):**
+  enrolled-to-enrolled WiFi traffic on the same AP is the worst cost-to-value case this piece
+  has to serve — the roster/lookup mechanism has to exist even for the case where tunneling the
+  flow is barely worth it.
+
+**Confidence:** low — genuinely new capability, not an extension of anything already scoped;
+shape depends on Piece 4's push-mechanism design (if roster-push is chosen) or adds a new
+request/response path (if lookup-on-heartbeat is chosen).
+
+---
+
 ## Total & confidence
 ```
 TBD — needs its own dedicated scoping session.
 ```
 This doc deliberately does **not** produce a piece-by-piece or total session estimate, per the
-operator's explicit instruction this session. Rationale beyond that instruction: three of the
-four pieces above are blocked on unresolved design questions (Open Items #1 and #2, the
-push-mechanism consolidation question), and **no target hardware baseline exists** (Open Item
-#3) — estimating build sessions before knowing what hardware this needs to run on and before
-the reuse-vs-parallel scoring decision is made would be a number without a foundation, the same
-mistake the original build-scope doc's "small selective-routing increment" line made for Fork B.
+operator's explicit instruction this session. Rationale beyond that instruction: most of the
+five pieces above are blocked on unresolved design questions (Open Item #2's reuse-vs-parallel
+decision, the push-mechanism consolidation question, Piece 5's roster-vs-lookup choice), and
+**no target hardware baseline exists** (Open Item #3) — estimating build sessions before knowing
+what hardware this needs to run on and before those decisions are made would be a number without
+a foundation, the same mistake the original build-scope doc's "small selective-routing increment"
+line made for Fork B.
 
 ## Biggest unknowns (explicit)
 1. **Reuse-vs-parallel scoring engine (Piece 2 / Open Item #2)** — unresolved; changes the
@@ -132,17 +169,22 @@ mistake the original build-scope doc's "small selective-routing increment" line 
 2. **Continuous telemetry volume at scale (Piece 1)** — no precedent in this codebase for
    flow-level streaming; unknown whether "report all new connections" is tolerable bandwidth/
    load at MSP multi-site scale vs. a single home network.
-3. **Agent-to-agent WiFi redirect ownership (Open Item #1, from the addendum)** — unresolved;
-   affects Piece 1's telemetry semantics when both flow endpoints are enrolled agents.
+3. **Agent-to-agent WiFi redirect ownership is RESOLVED (Open Item #1, addendum)**, but resolving
+   it surfaced a new unscoped dependency: **peer-enrollment lookup / fleet-roster distribution
+   (Piece 5)** — roster-push vs. lookup-on-heartbeat not decided. Separately, whether the
+   ownership decision actually *protects* anything depends on Fork B's tunnel being INLINE vs.
+   MIRROR — **`adr-0009-l3-fork-b-scope.md` doesn't state which** (recorded as a documentation
+   gap in the addendum, not resolved here).
 4. **No target hardware baseline (Open Item #3)** — blocks turning any of the above into a real
    session estimate or resource-cost validation.
 
 ## Cross-references
 [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) (the direction this
-scopes), [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the transport this trigger
-feeds into, esp. Piece 1's reputation-verdict selection), ADR 0009's "Enrollment enriches
-detection" table (the existing lateral-movement scoring this may or may not extend),
-[community-signal-dedup.md](community-signal-dedup.md),
+scopes, incl. the now-RESOLVED Open Item 1 that Piece 5 depends on),
+[adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the transport this trigger feeds
+into, esp. Piece 1's reputation-verdict selection, and Pieces 2–3's unstated INLINE-vs-MIRROR
+gap), ADR 0009's "Enrollment enriches detection" table (the existing lateral-movement scoring
+this may or may not extend), [community-signal-dedup.md](community-signal-dedup.md),
 [open-source-threat-feeds.md](open-source-threat-feeds.md) (flagged overlap, Piece 4),
 [lateral-movement-outbreak-detection.md](lateral-movement-outbreak-detection.md) (the
 post-detection correlation work this may share an engine with).
