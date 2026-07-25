@@ -159,6 +159,84 @@ from [support-bundle.md](support-bundle.md).)
 > "Stop wasting weeks on software support. Nemesis documents everything automatically.
 > When something breaks, you have the proof."
 
+## Business model & resource philosophy (2026-07-25 capture)
+
+> Capture-only (Window 2, docs/audit — no code, no build). Same session as the
+> [ADR 0009 L3 addendum](../architecture/0009-security-inspection-proxy.md) and the TLS/
+> behavioral-trigger scoping docs. This section pins the business-model decisions that came up
+> repeatedly while scoping today's architecture work — they're product/pricing decisions, not
+> engineering ones, but they constrain engineering choices (see the Resource Philosophy /
+> TLS-resource-tension cross-link below), so they're captured here rather than lost in
+> conversation.
+
+### Tier structure
+- **Free tier = home use, FULL uniform detection depth — never stripped down.** A free-tier user
+  gets the same detection capability as a paying one; the tier gate is administrative/scale
+  features, not security.
+- **Commercial tier = FLAT price, NOT device-count or network-size based.**
+- **Hardware/bandwidth is customer-owned infrastructure cost**, scales with their network size,
+  and is **explicitly OUTSIDE Nemesis's pricing model.** Nemesis prices the software/service;
+  the customer's own hardware footprint is theirs to provision, same as any self-hosted product.
+
+### Locked principle — capability is never the upsell
+**Detection/security CAPABILITY is uniform at every tier and every scale.** Only
+**administrative/organizational** features differ by tier: multi-user, roles, MSP cross-site
+management, device-count caps. **Security is never the upsell.** This is a **locked** product
+principle, not a current-plan detail subject to routine revision — if a future pricing
+discussion proposes gating detection depth by tier, that's a reversal of a stated principle and
+should be flagged as such, not treated as a normal roadmap tradeoff.
+
+This directly extends the north-star thesis above ("enterprise capability without enterprise
+pricing") — it's the pricing-model expression of the same idea, not a separate decision.
+
+### Resource philosophy
+**Explicit engineering targets, not aspirations:**
+- Minimize **SERVER** resource cost relative to network size.
+- Keep **PER-DEVICE (agent)** resource cost very low.
+
+**Accepted tradeoff, stated explicitly:** as a network grows, some additional hardware/
+bandwidth is a **fair, EXPECTED, and TRANSPARENTLY COMMUNICATED** cost of scale — **not**
+something to hide or architect around at all costs. This is the philosophy the
+[network-resource-scaling-advisor.md](network-resource-scaling-advisor.md) capture
+operationalizes: rather than pretending Nemesis can scale for free, tell the customer honestly
+when their network has outgrown their current hardware/bandwidth, the same way any honest
+capacity-planning tool would. (Distinct from [nemesis-overhead-meter.md](nemesis-overhead-meter.md),
+which is Nemesis's own self-overhead/leak-detection diagnostic — see that scoping note for why
+these are two files, not one.)
+
+**Direct tension, named not resolved:** this philosophy is in explicit tension with
+[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) §c's
+resource-tension unknown (full TLS decryption for genuine payload coverage vs. the low-footprint
+selective-inspection design). That tension is an open architectural question, not something this
+business-model capture resolves — cross-linked here so the two don't drift apart in separate
+docs.
+
+### AI principle — strictly optional, never in the detection/decision path
+**AI-powered features are STRICTLY OPTIONAL and NEVER part of the detection/scoring/decision
+path.** Confirmed uses, and the only confirmed uses:
+1. **Opt-in post-detection explanation** — what happened, the risk, a proposed action (after a
+   deterministic detection has already fired).
+2. **Opt-in narration** for the
+   [network-resource-scaling-advisor](network-resource-scaling-advisor.md)'s recommendations —
+   translating raw metrics into plain language.
+
+**All core detection, scoring, and resource measurement is deterministic, local, and works with
+zero external AI dependency.** This is the same "agent is a dumb sensor, all judgment is
+server-side and rule-based" hard principle from today's
+[ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) §3, extended to also mean
+"and the server-side judgment itself is deterministic, not AI-dependent, by default."
+
+**This came up repeatedly enough today (L3 design, resource module, this section) that it may
+be worth a durable mention in `CLAUDE.md` — flagged for the operator's call, not done here**
+(capture-only session; a change to core operating discipline shouldn't be made silently). See
+the same flag in the ADR 0009 addendum §3.
+
+### Marketing / product thesis
+**"Enterprise-level protection for all user levels."** AI is the enabler that lets a small team
+build and price this at a fraction of what an enterprise SOC/security-vendor relationship
+costs, **without reducing detection depth for smaller customers.** State this as the product
+thesis driving the tier/pricing/resource decisions above — not just a tagline alongside them.
+
 ## Shape / next
 Capture as the guiding principle now. It may later **graduate** into `ARCHITECTURE.md`
 (durable product-vision section) or a dedicated ADR once it has shaped enough concrete
