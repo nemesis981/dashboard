@@ -1,12 +1,14 @@
 # HANDOFF — current state
 
-> Last updated **2026-07-25 (docs-review session, Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-07-25 (full-day closeout, Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
 > live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
 >
 > ✅ **Operator trip window (07-03 → ~07-06) has passed; session active again as of 2026-07-25.**
 > ✅ **Windows are back to a numbered split** — Window 1 (build, Opus) / Window 2 (docs+audit+sole
 > git-writer, Sonnet). See `CLAUDE.md` Window Roles.
+> ✅ **Today was capture-only, docs-only** (Window 2) — no code was built. One pre-existing 1-line
+> `watchdog.py` cleanup was committed on operator request; everything else is docs/architecture.
 
 ---
 
@@ -25,10 +27,57 @@ roadmap-vs-state and ADR audit, and made three doc fixes:
   (`8cdb120`) is a PUNCHLIST entry observed *on* the trip-laptop on 2026-07-03: `hw_metrics` /
   `agent_last_seen` telemetry landing normally, only `agent_devices.last_heartbeat_data` not
   populating (low severity, non-blocking, still open). No evidence any fallback procedure was needed.
-- **Open, uncommitted, not acted on**: `alert_manager/watchdog.py` has a 1-line uncommitted diff
-  (drops a redundant local `os` re-import — `os` is already imported at module scope, so this looks
-  like safe Window-1 cleanup WIP) — not committed because it hasn't been reported ready-to-commit
-  this session. `hw_monitor.log.1` (untracked, looks like a rotated log) also sitting in the tree.
+- **Resolved later the same day**: `watchdog.py`'s redundant local `os` re-import was operator-
+  approved and committed (`681f350`). The pre-existing uncommitted `CLAUDE.md` Window-numbering
+  formalization was also confirmed and committed (`fe78c91`). `hw_monitor.log.1` was reviewed
+  (23-day span, 4 recurring non-fatal "scan dispatch timeout" WARNINGs on one device, 19 non-fatal
+  enrollment/fingerprint ERRORs, nothing acute) and deleted along with the stale `CLAUDE.md.old` —
+  neither was repo-tracked, no commit needed.
+
+## 2026-07-25 afternoon: zero-day / TLS / business-model design capture (capture-only, NOT built)
+Full design session on the L3 zero-day architecture, TLS interception, and the business/resource
+model. Four commits (`1285a33`, `ebf0aae`, `1d6d2d2`, `946d7b4`), all Rule-8 scanned, all pushed.
+Full detail: `docs/handoff/supplements/2026-07-25-002.md`. Summary:
+- **ADR 0009 addendum** (`docs/architecture/0009-security-inspection-proxy.md`) — finalizes the
+  L3 selection model: **origin-based WiFi routing** (WiFi-origin traffic is always a tunnel
+  candidate regardless of destination; wired is already LAN-tap covered, replacing the
+  destination-based reasoning Fork B's original model had) + a **two-layer trigger/catch model**
+  (server-side behavioral scoring triggers; tunnel-routed Suricata catches, on unknown reputation
+  OR a behavioral escalation on a cached-clean destination) + the **hard principle that the agent
+  is a sensor/enforcement point only, never a judgment-maker** + a **dynamic cache** replacing the
+  static TTL one (named limitation: in-flight connections can't be retroactively inspected, only
+  the next connection escalates) + **shared fleet intelligence** (flagged, unresolved overlap with
+  `community-signal-dedup.md`/`open-source-threat-feeds.md`). Supersedes/refines
+  `adr-0009-l3-fork-b-scope.md`'s trigger criteria; that doc's transport mechanics still apply.
+  **Direction decided, NOT built.**
+- **New scoping doc**: `docs/roadmap/adr-0009-l3-behavioral-trigger-scope.md` — the new trigger
+  layer's engineering cost, piece-by-piece, **deliberately no session estimate** (TBD, needs its
+  own dedicated scoping session — additive on top of the already-scoped ~13–23 session Fork-B work).
+- **New scoping doc**: `docs/roadmap/tls-interception-sterilization-scope.md` — full TLS
+  decrypt-inspect-reencrypt for HTTPS payload coverage; sterilization policy (transient in-memory
+  inspection, bounded evidence retention on actual detections); home-strict/business-opt-in
+  toggle; 3 named hard unknowns (CA trust with no MDM, cert-pinning bypass, resource tension vs.
+  the low-footprint design). Also **no session estimate**, same TBD treatment.
+- **Business model + resource module**: `product-thesis-built-in-it-expertise.md` expanded (tier
+  structure — free=full uniform detection, commercial=flat price not device-count-based;
+  hardware/bandwidth explicitly outside the pricing model; **locked principle: security
+  capability is never the upsell**; resource philosophy — minimize server/per-device cost, accept
+  scale-driven hardware growth as a transparent tradeoff; **AI-strictly-optional principle** — AI
+  never in the detection/scoring path, confirmed uses are opt-in post-detection explanation +
+  opt-in resource-advisor narration only). New `docs/roadmap/network-resource-scaling-advisor.md`
+  for the resource-analysis module itself (deliberately separate from
+  `nemesis-overhead-meter.md` — that's Nemesis's own self-overhead diagnostic, a different
+  concept; flagged in both files for the operator to override).
+- **4 explicit open items** (all in the ADR 0009 addendum, cross-referenced from both scoping
+  docs — pick these up without re-deriving the conversation): (1) agent-to-agent WiFi redirect
+  ownership — unresolved; (2) whether the behavioral-trigger engine reuses the existing
+  lateral-movement scoring engine or runs separately — unresolved; (3) **no target hardware
+  baseline exists** — blocks turning any of today's new scope into real estimates; (4) TLS
+  resource-tension — how much traffic genuinely needs decrypting, unresolved.
+- **Flagged, not acted on**: the agent-is-a-sensor and AI-never-in-detection principles came up
+  often enough today that they may deserve a durable `CLAUDE.md` mention — operator's call.
+- **Explicitly out of scope**: the c-store/Hungry-Howie's market document is held outside the
+  repo by the operator; not referenced or committed as part of today's work.
 
 ## TL;DR (last shipped work — 2026-07-02 closeout, still current)
 That night shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
@@ -146,26 +195,40 @@ its own.
 - **Old `build2-83` ghost** device record — harmless; reject in Settings → Devices when convenient.
 
 ## NEXT-SESSION PRIORITIES (post-trip; trip window has passed)
-1. **Decide on the uncommitted `watchdog.py` cleanup** sitting in the tree — confirm with Window 1
-   whether it's ready, then Window 2 reviews/Rule-8-scans/commits it (its own commit, not batched).
-2. **Low-severity trip-laptop bug still open**: `agent_devices.last_heartbeat_data` not populating
-   for trip-laptop (PUNCHLIST, `8cdb120`). Not blocking; pick up when convenient.
-3. **installer-unified-v1.0.6's two pre-trip fixes are still outstanding** (auto_approve default,
-   double-enroll) — these were deferred *for* the trip and the trip has now happened; worth deciding
-   whether they're still wanted or superseded.
-4. **ADR 0001 Stages 5–6** (service-discovery instead of hardcoded `HEALTH_SERVICES`; retire the
+1. **STILL OPEN FROM BEFORE TODAY — do not let today's larger design work bury these:**
+   - **`installer-unified-v1.0.6`'s two pre-trip fixes** (auto_approve default, double-enroll) —
+     deferred *for* the trip; the trip has happened; still unresolved. Oldest open item in this
+     list — decide whether still wanted or superseded.
+   - **`agent_devices.last_heartbeat_data` not populating** for trip-laptop (PUNCHLIST, `8cdb120`,
+     open since 2026-07-03). Low severity, not blocking.
+2. **Today's new design work needs dedicated scoping sessions before any of it is buildable**:
+   `adr-0009-l3-behavioral-trigger-scope.md` and `tls-interception-sterilization-scope.md` both
+   deliberately carry no session estimate. Don't skip straight to building from the addendum —
+   the scoping pass comes first, and Open Item 3 (no target hardware baseline) blocks even that.
+3. **ADR 0001 Stages 5–6** (service-discovery instead of hardcoded `HEALTH_SERVICES`; retire the
    3 orphaned per-module `.db` files) are open and low-risk — good small-fix candidates.
-5. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
+4. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
    toggle still unbuilt — `dashboard-l2-toggle.md`) — both still true, unchanged since 07-02.
+5. If picking up the L3/TLS work: read the ADR 0009 addendum's "Open items from this session"
+   section FIRST — 4 unresolved design questions block real progress on either new scoping doc.
 
 ## Pointers
-- Session narratives: `docs/handoff/supplements/2026-07-02-001.md`, `2026-07-25-001.md`.
+- Session narratives: `docs/handoff/supplements/2026-07-02-001.md`, `2026-07-25-001.md` (morning
+  audit), `2026-07-25-002.md` (full-day closeout, incl. the design-capture detail).
 - Fallback: `docs/operations/backupproc.md`; tag `pre-l1l2l3-build-known-good` (`14b066b`).
-- L2 design: `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`,
-  `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`.
-- ADRs: 0005 (DNS posture blocker), 0009 (inspection proxy), 0011 (enrollment), 0012 (enrollment modes).
+- L2/L3 design: `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`,
+  `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`,
+  `adr-0009-l3-behavioral-trigger-scope.md` (new 07-25), `tls-interception-sterilization-scope.md`
+  (new 07-25).
+- Business model: `docs/roadmap/product-thesis-built-in-it-expertise.md` (expanded 07-25 —
+  tier/pricing/resource-philosophy/AI-optional sections), `network-resource-scaling-advisor.md`
+  (new 07-25, distinct from `nemesis-overhead-meter.md`).
+- ADRs: 0001 (DB/module architecture — header fixed 07-25), 0005 (DNS posture blocker), 0009
+  (inspection proxy — L3 addendum 07-25), 0011 (enrollment), 0012 (enrollment modes).
 - Latest audits: `docs/audits/roadmap-state-audit-2026-07-25.md`, `docs/audits/adr-status-audit-2026-07-25.md`.
 - Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
+- **Not in this repo, intentionally:** the c-store/Hungry-Howie's market document — held outside
+  the repo by the operator, not part of this project's docs.
 
 ## Topology (durable)
 - `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`).
