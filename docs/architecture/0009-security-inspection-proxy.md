@@ -1,10 +1,10 @@
 # ADR 0009 — Security Inspection Proxy (Self-Hosted SSE)
 
 - **Status:** Proposed (architecture decided 2026-06-28; design captured, **no code changed**).
-  **See the 2026-07-25 addendum below** — the L3 selection model is finalized (origin-based
-  routing + two-layer behavioral trigger), refining/superseding parts of
-  `adr-0009-l3-fork-b-scope.md`'s original trigger criteria. Still **not built**.
-- **Date:** 2026-06-28 (L3 addendum: 2026-07-25)
+  **See the 2026-07-25 addendum below**, now organized as a **three-tier structure** (Tier 1
+  mirror/passive default, Tier 2 full-inline toggle, Tier 3 client-side local emergency
+  triggers) per the same-day consolidated design capture. Still **not built**.
+- **Date:** 2026-06-28 (L3 addendum: 2026-07-25; three-tier consolidation: 2026-07-25)
 - **Extends:** [0005-dns-firewall-device-auth-architecture](0005-dns-firewall-device-auth-architecture.md)
   (device auth), [0007-device-user-model](0007-device-user-model.md) (device-user model)
 - **Depends on:** the agent rebuild / config-pull
@@ -145,16 +145,48 @@ over time → fewer false positives (Day 1 sparse → Month 6 near-zero). Feeds,
 - **Venue guest network:** V2 (needs the mobile agent + auto-approve flow).
 - **MSP cross-site enforcement:** V3+ (see [msp-central-management.md](../roadmap/msp-central-management.md)).
 
-## Addendum (2026-07-25) — L3 direction finalized: origin-based routing + two-layer behavioral model
+## Addendum (2026-07-25) — L3 direction finalized: three-tier structure
 
 > Capture-only (Window 2, docs/audit — no code, no build). Full day's design session covering
 > the L3 zero-day architecture, TLS interception, and the business/resource model. **Status:
 > direction decided, NOT built.** This refines the selection model in
 > [adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md) — that doc's Piece 1–5
 > redirect/NAT/return-path/fail-safe mechanics **still apply as the underlying transport**; this
-> addendum changes **what triggers the redirect** and adds a behavioral layer on top. Companion
-> scoping docs: [adr-0009-l3-behavioral-trigger-scope.md](../roadmap/adr-0009-l3-behavioral-trigger-scope.md),
-> [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md).
+> addendum changes **what triggers the redirect** and adds a behavioral layer on top.
+> **Consolidated same-day into a three-tier structure** (§0 below) that supersedes/extends this
+> addendum's original two-layer framing without discarding it — sections 1–5 below are now
+> specifically **Tier 1's** detail. Companion scoping docs:
+> [adr-0009-l3-behavioral-trigger-scope.md](../roadmap/adr-0009-l3-behavioral-trigger-scope.md)
+> (Tier 1's trigger engine),
+> [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
+> (Tier 2, now including the full undetectable-inline design),
+> [adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md)
+> (Tier 3, new).
+
+### 0. Three-tier structure
+
+Nemesis's zero-day detection is a three-tier system. Each tier is independent and gracefully
+degrades to the tier below it if unavailable.
+
+- **Tier 1 — Mirror/passive detection (default, always on).** Out-of-band behavioral and
+  metadata analysis on tapped/mirrored traffic — no side channel is possible because the
+  inspection point is never in the actual traffic path. The safe, market-proven default every
+  Nemesis deployment gets regardless of Tier 2/3 configuration. **This is sections 1–5 below**:
+  origin-based routing, the trigger/catch model, the hard sensor-only principle, the dynamic
+  cache, and shared fleet intelligence. Escalates to Tier 2 on high-confidence behavioral
+  triggers.
+- **Tier 2 — Full inline inspection (toggle, off by default).** Active decrypt/inspect/
+  re-encrypt on the tunnel — full payload visibility Tier 1 structurally cannot have. When
+  enabled, Nemesis attempts to make the fact of inspection itself undetectable to anything
+  observing the connection. **A genuine R&D goal, not a guaranteed property** — see
+  [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
+  for the full undetectable-inline design and its honest caveats. Summary: §6 below.
+- **Tier 3 — Client-side late triggers (always on, narrow scope).** A short, fixed list of
+  local, immediate agent actions that fire in milliseconds, without a server round-trip, to
+  interrupt ransomware/malware that got past Tiers 1 and 2 before damage becomes irreversible.
+  Requires an explicit, narrow exception to §3's sensor-only principle — see the amended §3 and
+  [adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md).
+  Summary: §7 below.
 
 ### 1. Origin-based WiFi routing (replaces destination-based reasoning)
 **WiFi-origin traffic is ALWAYS a candidate for the tunnel pipeline, regardless of
@@ -191,6 +223,27 @@ preference that could reverse under different assumptions. It applies to every l
 the agent reports telemetry and enforces verdicts (drop/allow/redirect via WinDivert); it never
 decides what's suspicious.
 
+**This is the default and the floor.** With Tier 2 and Tier 3 toggled OFF, the agent remains a
+pure telemetry sensor/enforcement point exactly as stated above — no change to that case,
+regardless of anything below.
+
+**The narrow Tier 3 exception (added 2026-07-25).** When Tier 3 is toggled ON, the agent may
+act unilaterally ONLY on the enumerated trigger list in
+[adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md)
+— nothing else is ever judged locally. This is an **explicit, narrow, auditable carve-out, not
+a general loosening** of the sensor-only principle: the agent still never judges *ambiguous*
+traffic — that stays server-side, always, in every tier. The exception is scoped to
+*executing a fixed, pre-defined emergency stop on an unambiguous signal*, a categorically
+different act from investigation or classification.
+
+**Why the exception exists — the reasoning, not just the rule.** Ransomware's most damaging
+actions (shadow-copy/backup deletion, mass file encryption) happen in a tight window after a
+payload executes. By the time agent telemetry reaches the server and a verdict returns, that
+window has usually already closed — **a server round-trip is simply too slow to interrupt it.**
+This is the one case in the whole L3 design where "sensor only, judgment is server-side" cannot
+hold literally, and it is the *only* case: outside the enumerated Tier 3 trigger list, this
+principle is absolute.
+
 **This has become central enough across today's design session (L3, TLS, the behavioral
 trigger) that it may be worth a durable mention in `CLAUDE.md`'s Architecture section — flagged
 for the operator's call, not done here** (capture-only session; a change to core operating
@@ -225,7 +278,42 @@ IOC feeds normalized into the same signal schema). Those operate at **community/
 fleet** scope (across one owner's enrolled devices). Related shapes, different scope — **flag
 for later consolidation, do not build three parallel aggregation-and-pushback systems.**
 
-### Open items from this session (see also the two companion scoping docs)
+### 6. Tier 2 — full inline inspection (summary; full design in the TLS scoping doc)
+Active TLS decrypt/inspect/re-encrypt on the tunnel, toggled OFF by default. When ON, Nemesis
+attempts genuine per-connection indistinguishability — nothing about the client-facing
+connection (cert presentation, timing, packet-level artifacts) should differ between a locally
+cache-cleared connection and one actually deep-inspected. **No NDR market leader or commercial
+inline-interception vendor attempts this today** — real, unclaimed differentiation, but also an
+unsolved problem industry-wide; treat as an R&D goal with a validation plan, not a guaranteed
+shipped property.
+
+**Confirmed build order:** validate against a controlled, fixed VM destination first (a strict
+subset of the general arbitrary-internet-traffic problem — solving the general case covers this
+one, not vice versa, so it's a real checkpoint), then generalize to arbitrary destinations.
+Full design — side-channel normalization (3 layers, all required), cache design (cert-fingerprint
+keying, bounded validity, probabilistic re-inspection), dual randomization, evasion-probing
+handling (safe trigger use, rejected honeypot, flagged-not-built sandbox-and-observe), and
+pinned-app allowlisting — lives in
+[tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md),
+not duplicated here.
+
+### 7. Tier 3 — client-side late triggers (summary; full design in the Tier 3 scoping doc)
+A short, fixed, always-on list of local agent actions that fire in milliseconds on an
+unambiguous signal, without a server round-trip — the narrow exception to §3 above. On trigger:
+block/freeze the responsible process and the specific write immediately, alert, and hand off to
+the server for confirmation and forensics **after the fact** — the server's role shifts from
+real-time authorizer (every other tier, every other case) to after-the-fact investigator, only
+for the enumerated triggers. Full trigger list (deliberately kept as a living list, not a locked
+spec — which entries ship/get tuned/get dropped is TBD during build/testing) in
+[adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md).
+
+### Open items from this session (see also the three companion scoping docs)
+**Items 2–4 below are confirmed unchanged by the 2026-07-25 three-tier consolidation** —
+intentionally left open; testing during the build may drive the answers rather than a decision
+made in advance. (Tier 3's own two new open items — the mass-file-operation trigger's
+keep/tune/drop call, and the evasion-probing-vs-cert-pinning disambiguation problem — are
+recorded inline at their relevant points in the Tier 3 and TLS scoping docs respectively, not
+listed again here.)
 1. **Agent-to-agent WiFi traffic** (both ends enrolled): **which end's agent redirects.**
    **RESOLVED (2026-07-25).**
    - **DECISION — one redirect owner per flow:**
@@ -295,7 +383,11 @@ for later consolidation, do not build three parallel aggregation-and-pushback sy
 - [adr-0009-l3-behavioral-trigger-scope.md](../roadmap/adr-0009-l3-behavioral-trigger-scope.md) —
   2026-07-25 engineering-cost scoping for the new behavioral trigger layer (TBD estimate).
 - [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md) —
-  2026-07-25 scoping for the TLS decrypt-inspect-reencrypt + sterilization layer (TBD estimate).
+  Tier 2: TLS decrypt-inspect-reencrypt + sterilization + the full undetectable-inline design
+  (TBD estimate).
+- [adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md) —
+  Tier 3: the local late-trigger list and the §3 sensor-only exception's auditable
+  implementation (new, 2026-07-25).
 - [community-signal-dedup.md](../roadmap/community-signal-dedup.md),
   [open-source-threat-feeds.md](../roadmap/open-source-threat-feeds.md) — flagged possible
   overlap with the addendum's shared-fleet-intelligence push-back (not resolved; see addendum §5).

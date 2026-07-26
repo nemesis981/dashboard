@@ -1,12 +1,16 @@
 # ADR 0009 — L3 behavioral-trigger engineering cost (scope, not estimate)
 
 **Status:** scoping doc (read-only analysis; no code changed). Captured 2026-07-25, same
-session as the [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md#addendum-2026-07-25--l3-direction-finalized-origin-based-routing--two-layer-behavioral-model)
-that finalized the origin-based routing + two-layer trigger/catch model. Companion to
-[adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the redirect/NAT/return-path
-transport this trigger sits on top of) and
-[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (the other
-new-scope item from the same session).
+session as the [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) that
+finalized the origin-based routing + two-layer trigger/catch model — since consolidated into a
+**three-tier structure** (addendum §0); this doc scopes **Tier 1's** trigger engine. Companion
+to [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the redirect/NAT/return-path
+transport this trigger sits on top of),
+[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (**Tier 2**,
+same session), and
+[adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md)
+(**Tier 3**, new — where process-lineage anomalies flagged by this engine stay server-side per
+its own §3, rather than joining Tier 3's local action list).
 
 > **NO SESSION ESTIMATE IN THIS DOC — DELIBERATELY.** This is **additive scope on top of the
 > already-scoped ~13–23 session Fork-B mechanics**, and per the operator's explicit instruction
@@ -187,4 +191,9 @@ gap), ADR 0009's "Enrollment enriches detection" table (the existing lateral-mov
 this may or may not extend), [community-signal-dedup.md](community-signal-dedup.md),
 [open-source-threat-feeds.md](open-source-threat-feeds.md) (flagged overlap, Piece 4),
 [lateral-movement-outbreak-detection.md](lateral-movement-outbreak-detection.md) (the
-post-detection correlation work this may share an engine with).
+post-detection correlation work this may share an engine with),
+[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (Tier 2 —
+Piece H there feeds evasion-probing signals into this doc's Piece 2 scoring engine),
+[adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) (Tier 3 —
+the always-on local-trigger tier this engine's ambiguous/judgment-call signals explicitly do
+NOT feed into; see that doc's §3 "Explicitly NOT in scope").
