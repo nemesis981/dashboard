@@ -303,43 +303,24 @@ shipped property.
 **Confirmed build order:** validate against a controlled, fixed VM destination first (a strict
 subset of the general arbitrary-internet-traffic problem — solving the general case covers this
 one, not vice versa, so it's a real checkpoint), then generalize to arbitrary destinations.
-Full design — side-channel normalization (3 layers, all required), cache design (cert-fingerprint
-keying, bounded validity, probabilistic re-inspection), dual randomization, evasion-probing
-handling (safe trigger use, rejected honeypot, flagged-not-built sandbox-and-observe), and
-pinned-app allowlisting — lives in
-[tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md),
-not duplicated here.
+**Implementation-level detail (side-channel normalization, cache design, dual randomization,
+evasion-probing handling, pinned-app allowlisting) is documented internally, not in the public
+repo** — a source-visibility decision, not a feature-gating one (Tier 2 ships at every tier
+regardless). The general shape of each piece stays in
+[tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md).
 
 **Hybrid inline/mirror transition (added 2026-07-26) — replaces the assumption that Tier 2,
-once engaged for a connection, stays fully inline (gating delivery) for that connection's
-whole life.** It does not: only the **first meaningful chunk of decrypted application data** —
-explicitly not the literal first packet, since the TLS handshake (ClientHello/ServerHello/
-certificate exchange/Finished) precedes any application payload — is held for inline inspection
-before delivery. If it passes, the connection **transitions to mirror** (Piece E's uniform
-decrypt/inspect continues, but delivery is no longer gated) for the rest of its life. **This is
-the only place in the whole L3 design where delivery is ever actually gated pending a verdict**
-— Fork B's own tunnel transport is confirmed pure mirror (see Open Items below and
-[adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md)); this hybrid gate exists
-one layer up, inside Tier 2, and only for connections Tier 2 has decrypted.
-
-**Transition-hardening requirements (close a real bypass, not optional hygiene):** without
-them, an attacker who controls their own destination can watch round-trip latency drop as the
-signal that gating has ended, and time a malicious payload for right after. (a) Randomize how
-much of the connection stays inline-gated, rather than a fixed cutoff — same unpredictability
-logic as the existing per-connection sampling probability (Piece F). (b) Continue Layer 2's
-latency padding (Piece E(b)) through the transition itself, so the switch from inline to mirror
-produces no observable timing discontinuity. (c) Occasionally re-promote an already-downgraded
-connection back to inline mid-life as a spot-check, so an attacker can never be certain the gate
-has permanently lifted. (d) **Downgrading to mirror downgrades the DELIVERY GATE only** —
-Suricata continues inspecting the connection's traffic for its entire life regardless of gating
-state; a late-connection anomaly still feeds the Tier 1 trigger and can still dirty that
-destination's reputation, even though that specific packet may already have been delivered.
-**This is the same accepted tradeoff as §4's dynamic-cache limitation** (invalidate going
-forward, can't convert an in-flight connection mid-stream) — restated here at **connection**
-granularity instead of **destination** granularity; not a new gap, the same one at a finer
-grain. Full mechanism + hardening detail:
+once engaged for a connection, stays fully inline (gating delivery) for that connection's whole
+life.** It does not: an initial portion of decrypted application data is inline-gated, then the
+connection transitions to mirror (inspected, no longer delivery-gated) for the rest of its
+life — hardened against a real timing-based bypass. **This is the only place in the whole L3
+design where delivery is ever actually gated pending a verdict** — Fork B's own tunnel
+transport is confirmed pure mirror (see Open Items below and
+[adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md)). **Implementation-level
+detail (the gate boundary and hardening mechanics) documented internally, not in the public
+repo** — same source-visibility framing as above; general shape:
 [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
-(new Piece J), not duplicated here.
+(Piece J).
 
 **Correction — Tier 2 does not guarantee first-contact prevention.** Tier 2, including this
 hybrid gate, does **not** prevent an undetected zero-day payload from reaching its destination

@@ -3,6 +3,32 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [OPERATOR DECISION NEEDED] `l3_tls_validation/` code already exposed in public git history
+2026-07-26: as part of establishing a private-module pattern for Tier 2 (TLS interception)
+implementation detail, `l3_tls_validation/` was removed from the tracked tree (untracked +
+working-tree files deleted, replaced with a placeholder `README.md`) and its content moved to
+`~/work/nemesis-internal/l3-tier2-tls-interception/code/` (outside the repo, not version
+controlled — same pattern as `~/work/nemesis-private/`).
+
+**This does NOT remove the code from git history.** It was committed and **already pushed to
+the public GitHub repo** in `01fbcfc` (Layer-2 padding + Layer-3 pcap comparison) and `6d40e7d`
+(the VM-runner pair) before this task. Anyone who already cloned/forked the repo, or fetches
+before a rewrite, still has that history regardless of anything done going forward.
+
+- [ ] **Decide: leave history as-is, or rewrite it.** Leaving it as-is means the code stays
+  permanently visible in those two commits on GitHub (browsable via the commit history even
+  after `HEAD` no longer has the directory). Rewriting history (`git filter-repo` or
+  `git rebase` dropping those commits' content, then a **force-push**) stops it from being
+  visible in *future* clones/fetches of `main`, but: (a) is a **destructive, hard-to-reverse**
+  operation per CLAUDE.md's git safety protocol — do not do this without explicit operator
+  go-ahead; (b) does **not** undo any exposure that already happened (existing forks/clones/
+  cached views keep the old history regardless); (c) rewrites commit SHAs, which could disrupt
+  anything referencing `01fbcfc`/`6d40e7d` by hash (this session's own worklog/handoff docs do,
+  for instance).
+- **Not done here** — flagged for the operator's explicit call per Rule 1 (read-only
+  audit/flag, don't act unilaterally on a destructive git operation) and the git safety
+  protocol (never force-push without explicit request).
+
 ### [FIX-NOW] — concurrency races (multi-writer, real today)
 From `docs/audits/single-user-assumptions-audit-2026-06-28.md` §1. NOT a commercial-tier
 concern: Nemesis already runs 6 concurrent writer processes against one shared `alerts.db`,
@@ -71,6 +97,35 @@ below.
 - [ ] **`PIHOLE_IP` hardcoded default (Rule 8 leak).** A personal LAN IP is shipped as a
   default — replace with `127.0.0.1` / read from `/etc/nemesis.env` (defaults must be correct
   for ANY user): `dashboard.py:65`, `diagnostics/pihole_health.py`, `modules/dhcp/module.py`.
+
+- [ ] **Systemd unit files + one script ship a literal `/home/<user>/dashboard/...` path (Rule 8
+  leak, found 2026-07-26 during a broader re-scan, NOT new today — pre-existing since
+  2026-06-21/22/25).** `core/vpn-dns-guard.service` was already flagged above (the one
+  instance previously caught); this broader grep (`git grep -InE '/home/[a-z][a-z0-9_-]*'`
+  across all tracked `.md`/`.py`/`.sh`/`.service` files) found **six more, previously
+  unflagged**, all hardcoding the real install username instead of a placeholder or a
+  templated/computed path:
+  - `alert_manager/alert-watcher.service:9` (`ExecStart`)
+  - `alert_manager/dashboard.service:7,8,11` (`WorkingDirectory`, `Environment=PYTHONPATH`,
+    `ExecStart`)
+  - `alert_manager/device-scanner.service:7,8` (`WorkingDirectory`, `ExecStart`)
+  - `alert_manager/hw-monitor.service:7` (`ExecStart`)
+  - `alert_manager/install_pihole_pwd.sh:8` (`UNIT_SRC`)
+  - `alert_manager/watchdog.service:10` (`ExecStart`)
+  - `scripts/vpn_dns_livetest.sh:22,27` (comment + `GUARD=`)
+
+  **Checked, not assumed:** `install.sh`'s `deploy_services()` (~line 810) DOES rewrite the
+  7 core services' paths at install time (`sed -e "s|/home/[^/]*/dashboard|/home/$SUDO_USER/dashboard|g"`)
+  — so `alert-watcher`/`dashboard`/`device-scanner`/`hw-monitor`/`watchdog`.service are **not
+  a functional bug** for other users, just a repo-hygiene leak of the dev machine's real
+  username into a public tracked file. `core/vpn-dns-guard.service` is **not** in
+  `deploy_services()`'s `svc_names` array — not templated at all (consistent with its
+  existing flag above). `install_pihole_pwd.sh` and `scripts/vpn_dns_livetest.sh` are
+  standalone one-shot/dev-diagnostic scripts (not deployed via `install.sh`) with the literal
+  path inline — same leak, different flavor (a genuine functional issue if anyone besides the
+  original operator ever runs them as-is).
+  **Not fixed here** — a real code/config change requiring testing, out of scope for a
+  docs-only pass. Flagged per Rule 1 (audit, don't fix silently) for a dedicated pass.
 
 - [ ] **`vpn-dns-guard.service` solves the wrong layer (keep/disable deferred to ADR 0005).**
   The unit is installed + running on this box but does **NOT fix** the DNS issue — the real

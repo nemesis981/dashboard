@@ -7,6 +7,14 @@ same day** with the full undetectable-inline design (Pieces D–I below), consol
 same-day design session, once the three-tier structure named this capability **Tier 2** in the
 ADR 0009 addendum §6. **Extended again 2026-07-26** with Piece J (the hybrid inline/mirror
 transition) and a correction to the surrounding "Tier 2 catches zero-days" framing — see Piece J.
+
+**Repo-structure note (2026-07-26):** Pieces E/F/G/H/J's implementation-level detail (exactly
+how each mechanism works, hardening mechanics, the validation harness code that was briefly at
+`l3_tls_validation/`) has moved to a private, non-public location — a source-visibility
+decision, not a feature-gating one (the capability ships at every tier regardless). This doc
+now carries the general shape of each piece plus a pointer, not the full mechanism. See
+`l3_tls_validation/README.md` and `PUNCHLIST.md` for the move's rationale and history.
+
 This decision closes the open question that made "enterprise-competitive zero-day detection"
 only partial: without TLS interception, the L3 catch layer (Fork B's tunnel-routed Suricata) can
 see metadata and unencrypted traffic, but not the payload of the large majority of real-world
@@ -116,107 +124,36 @@ drone's closed-network case is covered automatically, by extension, with no sepa
 needed. Noted here only so it isn't lost; not scoped further.
 
 ## Piece E — Side-channel normalization (three layers, all required)
-An attacker doesn't need to guess your inspection schedule if any layer of the connection
-reveals inspection is happening on THIS specific connection. **All three must be normalized**,
-or the weakest one gives the attacker a free, reliable, per-connection test.
-
-- **(a) TLS presentation.** The agent must perform TLS interception (decrypt/re-encrypt)
-  **uniformly on EVERY connection**, regardless of whether that connection's payload is
-  subsequently forwarded to the server for deep inspection or handled locally against the
-  cache. Whether deep inspection happens becomes a decision made *after* decryption, invisible
-  to the client. The client-facing cert story must be identical whether or not the connection
-  is actually being deep-inspected.
-- **(b) Timing.** A round-trip to the server for real inspection adds latency a purely local
-  cache-hit decision doesn't have. Locally-cached-clean connections need an **artificial delay**
-  inserted to match the typical latency profile of a genuinely tunneled connection. This costs
-  local latency, not bandwidth — the resource savings from caching stay intact even with the
-  padding.
-- **(c) Packet-level artifacts.** TTL, TCP window size, and fragmentation behavior must be
-  normalized to be identical regardless of which path (locally cached vs. actually
-  tunneled/inspected) the traffic actually took.
-
-**Honest framing, stated explicitly — don't claim more than this:** "no observable difference"
-is a target *approached*, not proven. The realistic goal is raising the cost of detecting
-inspection high enough that it stops being a cheap, reliable evasion technique for an attacker
-— not an absolute, provable guarantee.
+Three layers of the connection — TLS presentation, timing, and packet-level artifacts — must
+all be normalized so that no layer reveals whether a given connection is being deep-inspected.
+**Implementation-level detail (exactly how each layer is normalized) documented internally, not
+in the public repo** — this is a source-visibility decision, not a feature-gating one; the
+capability ships at every tier regardless. **Honest framing, kept public deliberately:** "no
+observable difference" is a target *approached*, not proven — the realistic goal is raising the
+cost of detecting inspection, not an absolute guarantee.
 
 ## Piece F — Cache design: destination trust, not packet content
-**Cache key: destination IP + TLS certificate fingerprint, not hostname alone.** Hostname/SNI
-is spoofable (domain fronting, encrypted SNI); cert fingerprint is cryptographically tied to
-the actual server. A cert change on a previously-trusted destination is itself a signal, not
-just noise — treat it as automatic cache invalidation.
-
-**Bounded validity, never permanent trust.** A cache entry that says "clean forever" is a hole
-a patient attacker can exploit — get whitelisted on ordinary traffic, then abuse the same
-channel later once it's no longer being watched. Cap what a clean verdict is worth: a time
-window, a byte/volume ceiling, or a connection count, after which the destination is
-re-inspected regardless of cached status.
-
-**Probabilistic/sampled re-inspection instead of a hard on/off switch.** Rather than "cached
-clean = never tunnel again until invalidated," a trusted destination still gets tunneled 1-in-N
-times going forward, with N growing as trust accumulates over more clean history. **This is the
-strongest single mechanism for the stated goal:** bandwidth stays low for well-established
-clean destinations, while there is always a nonzero chance the next connection to that
-destination gets caught — genuinely live zero-day detection rather than a hole that, once open,
-stays open.
-
-**Data points to explicitly AVOID using as trust signals:** client-side JA3/JA4 TLS handshake
-fingerprints must **never** be used to GRANT a cache skip. Real malware families deliberately
-mimic common browser fingerprints specifically to blend in and defeat this kind of check — using
-it to grant trust hands attackers a known, documented way to get waved through. JA3/JA4 is still
-useful as a **trigger** signal (an unusual/rare fingerprint is worth flagging), never as grounds
-to trust.
-
-**Governance stays server-side.** The cache itself lives and is governed server-side; the agent
-only acts on a verdict token the server actually issued. A cache-skip decision must never be
-something the agent determines or self-reports locally — the same sensor-only boundary as
-everywhere else in the system (ADR 0009 addendum §3), and it matters here specifically because
-a compromised agent could otherwise just lie about a locally-made trust decision.
+Governs how long a destination's "clean" verdict is trusted before re-inspection, keyed on
+cryptographic identity rather than a spoofable hostname, with governance staying strictly
+server-side (the agent never determines trust locally — same sensor-only boundary as
+everywhere else in the system, ADR 0009 addendum §3). **Implementation-level detail (cache key
+design, trust-decay mechanics, what signals are deliberately excluded from granting trust)
+documented internally, not in the public repo.**
 
 ## Piece G — Dual randomization (two distinct mechanisms, not one)
-These address two different failure modes and are named and implemented **separately**:
-
-- **Per-connection sampling probability** (Piece F above) — addresses ongoing abuse of a
-  channel that's already been marked clean, on a per-connection basis.
-- **Periodic whole-cache re-audit at randomized intervals** — addresses a destination that was
-  genuinely clean when cached but changed afterward (domain sold, IP reassigned, a legitimate
-  site compromised weeks later). Randomizing WHEN this sweep happens (rather than a fixed
-  schedule) defeats an attacker who might otherwise map a predictable audit rhythm and time a
-  malicious payload for a known-safe window.
-
-**Both mechanisms are necessary; neither substitutes for the other.**
+Two separate randomization mechanisms address two different failure modes (ongoing abuse of an
+already-trusted channel vs. a destination that changed after being cached clean). **Both are
+necessary; neither substitutes for the other. Implementation-level detail documented internally,
+not in the public repo.**
 
 ## Piece H — Evasion-probing and deception (mostly flagged, NOT built now)
-- **Evasion-probing as a behavioral trigger signal — safe to build now.** Attempting to
-  fingerprint your own security layer (checking whether a connection is being inspected) is
-  behavior almost no legitimate client ever does — a strong tell. Feed detected evasion-probing
-  into the Tier 1 behavioral trigger engine
-  ([adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md)) as a
-  strong escalation signal, same as any other anomaly. **This does NOT require deciding where
-  the traffic gets routed next** — just that it raises suspicion.
-- **Direct honeypot redirect on suspected evasion — REJECTED.** Certificate-pinned legitimate
-  apps (banking apps, HSTS/HPKP clients) behave abnormally when they see Nemesis's interception
-  cert in exactly the way an evasion-probing attacker would — retry, fail, fall back. A direct
-  honeypot that actively impersonates a real service risks routing a legitimate app (and by
-  extension a real user's real credentials) into a convincing fake. **Worse than a normal false
-  positive**: the failure mode is active harm (a phishing setup pointed at your own customer),
-  not a simple connection failure.
-- **Sandbox-and-observe with generic, credential-inert decoys — flagged, NOT built now.** A
-  better-shaped version of the same idea: route suspected evasion-probing traffic to an isolated
-  sandbox with a passive, generic decoy — enough to look like "a server responded" for
-  observation purposes, but never soliciting or accepting anything that looks like a real
-  credential or real data. If a misrouted legitimate client can extract nothing usable and can't
-  be tricked into submitting anything real, this is safe even when the classification is wrong.
-  **Real, standalone infrastructure** (isolated network segment, decoy services, containment
-  strong enough nothing learned there can pivot back to the real network, someone actually
-  reviewing captures) — comparable in scope to the Data Manager or this TLS interception build.
-  Treat as a deliberate future capability, not part of this build.
-- **TBD — to be decided during build, may be driven by testing results:** how to reliably
-  distinguish an attacker probing for interception from a normal cert-pinning app failing for an
-  unrelated reason. This is the Section-3.6 disambiguation problem — real, unresolved, and it
-  **blocks anything beyond the trigger-signal use** above. Likely solved via the cert-pinned-app
-  allowlist work (Piece I / hard unknown (b) below), but not resolved here, and sandbox-and-observe
-  can't be scoped further until it is, regardless of which destination-routing model is chosen.
+Detecting an attacker probing whether their traffic is being inspected feeds the Tier 1
+behavioral trigger engine as a signal — it does not, by itself, determine routing. A
+direct-honeypot approach was considered and **explicitly rejected** on user-safety grounds (risk
+of misrouting a legitimate cert-pinned app, e.g. a banking app, into a convincing fake — active
+harm, not a simple false positive). A safer sandbox-and-observe alternative is flagged as a
+future capability, not built now. **Implementation-level detail documented internally, not in
+the public repo.**
 
 ## Piece I — Pinned-app handling (industry-standard approach)
 Adopt the standard industry model rather than inventing a new one: a **predefined + user-editable
@@ -229,75 +166,24 @@ below — building and maintaining the allowlist itself remains unscoped work.
 
 ## Piece J — Hybrid inline/mirror transition (per-connection gate, added 2026-07-26)
 
-**Replaces the implicit assumption that Tier 2, once engaged for a connection, stays fully
-inline (gating delivery) for that connection's entire life.** It does not — only the **first
-meaningful chunk of decrypted application data** is inline-gated (held for inspection before
-delivery); if it passes, the connection transitions to **mirror** (Piece E's uniform
-decrypt/inspect continues, but delivery is no longer gated) for the rest of its life.
+A per-connection gate: rather than staying fully inline (gating delivery) for a connection's
+entire life once Tier 2 engages, only an initial portion of decrypted application data is held
+for inspection before delivery; the connection then transitions to a lower-overhead monitoring
+mode (mirror — inspected, no longer delivery-gated) for the rest of its life. This closes a real
+timing-based bypass an attacker could otherwise use to time a payload for right after gating
+ends. **Implementation-level detail (exactly how the gate boundary and the hardening against
+that bypass work) documented internally, not in the public repo** — this is a source-visibility
+decision, not a feature-gating one; the capability ships at every tier regardless.
 
-**"First meaningful chunk," precisely — not the literal first packet.** The TLS handshake
-(ClientHello, ServerHello, certificate exchange, Finished) precedes any application payload;
-none of that is application data to inspect. The gate applies to the first chunk of **decrypted
-application data** that actually exists to inspect, whatever number of packets that takes.
-
-**Why hybrid, not always-fully-inline:** staying fully inline for a connection's whole life pays
-the inline-gating latency cost (a real round-trip per data chunk) for the connection's entire
-duration, for marginal detection benefit beyond the first look — most payloads that reveal
-themselves in inspectable content do so early. Transitioning to mirror after a clean first chunk
-keeps long-lived connections cheap while still gating the highest-value moment.
-
-### Transition-hardening requirements (close a real bypass — not optional hygiene)
-
-Without these, an attacker who controls their own destination can simply **watch round-trip
-latency drop** as the observable signal that inline gating has ended for a connection, and time
-a malicious payload for right after. Each requirement below closes one version of that
-timing-based bypass:
-
-- **(a) Randomize how much of the connection stays inline-gated, rather than a fixed cutoff.**
-  "Always exactly one chunk" is itself a learnable, fixed signal. Same unpredictability logic as
-  Piece F's per-connection sampling probability — vary the gated portion (more than one chunk,
-  sometimes) so there's no single fixed boundary to detect and time around.
-- **(b) Continue Layer 2's latency padding (Piece E(b)) through the transition itself.** The
-  switch from inline (real round-trip latency) to mirror (no round-trip) must not itself produce
-  an observable timing discontinuity — the padding that already normalizes cache-hit vs.
-  tunneled-inspection latency (Piece E(b)) has to extend across this transition too, not just
-  apply to whichever state a connection is already settled into.
-- **(c) Occasionally re-promote an already-downgraded connection back to inline mid-life, as a
-  spot-check.** Even after transitioning to mirror, a connection should sometimes be pulled back
-  into inline gating later in its life — so an attacker can never be certain the gate has
-  *permanently* lifted just because it lifted once. Same family of mechanism as Piece G's
-  periodic whole-cache re-audit, applied at connection granularity instead of cache-entry
-  granularity.
-- **(d) Critical clarification, stated explicitly: downgrading to mirror downgrades the DELIVERY
-  GATE only.** Suricata (and Tier 1's behavioral analysis) continues inspecting the connection's
-  traffic for its entire life, regardless of gating state. A late-connection anomaly still feeds
-  the Tier 1 trigger and can still dirty that destination's reputation — even though that
-  specific packet may already have been delivered by the time the anomaly is recognized. **This
-  is the same accepted tradeoff as the ADR 0009 addendum §4 dynamic-cache limitation**
-  ("invalidate the cache entry going forward, the current connection may complete uninspected")
-  — restated here at **connection granularity** instead of **destination granularity**. Not a
-  new gap; the same one, at a finer grain.
-
-### Correction to the surrounding Tier 2 framing
-
-Tier 2, including this hybrid gate, does **not** prevent an undetected zero-day payload from
-reaching its destination on the very first inline-gated chunk if that chunk itself looks clean.
-What Tier 2 provides is fast detection and rapid future-blocking via the dynamic cache, plus
-this partial first-contact gate — not a guarantee against a clean-looking first payload.
-**Tier 3's local late-triggers are the actual backstop** for a payload that gets through Tiers 1
-and 2 undetected and begins executing locally (see
+**Correction to the surrounding Tier 2 framing, kept public deliberately:** Tier 2, including
+this hybrid gate, does **not** prevent an undetected zero-day payload from reaching its
+destination on the very first inline-gated chunk if that chunk itself looks clean. What Tier 2
+provides is fast detection and rapid future-blocking via the dynamic cache, plus this partial
+first-contact gate — not a guarantee against a clean-looking first payload. **Tier 3's local
+late-triggers are the actual backstop** for a payload that gets through Tiers 1 and 2 undetected
+and begins executing locally (see
 [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md)). This is
 intentional defense-in-depth across the three tiers, not a gap unique to Tier 2.
-
-### Relationship to Fork B's now-resolved mirror mechanism
-
-This hybrid gate is the **only** place in the whole L3 design where delivery is ever actually
-held pending a verdict. Fork B's own tunnel transport (the redirect/NAT/Suricata-af-packet
-mechanism this Tier 2 interception may or may not ride, per Piece A's still-open
-agent-local-vs-server-side question) is confirmed **pure mirror** — see
-[adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) ("Mechanism: MIRROR," resolved
-2026-07-26). This hybrid gate exists one layer up, inside Tier 2's own decrypt/inspect/
-re-encrypt pipeline, and only applies to connections Tier 2 has actually decrypted.
 
 ---
 

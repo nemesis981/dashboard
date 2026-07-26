@@ -136,24 +136,13 @@ Pieces 1–2; hard to validate without the whole path standing up. Low confidenc
 ---
 
 ## Piece 5 — Fail-open / fail-safe (Fork B's flagged weak spot)
-**What Fork B's own analysis flagged: this path's failure mode is "poor by nature."** Unlike L2 —
-where a stall just holds SYNs for ~5s until the watchdog closes the handle and **traffic is
-restored** (`l2_windivert.py` stall-watchdog) — a broken **forward / NAT / return** leg can
-**black-hole the client's redirected traffic** silently.
-
-- **Achievable:** for **NEW** flows — detect the redirect path is unhealthy (periodic probe/keepalive
-  through the tunnel to the server) and **fail OPEN**: stop selecting flows for redirect and send
-  them **direct** (revert to L2-only drop/allow). Also bound each redirect with a short timeout so a
-  wedged flow gives up quickly.
-- **NOT cleanly achievable:** flows **already mid-redirect** when the path fails. They are in-flight
-  through the tunnel/NAT; you cannot transparently move an established, already-NAT'd connection back
-  to direct routing without breaking it. **This is a residual KNOWN RISK**, structurally worse than
-  L2's clean ~5s recovery.
-- **Honest verdict:** a *safe-enough* mode exists (fast health-detect + fail-open for new flows +
-  short redirect timeouts + a hard cap on concurrent redirected flows), but **"no client traffic
-  ever black-holes" is not fully attainable** for in-flight flows. This must be an explicit accepted
-  risk, and is a strong argument for keeping Fork B's redirect set **small** (only genuinely
-  ambiguous flows) and default-OFF until proven.
+A fail-safe mode is needed for when the redirect/forward/return path itself breaks. A
+health-detect-and-fail-open mechanism is achievable for new flows; **flows already mid-redirect
+when the path fails are a residual, not-fully-closeable risk** — an accepted tradeoff, not a
+build task. **Full risk narrative documented internally, not in the public repo** (this is the
+one piece of Fork B's own analysis that names a concrete exploitable weak point, not just a
+build-difficulty estimate) — see `PUNCHLIST.md` for the pointer. Strong argument for keeping
+Fork B's redirect set **small** (only genuinely ambiguous flows) and default-OFF until proven.
 
 **Estimate: ~2–3 sessions** to build health-detection + fail-open-for-new-flows + timeouts —
 **plus an unresolved residual risk** that no amount of sessions fully removes.
