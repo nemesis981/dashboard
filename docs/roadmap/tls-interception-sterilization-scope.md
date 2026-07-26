@@ -5,10 +5,18 @@ session as the [ADR 0009 addendum](../architecture/0009-security-inspection-prox
 [adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md). **Extended
 same day** with the full undetectable-inline design (Pieces D–I below), consolidated from a
 same-day design session, once the three-tier structure named this capability **Tier 2** in the
-ADR 0009 addendum §6. This decision closes the open question that made "enterprise-competitive
-zero-day detection" only partial: without TLS interception, the L3 catch layer (Fork B's
-tunnel-routed Suricata) can see metadata and unencrypted traffic, but not the payload of the
-large majority of real-world traffic, which is HTTPS.
+ADR 0009 addendum §6. **Extended again 2026-07-26** with Piece J (the hybrid inline/mirror
+transition) and a correction to the surrounding "Tier 2 catches zero-days" framing — see Piece J.
+This decision closes the open question that made "enterprise-competitive zero-day detection"
+only partial: without TLS interception, the L3 catch layer (Fork B's tunnel-routed Suricata) can
+see metadata and unencrypted traffic, but not the payload of the large majority of real-world
+traffic, which is HTTPS.
+
+**Correction (2026-07-26) — this closes the *payload-visibility* gap, not a first-contact-
+prevention guarantee.** Seeing the payload is not the same as catching every zero-day on first
+contact: a clean-looking first chunk of decrypted data still reaches its destination. See
+Piece J for exactly what Tier 2 does and does not guarantee, and why Tier 3 is the real backstop
+for payloads that get through undetected.
 
 **Why undetectability is worth attempting (market context):** no NDR market leader and no
 commercial inline-interception vendor (Zscaler, Palo Alto, Netskope) attempts per-connection
@@ -219,6 +227,78 @@ invisibly, and pinning is a **declining practice industry-wide**, so the exclusi
 should shrink over time rather than grow. This is the adopted *approach* to hard unknown (b)
 below — building and maintaining the allowlist itself remains unscoped work.
 
+## Piece J — Hybrid inline/mirror transition (per-connection gate, added 2026-07-26)
+
+**Replaces the implicit assumption that Tier 2, once engaged for a connection, stays fully
+inline (gating delivery) for that connection's entire life.** It does not — only the **first
+meaningful chunk of decrypted application data** is inline-gated (held for inspection before
+delivery); if it passes, the connection transitions to **mirror** (Piece E's uniform
+decrypt/inspect continues, but delivery is no longer gated) for the rest of its life.
+
+**"First meaningful chunk," precisely — not the literal first packet.** The TLS handshake
+(ClientHello, ServerHello, certificate exchange, Finished) precedes any application payload;
+none of that is application data to inspect. The gate applies to the first chunk of **decrypted
+application data** that actually exists to inspect, whatever number of packets that takes.
+
+**Why hybrid, not always-fully-inline:** staying fully inline for a connection's whole life pays
+the inline-gating latency cost (a real round-trip per data chunk) for the connection's entire
+duration, for marginal detection benefit beyond the first look — most payloads that reveal
+themselves in inspectable content do so early. Transitioning to mirror after a clean first chunk
+keeps long-lived connections cheap while still gating the highest-value moment.
+
+### Transition-hardening requirements (close a real bypass — not optional hygiene)
+
+Without these, an attacker who controls their own destination can simply **watch round-trip
+latency drop** as the observable signal that inline gating has ended for a connection, and time
+a malicious payload for right after. Each requirement below closes one version of that
+timing-based bypass:
+
+- **(a) Randomize how much of the connection stays inline-gated, rather than a fixed cutoff.**
+  "Always exactly one chunk" is itself a learnable, fixed signal. Same unpredictability logic as
+  Piece F's per-connection sampling probability — vary the gated portion (more than one chunk,
+  sometimes) so there's no single fixed boundary to detect and time around.
+- **(b) Continue Layer 2's latency padding (Piece E(b)) through the transition itself.** The
+  switch from inline (real round-trip latency) to mirror (no round-trip) must not itself produce
+  an observable timing discontinuity — the padding that already normalizes cache-hit vs.
+  tunneled-inspection latency (Piece E(b)) has to extend across this transition too, not just
+  apply to whichever state a connection is already settled into.
+- **(c) Occasionally re-promote an already-downgraded connection back to inline mid-life, as a
+  spot-check.** Even after transitioning to mirror, a connection should sometimes be pulled back
+  into inline gating later in its life — so an attacker can never be certain the gate has
+  *permanently* lifted just because it lifted once. Same family of mechanism as Piece G's
+  periodic whole-cache re-audit, applied at connection granularity instead of cache-entry
+  granularity.
+- **(d) Critical clarification, stated explicitly: downgrading to mirror downgrades the DELIVERY
+  GATE only.** Suricata (and Tier 1's behavioral analysis) continues inspecting the connection's
+  traffic for its entire life, regardless of gating state. A late-connection anomaly still feeds
+  the Tier 1 trigger and can still dirty that destination's reputation — even though that
+  specific packet may already have been delivered by the time the anomaly is recognized. **This
+  is the same accepted tradeoff as the ADR 0009 addendum §4 dynamic-cache limitation**
+  ("invalidate the cache entry going forward, the current connection may complete uninspected")
+  — restated here at **connection granularity** instead of **destination granularity**. Not a
+  new gap; the same one, at a finer grain.
+
+### Correction to the surrounding Tier 2 framing
+
+Tier 2, including this hybrid gate, does **not** prevent an undetected zero-day payload from
+reaching its destination on the very first inline-gated chunk if that chunk itself looks clean.
+What Tier 2 provides is fast detection and rapid future-blocking via the dynamic cache, plus
+this partial first-contact gate — not a guarantee against a clean-looking first payload.
+**Tier 3's local late-triggers are the actual backstop** for a payload that gets through Tiers 1
+and 2 undetected and begins executing locally (see
+[adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md)). This is
+intentional defense-in-depth across the three tiers, not a gap unique to Tier 2.
+
+### Relationship to Fork B's now-resolved mirror mechanism
+
+This hybrid gate is the **only** place in the whole L3 design where delivery is ever actually
+held pending a verdict. Fork B's own tunnel transport (the redirect/NAT/Suricata-af-packet
+mechanism this Tier 2 interception may or may not ride, per Piece A's still-open
+agent-local-vs-server-side question) is confirmed **pure mirror** — see
+[adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) ("Mechanism: MIRROR," resolved
+2026-07-26). This hybrid gate exists one layer up, inside Tier 2's own decrypt/inspect/
+re-encrypt pipeline, and only applies to connections Tier 2 has actually decrypted.
+
 ---
 
 ## Named hard unknowns (scoped, not resolved)
@@ -262,7 +342,8 @@ Same rationale as the behavioral-trigger doc: this is additive, genuinely new ca
 no existing precedent in the codebase, blocked on real unresolved questions (b, c above, plus
 Piece H's disambiguation TBD) and on the same missing target-hardware baseline (see Open Item
 below) — a session estimate now would not be grounded in anything. The scope grew substantially
-with Pieces D–I (the full undetectable-inline design); this makes the missing estimate more
+with Pieces D–I (the full undetectable-inline design) and again with **Piece J** (added
+2026-07-26, the hybrid inline/mirror transition); this makes the missing estimate more
 consequential, not less — a bigger unknown, not a smaller one.
 
 ## Open item carried from the ADR 0009 addendum
@@ -283,7 +364,9 @@ target for the evasion-probing escalation signal),
 [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) (Tier 3's
 local emergency-stop triggers — a separate, always-on tier from this doc's toggleable Tier 2),
 [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the tunnel transport TLS
-interception would presumably ride, if server-side), base [ADR 0009](../architecture/0009-security-inspection-proxy.md)
+interception would presumably ride, if server-side — **now confirmed mirror**, 2026-07-26 — see
+its "Mechanism: MIRROR" section; Piece J above is the layer that adds any delivery-gating on top
+of that mirror transport), base [ADR 0009](../architecture/0009-security-inspection-proxy.md)
 ("tunnel carries decisions, not data" — the principle Piece C's resource tension weighs against),
 [product-thesis-built-in-it-expertise.md](product-thesis-built-in-it-expertise.md) (the
 business-model capture from the same session, including the resource-philosophy principle this

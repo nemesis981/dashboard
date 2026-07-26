@@ -3,8 +3,11 @@
 - **Status:** Proposed (architecture decided 2026-06-28; design captured, **no code changed**).
   **See the 2026-07-25 addendum below**, now organized as a **three-tier structure** (Tier 1
   mirror/passive default, Tier 2 full-inline toggle, Tier 3 client-side local emergency
-  triggers) per the same-day consolidated design capture. Still **not built**.
-- **Date:** 2026-06-28 (L3 addendum: 2026-07-25; three-tier consolidation: 2026-07-25)
+  triggers) per the same-day consolidated design capture, **further extended 2026-07-26** with
+  Fork B's mirror-mechanism resolution and a Tier 2 hybrid inline/mirror transition design.
+  Still **not built**.
+- **Date:** 2026-06-28 (L3 addendum: 2026-07-25; three-tier consolidation: 2026-07-25; Fork-B
+  mirror resolution + Tier 2 hybrid design: 2026-07-26)
 - **Extends:** [0005-dns-firewall-device-auth-architecture](0005-dns-firewall-device-auth-architecture.md)
   (device auth), [0007-device-user-model](0007-device-user-model.md) (device-user model)
 - **Depends on:** the agent rebuild / config-pull
@@ -162,6 +165,14 @@ over time → fewer false positives (Day 1 sparse → Month 6 near-zero). Feeds,
 > (Tier 2, now including the full undetectable-inline design),
 > [adr-0009-l3-tier3-local-triggers-scope.md](../roadmap/adr-0009-l3-tier3-local-triggers-scope.md)
 > (Tier 3, new).
+>
+> **Extended again 2026-07-26:** Open Item 1's Fork-B mirror-vs-inline documentation gap is now
+> **RESOLVED** (see §6 and Open Items below) — Fork B is confirmed **mirror**. §6 also gains a
+> **hybrid inline/mirror transition** design for Tier 2: a per-connection gate on the first
+> meaningful chunk of decrypted application data, plus transition-hardening requirements that
+> close a real timing-based bypass. Full detail:
+> [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
+> (new Piece J).
 
 ### 0. Three-tier structure
 
@@ -176,9 +187,11 @@ degrades to the tier below it if unavailable.
   cache, and shared fleet intelligence. Escalates to Tier 2 on high-confidence behavioral
   triggers.
 - **Tier 2 — Full inline inspection (toggle, off by default).** Active decrypt/inspect/
-  re-encrypt on the tunnel — full payload visibility Tier 1 structurally cannot have. When
-  enabled, Nemesis attempts to make the fact of inspection itself undetectable to anything
-  observing the connection. **A genuine R&D goal, not a guaranteed property** — see
+  re-encrypt on the tunnel (**hybrid, added 2026-07-26**: inline-gated on a connection's first
+  meaningful decrypted chunk, then mirror for the rest — see §6) — full payload visibility
+  Tier 1 structurally cannot have. When enabled, Nemesis attempts to make the fact of inspection
+  itself undetectable to anything observing the connection. **A genuine R&D goal, not a
+  guaranteed property** — see
   [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
   for the full undetectable-inline design and its honest caveats. Summary: §6 below.
 - **Tier 3 — Client-side late triggers (always on, narrow scope).** A short, fixed list of
@@ -297,6 +310,46 @@ pinned-app allowlisting — lives in
 [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md),
 not duplicated here.
 
+**Hybrid inline/mirror transition (added 2026-07-26) — replaces the assumption that Tier 2,
+once engaged for a connection, stays fully inline (gating delivery) for that connection's
+whole life.** It does not: only the **first meaningful chunk of decrypted application data** —
+explicitly not the literal first packet, since the TLS handshake (ClientHello/ServerHello/
+certificate exchange/Finished) precedes any application payload — is held for inline inspection
+before delivery. If it passes, the connection **transitions to mirror** (Piece E's uniform
+decrypt/inspect continues, but delivery is no longer gated) for the rest of its life. **This is
+the only place in the whole L3 design where delivery is ever actually gated pending a verdict**
+— Fork B's own tunnel transport is confirmed pure mirror (see Open Items below and
+[adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md)); this hybrid gate exists
+one layer up, inside Tier 2, and only for connections Tier 2 has decrypted.
+
+**Transition-hardening requirements (close a real bypass, not optional hygiene):** without
+them, an attacker who controls their own destination can watch round-trip latency drop as the
+signal that gating has ended, and time a malicious payload for right after. (a) Randomize how
+much of the connection stays inline-gated, rather than a fixed cutoff — same unpredictability
+logic as the existing per-connection sampling probability (Piece F). (b) Continue Layer 2's
+latency padding (Piece E(b)) through the transition itself, so the switch from inline to mirror
+produces no observable timing discontinuity. (c) Occasionally re-promote an already-downgraded
+connection back to inline mid-life as a spot-check, so an attacker can never be certain the gate
+has permanently lifted. (d) **Downgrading to mirror downgrades the DELIVERY GATE only** —
+Suricata continues inspecting the connection's traffic for its entire life regardless of gating
+state; a late-connection anomaly still feeds the Tier 1 trigger and can still dirty that
+destination's reputation, even though that specific packet may already have been delivered.
+**This is the same accepted tradeoff as §4's dynamic-cache limitation** (invalidate going
+forward, can't convert an in-flight connection mid-stream) — restated here at **connection**
+granularity instead of **destination** granularity; not a new gap, the same one at a finer
+grain. Full mechanism + hardening detail:
+[tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md)
+(new Piece J), not duplicated here.
+
+**Correction — Tier 2 does not guarantee first-contact prevention.** Tier 2, including this
+hybrid gate, does **not** prevent an undetected zero-day payload from reaching its destination
+on the very first inline-gated chunk if that chunk itself looks clean. What Tier 2 provides is
+**fast detection** and **rapid future-blocking** via the dynamic cache (§4), plus this partial
+first-contact gate — not a guarantee against a clean-looking first payload. **Tier 3's local
+late-triggers (§7) are the actual backstop** for a payload that gets through Tiers 1 and 2
+undetected and begins executing locally. This is **intentional defense-in-depth across the
+three tiers**, not a gap unique to Tier 2.
+
 ### 7. Tier 3 — client-side late triggers (summary; full design in the Tier 3 scoping doc)
 A short, fixed, always-on list of local agent actions that fire in milliseconds on an
 unambiguous signal, without a server round-trip — the narrow exception to §3 above. On trigger:
@@ -340,17 +393,20 @@ listed again here.)
      two different agents, that is a **bug in the ownership rule's implementation** — log
      it; do **not** enforce on it (no additional blocking/dropping triggered by the
      duplicate itself).
-   - **Unresolved sub-item — recorded, not resolved:** the ownership decision above stands
-     either way, but whether it actually **protects the receiving end** depends on whether
-     Fork B's tunnel is **INLINE** (origin → server → destination; server can drop before
-     forwarding) or **MIRROR** (traffic goes direct; a copy is sent for inspection only). If
-     MIRROR, an origin-owned redirect never gates traffic reaching the destination — it can
-     only alert after the fact. **`adr-0009-l3-fork-b-scope.md` does not state which**:
-     Piece 2 describes the server forwarding + NAT'ing the flow (sounds inline), but Piece 3
-     adds Suricata via a passive `af-packet` capture interface (the same passive-capture
-     mechanism as the existing LAN tap) without ever stating whether the forward is gated on
-     Suricata's verdict. **Recorded here as a documentation gap in the Fork-B scope doc**,
-     not resolved by this addendum.
+   - **RESOLVED (2026-07-26) — previously an unresolved sub-item.** The ownership decision above
+     stands either way, but whether it actually **protects the receiving end** depended on
+     whether Fork B's tunnel is INLINE or MIRROR. **Confirmed: MIRROR.** Piece 2's forward is
+     unconditional (no verdict gate anywhere in it); Piece 3's Suricata is a passive `af-packet`
+     interface (the same passive-capture pattern as the existing LAN tap). Re-reading both
+     pieces together: there was never an actual contradiction between them — both were always
+     internally consistent with mirror; the doc simply never stated the choice explicitly until
+     now. **Consequence, now confirmed rather than merely feared:** an origin-owned redirect
+     through Fork B's tunnel does **not** gate traffic reaching the destination — it can only
+     alert/escalate after the fact. Full resolution:
+     [adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md) ("Mechanism: MIRROR"
+     section). **This does not mean the whole L3 pipeline never gates delivery** — see §6's new
+     hybrid inline/mirror transition, which gates delivery one layer up, inside Tier 2, for
+     connections it has decrypted.
    - **Flagged edge case — detail documented internally, not in the public repo (2026-07-26
      disclosure audit).** Enrolled-to-enrolled WiFi traffic on the same AP has a real,
      unresolved cost-to-value tension with the origin-based rule (§1). Not resolved here; a
@@ -379,7 +435,8 @@ listed again here.)
 - [connection-type-awareness.md](../roadmap/connection-type-awareness.md) — Mode 2 solves the
   WiFi gap.
 - [adr-0009-l3-fork-b-scope.md](../roadmap/adr-0009-l3-fork-b-scope.md) — the redirect/NAT/
-  return-path/fail-safe transport this addendum's trigger model sits on top of.
+  return-path/fail-safe transport this addendum's trigger model sits on top of; **now confirmed
+  mirror** (2026-07-26 — see its "Mechanism: MIRROR" section, and §6/Open Item 1 above).
 - [adr-0009-l3-behavioral-trigger-scope.md](../roadmap/adr-0009-l3-behavioral-trigger-scope.md) —
   2026-07-25 engineering-cost scoping for the new behavioral trigger layer (TBD estimate).
 - [tls-interception-sterilization-scope.md](../roadmap/tls-interception-sterilization-scope.md) —

@@ -23,6 +23,38 @@ clean / bad / unknown).
 
 ---
 
+## Mechanism: MIRROR (resolved 2026-07-26 — not an open question)
+
+**Finding, stated plainly:** the mechanism this doc scopes is **MIRROR**, not inline. Piece 2
+forwards every redirected flow to the internet **unconditionally** (IP forwarding + NAT/
+masquerade — no verdict gate anywhere in that piece's design). Piece 3 adds Suricata as a
+**passive** `af-packet` interface on `tailscale0` — the same passive-capture mechanism as the
+existing LAN tap, which by construction inspects a copy of traffic and never sits in its path.
+**Neither piece ever describes holding a packet pending a Suricata verdict before forwarding it.**
+
+This was flagged as an open documentation gap in the [2026-07-25 ADR 0009
+addendum](../architecture/0009-security-inspection-proxy.md) (Open Item 1's "unresolved
+sub-item"). Re-reading both pieces together to resolve it: **there was never an actual
+contradiction between Piece 2 and Piece 3.** Both are independently and consistently written as
+mirror. The real gap was that this doc never explicitly *decided* mirror was the intent — it
+fell out of how the two pieces happened to be written, without anyone stating the choice. That
+gap is closed now: **mirror is confirmed as this doc's mechanism, by design, not by accident.**
+
+**Consequence for the redirect-ownership question (ADR 0009 addendum Open Item 1):** since the
+tunnel is mirror, an origin-owned redirect (that addendum's §1) does **not** gate traffic
+reaching the destination — it can only alert/escalate after the fact, exactly as that addendum's
+unresolved sub-item worried it might. That consequence is now confirmed, not merely feared.
+
+**This does NOT mean the whole L3 pipeline never gates delivery.** A separate, connection-level
+inline gate exists one layer up, inside **Tier 2** (TLS interception) — not part of Fork B's own
+tunnel transport, and only relevant to connections Tier 2 has decrypted. See [ADR 0009 addendum
+§6](../architecture/0009-security-inspection-proxy.md) and
+[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (new Piece J)
+for that hybrid inline/mirror design. Fork B itself, as scoped in this doc, remains pure mirror
+end to end.
+
+---
+
 ## Piece 1 — Agent-side selective traffic redirect (WinDivert)
 **What:** extend the shipped L2 WinDivert layer from *drop-or-allow* to *drop / allow / **redirect***.
 
@@ -157,7 +189,10 @@ reuse the working server Suricata (Piece 3 is cheap), but pays heavily for the *
 ## Cross-references
 `adr-0009-build-scope.md` (Phase 3 / L3 — Fork A breakdown, the "Fork B = small increment" line this
 corrects; and Fork B depends on config-pull Phase 0a + the L2(b)/WinDivert driver), ADR 0009
-(architecture), ADR 0005 (firewall/device-auth engine — natural home for the NAT capability),
+(architecture — its addendum §6 and Open Item 1 now cross-reference this doc's mirror
+resolution above), ADR 0005 (firewall/device-auth engine — natural home for the NAT capability),
 `nemesis_agent/l2_windivert.py` (the SYN-drop layer Fork B extends), `nemesis_agent/reputation_cache.py`
 (the verdict driving "selected"), `alert_manager/firewall.py` (ufw chokepoint), `alert_manager/hw_monitor.py:27`
-(`NET_IFACE = enp131s0`), `docs/SETUP_LINUX.md:204` (the `af-packet` config, outside the repo).
+(`NET_IFACE = enp131s0`), `docs/SETUP_LINUX.md:204` (the `af-packet` config, outside the repo),
+[tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (Piece J —
+the hybrid inline/mirror transition this mirror-mechanism resolution motivates and sits beneath).
