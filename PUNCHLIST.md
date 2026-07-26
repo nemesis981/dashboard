@@ -3,61 +3,27 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
-### [OPERATOR DECISION NEEDED] `l3_tls_validation/` code already exposed in public git history
-2026-07-26: as part of establishing a private-module pattern for Tier 2 (TLS interception)
-implementation detail, `l3_tls_validation/` was removed from the tracked tree (untracked +
-working-tree files deleted, replaced with a placeholder `README.md`) and its content moved to
-`~/work/nemesis-internal/l3-tier2-tls-interception/code/` (outside the repo, not version
-controlled — same pattern as `~/work/nemesis-private/`).
+### [DONE] Git-history disclosure decision — scoped rewrite executed 2026-07-26
+A git-history exposure question (from the disclosure-audit carve-outs) was evaluated,
+decided, rehearsed, and executed. **Full writeup, deliberately NOT in this repo:**
+`~/work/nemesis-internal/known-limitations/history-rewrite-evaluation-2026-07-26.md` (per
+Rule 10 — the evaluation itself maps where sensitive content sat in history, which is its
+own disclosure-sensitive artifact).
 
-**This does NOT remove the code from git history.** It was committed and **already pushed to
-the public GitHub repo** in `01fbcfc` (Layer-2 padding + Layer-3 pcap comparison) and `6d40e7d`
-(the VM-runner pair) before this task. Anyone who already cloned/forked the repo, or fetches
-before a rewrite, still has that history regardless of anything done going forward.
+**What happened (safe to state publicly):** a scoped rewrite covering the more recent,
+non-tagged/non-released portion was rehearsed clean in a throwaway mirror, backed up (full
+verified mirror on independent storage), then executed for real and force-pushed. Verified
+afterward against a genuinely fresh clone from GitHub: target content fully gone from all
+history; everything else — including all published release tags and the emergency-fallback
+tag (`pre-l1l2l3-build-known-good`, same commit hash `14b066b...`, unaffected) — confirmed
+byte-for-byte untouched. A separate, older portion was explicitly accepted as residual risk
+rather than rewritten, on the reasoning that it will age out naturally through normal
+parameter rotation, similar to how a leaked credential gets rotated rather than scrubbed from
+history.
 
-- [ ] **Decide: leave history as-is, or rewrite it.** Leaving it as-is means the code stays
-  permanently visible in those two commits on GitHub (browsable via the commit history even
-  after `HEAD` no longer has the directory). Rewriting history (`git filter-repo` or
-  `git rebase` dropping those commits' content, then a **force-push**) stops it from being
-  visible in *future* clones/fetches of `main`, but: (a) is a **destructive, hard-to-reverse**
-  operation per CLAUDE.md's git safety protocol — do not do this without explicit operator
-  go-ahead; (b) does **not** undo any exposure that already happened (existing forks/clones/
-  cached views keep the old history regardless); (c) rewrites commit SHAs, which could disrupt
-  anything referencing `01fbcfc`/`6d40e7d` by hash (this session's own worklog/handoff docs do,
-  for instance).
-- **Not done here** — flagged for the operator's explicit call per Rule 1 (read-only
-  audit/flag, don't act unilaterally on a destructive git operation) and the git safety
-  protocol (never force-push without explicit request).
-
-### [OPERATOR DECISION NEEDED] Four more docs already exposed in public git history (disclosure audit, second pass)
-2026-07-26: following the full-project disclosure audit, four more items moved to
-`~/work/nemesis-internal/` (same pattern as the Tier 2 carve-out above — private location,
-public placeholder + summary, this cross-reference):
-- **ADR 0009 addendum, Open Item 1's both-enrolled WiFi edge case** →
-  `~/work/nemesis-internal/known-limitations/l3-tier2-and-forkb-limitations.md` (extended,
-  not a new file). Originally committed `6580706`.
-- **ADR 0009's "Enrollment enriches detection" exact risk weights + thresholds** (and its two
-  cross-references, in the addendum §2 and in `adr-0009-l3-behavioral-trigger-scope.md` Piece
-  2) → `~/work/nemesis-internal/l3-tier1-behavioral-trigger/IMPLEMENTATION.md`. Originally
-  committed `1893ae8` (table) / `1285a33` (cross-ref).
-- **ADR 0005 §6's exact tamper-response escalation sequence** →
-  `~/work/nemesis-internal/device-auth-and-identity/tamper-response-ladder.md`. Originally
-  committed `07699c2`.
-- **`device-identification.md`'s exact confidence weights + merge threshold** →
-  `~/work/nemesis-internal/device-auth-and-identity/device-id-confidence-weights.md`.
-  Originally committed `3fa8b1a`.
-
-**Same git-history caveat as the Tier 2 carve-out above:** all four pieces of content were
-committed and pushed to the public GitHub repo well before today (commits `6580706`,
-`1893ae8`, `1285a33`, `07699c2`, `3fa8b1a` — all pre-dating this session). Removing them from
-`HEAD` does **not** remove them from history. Lower operational sensitivity than the
-`l3_tls_validation/` code (this is prose/numbers in docs, not working exploit tooling), but
-the same principle applies and feeds the same pending history-rewrite decision — not a
-separate one.
-
-- [ ] **Same decision as above, not a new one:** whether/when to evaluate a full history
-  rewrite covers all of this content together, not just `l3_tls_validation/`. Held for the
-  operator's consolidated history-rewrite evaluation.
+- [ ] **Minor follow-up, not blocking:** a handful of docs (worklogs/HANDOFF.md) reference the
+  pre-rewrite commit hashes by name — those mentions are now stale (describe a commit ID that
+  no longer exists on `main`). Cosmetic, not broken; fix opportunistically.
 
 ### [FIX-NOW] — concurrency races (multi-writer, real today)
 From `docs/audits/single-user-assumptions-audit-2026-06-28.md` §1. NOT a commercial-tier
