@@ -101,6 +101,72 @@ SMTP config: `/etc/nemesis.env` (running system); local reference at
 
 ---
 
+## Troubleshooting: dashboard won't load / hangs (2026-07-26)
+
+Symptom: the dashboard page hangs or won't load at all. Real diagnostic chain, in order —
+don't skip to a restart without checking the log first, since the fix differs depending on
+what's actually wrong.
+
+**1. Check the service status and log first.**
+```
+sudo systemctl status dashboard
+```
+Look for a repeated `OSError: [Errno 24] Too many open files` in the log output. That
+specific error points at a **known open bug**: the `anomaly_detection` module leaks a file
+descriptor on `/var/log/suricata/eve.json` each detection cycle until the process runs out
+of file handles and everything (including the dashboard's own requests) starts failing with
+the same error. See PUNCHLIST for current status — **not yet fixed as of 2026-07-26.**
+
+**2. Restart the service.**
+```
+sudo systemctl restart dashboard
+```
+This clears the immediate symptom (fresh process, fresh fd table) but is **not a fix** —
+if the underlying leak is still open, the fd count will climb back up over time and the
+same hang will recur. Restarting only buys time until the real fix lands.
+
+**3. If the restart itself fails with "Start request repeated too quickly."**
+That's **systemd's own rate limiter**, not a new bug — it kicks in after repeated failed
+start attempts in a short window. Clear it before retrying:
+```
+sudo systemctl reset-failed dashboard.service
+sudo systemctl restart dashboard
+```
+
+**4. If it still won't come up, check the real error before guessing further.**
+```
+sudo journalctl -xeu dashboard.service
+```
+Don't assume it's the same fd-leak bug — read the actual error. A different failure here
+means a different fix.
+
+**Two gotchas that will bite you if you're debugging this manually (found 2026-07-26):**
+
+- **(a) Running the script manually with `sudo` for debugging leaves files owned by
+  `root`.** If you `sudo python3 dashboard.py` (or similar) to watch output live while
+  troubleshooting, any files it creates/touches during that run end up owned by `root`.
+  The next time the service starts normally (as its own non-root user), it can hit a
+  `PermissionError` on those same files. Fix: `chown` the affected files back to the
+  service's actual user before restarting the service normally.
+- **(b) Confirm which user the service actually runs as before trusting a "missing
+  module" error from a manual run.** Check:
+  ```
+  grep "^User" /etc/systemd/system/dashboard.service
+  ```
+  `dashboard.service` runs as the install user (not root — see "Services running as root"
+  above, `dashboard.py` is the one service that's already correct). If you run the script
+  manually under a **different** user context than the service normally uses (e.g. plain
+  `sudo` instead of `sudo -u <that-user>`), you can hit a false "module not found" error
+  that has nothing to do with a real missing dependency — it's a different Python
+  environment/user context than the one the service actually runs in. Match the user
+  before concluding a module is really missing.
+
+**Future robustness note (not urgent, not built):** the dashboard should ideally fail more
+gracefully / self-report when it hits resource exhaustion (too-many-open-files) instead of
+silently hanging — flagged as a future item on the PUNCHLIST, not something to fix today.
+
+---
+
 ## Backup system notes
 
 - Archives: `alerts.db`, `hw_map.json`, `/etc/nemesis.env` (+ historically `tickets.db` and

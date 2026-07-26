@@ -932,6 +932,19 @@ baking it, so the dashboard UI can mint L2-enabled installers directly. **Securi
 change → audit-first, hold-for-review.** Deferred from tonight deliberately (Option B was the
 lower-risk path for one laptop pre-trip).
 
+### [FIX-NOW] `anomaly_detection` fd leak on `/var/log/suricata/eve.json` (dashboard hang, real today — 2026-07-26)
+- [ ] **`_detection_cycle` (`modules/anomaly_detection/module.py`) leaks a file descriptor on
+  `/var/log/suricata/eve.json` every cycle**, eventually exhausting the process's fd table —
+  observed live today as repeated `OSError: [Errno 24] Too many open files` in the dashboard
+  service log, which then hangs the dashboard itself (confirmed via `journalctl -u dashboard`,
+  recurring every poll cycle as of 2026-07-26 11:33, no code fix landed — `git log`/`git diff`
+  on the module show nothing touching this since `37a02d0`). **NOT YET FIXED — stays open.**
+  User-facing symptom + immediate workaround (restart, not a fix) documented in
+  `docs/reference/operational-notes.md` ("Troubleshooting: dashboard won't load / hangs").
+- [ ] **Future robustness (not urgent, do not build now):** the dashboard should ideally fail
+  more gracefully / self-report on resource exhaustion (too-many-open-files) instead of
+  silently hanging. Flag for a later error-handling pass — not part of the fd-leak fix itself.
+
 ### [LOW] `agent_devices.last_heartbeat_data` not populating (observed 2026-07-03, trip-laptop)
 - [ ] **`agent_devices.last_heartbeat_data` is not populating for trip-laptop despite
   hw_metrics/agent_last_seen updating normally** — real telemetry (cpu/ram/temp) is landing

@@ -283,6 +283,11 @@ Settings → Hardware → "Re-run hardware discovery" → then "Reset sensor bas
 **"The dashboard seems wrong or slow"**
 Settings → "Restart Dashboard" → page reloads in ~5 seconds.
 
+**"The dashboard won't load at all / hangs"**
+Check the service log for a "Too many open files" error before just restarting repeatedly —
+see the full diagnostic chain in `docs/reference/operational-notes.md`
+("Troubleshooting: dashboard won't load / hangs").
+
 **"I want to update my email or API key settings"**
 Settings → "Configuration Wizard" → step through to the relevant section → save. No terminal required.
 
