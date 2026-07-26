@@ -178,15 +178,20 @@ Most compliance evidence already exists in Nemesis data. This module generates f
 
 > ⚠️ The automated Windows installer (`windows_agent/nemesis-windows-setup.py`) is a work in progress and has not been fully validated end-to-end. The primary distribution method is the unified **Nemesis Agent** described in Phase 1 above, which replaces the earlier hardware-only Windows agent.
 
+> **Scope update (2026-07-26 — see [ADR 0014](docs/architecture/0014-deployment-appliance-model.md)):** the dedicated Linux **appliance** (mini PC) is now the primary deployment target for SMB/venue customers — not a Windows-hosted VM. This narrows what "Windows/VM support" means below: **(a)** cross-platform support is an **agent-only** requirement (already shipped — the unified Nemesis Agent is Windows/Mac/Linux); the server/dashboard/detection stack itself only needs to run on the appliance's Linux target. **(b)** The full-stack-in-a-VM-on-Windows path described below is **retained**, but as an **optional home-user path** (for people who'd rather use hardware they already own than buy/run a dedicated appliance) — not as a primary SMB/venue target. This is a genuine reversal of that path's earlier "primary path" framing, not a silent narrowing; see ADR 0014 for the full reasoning (why appliance, why the VM mechanism itself is unchanged/confirmed-correct, not reconsidered as "too heavy").
+
 **Current state:**
 - `windows_agent/` — original hardware-only agent (functional for hardware telemetry)
 - `windows_agent/nemesis-windows-setup.py` — Windows installer script (WIP, requires testing)
-- Full Nemesis-on-Windows requires a Linux VM (VirtualBox recommended) for Pi-hole/Suricata
+- Full Nemesis-on-Windows (home-user option, not the SMB/venue primary path) requires a Linux VM
+  (VirtualBox recommended) for Pi-hole/Suricata — see `docs/SETUP_WINDOWS.md`.
 
 **Planned:**
 - Nemesis Agent for Windows (`nemesis_agent/`) — full security endpoint agent
 - Windows 11 test VM validation in progress
 - Pre-built Ubuntu VM `.ova` available on Archive.org for import into VirtualBox
+- **SMB/venue primary path:** dedicated Linux appliance (mini PC) — sourcing/sizing not yet
+  started; see [ADR 0014](docs/architecture/0014-deployment-appliance-model.md) Open Items.
 
 **Known Windows install requirements** (from testing):
 - Microsoft Visual C++ Redistributable 2015-2022 (required before Python packages)

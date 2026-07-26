@@ -391,3 +391,6 @@ listed again here.)
 - [community-signal-dedup.md](../roadmap/community-signal-dedup.md),
   [open-source-threat-feeds.md](../roadmap/open-source-threat-feeds.md) — flagged possible
   overlap with the addendum's shared-fleet-intelligence push-back (not resolved; see addendum §5).
+- [ADR 0016 — guest marketing capture](0016-guest-marketing-capture.md) — its PII
+  network-transit addendum reuses this ADR's Tier 1 behavioral-anomaly engine at a new
+  chokepoint (the export API), scoped separately from Tier 2/3 (2026-07-26).

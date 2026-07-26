@@ -7,6 +7,20 @@ Tier 2). Related: [agent rebuild](agent-rebuild-config-driven.md),
 [connection-type awareness](connection-type-awareness.md),
 [product thesis — agent-as-credential / 2FA](product-thesis-built-in-it-expertise.md).
 
+> **⚠ FLAGGED TENSION (2026-07-26, not resolved) — read before building anything here.**
+> [ADR 0015 — guest self-service enrollment](../architecture/0015-guest-self-service-enrollment.md)
+> (new, same day) describes venue guest enrollment as **QR-code / captive-portal** self-service
+> (matching standard hospitality WiFi UX), and explicitly does **not** require an installed app
+> as the enrollment mechanism — an app is framed as an optional value-add (protection beyond the
+> visit), not the credential itself. That is a real disagreement with **this stub's** "the app
+> IS the access credential — no app = no WiFi" framing below, which this stub still describes
+> unchanged. **Not reconciled yet** — pick this stub back up alongside ADR 0015 before building
+> either. Also see new [ADR 0014 — deployment appliance
+> model](../architecture/0014-deployment-appliance-model.md) (independent decision, same day,
+> unrelated to this tension — the SMB/venue *server* deployment target, not the guest-enrollment
+> mechanism) and [ADR 0016 — guest marketing capture](../architecture/0016-guest-marketing-capture.md)
+> (new opt-in module, same day — captive-portal-adjacent, needs legal review before shipping).
+
 ## Concept
 Replace the guest-WiFi password with the **Nemesis guest app**. The app **IS** the access
 credential — **no app = no WiFi**. The Terms-of-Service disclosure shown at install is the
@@ -56,6 +70,15 @@ funnel** → network effect: more venues → more users → better intelligence.
 - **Auto-approve flow** (a venue can't manually approve each guest — see sequencing).
 - **Lighter agent** (mobile-first, not the full desktop agent).
 - **Short enrollment duration** (visit-based, not permanent).
+- **New (2026-07-26) — paid custom-integration service, not required:** if [ADR 0016 — guest
+  marketing capture](../architecture/0016-guest-marketing-capture.md) ships, custom per-venue
+  integration work (wiring the exported guest data into a specific venue's other systems) is a
+  **possible paid service** Paul could offer — but not required; the export API should be
+  documented well enough that any programmer (the venue's own, or one they hire) can build the
+  integration themselves. **Unconfirmed, needs a lawyer, not a settled fact:** this likely
+  shifts *some* liability for downstream data handling to the venue/their programmer once data
+  leaves via the documented export API — flagged as unconfirmed legal reasoning only, per ADR
+  0016; do not treat as a guaranteed liability shield.
 
 ## Sequencing
 - **Mobile agent (V2/V3)** — required first.
