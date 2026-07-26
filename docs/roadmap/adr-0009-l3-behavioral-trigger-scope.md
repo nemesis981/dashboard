@@ -57,8 +57,9 @@ streaming (the closest analog, hw-monitor heartbeat, is periodic snapshot, not f
 ## Piece 2 — Server-side correlation/scoring engine (extends or parallels the lateral-movement table)
 **What:** the continuous rule-based behavioral/pattern scorer described in the addendum's
 Layer (a). **Open Item #2 (unresolved, from the addendum): does this reuse the EXISTING
-lateral-movement risk-weight table (ADR 0009 "Enrollment enriches detection": `risk
-+30/+40/+15/+20/+15`, thresholds `≥70/≥40`) or run as a separate, parallel scoring system?**
+lateral-movement risk-weight table (ADR 0009 "Enrollment enriches detection" — exact
+weights/thresholds documented internally, not in the public repo) or run as a separate,
+parallel scoring system?**
 
 - **If reused:** the existing table is scoped for **post-detection correlation between fleet
   devices** (lateral movement) — a different signal shape than "is this destination/pattern

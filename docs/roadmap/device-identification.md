@@ -84,11 +84,12 @@ reconnect. Naive MAC-based tracking = endless phantom devices on the network.
 - **NetBIOS name** — stable for Windows devices.
 
 ### Correlation engine
-New MAC/IP appears → check stable signals → match against known devices → same device?
-- Confidence: `keypair=1.0`, `dhcp=0.95`, `mdns=0.90`, `timing_correlation=0.70`.
-- Threshold ≥ 0.85 → **suggest merge** to user.
-- Below threshold → treat as genuinely new device.
-- **NEVER auto-merge — always user confirmation.**
+New MAC/IP appears → check stable signals → match against known devices → same device? Each
+signal type contributes a different confidence weight toward a merge suggestion; a device's
+cryptographic agent keypair, when present, is unspoofable and always the strongest signal.
+**Exact per-signal weights and the merge threshold documented internally, not in the public
+repo** (2026-07-26 disclosure audit) — a source-visibility decision, not a feature-gating one.
+- **NEVER auto-merge — always user confirmation** (this safety property stays public).
 
 ### Agent solves phones completely
 Agent installed → keypair = permanent cryptographic identity. MAC randomizes, IP changes →
@@ -96,8 +97,10 @@ irrelevant. Server recognizes the keypair → same device, confidence 1.0. The e
 IS the phone's identity.
 
 ### Without agent (unmanaged phones)
-DHCP hostname + mDNS name → 85-95% confidence. Timing correlation (departed + reappeared within
-60s) → 70%. Suggest merge, never auto-merge. User confirms → identity locked, trust established.
+Stable signals (DHCP hostname, mDNS name, timing correlation on departure/reappearance) still
+support a merge suggestion at lower confidence than the agent keypair path. **Exact confidence
+values documented internally, not in the public repo.** Suggest merge, never auto-merge. User
+confirms → identity locked, trust established.
 
 ### Phantom-device cleanup
 Once the correlation engine is active: scan the historical list for the same stable identifiers

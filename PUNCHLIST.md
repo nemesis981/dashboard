@@ -29,6 +29,36 @@ before a rewrite, still has that history regardless of anything done going forwa
   audit/flag, don't act unilaterally on a destructive git operation) and the git safety
   protocol (never force-push without explicit request).
 
+### [OPERATOR DECISION NEEDED] Four more docs already exposed in public git history (disclosure audit, second pass)
+2026-07-26: following the full-project disclosure audit, four more items moved to
+`~/work/nemesis-internal/` (same pattern as the Tier 2 carve-out above — private location,
+public placeholder + summary, this cross-reference):
+- **ADR 0009 addendum, Open Item 1's both-enrolled WiFi edge case** →
+  `~/work/nemesis-internal/known-limitations/l3-tier2-and-forkb-limitations.md` (extended,
+  not a new file). Originally committed `6580706`.
+- **ADR 0009's "Enrollment enriches detection" exact risk weights + thresholds** (and its two
+  cross-references, in the addendum §2 and in `adr-0009-l3-behavioral-trigger-scope.md` Piece
+  2) → `~/work/nemesis-internal/l3-tier1-behavioral-trigger/IMPLEMENTATION.md`. Originally
+  committed `1893ae8` (table) / `1285a33` (cross-ref).
+- **ADR 0005 §6's exact tamper-response escalation sequence** →
+  `~/work/nemesis-internal/device-auth-and-identity/tamper-response-ladder.md`. Originally
+  committed `07699c2`.
+- **`device-identification.md`'s exact confidence weights + merge threshold** →
+  `~/work/nemesis-internal/device-auth-and-identity/device-id-confidence-weights.md`.
+  Originally committed `3fa8b1a`.
+
+**Same git-history caveat as the Tier 2 carve-out above:** all four pieces of content were
+committed and pushed to the public GitHub repo well before today (commits `6580706`,
+`1893ae8`, `1285a33`, `07699c2`, `3fa8b1a` — all pre-dating this session). Removing them from
+`HEAD` does **not** remove them from history. Lower operational sensitivity than the
+`l3_tls_validation/` code (this is prose/numbers in docs, not working exploit tooling), but
+the same principle applies and feeds the same pending history-rewrite decision — not a
+separate one.
+
+- [ ] **Same decision as above, not a new one:** whether/when to evaluate a full history
+  rewrite covers all of this content together, not just `l3_tls_validation/`. Held for the
+  operator's consolidated history-rewrite evaluation.
+
 ### [FIX-NOW] — concurrency races (multi-writer, real today)
 From `docs/audits/single-user-assumptions-audit-2026-06-28.md` §1. NOT a commercial-tier
 concern: Nemesis already runs 6 concurrent writer processes against one shared `alerts.db`,

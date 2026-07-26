@@ -129,14 +129,12 @@ department required."*
 ## Enrollment enriches detection
 Every enrolled device has a behavioral baseline (connection graph, typical ports, normal hours,
 connection count). Lateral-movement detection uses this baseline for high-confidence verdicts:
-- New connection between enrolled devices: **risk +30**
-- Connection after a recent finding on the src device: **risk +40**
-- Unusual port for this device: **risk +15**
-- Sensitive target (server / NAS): **risk +20**
-- Outside normal hours: **risk +15**
-
-**Score ≥70: CRITICAL → isolate. Score ≥40: HIGH → investigate.** Compounding: baselines mature
-over time → fewer false positives (Day 1 sparse → Month 6 near-zero). Feeds, and is fed by,
+a weighted, additive scoring model (new connections between enrolled devices, connections
+following a recent finding, unusual ports, sensitive targets, off-hours activity all contribute)
+escalating through two tiers (investigate / isolate). **Exact weights and thresholds documented
+internally, not in the public repo** (2026-07-26 disclosure audit) — a source-visibility
+decision, not a feature-gating one; this scoring runs at every tier regardless. Compounding:
+baselines mature over time → fewer false positives (Day 1 sparse → Month 6 near-zero). Feeds, and is fed by,
 [0008-impossible-travel-detection](0008-impossible-travel-detection.md).
 
 ## Sequencing
@@ -219,9 +217,9 @@ independent of their reputation verdict.
 ### 2. Two-layer model — trigger (server) + catch (tunnel)
 - **Layer (a) — the TRIGGER.** Continuous, lightweight, **server-side** rule-based
   behavioral/pattern scoring — same shape as the existing lateral-movement risk-weight table
-  (ADR 0009 "Enrollment enriches detection" above: `risk +30/+40/+15/+20/+15`, thresholds
-  `≥70 CRITICAL / ≥40 HIGH`). **Open question whether this literally reuses that engine or runs
-  as a parallel one** — see Open Items below.
+  (ADR 0009 "Enrollment enriches detection" above — exact weights/thresholds documented
+  internally). **Open question whether this literally reuses that engine or runs as a parallel
+  one** — see Open Items below.
 - **Layer (b) — the CATCH.** Tunnel-routed Suricata payload inspection (Fork B's transport),
   invoked on **either** of two triggers:
   1. Unknown reputation verdict (the **original** Fork-B trigger, unchanged), OR

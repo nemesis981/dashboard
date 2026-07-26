@@ -145,12 +145,11 @@ On a fingerprint mismatch **without** an active re-enrollment key, **do NOT auto
 A mismatch is **usually legitimate**; blocking DNS would brick an honest user and may kill
 their own path to reach IT/remediation.
 
-Instead, **detect aggressively, respond proportionally:**
-1. **Detect aggressively** → alert the dashboard + flag the device **unverified**.
-2. **(With the engine)** isolate the device from **SENSITIVE network segments** while leaving
-   **basic connectivity** intact.
-3. **Escalate to a human.**
-4. **Hard-block ONLY on owner-confirmation / high-confidence.**
+Instead, **detect aggressively, respond proportionally** — escalating through detection,
+containment, and human confirmation before any hard block, never silently or irreversibly.
+**Exact escalation sequence documented internally, not in the public repo** (2026-07-26
+disclosure audit) — a source-visibility decision, not a feature-gating one; the general
+commitment below is the part that matters publicly.
 
 **Remediation info must NOT depend on a blocked resource.** Detection is aggressive; response
 is **proportional, reversible, and human-in-the-loop**.
