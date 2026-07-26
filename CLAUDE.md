@@ -297,6 +297,29 @@ notes that read as internal, but the repo is public — they leak just like code
      (not living only in the conversation).
   Verdict: **"clean + synced + leak-free + open items captured"** — or list exactly what's off.
 
+### 10. Disclosure-check before publishing novel mechanisms or honest-limitation language
+Before any commit or write operation to the public repo, check whether it introduces:
+- a **genuinely novel mechanism** (not standard industry practice elsewhere — same judgment
+  bar as the 2026-07-26 disclosure audit), or
+- **explicit honest-limitation/caveat language** describing an unresolved weakness (any
+  "X doesn't fully solve Y," "the weakest point is Z," or described-but-unresolved edge case).
+
+If either applies, **flag it for a public/private disclosure decision — do not silently commit
+either way.** Apply the established policy:
+- General architecture, tier/capability structure, and the existence of a capability default
+  to **public**.
+- Novel mechanism implementation, specific tuning parameters, and honest-limitation/caveat
+  language describing unresolved weaknesses default to a **flagged decision**, not automatic
+  public commit.
+- **Feature availability is never the deciding factor** — this is a source/doc-visibility rule
+  only, never a pricing-tier gate. State this distinction explicitly whenever the rule is
+  invoked, so it's never misread as feature-gating.
+
+This is a **standing check for all future work**, not a one-time retroactive pass — every
+window applies it going forward, the same way Rule 8's leak-scan applies to every commit.
+(Precedent/full inventory: the 2026-07-26 novel-mechanism disclosure audit and its resulting
+private-module carve-out for Tier 2 and the four follow-on items.)
+
 ---
 
 ## TIER 2 — Nemesis-specific rules
