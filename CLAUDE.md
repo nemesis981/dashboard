@@ -133,8 +133,21 @@ TLS-interception harness + implementation detail, moved out of the public repo f
 source-visibility). This rule covers it and any future similarly-carved-out private modules.
 - **Window 1 is the git-writer for these private repos** — it authors the code that lives
   there. It follows the SAME discipline as Window 2's public-repo practice: verify staged
-  content before committing, Rule-8 scan the staged diff, and push to ALL configured remotes
-  (local + USB + private GitHub).
+  content before committing, Rule-8 scan the staged diff, and push to all three of a private
+  module's configured remotes — **local** (a bare repo on this machine), **USB** (independent
+  physical storage), and **private GitHub** (`private: true`, access-restricted). **Confirmed
+  in place for `l3-tier2-tls-interception` (2026-07-26)**: all three remotes verified to
+  report the same HEAD after a push — same sync-check discipline as anything else in this
+  file.
+- **This three-remote pattern is specific to private modules — not a general repo
+  requirement.** The public dashboard repo intentionally has only `origin` (public GitHub),
+  and that's correct as-is, not a partial/unfinished version of this rule: GitHub itself is
+  that repo's durable, off-site copy — the entire reason it's hosted there. A private
+  module's GitHub remote is deliberately low-visibility instead, so it doesn't get that same
+  "the host is inherently a durable, mirrored copy" property for free — hence the extra
+  local + USB redundancy, specific to private-module content. **Verified 2026-07-26**, not
+  assumed: the public repo genuinely has a single `origin` remote, confirming the asymmetry
+  is intentional rather than a silently unfinished rollout of this rule.
 - **Window 2 remains sole git-writer for the PUBLIC repo only.** This does NOT change or
   extend that rule. The two repos have two git-writers by design — ownership follows
   authorship: Window 1 authors the private-module code, Window 2 authors the public docs.
