@@ -10,6 +10,9 @@
 > ✅ **Today shipped real code, not just docs**: the full ADR 0006 Data Manager v1 build (see
 > below) — this banner's earlier "docs-only" framing covered only the morning/afternoon; the
 > evening Window 1/Window 2 build cycle shipped a real capability with loader-level enforcement.
+> ✅ **Late today: L3 design consolidated into a three-tier structure** (Tier 1/2/3) — still
+> capture-only, nothing built, but a real correction landed: a mis-numbered ADR reference
+> ("ADR 0011") was caught and redirected before it could corrupt an unrelated ADR. See below.
 
 ---
 
@@ -120,6 +123,47 @@ close-out covered by this section.
   zero-day work (behavioral-trigger telemetry, TLS interception) to produce real new schemas to
   design the gatekeeper against, rather than designing it now against only today's 6 stable
   schemas. v3 (contributor-scale enforcement) remains not started.
+
+## 2026-07-25 late: L3 design consolidated into a three-tier structure (capture-only, NOT built)
+Operator brought a same-day design-capture document consolidating the L3 zero-day architecture
+into three tiers. One commit (`68c0eb1`), Rule-8 scanned, held for operator review before
+committing (per explicit instruction), then pushed once confirmed. Full detail:
+`docs/handoff/supplements/2026-07-25-003.md`. Summary:
+
+- **Three tiers, formalized in the ADR 0009 addendum's new §0**: **Tier 1** (mirror/passive,
+  default, always on) = the existing origin-based-routing/trigger-catch/sensor-only/dynamic-
+  cache/fleet-intelligence design (addendum §1–5, unchanged, just now explicitly named Tier 1).
+  **Tier 2** (full inline inspection, toggle, off by default) = the TLS interception work,
+  extended today with the full "undetectable inline" design (side-channel normalization, cache
+  keyed on cert fingerprint not hostname, dual randomization, evasion-probing handling,
+  pinned-app allowlisting) — all added to `tls-interception-sterilization-scope.md`. **Tier 3**
+  (client-side late triggers, always on, narrow) = brand new: a short enumerated list of local
+  agent actions (shadow-copy-deletion attempt, canary-file touch, mass file-operation pattern)
+  that fire in milliseconds without a server round-trip, because ransomware's damage window
+  closes faster than a server verdict can return. New doc:
+  `docs/roadmap/adr-0009-l3-tier3-local-triggers-scope.md`.
+- **Real correction, not just a rename**: the source document repeatedly attributed the
+  sensor-only principle (and Tier 3's conflict with it) to **"ADR 0011"** — wrong. ADR 0011 is
+  the Enrollment Security Model and has no sensor-only language in it at all. The principle
+  actually lives in **ADR 0009's own addendum §3**. Verified via grep before writing anything;
+  every amendment was redirected there instead of corrupting ADR 0011. Flagged to the operator
+  before committing; confirmed the redirect matched intent. **If anything downstream still
+  refers to "ADR 0011" for the sensor-only principle, that reference is stale — check ADR 0009
+  §3 instead.**
+- **Resolved (not left open):** the Tier 3 vs. sensor-only conflict. Default/floor (Tier 2/3
+  off) = pure sensor, unchanged. Tier 3 ON = a narrow, auditable exception — unilateral local
+  action ONLY on the enumerated trigger list, nothing else ever judged locally — with the
+  reasoning (server round-trip too slow for ransomware's shadow-copy/mass-encryption window)
+  stated plainly, not just the rule.
+- **Left open on purpose, as inline TBD notes at the relevant point in each doc, not as
+  blocking gates**: whether the mass-file-operation trigger ships (higher false-positive rate
+  than the other two Tier 3 candidates — decided empirically during build/testing), and the
+  evasion-probing-vs-cert-pinning-failure disambiguation problem (blocks the flagged-not-built
+  sandbox-and-observe idea specifically, not the safe-to-build trigger-signal use).
+- **Incidental, not chased further**: the source document mentions a "drone platform" project
+  in passing (shares Tier 2's VM-validation shape, on hold until October 2026, not a build
+  dependency) — this is the **first mention of any drone project anywhere in this repo**.
+  Recorded as a flagged aside exactly as the source framed it; not expanded into its own capture.
 
 ## TL;DR (last shipped work — 2026-07-02 closeout, still current)
 That night shipped the **WiFi-security layer (Feature 6 / L1 / L2)** and — critically — **fixed a
@@ -244,13 +288,16 @@ its own.
    - **`agent_devices.last_heartbeat_data` not populating** for trip-laptop (PUNCHLIST, `8cdb120`,
      open since 2026-07-03). Low severity, not blocking.
 2. **Today's new design work needs dedicated scoping sessions before any of it is buildable**:
-   `adr-0009-l3-behavioral-trigger-scope.md` and `tls-interception-sterilization-scope.md` both
-   deliberately carry no session estimate. Don't skip straight to building from the addendum —
-   the scoping pass comes first, and Open Item 3 (no target hardware baseline) blocks even that.
+   `adr-0009-l3-behavioral-trigger-scope.md` (Tier 1), `tls-interception-sterilization-scope.md`
+   (Tier 2), and `adr-0009-l3-tier3-local-triggers-scope.md` (Tier 3) all deliberately carry no
+   session estimate. Don't skip straight to building from the addendum — the scoping pass comes
+   first, and Open Item 3 (no target hardware baseline) blocks even that.
 3. Do NOT enable L1 (ADR 0005 DNS posture still unresolved) and do NOT globally enable L2 (per-device
    toggle still unbuilt — `dashboard-l2-toggle.md`) — both still true, unchanged since 07-02.
-4. If picking up the L3/TLS work: read the ADR 0009 addendum's "Open items from this session"
-   section FIRST — 4 unresolved design questions block real progress on either new scoping doc.
+4. If picking up the L3/TLS/Tier-3 work: read the ADR 0009 addendum's §0 (three-tier structure)
+   and "Open items from this session" section FIRST. **Note:** the sensor-only principle and its
+   Tier 3 exception live in ADR 0009 §3 — NOT ADR 0011 (a same-day correction; the design-capture
+   source document had this mis-numbered).
 5. **New module authors: the Data Manager is now loader-enforced**, not a style guideline — a
    `module.py` importing raw `sqlite3` or the bare `get_db` accessor will be refused at load
    time with a named error. Route all DB access through `get_data_manager().connect(module)`.
@@ -265,18 +312,22 @@ its own.
 
 ## Pointers
 - Session narratives: `docs/handoff/supplements/2026-07-02-001.md`, `2026-07-25-001.md` (morning
-  audit), `2026-07-25-002.md` (full-day closeout, incl. the design-capture detail).
+  audit), `2026-07-25-002.md` (ADR 0006 build through malware_detection), `2026-07-25-003.md`
+  (ADR 0006 loader-enforcement close-out + L3 three-tier consolidation).
 - Fallback: `docs/operations/backupproc.md`; tag `pre-l1l2l3-build-known-good` (`14b066b`).
-- L2/L3 design: `docs/roadmap/dashboard-l2-toggle.md`, `l2-windivert-stumble-escalation.md`,
-  `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`,
-  `adr-0009-l3-behavioral-trigger-scope.md` (new 07-25), `tls-interception-sterilization-scope.md`
-  (new 07-25).
+- L2/L3 design (three-tier structure, per ADR 0009 addendum §0): `docs/roadmap/dashboard-l2-toggle.md`,
+  `l2-windivert-stumble-escalation.md`, `adr-0009-build-scope.md`, `adr-0009-l3-fork-b-scope.md`,
+  `adr-0009-l3-behavioral-trigger-scope.md` (Tier 1, new 07-25), `tls-interception-sterilization-scope.md`
+  (Tier 2, extended 07-25 with the full undetectable-inline design),
+  `adr-0009-l3-tier3-local-triggers-scope.md` (Tier 3, new 07-25).
 - Business model: `docs/roadmap/product-thesis-built-in-it-expertise.md` (expanded 07-25 —
   tier/pricing/resource-philosophy/AI-optional sections), `network-resource-scaling-advisor.md`
   (new 07-25, distinct from `nemesis-overhead-meter.md`).
 - ADRs: 0001 (DB/module architecture — Stages 0–6 all done 07-25), 0005 (DNS posture blocker),
   0006 (Data Manager — **v1 SHIPPED, loader-enforced, 07-25**; v2 deferred pending L3), 0009
-  (inspection proxy — L3 addendum 07-25), 0011 (enrollment), 0012 (enrollment modes).
+  (inspection proxy — L3 addendum + three-tier consolidation 07-25; **§3 is the sensor-only
+  principle — NOT ADR 0011**, a same-day mis-numbering correction), 0011 (enrollment — unrelated
+  to L3, do not confuse with the above), 0012 (enrollment modes).
 - Data Manager: `alert_manager/data_manager.py`, `alert_manager/test_data_manager.py` (43/43
   PASS), enforcement in `modules_loader.py` (`_check_data_manager_contract`).
 - Latest audits: `docs/audits/roadmap-state-audit-2026-07-25.md`, `docs/audits/adr-status-audit-2026-07-25.md`
