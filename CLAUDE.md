@@ -78,8 +78,10 @@ Window 1" / "you are Window 2"). A window has no way to know its own identity
 otherwise — the role comes from that load-time assignment, not from open order or
 timestamps. If a window is reopened after a crash, the operator re-states its number.
 
-### Window 1 — BUILD window (model: Opus)
-- Set once per session: `/model opus`.
+### Window 1 — BUILD window (role: Opus — currently Opus 5)
+- **Expected model: Opus** (currently `claude-opus-5` — bump this string when Anthropic
+  ships a newer Opus; the role pin itself doesn't change). Reasoning-heavy build/design
+  work. Set once per session: `/model claude-opus-5`.
 - Owns all CODE changes (dashboard.py, database.py, agent files, installers, etc.).
 - Runs Rule-3 verification (real output: py_compile, isolated tests, live checks) on
   every code change.
@@ -90,8 +92,10 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
 - Code work takes priority: never let a read-only audit or doc request preempt
   trip-critical or scheduled code work in this window.
 
-### Window 2 — DOCS/AUDIT window (model: Sonnet) — sole git-writer
-- Set once per session: `/model sonnet`.
+### Window 2 — DOCS/AUDIT window (role: Sonnet — currently Sonnet 5) — sole git-writer
+- **Expected model: Sonnet** (currently `claude-sonnet-5` — bump this string when
+  Anthropic ships a newer Sonnet; the role pin itself doesn't change). Docs, audits,
+  commits. Set once per session: `/model claude-sonnet-5`.
 - Owns ALL document work: ADRs, roadmap entries, handoff/supplements, build specs, doc
   audits, cross-references.
 - Owns the MORNING BRIEFING and the full MORNING ROADMAP-VS-STATE AUDIT.
@@ -128,6 +132,17 @@ first response must be to ask: **"Which window am I this session — Window 1 (b
 Opus) or Window 2 (docs/audit, Sonnet, sole git-writer)?"** and wait for the operator's
 answer before proceeding. If the operator's first message already states it, skip the
 question and confirm instead (window number + role + model).
+
+**Model self-check is the first ACTION, every time identity is given** (fresh session
+or a mid-session re-statement after a crash) — before any task work. This is a
+self-check convention, not a bash/script check (the active model isn't introspectable
+from the shell): confirm the currently active model against this window's expected
+model above (Window 1 → Opus, Window 2 → Sonnet) via `/status` or by simply noting
+which model you are. If there's a mismatch, **flag it clearly and immediately in the
+first response** rather than silently proceeding — e.g. "Note: expected Opus for
+Window 1, currently running on Sonnet 5" — then switch to the expected model
+(`/model claude-opus-5` / `/model claude-sonnet-5`) before starting the day's actual
+task.
 
 ---
 
