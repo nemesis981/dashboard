@@ -126,6 +126,19 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
+### Private modules — separate version control (Window 1 is git-writer)
+Carved-out private modules live OUTSIDE the public repo and are version-controlled
+separately. The first is `~/work/nemesis-internal/l3-tier2-tls-interception/` (the Tier 2
+TLS-interception harness + implementation detail, moved out of the public repo for
+source-visibility). This rule covers it and any future similarly-carved-out private modules.
+- **Window 1 is the git-writer for these private repos** — it authors the code that lives
+  there. It follows the SAME discipline as Window 2's public-repo practice: verify staged
+  content before committing, Rule-8 scan the staged diff, and push to ALL configured remotes
+  (local + USB + private GitHub).
+- **Window 2 remains sole git-writer for the PUBLIC repo only.** This does NOT change or
+  extend that rule. The two repos have two git-writers by design — ownership follows
+  authorship: Window 1 authors the private-module code, Window 2 authors the public docs.
+
 ### Role self-check (first response)
 If you have NOT been told your window number this session, do not begin any task. Your
 first response must be to ask: **"Which window am I this session — Window 1 (build,
