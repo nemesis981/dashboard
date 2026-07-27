@@ -7,7 +7,8 @@ from urllib import request as urlrequest, parse as urlparse
 from urllib.error import URLError, HTTPError
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 CACHE_TTL_HOURS = 24
 
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY")

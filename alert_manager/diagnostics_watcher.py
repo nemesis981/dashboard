@@ -25,7 +25,8 @@ import sys
 import time
 
 _HERE   = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DEFAULT_INTERVAL_SECONDS = 60
 DEFAULT_LOG_DIR = "/var/log/nemesis/diagnostics"
 SERVICE_LOG_BASENAME = "diagnostics_watcher.log"

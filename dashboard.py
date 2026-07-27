@@ -104,7 +104,9 @@ app = Flask(__name__)
 
 PIHOLE_IP = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
-DB_PATH = os.path.join(_HERE, "alert_manager", "alerts.db")
+sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
+import nemesis_paths  # noqa: E402
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alert_manager", "alerts.db"))
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 _BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")

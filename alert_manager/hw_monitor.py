@@ -21,7 +21,8 @@ from logging.handlers import RotatingFileHandler
 import psutil
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
-DB_PATH      = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+DB_PATH      = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 # systemd sets $LOGS_DIRECTORY when the unit declares LogsDirectory=. Falling
 # back to _HERE keeps the pre-migration unit working unchanged.
 LOG_FILE     = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "hw_monitor.log")

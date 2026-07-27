@@ -25,7 +25,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # back to _HERE keeps the pre-migration unit working unchanged.
 LOG_PATH = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "watchdog.log")
 
-HW_DB_PATH = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+HW_DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 HW_CHECK_INTERVAL_SECONDS = 300
 HW_ALERT_COOLDOWN_SECONDS = 1800
 
