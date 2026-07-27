@@ -145,11 +145,20 @@ preflight_checks() {
     fi
     ok "Local subnet: $DETECTED_SUBNET"
 
-    # Confirm dashboard is present
-    DASHBOARD_DIR="/home/$SUDO_USER/dashboard"
+    # Install location. Nemesis lives at /opt/nemesis (FHS: add-on application
+    # package) with variable state under /var/lib/nemesis, NOT under a user's
+    # home. A home-directory install cannot work with de-privileged services:
+    # /home/<user> is 0750, so a dedicated service user cannot even traverse it
+    # to reach the code, and ProtectHome=yes would hide the app from itself.
+    DASHBOARD_DIR="/opt/nemesis"
     if [[ ! -f "$DASHBOARD_DIR/dashboard.py" ]]; then
+        # Accept a pre-relocation clone and point the operator at the migration.
+        if [[ -f "/home/$SUDO_USER/dashboard/dashboard.py" ]]; then
+            die "found an older install at /home/$SUDO_USER/dashboard" \
+                "— run scripts/migrate_to_opt.sh to relocate it to $DASHBOARD_DIR first"
+        fi
         die "dashboard.py not found at $DASHBOARD_DIR/dashboard.py" \
-            "— is the repo cloned at ~/dashboard for user $SUDO_USER?"
+            "— is the repo cloned to $DASHBOARD_DIR?"
     fi
     ok "Dashboard directory: $DASHBOARD_DIR"
 }
@@ -747,6 +756,24 @@ setup_nemesis_group() {
     step_header "6/9" "Nemesis Group & Permissions"
 
     groupadd nemesis 2>/dev/null || true
+
+    # De-privileging (2026-07-27): a dedicated system group for shared-DB access
+    # and one static system user per service. Distinct users, not a shared one,
+    # so a compromise of the network-facing hw-monitor inherits nothing belonging
+    # to any other service. These users are deliberately NOT added to the
+    # 'nemesis' group — that group grants read of /etc/nemesis.env and its 16
+    # secrets, which the services receive via systemd EnvironmentFile (read by
+    # the manager as root) and therefore do not need directly.
+    groupadd --system nemesis-db 2>/dev/null || true
+    local _svc_user
+    for _svc_user in nemesis-diag nemesis-hwmon nemesis-alertw \
+                     nemesis-vpndns nemesis-canary nemesis-watchdog; do
+        if ! id "$_svc_user" &>/dev/null; then
+            useradd --system --no-create-home --shell /usr/sbin/nologin \
+                    --gid nemesis-db "$_svc_user" 2>/dev/null || true
+        fi
+    done
+    ok "Service users created (nemesis-db group + 6 per-service accounts)"
     ok "Group 'nemesis' ready"
 
     usermod -aG nemesis "$SUDO_USER"
@@ -810,25 +837,36 @@ hardware_discovery() {
 deploy_services() {
     step_header "8/9" "Deploying Systemd Services"
 
-    local svc_src="$DASHBOARD_DIR/alert_manager"
-    local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" "device-scanner" "malware-canary" "diagnostics-watcher")
+    # Templates live in two directories: vpn-dns-guard ships from core/, every
+    # other unit from alert_manager/. The previous version searched only
+    # alert_manager/ AND omitted vpn-dns-guard from the list, so that unit was
+    # never deployed by the installer at all — a two-part gap, fixed here.
+    local svc_dirs=("$DASHBOARD_DIR/alert_manager" "$DASHBOARD_DIR/core")
+    local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" \
+                     "device-scanner" "malware-canary" "diagnostics-watcher" \
+                     "vpn-dns-guard")
     local deployed=0
 
     for svc in "${svc_names[@]}"; do
-        local src="$svc_src/${svc}.service"
-        if [[ ! -f "$src" ]]; then
-            warn "Service file not found: $src — skipping $svc"
+        local src=""
+        local d
+        for d in "${svc_dirs[@]}"; do
+            [[ -f "$d/${svc}.service" ]] && { src="$d/${svc}.service"; break; }
+        done
+        if [[ -z "$src" ]]; then
+            warn "Service file not found for $svc in ${svc_dirs[*]} — skipping"
             continue
         fi
 
-        # Replace hardcoded paths and non-root User= fields.
-        # User=root and Group=root lines are left unchanged (some services need root).
-        sed \
-            -e "s|/home/[^/]*/dashboard|/home/$SUDO_USER/dashboard|g" \
-            -e "/User=root/b; /Group=root/b; s|^User=.*|User=$SUDO_USER|" \
+        # Units now carry absolute /opt/nemesis paths and, for the six
+        # de-privileged services, their own static User=. The only substitution
+        # left is __INSTALL_USER__, used by the two services that legitimately
+        # run as the install user (dashboard, device-scanner).
+        sed -e "s|__INSTALL_USER__|$SUDO_USER|g" \
             "$src" > "/etc/systemd/system/${svc}.service"
+        chmod 0644 "/etc/systemd/system/${svc}.service"
 
-        ok "Deployed /etc/systemd/system/${svc}.service"
+        ok "Deployed /etc/systemd/system/${svc}.service (from ${src#$DASHBOARD_DIR/})"
         deployed=$((deployed + 1))
     done
 
@@ -840,14 +878,18 @@ deploy_services() {
     systemctl daemon-reload
     ok "systemd configuration reloaded"
 
-    # Pre-create alerts.db owned by the dashboard user.
-    # Some services (hw-monitor, alert-watcher) may run as root and would otherwise
-    # create the file as root:root before the dashboard service can write to it.
-    local _db="$DASHBOARD_DIR/alert_manager/alerts.db"
+    # Pre-create alerts.db in the data directory, group-owned by nemesis-db so
+    # every de-privileged service can reach it. 0770 on the DIRECTORY is required
+    # (not 0750): SQLite in WAL mode creates -wal/-shm siblings there, so the
+    # group needs directory write or every service opens the DB read-only.
+    local _data_dir="/var/lib/nemesis"
+    local _db="$_data_dir/alerts.db"
+    install -d -m 0770 -o "$SUDO_USER" -g nemesis-db "$_data_dir"
     [[ -f "$_db" ]] || touch "$_db"
-    chown "$SUDO_USER:$SUDO_USER" "$_db"
-    chmod 664 "$_db"
-    ok "alerts.db ownership set to $SUDO_USER"
+    chown "$SUDO_USER" "$_db"
+    chgrp nemesis-db "$_db"
+    chmod 0660 "$_db"
+    ok "alerts.db at $_db (owner $SUDO_USER, group nemesis-db, 0660)"
 
     for svc in "${svc_names[@]}"; do
         if [[ ! -f "/etc/systemd/system/${svc}.service" ]]; then
@@ -1086,9 +1128,12 @@ restore_from_backup() {
 
     # alerts.db
     if [[ -f "$tmp_dir/alerts.db" ]]; then
-        cp "$tmp_dir/alerts.db" "$DASHBOARD_DIR/alert_manager/alerts.db"
-        chown "$SUDO_USER:nemesis" "$DASHBOARD_DIR/alert_manager/alerts.db" 2>/dev/null || true
-        ok "Restored: alert_manager/alerts.db"
+        install -d -m 0770 -o "$SUDO_USER" -g nemesis-db /var/lib/nemesis
+        cp "$tmp_dir/alerts.db" /var/lib/nemesis/alerts.db
+        chown "$SUDO_USER" /var/lib/nemesis/alerts.db 2>/dev/null || true
+        chgrp nemesis-db /var/lib/nemesis/alerts.db 2>/dev/null || true
+        chmod 0660 /var/lib/nemesis/alerts.db 2>/dev/null || true
+        ok "Restored: /var/lib/nemesis/alerts.db"
     fi
 
     # ADR 0001 Stage 6: the old per-module tickets.db has been retired — tickets data

@@ -73,7 +73,8 @@ echo ""
 echo "  This will remove Nemesis Firewall from this system."
 echo ""
 echo -e "  ${GREEN}${BOLD}Will NOT be deleted:${NC}"
-echo "    ~/dashboard          (your data, logs, and configuration)"
+echo "    /opt/nemesis         (application code)"
+echo "    /var/lib/nemesis     (your database)"
 echo "    /etc/suricata        (your Suricata rules and config)"
 echo ""
 echo -e "  ${RED}${BOLD}Will be removed:${NC}"
@@ -169,7 +170,10 @@ fi
 # canary poll trip on every (now-missing) bait. Paths are read from the DB so
 # custom canary_dirs are handled too. (alerts.db itself is preserved otherwise.)
 REAL_HOME="$(getent passwd "$REAL_USER" | cut -d: -f6)"
-CANARY_DB="$REAL_HOME/dashboard/alert_manager/alerts.db"
+# DB relocated to /var/lib/nemesis (2026-07-27); fall back to the pre-
+# relocation location so this still works on an unmigrated install.
+CANARY_DB="/var/lib/nemesis/alerts.db"
+[[ -f "$CANARY_DB" ]] || CANARY_DB="$REAL_HOME/dashboard/alert_manager/alerts.db"
 if [[ -f "$CANARY_DB" ]]; then
     _canary_out="$(python3 - "$CANARY_DB" <<'PYEOF'
 import sqlite3, os, sys
@@ -498,7 +502,7 @@ if [[ ${#SKIPPED[@]} -gt 0 ]]; then
     echo ""
 fi
 
-echo -e "  ${BOLD}Your ~/dashboard directory and data were not touched.${NC}"
+echo -e "  ${BOLD}/opt/nemesis and /var/lib/nemesis were not touched.${NC}"
 echo ""
 echo -e "${CYAN}${BOLD}═══════════════════════════════════════════════════════════════════════${NC}"
 echo ""

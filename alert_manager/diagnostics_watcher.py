@@ -28,7 +28,11 @@ _HERE   = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DEFAULT_INTERVAL_SECONDS = 60
-DEFAULT_LOG_DIR = "/var/log/nemesis/diagnostics"
+# systemd sets $LOGS_DIRECTORY from the unit's LogsDirectory=, and creates it
+# owned by the service user. Preferring it avoids a hardcoded path drifting
+# from what the unit actually provisions — under ProtectSystem=strict the
+# rest of /var/log is read-only, so a mismatch is an unrecoverable OSError.
+DEFAULT_LOG_DIR = os.environ.get("LOGS_DIRECTORY") or "/var/log/nemesis/diagnostics"
 SERVICE_LOG_BASENAME = "diagnostics_watcher.log"
 
 # Start with stdout logging so startup/errors are journald-visible immediately
