@@ -5381,7 +5381,7 @@ def _backup_candidates():
         # ADR 0001 Stage 6: tickets data now lives in the shared alerts.db
         # (tickets/tickets_seq/tickets_settings), captured by the alerts.db entry above.
         # The old per-module tickets.db has been retired, so it is no longer a candidate.
-        (os.path.join(_HERE, "alert_manager", "alerts.db"), "alerts.db"),
+        (DB_PATH, "alerts.db"),   # resolver-derived; follows the /var/lib/nemesis move
         (os.path.join(_HERE, "alert_manager", "hw_map.json"), "alert_manager/hw_map.json"),
         ("/etc/nemesis.env", "etc_nemesis.env"),
     ]

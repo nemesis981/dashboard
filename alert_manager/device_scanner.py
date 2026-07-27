@@ -9,7 +9,8 @@ from datetime import datetime
 from database import init_devices_table
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 
 def lookup_mac_vendor(mac):
     try:

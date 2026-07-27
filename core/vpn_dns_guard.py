@@ -68,7 +68,10 @@ _ROOT = os.path.dirname(_HERE)
 PIHOLE_IP = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 
-LOG_PATH = os.environ.get("VPN_DNS_GUARD_LOG", os.path.join(_HERE, "vpn_dns_guard.log"))
+# $LOGS_DIRECTORY (set by the unit) before the in-tree default: /opt is
+# read-only under ProtectSystem=strict.
+LOG_PATH = os.environ.get("VPN_DNS_GUARD_LOG") or os.path.join(
+    os.environ.get("LOGS_DIRECTORY", _HERE), "vpn_dns_guard.log")
 # State persists across restarts so we can restore the pre-VPN upstreams even if
 # the service (or the whole box) was restarted while the tunnel was up.
 STATE_PATH = os.environ.get(

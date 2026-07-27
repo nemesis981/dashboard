@@ -319,6 +319,51 @@ do_rollback() {
     run systemctl daemon-reload
     for s in "${SERVICES[@]}"; do systemctl start "$s" 2>/dev/null || true; done
     ok "rolled back to $SRC${orig_mode:+ (mode $orig_mode restored)}"
+
+    # Units are NOT reverted by this script — it moves code and data, while the
+    # units are deployed by install.sh. After a rollback they still point at
+    # $NEW_ROOT, which no longer exists, so every service will fail to start.
+    # Verified on the test VM. Say so loudly rather than let it be discovered.
+    local stale=0 u
+    for u in "${SERVICES[@]}"; do
+        if grep -qs "$NEW_ROOT" "/etc/systemd/system/${u}.service" 2>/dev/null; then
+            stale=$((stale + 1))
+        fi
+    done
+    if (( stale > 0 )); then
+        printf "\n  ${YEL}ACTION REQUIRED${NC}  %d unit file(s) still reference %s, which no\n" "$stale" "$NEW_ROOT"
+        printf "                   longer exists. Services will fail until the units are\n"
+        printf "                   restored to their pre-migration versions.\n\n"
+
+        # Point at a backup that ACTUALLY EXISTS. install.sh copies the previous
+        # units into a dated directory before overwriting them; use the newest.
+        # An earlier version of this warning named a snapshot path that nothing
+        # ever created — actionable-looking guidance that would have failed at
+        # the worst possible moment. If no backup is present, say so and give
+        # the git route instead of inventing a path.
+        local backup
+        # `|| true` is load-bearing: this script runs under `set -euo pipefail`,
+        # and when the glob matches nothing `ls` exits non-zero, which pipefail
+        # propagates and set -e turns into an abort — killing the script partway
+        # through printing this very warning. Caught on the VM.
+        backup="$(ls -1d /var/backups/nemesis/units-* 2>/dev/null | sort | tail -1 || true)"
+        if [[ -n "$backup" && -n "$(ls -1 "$backup"/*.service 2>/dev/null)" ]]; then
+            printf "                   Restore from the backup install.sh made:\n\n"
+            printf "                     sudo cp %s/*.service /etc/systemd/system/\n" "$backup"
+            printf "                     sudo systemctl daemon-reload\n"
+            printf "                     sudo systemctl restart %s\n\n" "${SERVICES[*]}"
+        else
+            printf "                   ${RED}No unit backup found under /var/backups/nemesis/.${NC}\n"
+            printf "                   Reconstruct them from git — the pre-relocation units are\n"
+            printf "                   the versions before the /opt migration landed:\n\n"
+            printf "                     cd %s\n" "$SRC"
+            printf "                     git log --oneline -- alert_manager/dashboard.service\n"
+            printf "                     git show <commit-before-migration>:alert_manager/<unit>.service\n"
+            printf "                   Write each to /etc/systemd/system/, substituting the install\n"
+            printf "                   user for __INSTALL_USER__ if present, then daemon-reload.\n\n"
+        fi
+        printf "                   Code and data rollback itself completed successfully.\n\n"
+    fi
 }
 
 # ── dispatch ─────────────────────────────────────────────────────────────────

@@ -837,6 +837,10 @@ hardware_discovery() {
 deploy_services() {
     step_header "8/9" "Deploying Systemd Services"
 
+    # Dated directory holding the units as they were before this run overwrote
+    # them. Referenced by migrate_to_opt.sh --rollback.
+    local UNIT_BACKUP_DIR="/var/backups/nemesis/units-$(date +%Y%m%d-%H%M%S)"
+
     # Templates live in two directories: vpn-dns-guard ships from core/, every
     # other unit from alert_manager/. The previous version searched only
     # alert_manager/ AND omitted vpn-dns-guard from the list, so that unit was
@@ -858,6 +862,16 @@ deploy_services() {
             continue
         fi
 
+        # Back up any existing unit BEFORE overwriting it. Previously this
+        # clobbered the installed unit with no copy kept, so a reinstall or a
+        # relocation left no way back to the previous service definitions —
+        # and migrate_to_opt.sh --rollback pointed operators at a snapshot
+        # directory nothing ever created. This makes that path real.
+        if [[ -f "/etc/systemd/system/${svc}.service" ]]; then
+            install -d -m 0755 "$UNIT_BACKUP_DIR"
+            cp -a "/etc/systemd/system/${svc}.service" "$UNIT_BACKUP_DIR/"
+        fi
+
         # Units now carry absolute /opt/nemesis paths and, for the six
         # de-privileged services, their own static User=. The only substitution
         # left is __INSTALL_USER__, used by the two services that legitimately
@@ -869,6 +883,25 @@ deploy_services() {
         ok "Deployed /etc/systemd/system/${svc}.service (from ${src#$DASHBOARD_DIR/})"
         deployed=$((deployed + 1))
     done
+
+    if [[ -d "$UNIT_BACKUP_DIR" ]]; then
+        ok "Previous unit files backed up to $UNIT_BACKUP_DIR"
+    fi
+
+    # Polkit rule granting the de-privileged watchdog its restart authority.
+    # Without this it cannot restart the services it supervises, since it no
+    # longer runs as root. Scoped to 7 named units and the restart/try-restart
+    # verbs only — verified on the test VM that every other unit, every other
+    # verb, and every other service user is denied.
+    local _polkit_src="$DASHBOARD_DIR/alert_manager/10-nemesis-watchdog.rules"
+    if [[ -f "$_polkit_src" ]]; then
+        install -d -m 0755 /etc/polkit-1/rules.d
+        install -m 0644 -o root -g root "$_polkit_src" /etc/polkit-1/rules.d/
+        systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
+        ok "Deployed polkit rule for watchdog restart authority"
+    else
+        warn "Polkit rule not found at $_polkit_src — watchdog will be unable to restart services"
+    fi
 
     if [[ $deployed -eq 0 ]]; then
         warn "No service files were found in $svc_src — services not deployed."

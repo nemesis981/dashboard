@@ -1,0 +1,43 @@
+// Nemesis: allow the watchdog service user to restart ONLY Nemesis units.
+//
+// Grants the de-privileged watchdog service exactly the restart authority it
+// needs, and nothing else. Verified on the test VM: the 7 units below are
+// permitted; every other unit and every other verb falls through to deny.
+//
+// watchdog is the one de-privileged service with a genuine privilege need:
+// systemctl restart <unit> for the services it supervises. This grants exactly
+// that and nothing else — not blanket sudo, not root, and not authority over
+// any unit outside this list.
+//
+// Deployed by install.sh to /etc/polkit-1/rules.d/10-nemesis-watchdog.rules (root:root 0644)
+
+polkit.addRule(function(action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    if (subject.user !== "nemesis-watchdog") {
+        return undefined;
+    }
+
+    var unit = action.lookup("unit");
+    var allowed = [
+        "dashboard.service",
+        "hw-monitor.service",
+        "alert-watcher.service",
+        "device-scanner.service",
+        "malware-canary.service",
+        "diagnostics-watcher.service",
+        "vpn-dns-guard.service"
+    ];
+    if (allowed.indexOf(unit) < 0) {
+        return undefined;          // fall through to default (deny)
+    }
+
+    // Restrict to the verbs the watchdog actually uses. `status`/`is-active`
+    // need no privilege at all and are deliberately absent.
+    var verb = action.lookup("verb");
+    if (verb === "restart" || verb === "try-restart") {
+        return polkit.Result.YES;
+    }
+    return undefined;
+});

@@ -124,8 +124,17 @@ def attest(service,
         raise PrivilegeAttestationError(
             "%s: privilege boundary not satisfied: %s" % (service, detail))
 
-    log.info("privilege attestation OK for %s (euid=%d, CapEff=0x%016x, "
-             "NoNewPrivs=%s)", service, euid, caps or 0, no_new_privs())
+    msg = ("privilege attestation OK for %s (euid=%d, CapEff=0x%016x, "
+           "NoNewPrivs=%s)" % (service, euid, caps or 0, no_new_privs()))
+    log.info("%s", msg)
+    # ALSO write to stderr. Services configure logging differently — some attach
+    # a handler to their own named logger and never touch the root logger, so a
+    # propagated record from this module is silently dropped (observed on
+    # hw-monitor and alert-watcher: attestation ran and passed, but the line
+    # appeared nowhere). A security boundary that cannot be observed holding is
+    # not much better than one that is not asserted. Every unit sets
+    # StandardError=journal, so stderr is the one channel guaranteed to surface.
+    print(msg, file=sys.stderr, flush=True)
     return True
 
 

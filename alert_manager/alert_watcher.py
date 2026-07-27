@@ -21,8 +21,12 @@ from firewall import (
 
 LOG_FILE = "/var/log/suricata/fast.log"
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "alerts.db")
-WATCHER_LOG = os.path.join(_HERE, "alert_watcher.log")
+import nemesis_paths
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
+# systemd sets $LOGS_DIRECTORY from the unit. The code tree is read-only under
+# ProtectSystem=strict once relocated to /opt, so writing a log beside the
+# source is an unrecoverable OSError at startup.
+WATCHER_LOG = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "alert_watcher.log")
 POLL_INTERVAL = 1.0
 SWEEP_INTERVAL = 30.0
 QUARANTINE_HOURS = 1

@@ -16,10 +16,22 @@ META = {
 
 # Derived from this file's location (repo_root/alert_manager/alerts.db) — no
 # hardcoded home dir. (ADR 0001, Stage 1.)
-DB_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "alert_manager", "alerts.db",
-)
+def _resolve_db():
+    """Shared DB location. Prefers the canonical resolver so this follows the
+    /var/lib/nemesis relocation; falls back to the historic tree-relative path
+    when run by hand outside an install."""
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _legacy = os.path.join(_root, "alert_manager", "alerts.db")
+    try:
+        import sys
+        sys.path.insert(0, os.path.join(_root, "alert_manager"))
+        import nemesis_paths
+        return nemesis_paths.db_path(_legacy)
+    except Exception:
+        return _legacy
+
+
+DB_PATH = _resolve_db()
 
 
 def run() -> dict:

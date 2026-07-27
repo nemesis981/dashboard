@@ -3,7 +3,8 @@ import sqlite3
 from datetime import datetime
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_HERE, "alerts.db")
+import nemesis_paths
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)

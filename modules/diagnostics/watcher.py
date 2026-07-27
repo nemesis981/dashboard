@@ -433,7 +433,13 @@ if __name__ == "__main__":
     except RuntimeError:
         here = os.path.dirname(os.path.abspath(__file__))
         repo_root = os.path.dirname(os.path.dirname(here))
-        modules.set_shared_db_path(os.path.join(repo_root, "alert_manager", "alerts.db"))
+        _legacy = os.path.join(repo_root, "alert_manager", "alerts.db")
+        try:
+            sys.path.insert(0, os.path.join(repo_root, "alert_manager"))
+            import nemesis_paths
+            modules.set_shared_db_path(nemesis_paths.db_path(_legacy))
+        except Exception:
+            modules.set_shared_db_path(_legacy)
     diag._init_db()
     result = run_once(actor="hand-run", verbose=("--verbose" in sys.argv))
     print(result)
