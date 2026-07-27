@@ -65,6 +65,22 @@ Resume: [one sentence from HANDOFF]
 Roadmap: N shipped / N partial / N parked (M total) — [drift note or "no change"]
 ------------------------------
 ```
+7. **Write the briefing to disk (EVERY session, automatically — do not ask).** Save the full
+   briefing to `docs/briefing/YYYY-MM-DD.md` — the status block above **plus** the supporting
+   detail that doesn't fit in it: the roadmap-vs-state audit findings (baseline file used,
+   file-set drift, shipping drift, and the closeout action if drift was found), the model
+   self-check result, any process findings, and the open items carried forward from HANDOFF.
+   Then print the status block in chat. Both — the file is not a substitute for reporting.
+   - `docs/briefing/` is **gitignored, local-only** — never committed, so this is not a
+     git-write and needs no push. Rule 8 still applies to its content (placeholders, not real
+     IPs/hosts/accounts) — the file is one copy-paste away from somewhere public.
+   - **One file per date; latest run that day overwrites it.** Files accumulate across dates —
+     they are the searchable record of what each morning's audit actually found, which the
+     chat-only version loses the moment the session ends.
+   - Why this is a rule and not a nicety: the audit's whole value is *diffing against what was
+     true before*. A finding that lives only in a closed session can't be diffed, and a
+     recurring drift pattern is invisible until you can compare three mornings side by side.
+
 Then ask: **"What would you like to work on today?"** This replaces the manual catch-up
 prompt — session is oriented in under 30 seconds.
 
