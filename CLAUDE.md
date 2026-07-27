@@ -116,7 +116,8 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
 ### Window 1 — BUILD window (role: Opus — currently Opus 5)
 - **Expected model: Opus** (currently `claude-opus-5` — bump this string when Anthropic
   ships a newer Opus; the role pin itself doesn't change). Reasoning-heavy build/design
-  work. Set once per session: `/model claude-opus-5`.
+  work. **Launch pinned — `nem1`** (see "Launching a window" below); `/model opus[1m]`
+  only as a mid-session correction.
 - Owns all CODE changes (dashboard.py, database.py, agent files, installers, etc.).
 - Runs Rule-3 verification (real output: py_compile, isolated tests, live checks) on
   every code change.
@@ -130,7 +131,8 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
 ### Window 2 — DOCS/AUDIT window (role: Sonnet — currently Sonnet 5) — sole git-writer
 - **Expected model: Sonnet** (currently `claude-sonnet-5` — bump this string when
   Anthropic ships a newer Sonnet; the role pin itself doesn't change). Docs, audits,
-  commits. Set once per session: `/model claude-sonnet-5`.
+  commits. **Launch pinned — `nem2`** (see "Launching a window" below); `/model
+  claude-sonnet-5` only as a mid-session correction.
 - Owns ALL document work: ADRs, roadmap entries, handoff/supplements, build specs, doc
   audits, cross-references.
 - Owns the MORNING BRIEFING and the full MORNING ROADMAP-VS-STATE AUDIT.
@@ -186,6 +188,31 @@ source-visibility). This rule covers it and any future similarly-carved-out priv
 - **Window 2 remains sole git-writer for the PUBLIC repo only.** This does NOT change or
   extend that rule. The two repos have two git-writers by design — ownership follows
   authorship: Window 1 authors the private-module code, Window 2 authors the public docs.
+
+### Launching a window (model pinned at launch, not corrected mid-session)
+
+Each window is opened with its role's model already pinned, via shell aliases in `~/.bashrc`:
+
+```
+alias nem1="cd ~/dashboard && claude --model opus[1m]"     # Window 1 — build
+alias nem2="cd ~/dashboard && claude --model claude-sonnet-5"  # Window 2 — docs/audit
+```
+
+- **Why a launch flag and not config.** `~/.claude/settings.json` sets `"model": "opus[1m]"`
+  at the USER level, so every session everywhere starts on Opus — which is correct for Window 1
+  and wrong for Window 2 *every single morning* (this is what the self-check kept catching;
+  it was reporting a permanent default, not an occasional slip). A per-window model cannot come
+  from config: both windows run in `~/dashboard`, so a `model` key in that project's
+  `.claude/settings.json` would force BOTH onto one model and break whichever pin it doesn't
+  match. **Do not add one.** The launch command is the only layer that distinguishes the two.
+- **`opus[1m]` for Window 1, deliberately** — that is what the global default resolves to today;
+  plain `claude-opus-5` would silently drop the 1M-token context window.
+- **Claude Code cannot switch its own model.** `/model` is an operator-typed CLI command, not a
+  tool available to the session — a window can only DETECT and report a mismatch, never fix one.
+  That is precisely why the pin belongs at launch: it is the only point where it can be enforced
+  rather than merely flagged.
+- Bump the model strings here and in the Window Roles above when Anthropic ships a newer Opus
+  or Sonnet — the role pins themselves don't change, only the strings.
 
 ### Role self-check (first response)
 If you have NOT been told your window number this session, do not begin any task. Your
