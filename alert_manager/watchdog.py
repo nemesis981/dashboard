@@ -21,7 +21,9 @@ SERVICES = [
 
 CHECK_INTERVAL_SECONDS = 120
 _HERE = os.path.dirname(os.path.abspath(__file__))
-LOG_PATH = os.path.join(_HERE, "watchdog.log")
+# systemd sets $LOGS_DIRECTORY when the unit declares LogsDirectory=. Falling
+# back to _HERE keeps the pre-migration unit working unchanged.
+LOG_PATH = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "watchdog.log")
 
 HW_DB_PATH = os.path.join(_HERE, "alerts.db")
 HW_CHECK_INTERVAL_SECONDS = 300
@@ -515,4 +517,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before doing any work.
+    # Inert until the migrated unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("watchdog")
     main()

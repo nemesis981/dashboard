@@ -292,4 +292,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before doing any work.
+    # Inert until the migrated unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("alert-watcher")
     main()

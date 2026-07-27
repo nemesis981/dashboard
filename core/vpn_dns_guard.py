@@ -562,4 +562,11 @@ def main(argv):
 
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before doing any work.
+    # Inert until the migrated unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    # This service lives in core/, so reach alert_manager/ for the shared module.
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "..", "alert_manager"))
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("vpn-dns-guard")
     main(sys.argv)

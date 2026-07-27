@@ -22,7 +22,9 @@ import psutil
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
 DB_PATH      = os.path.join(_HERE, "alerts.db")
-LOG_FILE     = os.path.join(_HERE, "hw_monitor.log")
+# systemd sets $LOGS_DIRECTORY when the unit declares LogsDirectory=. Falling
+# back to _HERE keeps the pre-migration unit working unchanged.
+LOG_FILE     = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "hw_monitor.log")
 HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
 NET_IFACE    = "enp131s0"
 SAMPLE_INTERVAL  = 300
@@ -2262,4 +2264,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before doing any work.
+    # Inert until the migrated unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("hw-monitor")
     main()
