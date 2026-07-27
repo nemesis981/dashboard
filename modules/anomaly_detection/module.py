@@ -26,6 +26,7 @@ import time
 import threading
 import logging
 import html as _html
+from contextlib import contextmanager, closing
 from datetime import datetime, timedelta
 
 from modules import NemesisModule, get_data_manager
@@ -125,15 +126,14 @@ class Module(NemesisModule):
         if self._building_baseline:
             return {"state": "running", "detail": "Building initial baseline…"}
         try:
-            conn = _conn()
-            open_n = conn.execute(
-                "SELECT COUNT(*) FROM anomaly_incidents WHERE status='open'"
-            ).fetchone()[0]
-            high_n = conn.execute(
-                "SELECT COUNT(*) FROM anomaly_incidents "
-                "WHERE status='open' AND score>=?", (SCORE_HIGH,)
-            ).fetchone()[0]
-            conn.close()
+            with _db() as conn:
+                open_n = conn.execute(
+                    "SELECT COUNT(*) FROM anomaly_incidents WHERE status='open'"
+                ).fetchone()[0]
+                high_n = conn.execute(
+                    "SELECT COUNT(*) FROM anomaly_incidents "
+                    "WHERE status='open' AND score>=?", (SCORE_HIGH,)
+                ).fetchone()[0]
         except Exception:
             return {"state": "error", "detail": "DB unavailable"}
         alive = self._thread and self._thread.is_alive()
@@ -198,9 +198,36 @@ def _conn():
     return get_data_manager().connect("anomaly_detection")
 
 
-def _init_db() -> None:
+@contextmanager
+def _db():
+    """Connection scope that GUARANTEES close(), even when a statement raises.
+
+    Use this instead of the bare ``conn = _conn() … conn.close()`` shape with the
+    close() sitting inside a try block. If the statement raises (e.g.
+    ``sqlite3.OperationalError``), that close() is skipped and the connection —
+    plus its file descriptor — leaks until the cyclic GC happens to run. Measured:
+    2 fds per detection cycle, growing linearly past 500 before automatic GC
+    intervenes. That is the confirmed mechanism behind the 2026-07-18 fd-exhaustion
+    incident, where a 4-hour burst of readonly-DB write failures exhausted the
+    process fd table and the next eve.json open() died with
+    ``OSError: [Errno 24] Too many open files`` — eve.json being the victim, not
+    the source.
+
+    Do NOT write ``with _conn() as c:`` — GuardedConnection delegates
+    ``__enter__``/``__exit__`` to sqlite3's TRANSACTION context manager, which
+    commits or rolls back but never closes. That shape looks correct and still
+    leaks.
+    """
     conn = _conn()
-    conn.executescript("""
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def _init_db() -> None:
+    with _db() as conn:
+        conn.executescript("""
         CREATE TABLE IF NOT EXISTS anomaly_baseline (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             metric_key   TEXT    NOT NULL,
@@ -260,47 +287,45 @@ def _init_db() -> None:
         );
 
     """)
-    # Idempotent migration: actor attribution seam (readiness Tier B).
-    existing = {row[1] for row in conn.execute("PRAGMA table_info(anomaly_incidents)").fetchall()}
-    if "actor" not in existing:
-        conn.execute("ALTER TABLE anomaly_incidents ADD COLUMN actor TEXT")
-    # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
-    # Idempotent migration: enforce at most ONE 'open' incident per offending_target so
-    # concurrent detections merge into it instead of racing SELECT→INSERT into duplicates.
-    # A PARTIAL unique index (WHERE status='open') is required — a plain UNIQUE on
-    # (offending_target, status) would also forbid multiple 'closed' rows, destroying
-    # incident history. Guard on index presence (the index analog of the Tier-B PRAGMA
-    # guard). Collapse any pre-existing duplicate opens FIRST — keep the highest-scoring,
-    # most-recent open row, mark the rest 'closed' (preserve the data, don't delete) — else
-    # the unique index creation fails.
-    has_open_uniq = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_ai_open_target'"
-    ).fetchone()
-    if not has_open_uniq:
-        conn.execute("""
-            UPDATE anomaly_incidents SET status='closed'
-             WHERE status='open' AND id NOT IN (
-               SELECT id FROM (
-                 SELECT id, ROW_NUMBER() OVER (
-                   PARTITION BY offending_target
-                   ORDER BY score DESC, id DESC) AS rn
-                 FROM anomaly_incidents WHERE status='open'
-               ) WHERE rn = 1
-             )
-        """)
-        conn.execute("CREATE UNIQUE INDEX idx_ai_open_target "
-                     "ON anomaly_incidents(offending_target) WHERE status='open'")
-    conn.commit()
-    conn.close()
+        # Idempotent migration: actor attribution seam (readiness Tier B).
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(anomaly_incidents)").fetchall()}
+        if "actor" not in existing:
+            conn.execute("ALTER TABLE anomaly_incidents ADD COLUMN actor TEXT")
+        # DATA MANAGER v0 — atomic operation (see docs/architecture/0006-data-manager.py)
+        # Idempotent migration: enforce at most ONE 'open' incident per offending_target so
+        # concurrent detections merge into it instead of racing SELECT→INSERT into duplicates.
+        # A PARTIAL unique index (WHERE status='open') is required — a plain UNIQUE on
+        # (offending_target, status) would also forbid multiple 'closed' rows, destroying
+        # incident history. Guard on index presence (the index analog of the Tier-B PRAGMA
+        # guard). Collapse any pre-existing duplicate opens FIRST — keep the highest-scoring,
+        # most-recent open row, mark the rest 'closed' (preserve the data, don't delete) — else
+        # the unique index creation fails.
+        has_open_uniq = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_ai_open_target'"
+        ).fetchone()
+        if not has_open_uniq:
+            conn.execute("""
+                UPDATE anomaly_incidents SET status='closed'
+                 WHERE status='open' AND id NOT IN (
+                   SELECT id FROM (
+                     SELECT id, ROW_NUMBER() OVER (
+                       PARTITION BY offending_target
+                       ORDER BY score DESC, id DESC) AS rn
+                     FROM anomaly_incidents WHERE status='open'
+                   ) WHERE rn = 1
+                 )
+            """)
+            conn.execute("CREATE UNIQUE INDEX idx_ai_open_target "
+                         "ON anomaly_incidents(offending_target) WHERE status='open'")
+        conn.commit()
 
 
 def _get_state(key: str, default: str = "") -> str:
     try:
-        conn = _conn()
-        row = conn.execute(
-            "SELECT value FROM anomaly_state WHERE key=?", (key,)
-        ).fetchone()
-        conn.close()
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT value FROM anomaly_state WHERE key=?", (key,)
+            ).fetchone()
         return row[0] if row else default
     except Exception:
         return default
@@ -308,13 +333,12 @@ def _get_state(key: str, default: str = "") -> str:
 
 def _set_state(key: str, value: str) -> None:
     try:
-        conn = _conn()
-        conn.execute(
-            "INSERT OR REPLACE INTO anomaly_state(key,value) VALUES(?,?)",
-            (key, value)
-        )
-        conn.commit()
-        conn.close()
+        with _db() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO anomaly_state(key,value) VALUES(?,?)",
+                (key, value)
+            )
+            conn.commit()
     except Exception:
         log.exception("anomaly_detection: _set_state failed for %s", key)
 
@@ -365,22 +389,21 @@ def _build_initial_baseline() -> None:
                 count += 1
 
         now = time.time()
-        conn = _conn()
-        for key, hours in batch.items():
-            for how, days in hours.items():
-                total = sum(days.values())
-                obs   = len(days)
-                conn.execute("""
-                    INSERT INTO anomaly_baseline(metric_key, hour_of_week,
-                        total_count, obs_count, last_updated)
-                    VALUES(?, ?, ?, ?, ?)
-                    ON CONFLICT(metric_key, hour_of_week) DO UPDATE SET
-                        total_count  = total_count + excluded.total_count,
-                        obs_count    = obs_count + excluded.obs_count,
-                        last_updated = excluded.last_updated
-                """, (key, how, total, obs, now))
-        conn.commit()
-        conn.close()
+        with _db() as conn:
+            for key, hours in batch.items():
+                for how, days in hours.items():
+                    total = sum(days.values())
+                    obs   = len(days)
+                    conn.execute("""
+                        INSERT INTO anomaly_baseline(metric_key, hour_of_week,
+                            total_count, obs_count, last_updated)
+                        VALUES(?, ?, ?, ?, ?)
+                        ON CONFLICT(metric_key, hour_of_week) DO UPDATE SET
+                            total_count  = total_count + excluded.total_count,
+                            obs_count    = obs_count + excluded.obs_count,
+                            last_updated = excluded.last_updated
+                    """, (key, how, total, obs, now))
+            conn.commit()
         log.info("anomaly_detection: baseline built from %d DNS events, "
                  "%d domain/hour pairs", count, sum(len(v) for v in batch.values()))
     except FileNotFoundError:
@@ -916,12 +939,11 @@ def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,
     if is_auto:
         # Reuse cached report for up to 30 days for recurring targets
         try:
-            conn_tmp = _conn()
-            in_recurrence = conn_tmp.execute(
-                "SELECT 1 FROM anomaly_recurrence WHERE offending_target=? AND last_seen>?",
-                (domain, time.time() - RECURRENCE_DAYS * 86400)
-            ).fetchone()
-            conn_tmp.close()
+            with _db() as conn_tmp:
+                in_recurrence = conn_tmp.execute(
+                    "SELECT 1 FROM anomaly_recurrence WHERE offending_target=? AND last_seen>?",
+                    (domain, time.time() - RECURRENCE_DAYS * 86400)
+                ).fetchone()
         except Exception:
             in_recurrence = None
         cache_hours = RECURRENCE_DAYS * 24 if in_recurrence else AI_DEDUP_HOURS
@@ -952,10 +974,9 @@ def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,
 
     report_json = json.dumps(report)
     try:
-        conn = _conn()
-        _attach_ai_to_incident(conn, inc_id, report_json, time.time())
-        conn.commit()
-        conn.close()
+        with _db() as conn:
+            _attach_ai_to_incident(conn, inc_id, report_json, time.time())
+            conn.commit()
     except Exception:
         log.exception("anomaly_detection: failed to attach AI report to incident %s", inc_id)
 
@@ -1165,9 +1186,10 @@ def _is_currently_rate_limited() -> tuple:
     """Returns (is_limited: bool, reason: str) by proxying to ai_engine."""
     try:
         from modules.ai_engine.module import _conn as _ai_conn, _check_rate_limit
-        conn = _ai_conn()
-        limited, reason = _check_rate_limit(conn)
-        conn.close()
+        # closing() (not _db()) — this borrows ai_engine's connection factory, so it
+        # must not go through anomaly_detection's namespace-scoped _conn().
+        with closing(_ai_conn()) as conn:
+            limited, reason = _check_rate_limit(conn)
         return limited, reason
     except Exception:
         return False, ""
@@ -1217,9 +1239,8 @@ def _parse_ts(ts_str: str) -> float:
 
 def _load_device_names() -> dict:
     try:
-        conn = _conn()
-        rows = conn.execute("SELECT ip, friendly_name FROM devices").fetchall()
-        conn.close()
+        with _db() as conn:
+            rows = conn.execute("SELECT ip, friendly_name FROM devices").fetchall()
         return {r["ip"]: r["friendly_name"] for r in rows if r["friendly_name"]}
     except Exception:
         return {}
@@ -1273,18 +1294,17 @@ def _render_card(building: bool, built: bool) -> str:
     high_open = 0
     total_baseline = 0
     try:
-        conn = _conn()
-        total_open = conn.execute(
-            "SELECT COUNT(*) FROM anomaly_incidents WHERE status='open'"
-        ).fetchone()[0]
-        high_open = conn.execute(
-            "SELECT COUNT(*) FROM anomaly_incidents "
-            "WHERE status='open' AND score>=?", (SCORE_HIGH,)
-        ).fetchone()[0]
-        total_baseline = conn.execute(
-            "SELECT COUNT(DISTINCT metric_key) FROM anomaly_baseline"
-        ).fetchone()[0]
-        conn.close()
+        with _db() as conn:
+            total_open = conn.execute(
+                "SELECT COUNT(*) FROM anomaly_incidents WHERE status='open'"
+            ).fetchone()[0]
+            high_open = conn.execute(
+                "SELECT COUNT(*) FROM anomaly_incidents "
+                "WHERE status='open' AND score>=?", (SCORE_HIGH,)
+            ).fetchone()[0]
+            total_baseline = conn.execute(
+                "SELECT COUNT(DISTINCT metric_key) FROM anomaly_baseline"
+            ).fetchone()[0]
         stats_html = (
             f'<span style="color:#ccc;font-size:0.82em;margin-right:14px">'
             f'Open: <strong style="color:#00d4ff">{total_open}</strong></span>'
@@ -1399,17 +1419,16 @@ def _render_card(building: bool, built: bool) -> str:
 def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
     offset = (page - 1) * per_page
     try:
-        conn = _conn()
-        rows = conn.execute("""
-            SELECT id, created_at, updated_at, incident_type, offending_target,
-                   score, device_count, devices_json, evidence_json, status,
-                   ai_report, ai_generated_at
-              FROM anomaly_incidents
-             WHERE status='open'
-             ORDER BY score DESC, updated_at DESC
-             LIMIT ? OFFSET ?
-        """, (per_page + 1, offset)).fetchall()
-        conn.close()
+        with _db() as conn:
+            rows = conn.execute("""
+                SELECT id, created_at, updated_at, incident_type, offending_target,
+                       score, device_count, devices_json, evidence_json, status,
+                       ai_report, ai_generated_at
+                  FROM anomaly_incidents
+                 WHERE status='open'
+                 ORDER BY score DESC, updated_at DESC
+                 LIMIT ? OFFSET ?
+            """, (per_page + 1, offset)).fetchall()
     except Exception as e:
         return f'<tr><td colspan="6" style="color:#ff4444">DB error: {_html.escape(str(e))}</td></tr>', False
 
@@ -1740,11 +1759,10 @@ def _api_incidents():
 def _api_incident_detail(inc_id: int):
     from flask import jsonify
     try:
-        conn = _conn()
-        row = conn.execute(
-            "SELECT * FROM anomaly_incidents WHERE id=?", (inc_id,)
-        ).fetchone()
-        conn.close()
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT * FROM anomaly_incidents WHERE id=?", (inc_id,)
+            ).fetchone()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -1885,13 +1903,12 @@ def _api_incident_close(inc_id: int):
     from flask import jsonify, request
     from flask_login import current_user
     try:
-        conn = _conn()
-        conn.execute(
-            "UPDATE anomaly_incidents SET status='closed', updated_at=?, actor=? WHERE id=?",
-            (time.time(), getattr(current_user, "username", "unknown"), inc_id)
-        )
-        conn.commit()
-        conn.close()
+        with _db() as conn:
+            conn.execute(
+                "UPDATE anomaly_incidents SET status='closed', updated_at=?, actor=? WHERE id=?",
+                (time.time(), getattr(current_user, "username", "unknown"), inc_id)
+            )
+            conn.commit()
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1901,13 +1918,12 @@ def _api_incident_analyze(inc_id: int):
     """Manual AI analysis endpoint. Bypasses rate limit when allow_manual_override is on."""
     from flask import jsonify
     try:
-        conn = _conn()
-        row = conn.execute(
-            "SELECT offending_target, incident_type, score, devices_json, "
-            "evidence_json, ai_report, ai_generated_at "
-            "FROM anomaly_incidents WHERE id=?", (inc_id,)
-        ).fetchone()
-        conn.close()
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT offending_target, incident_type, score, devices_json, "
+                "evidence_json, ai_report, ai_generated_at "
+                "FROM anomaly_incidents WHERE id=?", (inc_id,)
+            ).fetchone()
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
