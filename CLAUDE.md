@@ -49,10 +49,29 @@ session, before anything else. Run these and report the results in a clean block
      — a parked item with a fresh feat commit has likely shipped; verify it.
    - This is a READ-ONLY audit (Rule 1) — report only, change nothing. When drift is found,
      refresh the baseline audit doc at closeout (new dated file).
-   - Baseline (2026-07-25): **4 SHIPPED / 8 PARTIAL / 47 PARKED** (59 total) —
-     `docs/audits/roadmap-state-audit-2026-07-25.md`. (Superseded the 2026-07-02 baseline —
-     the +8 file-count drift flagged against it traced entirely to same-session 07-02 work
-     the original baseline doc under-counted; no shipping change.)
+   - **Baseline: RESOLVE AT RUNTIME — never hardcoded in this file.** The current baseline is
+     the newest `docs/audits/roadmap-state-audit-*.md` by filename date (ISO names sort
+     lexically, and the `roadmap-capture-audit-*` sibling does not match this glob):
+     ```
+     ls ~/dashboard/docs/audits/roadmap-state-audit-*.md | sort | tail -1
+     ```
+     Read that file's `**Tally:**` line for the SHIPPED / PARTIAL / PARKED / total counts and
+     diff today's reality against it. If no such file exists, say so and treat the run as a
+     first baseline.
+   - **Why no number lives here.** A copy of the tally in this file is a SECOND source of truth
+     that only updates if someone remembers a separate edit after each closeout refresh — so it
+     desyncs by default, and a stale copy then silently produces a FALSE drift finding. Observed
+     live 2026-07-27: a pointer left at the 07-25 baseline reported "+4 file-set drift" that the
+     07-26 baseline had already absorbed and closed out. The repo was fine; the pointer was
+     wrong. Resolving at runtime also REMOVES a closeout obligation — refresh the audit doc and
+     you are done, no second edit to remember.
+   - **The audit doc's `**Tally:**` line is a machine-read contract.** Every refreshed baseline
+     MUST keep the existing shape — `**Tally: N SHIPPED · N PARTIAL · N STUB/PARKED — N total.**`
+     (unchanged across every baseline since 2026-06-30). Reformatting it breaks the lookup above.
+   - **Name the resolved baseline in the briefing** — state which file was used and the tally
+     read from it. A wrong baseline is then visible in the output instead of hiding inside a
+     drift number, which is exactly how the 2026-07-27 false positive went unnoticed until it
+     was caught by accident.
 
 Format the output as:
 ```
