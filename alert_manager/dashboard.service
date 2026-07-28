@@ -7,7 +7,7 @@ Type=simple
 User=__INSTALL_USER__
 Group=nemesis-db
 WorkingDirectory=/opt/nemesis
-Environment=PYTHONPATH=/opt/nemesis/alert_manager
+Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_monitor
 EnvironmentFile=-/etc/watchdog.env
 EnvironmentFile=/etc/nemesis.env
 

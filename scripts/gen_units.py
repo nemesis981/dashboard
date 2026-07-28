@@ -77,7 +77,14 @@ SERVICES = {
     omit_capability_drop=True,
     extra=[
       f"WorkingDirectory={NEW_ROOT}",
-      f"Environment=PYTHONPATH={NEW_ROOT}/alert_manager",
+      # dashboard imports hw_monitor AS A LIBRARY (23 symbols across ~15 routes:
+      # get_live_metrics, get_hw_alerts, get_anomaly_snapshots, the scan_* helpers,
+      # DB_PATH, …). After the core_module move, hw_monitor.py lives in
+      # core_module/hw_monitor/, so that dir is added here — `import hw_monitor`
+      # resolves to the single core_module copy and the old alert_manager/hw_monitor.py
+      # can then be removed (its own follow-up commit). alert_manager stays first so
+      # the other library imports (data_manager, firewall, database, …) are unaffected.
+      f"Environment=PYTHONPATH={NEW_ROOT}/alert_manager:{NEW_ROOT}/core_module/hw_monitor",
       "EnvironmentFile=-/etc/watchdog.env",
       "EnvironmentFile=/etc/nemesis.env",
     ]),
