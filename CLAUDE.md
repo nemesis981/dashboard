@@ -23,17 +23,17 @@ session, before anything else. Run these and report the results in a clean block
 
 1. **Total code lines:**
    ```
-   find ~/dashboard -type f \( -name "*.py" -o -name "*.js" -o -name "*.html" \
+   find /opt/nemesis -type f \( -name "*.py" -o -name "*.js" -o -name "*.html" \
      -o -name "*.css" -o -name "*.sh" \) | grep -v __pycache__ | grep -v .git \
      | xargs wc -l 2>/dev/null | tail -1
    ```
-2. **Last 3 commits:** `git -C ~/dashboard log --oneline -3`
+2. **Last 3 commits:** `git -C /opt/nemesis log --oneline -3`
 3. **Service status (is-active):**
    ```
    systemctl is-active dashboard watchdog alert-watcher malware-canary \
      diagnostics-watcher vpn-dns-guard 2>/dev/null
    ```
-4. **Working tree status:** `git -C ~/dashboard status --short`
+4. **Working tree status:** `git -C /opt/nemesis status --short`
 5. **Read `docs/handoff/HANDOFF.md`** and state today's resume point.
 6. **Roadmap-vs-state audit (LIVE each session) — baseline diff, not header-trust:**
    report the tally + flag drift vs the maintained baseline
@@ -41,7 +41,7 @@ session, before anything else. Run these and report the results in a clean block
    off each file's `Status:` header — headers go stale on shipping (the 3 currently-shipped
    items still say "parked"), so trusting them hides the exact drift this check exists to
    catch. Instead, each morning:
-   - **File-set drift:** `ls ~/dashboard/docs/roadmap/*.md` → compare names/count to the
+   - **File-set drift:** `ls /opt/nemesis/docs/roadmap/*.md` → compare names/count to the
      baseline's file count. Report any ADDED or REMOVED files.
    - **Shipping drift:** the baseline's non-parked items (SHIPPED + PARTIAL) plus any
      newly-added files get a quick code/`git log` re-check (confirm/upgrade status). For
@@ -53,7 +53,7 @@ session, before anything else. Run these and report the results in a clean block
      the newest `docs/audits/roadmap-state-audit-*.md` by filename date (ISO names sort
      lexically, and the `roadmap-capture-audit-*` sibling does not match this glob):
      ```
-     ls ~/dashboard/docs/audits/roadmap-state-audit-*.md | sort | tail -1
+     ls /opt/nemesis/docs/audits/roadmap-state-audit-*.md | sort | tail -1
      ```
      Read that file's `**Tally:**` line for the SHIPPED / PARTIAL / PARKED / total counts and
      diff today's reality against it. If no such file exists, say so and treat the run as a
@@ -194,15 +194,15 @@ source-visibility). This rule covers it and any future similarly-carved-out priv
 Each window is opened with its role's model already pinned, via shell aliases in `~/.bashrc`:
 
 ```
-alias nem1="cd ~/dashboard && claude --model opus[1m]"     # Window 1 — build
-alias nem2="cd ~/dashboard && claude --model claude-sonnet-5"  # Window 2 — docs/audit
+alias nem1="cd /opt/nemesis && claude --model opus[1m]"     # Window 1 — build
+alias nem2="cd /opt/nemesis && claude --model claude-sonnet-5"  # Window 2 — docs/audit
 ```
 
 - **Why a launch flag and not config.** `~/.claude/settings.json` sets `"model": "opus[1m]"`
   at the USER level, so every session everywhere starts on Opus — which is correct for Window 1
   and wrong for Window 2 *every single morning* (this is what the self-check kept catching;
   it was reporting a permanent default, not an occasional slip). A per-window model cannot come
-  from config: both windows run in `~/dashboard`, so a `model` key in that project's
+  from config: both windows run in `/opt/nemesis`, so a `model` key in that project's
   `.claude/settings.json` would force BOTH onto one model and break whichever pin it doesn't
   match. **Do not add one.** The launch command is the only layer that distinguishes the two.
 - **`opus[1m]` for Window 1, deliberately** — that is what the global default resolves to today;
@@ -501,10 +501,15 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
   Confirm what this actually refers to in the live code (likely a hardcoded string in the
   dashboard's own AI-integration, e.g. `ai_engine/module.py` — NOT Claude Code's own model
   selection) before changing it; don't guess-update a value real code depends on.
-- **Key paths** (public-repo placeholders — substitute the real install user locally):
-  - dashboard: `/home/<user>/dashboard/dashboard.py`
-  - `/home/<user>/dashboard/alert_manager/` — core services (alert-watcher, hw-monitor,
-    device-scanner, watchdog, dashboard) + shared `alerts.db`
-  - `/home/<user>/dashboard/modules/` — pluggable modules
+- **Key paths** (fixed since the 2026-07-27 `/opt` relocation — no longer install-user-home-
+  dependent; `scripts/migrate_to_opt.sh` is the one-way move, `alert_manager/nemesis_paths.py`
+  is what code actually resolves against, not these paths computed ad hoc):
+  - dashboard: `/opt/nemesis/dashboard.py`
+  - `/opt/nemesis/alert_manager/` — core services (alert-watcher, hw-monitor,
+    device-scanner, watchdog, dashboard)
+  - `/opt/nemesis/modules/` — pluggable modules
+  - `/var/lib/nemesis/alerts.db` — shared DB (moved out of the tree 2026-07-27; group
+    `nemesis-db`, directory mode `0770` — SQLite WAL's `-wal`/`-shm` siblings need directory
+    write, not just traverse)
   - `/etc/nemesis.env` — environment/secrets, mode `640 root:nemesis`
   - `docs/CUSTOM_TAILSCALE_OAUTH.md` — Tailscale OAuth auth-key minting setup (the four `TAILSCALE_OAUTH_*`/`TAILSCALE_TAG` env vars + installer self-onboard hybrid fallback)
