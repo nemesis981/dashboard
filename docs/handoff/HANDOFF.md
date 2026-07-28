@@ -1,135 +1,174 @@
 # HANDOFF — current state
 
-> Last updated **2026-07-26 (full-day closeout, Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-07-27 (full-day closeout, Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
 > live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
 >
-> ✅ **A public git-history rewrite happened today** (Group-A scope only, fully verified) — see
-> "Git-history rewrite" below before assuming anything about commit hashes predating today.
-> ✅ **A new private-module pattern exists now**: `~/work/nemesis-internal/` holds carved-out
-> Tier 2 implementation detail + honest-limitation writeups, outside the public repo. Window 1
-> is that repo's git-writer (new CLAUDE.md rule). See "Private-module carve-out" below.
-> ✅ **No code shipped today** — the day was docs/repo-structure/architecture work (three new
-> ADRs, ADR 0009 Fork-B/Tier-2 design, the disclosure audit, CLAUDE.md rules, the history
-> rewrite) plus Window 1's continuing private-module build on the Tier 2 hybrid gate.
-> ⚠️ **`anomaly_detection`'s fd-leak bug is confirmed still live** — see "Open items" below,
-> this is real and current, not a stale carryover.
+> 🚨 **THE INSTALL LOCATION CHANGED TODAY.** `~/dashboard` → **`/opt/nemesis`** (code) and
+> **`/var/lib/nemesis`** (database). `/home/<user>/dashboard` no longer exists as a git repo.
+> Every doc that says `~/dashboard` or `/home/<user>/dashboard` — including **CLAUDE.md's own
+> "Key paths" section and its Morning Status commands** — is now wrong. Not fixed tonight
+> (flagged as tomorrow's top priority below); until it is, `find ~/dashboard` and
+> `git -C ~/dashboard` in CLAUDE.md will silently return nothing.
+> ✅ **Six of eight services no longer run as root** — dedicated per-service system users,
+> kernel-verified privilege attestation, `systemd-analyze` exposure 9.6 UNSAFE → 2.0 OK.
+> ⚠️ **A real production incident happened today** (~25 min degraded, all 8 services
+> crash-looping) and was recovered — see "The incident" below. Root cause: a migration script
+> gap, now itself an open item, not yet fully closed.
+> ✅ **Dashboard is deliberately still unhardened** (9.2 UNSAFE) — not an oversight, see below.
 
 ---
 
-## Git-history rewrite (2026-07-26) — READ THIS BEFORE TRUSTING OLD COMMIT HASHES
+## The relocation + de-privileging effort (today's session arc)
 
-A scoped (`git filter-repo`) history rewrite executed today, force-pushed to `origin`. **Every
-commit hash on `main` from `6580706` onward changed.** If any doc anywhere (including older
-supplements below this one) cites a commit hash from that range, treat it as potentially stale
-— it describes what existed at the time, not necessarily a hash still resolvable today.
+Started on the PUNCHLIST `[FIX-NOW]` fd-leak. Expanded, via operator decisions through the day,
+into: fd-leak fix → a Data Manager gatekeeper assessment → a PostgreSQL evaluation (**deferred**
+— measured SQLite/WAL at 18,126–25,619 w/s against a 1,000 w/s worst-case projection, ~25x
+headroom; the throughput case didn't survive measurement) → a dedicated-writer-process
+assessment (**deferred** — measured Unix-socket IPC at 62,666 w/s, viable but superseded) →
+service de-privileging → an `/opt` relocation → a production incident and recovery. Both
+deferred assessments live only in conversation right now — flagged for a roadmap
+stub/ADR decision, not made yet.
 
-**What changed:** `l3_tls_validation/`'s code (13 files, formerly at `01fbcfc`/`6d40e7d`/
-`b9ec952`) and one prose paragraph (the ADR 0009 addendum's both-enrolled WiFi edge case,
-formerly at `6580706`) are gone from all history — moved to
-`~/work/nemesis-internal/l3-tier2-tls-interception/` beforehand, nothing lost, just relocated.
+Six commits, all pushed, `HEAD` = `7e804a6`:
+```
+a38a068  fix(anomaly_detection): guarantee DB connection close on exception
+84a57d2  feat(privsep): kernel-verified privilege attestation, wired into all six services
+597c302  feat(paths): canonical DB path resolver, staged for the /opt relocation
+a133892  feat(scripts): /opt relocation migration tool, VM-proven
+5e9fcc0  feat(units): /opt layout + per-service de-privileging across all 8 units
+7e804a6  fix(paths,privsep): complete the DB-path migration and make services start under /opt
+```
 
-**What did NOT change, verified byte-for-byte:** the exact lateral-movement risk weights, ADR
-0005's tamper-response ladder, and `device-identification.md`'s confidence weights (all
-accepted as residual risk, not rewritten) — and, critically, **all 10 git tags, including
-`pre-l1l2l3-build-known-good` (commit `14b066b7aee69651b2e67836a242a060270f5a08`, unchanged)**.
-`docs/operations/backupproc.md`'s emergency-fallback procedure is **confirmed still valid** —
-re-verified via `git cat-file -p` on both the pre-rewrite backup and a fresh post-rewrite clone
-from GitHub, same tag message/tagger/date/target commit.
+Three bugs were caught in review and held before landing (details:
+`docs/handoff/supplements/2026-07-27-001.md`): a standalone `--verify` false-fail in
+`migrate_to_opt.sh`, four systemd units silently losing real ordering dependencies on
+regeneration (fixed with an explicit `after`/`wants` list model plus a new
+`gen_units.py --check` drift guard), and a rollback warning pointing at a snapshot path
+nothing created (fixed by having `install.sh` actually create it).
 
-Full technical detail, the decision reasoning (why Group A got rewritten and Group B didn't),
-and the residual-exposure analysis (release download counts, GitHub traffic) live in
-`~/work/nemesis-internal/known-limitations/history-rewrite-evaluation-2026-07-26.md` —
-deliberately NOT in this repo (it maps exactly where sensitive content sat in history, which is
-itself a disclosure-sensitive artifact per the new Rule 10). Backup of the pre-rewrite state:
-`/run/media/<user>/storage/nemesis-state-backups/2026-07-26-1600-pre-history-rewrite-group-a/`.
+## THE INCIDENT (2026-07-27, ~25 min degraded production) — read before touching migrate_to_opt.sh
 
-**Minor non-blocking follow-up:** a handful of docs (worklogs, this file's own prior versions)
-mention the now-superseded pre-rewrite hashes. Cosmetic — prose, not resolvable links — fix
-opportunistically, not urgent.
+The operator ran `scripts/migrate_to_opt.sh --run` for real. Code and DB moved cleanly
+(integrity confirmed), but the migration script does **not** deploy unit files (`install.sh`
+does) — so all 8 deployed units still pointed at the now-deleted `/home/<user>/dashboard`.
+`do_migrate` restarts every service at the end of its run; with stale units this drove all 8
+into crash loops (`dashboard` hit `StartLimitBurst`/`failed`; the other 7 hit
+`INVALIDARGUMENT`/"can't open file", restart counters 23+). Recovered forward, one service at
+a time, verifying each.
 
-## Private-module carve-out (new pattern, 2026-07-26)
+**Current state independently re-confirmed via `systemctl show` (not relayed):** all 8
+services `active`/`running`, `NRestarts=0`, correct `/opt/nemesis` `ExecStart` paths.
 
-`~/work/nemesis-internal/` now exists — sibling to `~/work/nemesis-private/` but a different
-scope (proprietary technical detail + honest self-assessment, not secrets/creds). Holds:
-- `l3-tier2-tls-interception/` — the Tier 2 TLS-interception harness code + implementation
-  detail (Pieces E/F/G/H/J). **Now its own git repo**, three remotes (`local`, `usb`, private
-  GitHub — `nemesis981/nemesis-l3-tier2-tls-interception`, confirmed `private: true`), **Window
-  1 is its git-writer** (new CLAUDE.md rule, explicitly scoped separate from Window 2's
-  public-repo sole-git-writer rule).
-- `l3-tier1-behavioral-trigger/` — the exact lateral-movement risk weights/thresholds.
-- `device-auth-and-identity/` — ADR 0005's tamper-response ladder + device-ID confidence
-  weights.
-- `known-limitations/` — the Fork B fail-safe risk narrative, the both-enrolled WiFi edge
-  case, and the history-rewrite evaluation.
+**`migrate_to_opt.sh` should not be run by anyone else as-is** (open item below) — it must
+either deploy units itself or refuse to restart services when the installed units still
+reference the old path. `--verify` also still doesn't check unit-path-correctness at all
+(only code location, DB location, old-path-gone) — a different gap from the standalone
+`--verify` bug fixed earlier the same day.
 
-**This is a source-visibility decision, not a feature-gating one** — every capability above
-ships at every Nemesis tier regardless, per the existing "security is never the upsell"
-principle. Stated explicitly every place this pattern is documented so it's never misread as a
-tier restriction.
+## Current state — de-privileging model
 
-**New standing rule (CLAUDE.md Rule 10):** before any public-repo commit, flag genuinely novel
-mechanisms or honest-limitation/caveat language for a public/private decision, applying this
-same policy — general architecture/capability-existence stays public by default; novel
-implementation, tuning parameters, and unresolved-weakness caveats get flagged, not silently
-committed either way. Standing/ongoing, not a one-time retroactive pass.
+```
+dashboard            <user>              /opt/nemesis/dashboard.py            (NOT hardened, see below)
+watchdog             nemesis-watchdog  /opt/nemesis/alert_manager/watchdog.py
+hw-monitor           nemesis-hwmon     /opt/nemesis/alert_manager/hw_monitor.py
+alert-watcher        nemesis-alertw    /opt/nemesis/alert_manager/alert_watcher.py
+device-scanner       <user>              /opt/nemesis/alert_manager/device_scanner.py
+malware-canary       nemesis-canary    /opt/nemesis/alert_manager/malware_canary.py
+diagnostics-watcher  nemesis-diag      /opt/nemesis/alert_manager/diagnostics_watcher.py
+vpn-dns-guard        nemesis-vpndns    /opt/nemesis/core/vpn_dns_guard.py
+```
 
-## Three new ADRs — deployment model + venue market direction (2026-07-26, capture-only)
+`systemd-analyze` exposure: 9.6 UNSAFE → 2.0 OK for the six de-privileged services;
+device-scanner 2.2 (retains `CAP_NET_RAW`, see Open Items #10 below); dashboard unchanged at
+9.2 UNSAFE, deliberately. UIDs for the six confirmed directly (`id`): 985/990/991/992/993/994,
+all `gid=972 (nemesis-db)`. Attestation: kernel-verified at runtime (euid, `CapEff`,
+`NoNewPrivs` read from `/proc/self/status`), never inferred from the unit file — the pattern
+follows a private L3 `SYSTEMD_FAIL_OPEN` finding (a unit that asks for isolation it cannot get
+starts anyway, unrestricted). Journal confirmation of the attestation lines and the live
+`/etc/sudoers.d/` listing were **not independently verifiable this session** (no passwordless
+sudo available) — see Open Items #3.
 
-- **ADR 0014 — deployment-appliance-model.** A dedicated Linux appliance (mini PC) is now the
-  primary SMB/venue deployment target, **reversing** Windows-hosted-VM-as-primary (stated
-  explicitly as a reversal, not silently narrowed). Cross-platform requirement narrows to the
-  agent only. Home-user VM path retained unchanged. **Note:** the "locked June 22 release
-  sequence" doc this reverses was searched for and not found anywhere in this repo — likely
-  lives only in an external tracker; `ROADMAP.md`'s Windows Support Status section was updated
-  as the in-repo analog.
-- **ADR 0015 — guest-self-service-enrollment.** QR/captive-portal venue enrollment, specifying
-  ADR 0012's existing VENUE AUTO mode's concrete mechanism. **Flagged, unresolved:** real
-  tension with the pre-existing `venue-guest-network.md` stub's "app IS the credential" framing
-  vs. this ADR's captive-portal-without-mandatory-app direction. Needs the operator to
-  reconcile before either gets built.
-- **ADR 0016 — guest-marketing-capture.** Opt-in, export-API-only marketing capture (explicit
-  non-goal: never becomes an ESP). **Legal review is a hard prerequisite before any build work**
-  on the PII-collection half — stated in the ADR's status line.
+**Dashboard is deliberately not hardened.** It elevates via `sudo -n` in ~10 places, including
+`alert_manager/firewall.py` (the ADR-0005 ufw chokepoint). `NoNewPrivileges=yes` makes the
+kernel ignore setuid, so sudo cannot elevate under it — proven, not assumed (`sudo -n ufw
+status` succeeds normally, fails under `--no-new-privs`). A hardened dashboard would have
+started, looked healthy, and been unable to block or quarantine anything — a silent loss of a
+core security function. The unit carries an in-file comment explaining this; do not add
+hardening directives to it before the `firewall.py` sudo call sites are rewritten to use a
+capability directly (deferred to tomorrow, operator-confirmed, do not scope tonight — the
+CAP_NET_RAW/CAP_NET_ADMIN rewrite of `firewall.py` and the other sudo call sites, matching the
+device-scanner precedent, is what closes dashboard's 9.2 score).
 
-## ADR 0009 — Fork B mirror resolution + Tier 2 hybrid gate (2026-07-26, capture-only)
+Data: `/var/lib/nemesis/alerts.db`, `<user>:nemesis-db 0660`, directory 0770 (load-bearing, not
+0750 — SQLite WAL mode creates `-wal`/`-shm` siblings in the directory, and 0750 reproduces the
+same "attempt to write a readonly database" failure behind the 2026-07-18 fd-exhaustion
+incident).
 
-Fork B's tunnel transport confirmed **MIRROR** (resolves the mirror-vs-inline documentation gap
-Open Item 1 had flagged — never a real contradiction, just an undecided default until now).
-New **hybrid inline/mirror gate** design for Tier 2: the first meaningful chunk of decrypted
-application data is held inline before delivery, then the connection transitions to mirror —
-with four transition-hardening requirements against a timing-based bypass (full mechanism
-detail now lives privately, per the carve-out above; the public docs carry the general shape).
-**Corrected, kept public deliberately:** Tier 2 does not guarantee first-contact prevention of
-a clean-looking payload; Tier 3's local late-triggers are the actual backstop.
+## Open items
 
-## Open items (carried forward, still true)
-
-1. **`anomaly_detection`'s fd-leak on `/var/log/suricata/eve.json` — CONFIRMED STILL LIVE**
-   (re-verified via `journalctl` today, no code change since `37a02d0`). Causes the dashboard
-   to hang under sustained load. Tracked `[FIX-NOW]` in `PUNCHLIST.md`. A full user-facing
-   troubleshooting section now exists in `docs/reference/operational-notes.md` as a workaround
-   (restart clears it temporarily, does not fix it).
-2. **Six systemd-unit/script files hardcode the dev box's real username** (found during today's
-   broader Rule-8 re-scan; only `vpn-dns-guard.service` was previously flagged). Most are
-   harmless — `install.sh` already templates them at install time — but
-   `vpn-dns-guard.service` and two standalone scripts are not templated, a genuine issue for
-   anyone but the original operator. Not fixed (real code/config change, out of scope for the
-   docs-only passes today). See `PUNCHLIST.md` for exact file:line locations.
-3. **`installer-unified-v1.0.6`'s two pre-trip fixes** (auto_approve default, double-enroll) —
-   still unresolved, oldest open item carried across multiple closeouts now.
-4. **`agent_devices.last_heartbeat_data` not populating** for trip-laptop — still open, low
-   severity, since 2026-07-03.
-5. **ADR 0015 vs. `venue-guest-network.md` tension** (above) — needs an operator decision
-   before either the captive-portal or app-as-credential guest-enrollment vision gets built.
-6. **No target hardware baseline exists** — still blocks turning any L3/Tier-1/Tier-2 scoping
-   doc into a real session estimate (unchanged, carried forward from 07-25).
-7. **Legal review** — hard prerequisite for ADR 0016's PII-collection half, not yet started.
+1. **`.nemesis-premigration-mode` is untracked and not gitignored** — confirmed at the
+   `/opt/nemesis` repo root (content: mode `775`, path `/home/<user>/dashboard`). The only thing
+   making the tree dirty; will fail `migrate_to_opt.sh`'s own dirty-tree preflight on any
+   future run. Needs a `.gitignore` entry.
+2. **`/etc/nemesis.env` line 18, `NEMESIS_AGENT_EXE`, still holds a `/home/<user>` path** —
+   confirmed by direct read. Not corrected during the migration; deliberately not granted to
+   Window 1, since write access to that file means the ability to rewrite all 16 secrets.
+3. **Three temporary sudoers grants need removal at end-of-effort:**
+   `nemesis-deprivilege-step1`, `nemesis-relocation`, `nemesis-dashboard-unit`. Only partially
+   corroborated this session (via the pre-migration USB snapshot, which predates incident
+   recovery and shows 2 of the 3 plus two others not in this list) — confirm the actual live
+   `/etc/sudoers.d/` before removing anything.
+4. **`migrate_to_opt.sh` should not be run by anyone else as-is** — the defect behind tonight's
+   incident (see above).
+5. **PUNCHLIST fd-leak entry was stale — corrected this session.** Root cause was never
+   `eve.json` handling; it was unclosed SQLite connections in `_set_state`, fixed in `a38a068`.
+6. **`docs/reference/operational-notes.md` still carries the same stale eve.json framing** —
+   flagged, not fixed tonight (prose, deserves its own pass).
+7. **Six files still compute raw tree-relative `alerts.db` paths** — all historical/test
+   tooling, no production service: `alert_manager/test_quarantine.py`, three
+   `scripts/stage2_migrate_*`, `scripts/wal_concurrent_smoketest.py`, `test_anomaly_cleanup.py`.
+8. **`device_scanner.py` and `dashboard.py` have no attestation call** — their units declare
+   `NEMESIS_EXPECT_USER` and nothing reads it. Cosmetic.
+9. **`dashboard.py` has a duplicate `sys.path.insert`** — 4 occurrences total (lines 6, 19, 75,
+   107), not just the 2 originally flagged.
+10. **`device_scanner.py`'s `scan_network()` still shells out via `["sudo", "nmap", ...]`
+    unconditionally** — no code path uses the unit's new `AmbientCapabilities=CAP_NET_RAW`
+    instead. The "CAP_NET_RAW replaces the unrestricted sudo nmap grant" framing from the units
+    commit isn't realized at the code level yet: either the old sudoers grant is still live and
+    now redundant, or it was revoked and the scanner is silently broken. Needs a code decision
+    (Window 1's lane).
+11. **ADR 0015 vs. `venue-guest-network.md` tension** (carried forward from 07-26) — needs an
+    operator decision before either guest-enrollment vision gets built.
+12. **No target hardware baseline exists** (carried forward) — still blocks turning any
+    L3/Tier-1/Tier-2 scoping doc into a real session estimate.
+13. **Legal review** (carried forward) — hard prerequisite for ADR 0016's PII-collection half,
+    not yet started.
 
 ## Roadmap baseline
+
 `docs/audits/roadmap-state-audit-2026-07-26.md` — **4 SHIPPED / 8 PARTIAL / 51 PARKED, 63
-total.** Unchanged from this morning; reconfirmed at closeout, no further drift. Supersedes
-2026-07-25 as the Morning Status baseline.
+total.** Unchanged — no `docs/roadmap/*.md` files were touched by any of today's six commits
+(all code fixes for the relocation/de-privileging effort), so no re-audit was needed.
+
+## Docs that need the path fixed — TOP PRIORITY for tomorrow
+
+Flagging only, not done tonight (a ~28-reference edit deserves its own pass, not a rushed
+tack-on at the end of a long session) — but this is the single highest-priority open item,
+since leaving it stale actively breaks the morning routine rather than just reading oddly:
+- **CLAUDE.md "Key paths"** — every path is wrong.
+- **CLAUDE.md's own Morning Status commands** — `find ~/dashboard` / `git -C ~/dashboard` will
+  silently return nothing starting tomorrow.
+- **`docs/operations/backupproc.md`** — references the old location and the DB's old in-tree
+  position.
+- **New ADR needed** (probably 0017) — the relocation + de-privileging model (per-service
+  users, `nemesis-db` group, runtime attestation, the dashboard carve-out) is architectural and
+  currently undocumented anywhere except commit messages and this handoff.
+- **ADR 0003** — its backup design remains unimplemented; the DB has moved, changing what a
+  backup targets.
+- **Rule 10 decision needed, not made tonight:** the attestation pattern derives from a private
+  L3 `SYSTEMD_FAIL_OPEN` finding. The general approach (assert privilege at runtime, never
+  trust the unit file) reads as publishable; the L3 harness detail stays private.
 
 ## LIVE vs DEFAULT-OFF (and why) — unchanged since 2026-07-02, still current
 
@@ -141,26 +180,27 @@ total.** Unchanged from this morning; reconfirmed at closeout, no further drift.
 | **L2** — WinDivert reputation blocking | **default OFF globally** | Validated 2026-07-02; per-device toggle still unbuilt. |
 | **L2 on the trip-laptop** | **ON** (that one installer only) | Global default unchanged. |
 
-## Emergency fallback — CONFIRMED, and re-verified today post-rewrite
+## Emergency fallback — NEEDS RE-VERIFICATION, path changed today
+
 `docs/operations/backupproc.md` — Procedure A (local uninstall) and Procedure B (Claude Code
-revert prompt). Revert tag **`pre-l1l2l3-build-known-good` → `14b066b`, verified on origin
-before today's rewrite, and re-verified byte-for-byte unchanged after it.**
+revert prompt). Revert tag `pre-l1l2l3-build-known-good` → `14b066b`, last verified byte-exact
+on 2026-07-26 (pre-relocation). **Not re-verified against the new `/opt/nemesis` layout** — the
+doc itself still references the old location (see "Docs that need the path fixed" above).
+Treat this procedure as unconfirmed for the current install until that doc is updated and
+re-tested.
 
 ## Pointers
-- Today's narrative: `docs/handoff/supplements/2026-07-26-001.md`.
-- Prior narratives: `docs/handoff/supplements/2026-07-25-001.md` (morning audit), `-002.md`
-  (ADR 0006 build), `-003.md` (loader-enforcement + L3 three-tier consolidation),
+- Today's narrative: `docs/handoff/supplements/2026-07-27-001.md`.
+- Prior narratives: `docs/handoff/supplements/2026-07-26-001.md`, `2026-07-25-001.md` (morning
+  audit), `-002.md` (ADR 0006 build), `-003.md` (loader-enforcement + L3 consolidation),
   `2026-07-02-001.md`.
-- Private module + evaluation docs (outside this repo): `~/work/nemesis-internal/` — see its
-  own `README.md` for structure.
-- Fallback: `docs/operations/backupproc.md`; tag `pre-l1l2l3-build-known-good` (`14b066b`).
-- New ADRs: 0014 (deployment-appliance-model), 0015 (guest-self-service-enrollment), 0016
-  (guest-marketing-capture).
-- ADR 0009: base + addendum, now with the Fork-B mirror resolution + Tier 2 hybrid gate summary
-  (full mechanism detail private, per the carve-out).
+- Snapshots (USB, both directions verified restorable):
+  `2026-07-27-1846-pre-opt-migration-run` (current rollback target),
+  `2026-07-27-1625-pre-opt-relocation` (superseded), `2026-07-27-1537-pre-service-deprivileging`.
+- Private module + evaluation docs (outside this repo): `~/work/nemesis-internal/`.
+- Fallback: `docs/operations/backupproc.md` (needs re-verification, see above); tag
+  `pre-l1l2l3-build-known-good` (`14b066b`).
 - Latest audits: `docs/audits/roadmap-state-audit-2026-07-26.md`.
-- CLAUDE.md: Rule 10 (disclosure-check, standing), the private-module git-writer rule +
-  remote-scope clarification, the per-window model pins (Window 1 Opus / Window 2 Sonnet).
 - Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
 
 ## Topology (durable, unchanged)

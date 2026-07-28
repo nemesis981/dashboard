@@ -983,15 +983,19 @@ baking it, so the dashboard UI can mint L2-enabled installers directly. **Securi
 change → audit-first, hold-for-review.** Deferred from tonight deliberately (Option B was the
 lower-risk path for one laptop pre-trip).
 
-### [FIX-NOW] `anomaly_detection` fd leak on `/var/log/suricata/eve.json` (dashboard hang, real today — 2026-07-26)
-- [ ] **`_detection_cycle` (`modules/anomaly_detection/module.py`) leaks a file descriptor on
-  `/var/log/suricata/eve.json` every cycle**, eventually exhausting the process's fd table —
-  observed live today as repeated `OSError: [Errno 24] Too many open files` in the dashboard
-  service log, which then hangs the dashboard itself (confirmed via `journalctl -u dashboard`,
-  recurring every poll cycle as of 2026-07-26 11:33, no code fix landed — `git log`/`git diff`
-  on the module show nothing touching this since `37a02d0`). **NOT YET FIXED — stays open.**
-  User-facing symptom + immediate workaround (restart, not a fix) documented in
-  `docs/reference/operational-notes.md` ("Troubleshooting: dashboard won't load / hangs").
+### [DONE — 2026-07-27] `anomaly_detection` fd leak, root cause corrected (was: dashboard hang, 2026-07-26)
+- [x] **Root cause was misdiagnosed when this entry was first written.** The leak was never
+  `eve.json` handling — `_detection_cycle`'s reads of `/var/log/suricata/eve.json` were always
+  leak-safe. The real leak was bare `conn = _conn() … conn.close()` call sites in
+  `modules/anomaly_detection/module.py` (e.g. `_set_state`) where `close()` sat inside the
+  `try:` block, so a raised statement (e.g. `sqlite3.OperationalError`) skipped it and leaked
+  the connection's fd — eventually exhausting the process's fd table and surfacing as
+  `OSError: [Errno 24] Too many open files`, with eve.json's own `open()` as the visible victim,
+  not the source. **Fixed in `a38a068`**: a `_db()` contextmanager guarantees `close()` in
+  `finally:`, and every call site missing that guarantee was migrated to it. Two remaining bare
+  `_conn()` sites were checked and confirmed already safe (already closed in `finally:`).
+  `docs/reference/operational-notes.md`'s troubleshooting section still describes the old
+  (incorrect) eve.json framing — needs a follow-up pass, not corrected yet.
 - [ ] **Future robustness (not urgent, do not build now):** the dashboard should ideally fail
   more gracefully / self-report on resource exhaustion (too-many-open-files) instead of
   silently hanging. Flag for a later error-handling pass — not part of the fd-leak fix itself.
