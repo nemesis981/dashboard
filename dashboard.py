@@ -2063,7 +2063,7 @@ def api_quarantines():
     return jsonify({"quarantines": get_active_quarantines()})
 
 
-@app.route("/api/quarantine/<int:q_id>/confirm")
+@app.route("/api/quarantine/<int:q_id>/confirm", methods=["POST"])
 def api_quarantine_confirm(q_id):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
@@ -2087,7 +2087,7 @@ def api_quarantine_confirm(q_id):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/quarantine/<int:q_id>/lift")
+@app.route("/api/quarantine/<int:q_id>/lift", methods=["POST"])
 def api_quarantine_lift(q_id):
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
@@ -2259,7 +2259,7 @@ def test_enrichment(ip):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/action/<rule_id>/<action>")
+@app.route("/api/action/<rule_id>/<action>", methods=["POST"])
 def set_action(rule_id, action):
     try:
         src_ip = request.args.get("ip", "")
@@ -8179,7 +8179,7 @@ def dashboard():
         function takeAction(action) {{
             var url = "/api/action/" + currentRuleId + "/" + action;
             if (action === "block" && currentSrcIp) url += "?ip=" + encodeURIComponent(currentSrcIp);
-            fetch(url).then(r => r.json()).then(data => {{
+            fetch(url, {{method: "POST"}}).then(r => r.json()).then(data => {{
                 closeModal();
                 location.reload();
             }});
@@ -9474,7 +9474,7 @@ def dashboard():
 
         function confirmQuarantine(id) {{
             if (!confirm("Confirm this block permanently? The ufw rule will be kept and the alert marked 'block'.")) return;
-            fetch("/api/quarantine/" + id + "/confirm")
+            fetch("/api/quarantine/" + id + "/confirm", {{method: "POST"}})
                 .then(r => r.json())
                 .then(d => {{
                     if (d.success) {{ refreshDashboard(); }}
@@ -9485,7 +9485,7 @@ def dashboard():
 
         function liftQuarantine(id, ip) {{
             if (!confirm("Lift this quarantine for " + ip + "? The ufw rule will be removed.")) return;
-            fetch("/api/quarantine/" + id + "/lift")
+            fetch("/api/quarantine/" + id + "/lift", {{method: "POST"}})
                 .then(r => r.json())
                 .then(d => {{
                     if (d.success) {{ refreshDashboard(); }}
