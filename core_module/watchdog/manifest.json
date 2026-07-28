@@ -1,0 +1,9 @@
+{
+  "name": "watchdog",
+  "display_name": "Service Watchdog",
+  "unit_name": "watchdog",
+  "service_user": "nemesis-watchdog",
+  "disableable": true,
+  "stopping_this_means": "Failed Nemesis services are no longer auto-restarted while stopped.",
+  "namespace_note": "DB namespace (if any) is declared in alert_manager/data_manager.py NAMESPACES."
+}

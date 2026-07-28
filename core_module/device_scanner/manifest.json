@@ -1,0 +1,9 @@
+{
+  "name": "device_scanner",
+  "display_name": "Device Scanner",
+  "unit_name": "device-scanner",
+  "service_user": "__INSTALL_USER__",
+  "disableable": true,
+  "stopping_this_means": "The network device inventory stops refreshing while stopped.",
+  "namespace_note": "DB namespace (if any) is declared in alert_manager/data_manager.py NAMESPACES."
+}

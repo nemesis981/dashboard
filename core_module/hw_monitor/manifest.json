@@ -1,0 +1,9 @@
+{
+  "name": "hw_monitor",
+  "display_name": "Hardware Monitor",
+  "unit_name": "hw-monitor",
+  "service_user": "nemesis-hwmon",
+  "disableable": true,
+  "stopping_this_means": "Windows-agent telemetry (:5001) is not received and hardware anomaly detection pauses while stopped.",
+  "namespace_note": "DB namespace (if any) is declared in alert_manager/data_manager.py NAMESPACES."
+}

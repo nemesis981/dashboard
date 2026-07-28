@@ -1,0 +1,50 @@
+[Unit]
+Description=Nemesis Hardware Monitor
+After=network-online.target
+
+[Service]
+Type=simple
+User=nemesis-hwmon
+Group=nemesis-db
+Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis
+
+# Activates runtime privilege attestation (nemesis_privsep). Absent =>
+# the check stays inert, which is what makes the code safe pre-migration.
+Environment=NEMESIS_EXPECT_USER=nemesis-hwmon
+Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
+
+ExecStart=/usr/bin/python3 /opt/nemesis/core_module/hw_monitor/hw_monitor.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+LogsDirectory=nemesis/hw-monitor
+LogsDirectoryMode=0750
+# 0770 on the data dir: SQLite in WAL mode creates -wal/-shm siblings
+# there, so the service group needs directory write, not just traverse.
+ReadWritePaths=/var/lib/nemesis
+
+# --- privilege boundary (identical across all Nemesis units) ------------------
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

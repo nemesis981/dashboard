@@ -1,0 +1,9 @@
+{
+  "name": "alert_watcher",
+  "display_name": "Alert Watcher",
+  "unit_name": "alert-watcher",
+  "service_user": "nemesis-alertw",
+  "disableable": true,
+  "stopping_this_means": "Suricata alerts are no longer ingested, scored, or auto-quarantined while stopped.",
+  "namespace_note": "DB namespace (if any) is declared in alert_manager/data_manager.py NAMESPACES."
+}

@@ -1,0 +1,9 @@
+{
+  "name": "diagnostics_watcher",
+  "display_name": "Diagnostics Watcher",
+  "unit_name": "diagnostics-watcher",
+  "service_user": "nemesis-diag",
+  "disableable": true,
+  "stopping_this_means": "Connectivity diagnostics stop running while stopped.",
+  "namespace_note": "DB namespace (if any) is declared in alert_manager/data_manager.py NAMESPACES."
+}

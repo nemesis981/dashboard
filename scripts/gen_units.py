@@ -187,6 +187,33 @@ SERVICES = {
     ]),
 }
 
+# ── core_module layout move (2026-07-28) ─────────────────────────────────────
+# These six daemons live under core_module/<module>/ instead of alert_manager/.
+# Applied as one block, after SERVICES, so the relocation is reviewable in a
+# single place rather than scattered across six entries.
+#
+# THE PYTHONPATH IS LOAD-BEARING (proven on the VM, not assumed). Once a file
+# leaves alert_manager/, its own directory (sys.path[0]) no longer covers the
+# sibling imports (nemesis_paths, data_manager, firewall, database, email_utils),
+# and three of these daemons additionally reach the top-level `modules` package
+# via `sys.path.insert(0, dirname(_HERE))` — which points at core_module/ once the
+# file is two levels deep, not the repo root. Adding BOTH alert_manager and the
+# repo root to PYTHONPATH resolves every import with no code change. Dropping this
+# line reproduces the ModuleNotFoundError crash-loop the VM caught twice.
+CORE_MODULE = {
+    "alert-watcher":       "alert_watcher",
+    "hw-monitor":          "hw_monitor",
+    "device-scanner":      "device_scanner",
+    "watchdog":            "watchdog",
+    "malware-canary":      "malware_canary",
+    "diagnostics-watcher": "diagnostics_watcher",
+}
+for _svc, _mod in CORE_MODULE.items():
+    _c = SERVICES[_svc]
+    _c["dest"] = f"core_module/{_mod}"
+    _c["exe"] = f"{NEW_ROOT}/core_module/{_mod}/{_mod}.py"
+    _c["extra"] = [f"Environment=PYTHONPATH={NEW_ROOT}/alert_manager:{NEW_ROOT}"] + _c.get("extra", [])
+
 # Identical for every service. ProtectHome=yes is now possible ONLY because the
 # relocation moved the code out of /home — under the old layout it would have
 # hidden the application from itself.
