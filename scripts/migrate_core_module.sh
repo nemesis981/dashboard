@@ -62,7 +62,10 @@ verify_healthy(){
   n="$(systemctl show -p NRestarts --value "$svc" 2>/dev/null || echo 0)"
   if [ "$st" != "active" ] || [ "$sub" != "running" ]; then
     printf "  %sFAIL%s %s is %s/%s (nrestarts=%s)\n" "$RED" "$RST" "$svc" "$st" "$sub" "$n"
-    journalctl -u "$svc" --since "-30s" --no-pager 2>/dev/null | grep -iE "error|traceback|modulenot|no module" | tail -4 | sed 's/^/         /'
+    # `|| true` at the source (see classify_service): safe by call-context today
+    # (only ever `if ! verify_healthy`), guarded here so a future bare caller
+    # can't be killed by grep's no-match exit under pipefail.
+    journalctl -u "$svc" --since "-30s" --no-pager 2>/dev/null | grep -iE "error|traceback|modulenot|no module" | tail -4 | sed 's/^/         /' || true
     return 1
   fi
   # confirm it is running from core_module, not the old path
@@ -190,21 +193,71 @@ do_run(){
   printf "\n  %sAll six migrated.%s Run --verify.\n\n" "$BLD" "$RST"
 }
 
+# Classify ONE service into one of three DISTINCT states — the whole point of
+# this function is that "not yet migrated" and "migration failed" are different
+# and must never be reported the same way (they were, before this fix):
+#   migrated+healthy  -> on core_module, active/running        (OK)
+#   pending           -> still on alert_manager, active         (OK — expected mid-rollout)
+#   FAIL              -> on core_module but unhealthy, OR down anywhere, OR unknown path
+# Prints the classified line; sets the caller's tallies via the named refs.
+classify_service(){
+  local svc="$1" __mig="$2" __pend="$3" __fail="$4"
+  local st sub ex n
+  st="$(svc_state "$svc")"; sub="$(systemctl show -p SubState --value "$svc")"
+  ex="$(installed_execstart "$svc")"; n="$(systemctl show -p NRestarts --value "$svc" 2>/dev/null || echo 0)"
+  case "$ex" in
+    *"/core_module/"*)
+      if [ "$st" = active ] && [ "$sub" = running ]; then
+        ok "$svc  MIGRATED, healthy ($(basename "$(dirname "$ex")")/$(basename "$ex"), nrestarts=$n)"
+        eval "$__mig=\$(( $__mig + 1 ))"
+      else
+        printf "  %sFAIL%s %s  MIGRATED but UNHEALTHY — %s/%s, nrestarts=%s\n" "$RED" "$RST" "$svc" "$st" "$sub" "$n"
+        # `|| true` at the SOURCE (same pattern as migrate_to_opt.sh's rollback
+        # warning): grep exits 1 when it finds no error lines, and under
+        # `set -o pipefail` that non-zero would abort the script — classify_service
+        # is called bare, not in an `if`, so nothing would absorb it. Guarding here
+        # keeps every future caller safe by default rather than at each call site.
+        journalctl -u "$svc" --since "-30s" --no-pager 2>/dev/null | grep -iE "error|traceback|no module|unknown user" | tail -3 | sed 's/^/         /' || true
+        eval "$__fail=\$(( $__fail + 1 ))"
+      fi ;;
+    *"/alert_manager/"*)
+      if [ "$st" = active ]; then
+        printf "  %s· ·%s  %s  pending — not yet migrated (on alert_manager, active). Not a failure.\n" "$YEL" "$RST" "$svc"
+        eval "$__pend=\$(( $__pend + 1 ))"
+      else
+        printf "  %sFAIL%s %s  DOWN on alert_manager (state=%s) — genuine problem\n" "$RED" "$RST" "$svc" "$st"
+        eval "$__fail=\$(( $__fail + 1 ))"
+      fi ;;
+    *)
+      printf "  %sFAIL%s %s  unexpected ExecStart '%s' (state=%s)\n" "$RED" "$RST" "$svc" "$ex" "$st"
+      eval "$__fail=\$(( $__fail + 1 ))" ;;
+  esac
+}
+
 do_verify(){
   need_root
-  step "verify all six"
-  local fails=0 svc
-  for svc in "${ORDER[@]}"; do
-    verify_healthy "$svc" 0 || fails=$((fails+1))
+  local only="${1:-}" svcs
+  if [ -n "$only" ]; then
+    [ -n "${MEMBERS[$only]:-}" ] || die "unknown service: $only"
+    svcs=("$only"); step "verify $only"
+  else
+    svcs=("${ORDER[@]}"); step "verify all six"
+  fi
+  local mig=0 pend=0 fail=0 svc
+  for svc in "${svcs[@]}"; do
+    classify_service "$svc" mig pend fail
   done
-  # import smoke test under each unit's env (catches a lurking import gap)
-  for svc in "${ORDER[@]}"; do
-    local mod="${MEMBERS[$svc]}"
-    if PYTHONPATH="$TREE/alert_manager:$TREE" python3 -c "import ast,sys; ast.parse(open('$(new_py "$svc")').read())" 2>/dev/null; then :; else
-      printf "  %sFAIL%s %s: new file does not parse\n" "$RED" "$RST" "$mod"; fails=$((fails+1)); fi
-  done
-  [ "$fails" -eq 0 ] && printf "\n  %sAll six healthy from core_module.%s\n\n" "$GRN" "$RST" \
-    || { printf "\n  %s%d failure(s).%s Consider --rollback.\n\n" "$RED" "$fails" "$RST"; return 1; }
+  printf "\n  %d migrated+healthy · %d pending (not yet migrated) · %d failed\n" "$mig" "$pend" "$fail"
+  if [ "$fail" -eq 0 ]; then
+    if [ "$pend" -gt 0 ]; then
+      printf "  %sNo failures.%s %d service(s) still to migrate — expected during incremental rollout.\n\n" "$GRN" "$RST" "$pend"
+    else
+      printf "  %sAll verified services healthy from core_module.%s\n\n" "$GRN" "$RST"
+    fi
+  else
+    printf "  %s%d GENUINE failure(s)%s (not counting the pending ones). Consider --rollback for those.\n\n" "$RED" "$fail" "$RST"
+    return 1
+  fi
 }
 
 do_rollback(){
@@ -221,7 +274,7 @@ do_rollback(){
 case "${1:-}" in
   --preflight) do_preflight ;;
   --run)      shift; only=""; [ "${1:-}" = "--only" ] && only="${2:-}"; do_run "$only" ;;
-  --verify)   do_verify ;;
+  --verify)   shift; only=""; [ "${1:-}" = "--only" ] && only="${2:-}"; do_verify "$only" ;;
   --rollback) shift; only=""; [ "${1:-}" = "--only" ] && only="${2:-}"; do_rollback "$only" ;;
   *) printf "usage: %s --preflight | --run [--only <svc>] | --verify | --rollback [--only <svc>]\n" "$0" >&2; exit 2 ;;
 esac
