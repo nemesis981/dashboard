@@ -20,6 +20,10 @@ memory-injection module:
    own independent schedule. Whatever the memory-injection module ends up needing from the agent
    drives the shape of this rework — it isn't specified further here because the module itself
    isn't scoped yet.
+   - **Also part of this rework: a dashboard addition to update all agents running a given
+     Windows upgrade level (win X.X.X) across the network** — a fleet-scale capability to push
+     an agent update targeted at exactly the machines on a specified Windows version/build,
+     rather than a blanket update-everyone action.
 2. **A small GUI, launched from the system tray/taskbar icon**, showing agent status and
    allowing config items to be edited as needed.
 3. **Recognize when a Windows Update has occurred and offer to self-test** in the new
@@ -30,7 +34,12 @@ memory-injection module:
 - **Item 1** — the memory-injection module is expected to depend on agent internals (whatever
   APIs/hooks it needs to actually perform or support memory injection) that don't necessarily
   exist in the agent's current shape. Flagging this now, while the module is paused, means the
-  rework is scoped as part of resuming that work rather than discovered mid-build.
+  rework is scoped as part of resuming that work rather than discovered mid-build. The
+  dashboard fleet-update addition connects to item 3 below: once the agent can recognize its own
+  Windows version/upgrade level (needed for the self-test in item 3), the natural dashboard-side
+  counterpart is being able to act on that at fleet scale — targeting an update to exactly the
+  agents on a given win X.X.X level, rather than pushing to every agent regardless of whether
+  that version is actually affected.
 - **Item 2** — a tray-icon GUI is an operational visibility/manageability gap independent of
   memory-injection specifically, but it's especially relevant once the agent is doing something as
   sensitive as memory injection: an operator would reasonably want to see agent status and adjust
