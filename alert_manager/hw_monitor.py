@@ -10,6 +10,7 @@ import logging
 import os
 import signal
 import sqlite3
+import data_manager
 import subprocess
 import sys
 import threading
@@ -50,6 +51,27 @@ _state = {
 _running = True
 
 
+# ── Data Manager wiring (ADR 0001/0006 retrofit, 2026-07-28) ─────────────────
+_DM = None
+
+
+def _db_connect():
+    """Guarded connection scoped to this process's namespace.
+
+    WARN MODE during the retrofit: every write outside the declared namespace is
+    logged as ``WOULD DENY`` and then ALLOWED. The namespace table list came from
+    static analysis of this file, which cannot see conditional SQL or statements
+    built elsewhere — so it is treated as a hypothesis to be disproved by real
+    traffic, not as a finished list. Flip to MODE_ENFORCE only once the journal
+    is quiet across a representative period.
+    """
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(DB_PATH)
+        data_manager.set_namespace_mode("hw_monitor", data_manager.MODE_WARN)
+    return _DM.connect("hw_monitor")
+
+
 def _stop(signum, _frame):
     global _running
     log.info("received signal %s, shutting down", signum)
@@ -57,7 +79,7 @@ def _stop(signum, _frame):
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute("""
@@ -791,7 +813,7 @@ def _update_fan_status(c, fans):
 
 def insert_sample(s):
     device_id = s.get("device_id", "local")
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(
@@ -1005,7 +1027,7 @@ def _check_baseline_drift(conn, sensor_key: str, baseline_avg, current_val: floa
 def _run_anomaly_pipeline(sample: dict, row_id: int):
     """Run all anomaly checks for a newly-inserted sample row."""
     ts = sample.get("timestamp", datetime.now().isoformat(timespec="seconds"))
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         anomalous_keys = []
         any_anomalous = False
@@ -1042,7 +1064,7 @@ def _run_anomaly_pipeline(sample: dict, row_id: int):
 
 def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
     """Return hw_anomaly_snapshots rows for the dashboard endpoint."""
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         clauses, params = [], []
         if sensor_key:
@@ -1073,7 +1095,7 @@ def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
 
 def get_hw_notifications(include_dismissed=False):
     """Return active hardware baseline-drift notifications."""
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         where = "" if include_dismissed else "WHERE dismissed=0"
         rows = conn.execute(
@@ -1091,7 +1113,7 @@ def reset_baseline(sensor_key=None):
     Called from /api/hw/reset-baseline.  Deletes hw_anomaly_snapshots rows
     and dismisses the matching hw_notifications so the next cycle starts fresh.
     """
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         if sensor_key and sensor_key != "all":
             conn.execute(
@@ -1122,7 +1144,7 @@ def get_fan_status():
     Returns:
       {unique_key: {"label": str, "ever_active": bool, "first_active_at": str|None}}
     """
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         rows = conn.execute(
             "SELECT unique_key, label, ever_active, first_active_at FROM fan_status"
@@ -1145,7 +1167,7 @@ def get_hw_alerts():
     Each dict: {alert_key, severity, breach, recommendation,
                 first_triggered_ts, last_triggered_ts}
     """
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         rows = conn.execute(
             """SELECT alert_key, severity, breach, recommendation,
@@ -1176,7 +1198,7 @@ def _bootstrap_fan_status():
         fans = _extract_temps_and_fans(sensors).get("fans", [])
         if not fans:
             return
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         try:
             c = conn.cursor()
             _update_fan_status(c, fans)
@@ -1251,7 +1273,7 @@ def _update_agent_device(payload, remote_ip=None):
     last_result = ah.get("last_scan_result") or ""
 
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         if remote_ip:
             conn.execute("""
                 INSERT INTO agent_devices
@@ -1338,7 +1360,7 @@ def _extract_usb_names(usb_events):
 def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
     """Insert into scan_queue if no pending entry already exists for this device."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         existing = conn.execute(
             "SELECT id FROM scan_queue WHERE device_id=? AND status='pending'",
             (device_id,),
@@ -1371,7 +1393,7 @@ def _check_and_queue_scan_triggers(payload):
     security  = payload.get("security", {}) or {}
 
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
 
         # Previous device state (before this payload)
         prev = conn.execute(
@@ -1452,7 +1474,7 @@ def _check_and_queue_scan_triggers(payload):
 def _persist_known_set(device_id, column, values):
     """Write an updated known-users/usb set back to agent_devices."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         # Cap at 500 entries to avoid unbounded growth
         trimmed = list(values)[-500:]
         conn.execute(
@@ -1473,7 +1495,7 @@ def _dispatch_pending_scans(device_id, agent_ip):
     For device_id='local' the scan runs in-process via subprocess.
     """
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT id, scan_path FROM scan_queue "
             "WHERE device_id=? AND status='pending' "
@@ -1486,7 +1508,7 @@ def _dispatch_pending_scans(device_id, agent_ip):
             scan_id = str(_uuid_mod.uuid4())
 
             # Record in scan_jobs
-            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn = _db_connect()
             conn.execute(
                 "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
@@ -1564,7 +1586,7 @@ def _local_clamscan_thread(scan_id, path):
         except Exception:
             pass
         status = "threats_found" if threats else "clean"
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         conn.execute(
             "UPDATE scan_jobs SET status=?, files_scanned=?, threats_found=?, "
             "progress_pct=100, completed_at=? WHERE scan_id=?",
@@ -1586,7 +1608,7 @@ def _local_clamscan_thread(scan_id, path):
 def get_scan_queue(status=None):
     """Return scan_queue rows as list of dicts, optionally filtered by status."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         if status:
             rows = conn.execute(
                 "SELECT id, device_id, trigger_type, trigger_detail, scan_path, "
@@ -1611,7 +1633,7 @@ def get_scan_queue(status=None):
 def get_scan_conditions():
     """Return all scan_conditions rows as list of dicts."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT id, device_id, condition_type, condition_value, enabled, scan_path "
             "FROM scan_conditions ORDER BY id"
@@ -1625,7 +1647,7 @@ def get_scan_conditions():
 
 def add_scan_condition(device_id, condition_type, condition_value, enabled, scan_path):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         conn.execute(
             "INSERT INTO scan_conditions "
             "(device_id, condition_type, condition_value, enabled, scan_path) "
@@ -1643,7 +1665,7 @@ def add_scan_condition(device_id, condition_type, condition_value, enabled, scan
 
 def delete_scan_condition(condition_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         conn.execute("DELETE FROM scan_conditions WHERE id=?", (condition_id,))
         conn.commit()
         conn.close()
@@ -1655,7 +1677,7 @@ def delete_scan_condition(condition_id):
 
 def cancel_queue_item(queue_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         conn.execute(
             "UPDATE scan_queue SET status='cancelled' WHERE id=? AND status='pending'",
             (queue_id,),
@@ -1671,7 +1693,7 @@ def cancel_queue_item(queue_id):
 def get_pending_count_per_device():
     """Return {device_id: pending_count} for all devices with pending queue items."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT device_id, COUNT(*) FROM scan_queue "
             "WHERE status='pending' GROUP BY device_id"
@@ -1685,7 +1707,7 @@ def get_pending_count_per_device():
 def get_agent_devices():
     """Return all agent_devices rows as list of dicts."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT device_id, device_name, device_type, ip_address, connection_type, "
             "agent_last_seen, suricata_running, suricata_profile, last_scan_at, last_scan_result "
@@ -1702,7 +1724,7 @@ def get_agent_devices():
 def get_hw_devices():
     """Return distinct device_ids seen in hw_metrics last 24h with their latest readings."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute("""
             SELECT m.device_id,
                    m.timestamp,
@@ -1733,7 +1755,7 @@ def get_hw_devices():
 
 def get_recent_samples_for_device(device_id, limit=288):
     """Return up to `limit` samples for a specific device_id, oldest first."""
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(
@@ -1772,7 +1794,7 @@ def _agent_enrollment_status(device_id):
     if not device_id:
         return None
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         row = conn.execute("SELECT enrollment_status FROM agent_devices WHERE device_id=?",
                            (device_id,)).fetchone()
         conn.close()
@@ -1787,7 +1809,7 @@ def _reputation_dataset():
     approved agent's local measurement cache. Read-only, best-effort → [] on any
     error (e.g. ip_enrichment table absent on a fresh box)."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         rows = conn.execute(
             "SELECT ip, abuse_score, threat_level, total_reports, last_checked "
             "FROM ip_enrichment").fetchall()
@@ -1853,7 +1875,7 @@ def _create_uninstall(payload, remote_ip):
     if not device_id:
         return (False, "missing_device_id")
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         conn.row_factory = sqlite3.Row
         row = conn.execute("SELECT enrollment_status, public_key FROM agent_devices "
                            "WHERE device_id=?", (device_id,)).fetchone()
@@ -1951,7 +1973,7 @@ def _create_enrollment(payload, remote_ip):
     token = (payload.get("enrollment_token") or "").strip()
     token_creator = None
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _db_connect()
         if token:
             try:
                 cur = conn.execute(
@@ -2179,7 +2201,7 @@ def _start_windows_agent_listener():
 
 def get_recent_samples(limit=288):
     """Return up to `limit` samples, oldest first (suitable for charts)."""
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(

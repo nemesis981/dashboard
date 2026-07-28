@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sqlite3
+import data_manager
 import subprocess
 import time
 
@@ -52,6 +53,27 @@ logging.basicConfig(
 )
 
 
+# ── Data Manager wiring (ADR 0001/0006 retrofit, 2026-07-28) ─────────────────
+_DM = None
+
+
+def _db_connect():
+    """Guarded connection scoped to this process's namespace.
+
+    WARN MODE during the retrofit: every write outside the declared namespace is
+    logged as ``WOULD DENY`` and then ALLOWED. The namespace table list came from
+    static analysis of this file, which cannot see conditional SQL or statements
+    built elsewhere — so it is treated as a hypothesis to be disproved by real
+    traffic, not as a finished list. Flip to MODE_ENFORCE only once the journal
+    is quiet across a representative period.
+    """
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(HW_DB_PATH)
+        data_manager.set_namespace_mode("watchdog", data_manager.MODE_WARN)
+    return _DM.connect("watchdog")
+
+
 def is_service_active(service: str) -> bool:
     result = subprocess.run(
         ["systemctl", "is-active", "--quiet", service],
@@ -91,7 +113,7 @@ def send_email_alert(service: str) -> None:
 
 
 def _fetch_latest_hw_sample():
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(
@@ -128,7 +150,7 @@ def _fetch_fan_status():
 
     Returns an empty dict if the table doesn't exist yet (pre-init_db).
     """
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         rows = conn.execute(
             "SELECT unique_key, label, ever_active FROM fan_status"
@@ -141,7 +163,7 @@ def _fetch_fan_status():
 
 
 def _fetch_recent_cpu_percents(n):
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(
@@ -159,7 +181,7 @@ def _fetch_recent_cpu_percents(n):
 
 
 def _init_cooldown_table():
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute("""
@@ -195,7 +217,7 @@ def _upsert_hw_alert(key, severity, breach, recommendation):
     even while the email cooldown is suppressing repeated sends.
     """
     now = time.time()
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute(
@@ -225,7 +247,7 @@ def _upsert_hw_alert(key, severity, breach, recommendation):
 def _resolve_stale_alerts(active_keys):
     """Mark resolved any hw_alerts whose condition is no longer detected."""
     now = time.time()
-    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    conn = _db_connect()
     try:
         c = conn.cursor()
         c.execute("SELECT alert_key FROM hw_alerts WHERE resolved_ts IS NULL")
@@ -247,7 +269,7 @@ def _load_cooldowns():
     """Restore cooldown timestamps from disk so a watchdog restart doesn't
     silently reset the 30-min window and trigger duplicate alerts."""
     try:
-        conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+        conn = _db_connect()
         try:
             c = conn.cursor()
             c.execute("SELECT alert_key, last_sent_ts FROM hw_alert_cooldowns")
@@ -270,7 +292,7 @@ def _hw_record(key):
     now_ts = time.time()
     _hw_state["cooldowns"][key] = now_ts
     try:
-        conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+        conn = _db_connect()
         try:
             c = conn.cursor()
             c.execute(

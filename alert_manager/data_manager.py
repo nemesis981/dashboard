@@ -44,11 +44,23 @@ log = logging.getLogger("nemesis.data_manager")
 # module through the guard).
 OP_LOG_TABLE = "dm_operation_log"
 
-# Module -> writable table prefix(es).  ADR 0001 ownership; the unprefixed legacy
-# names (`tickets`, `community_queue`) are covered because their module prefix is
+# Module -> writable tables.  ADR 0001 ownership; the unprefixed legacy names
+# (`tickets`, `community_queue`) are covered because their module prefix is
 # itself a prefix of the table name ("tickets" ⊑ "tickets"/"tickets_seq";
-# "community" ⊑ "community_queue").  Verified 2026-07-25: every module writes only
-# tables matching its own prefix — no cross-prefix writes exist.
+# "community" ⊑ "community_queue").  Verified 2026-07-25 for the six MODULE
+# namespaces: each writes only tables matching its own prefix.
+#
+# A namespace value is EITHER a tuple of table-name prefixes (the original ADR
+# 0001 shorthand) OR a dict with explicit ``prefixes`` and/or ``tables`` keys.
+#
+# WHY EXPLICIT TABLE LISTS EXIST (added 2026-07-28 for the core_module retrofit).
+# Prefixes were always a shorthand for per-table ownership, and the shorthand
+# breaks where two processes legitimately share one prefix. `hw_monitor` writes
+# hw_metrics / hw_notifications / hw_anomaly_snapshots; `watchdog` writes
+# hw_alerts / hw_alert_cooldowns. The tables are disjoint and the ownership is
+# unambiguous, but a `hw_` prefix grant cannot express it — granting either
+# grants both. Rather than rename live tables to fit the shorthand, the model now
+# says what it always meant: ownership is per table.
 NAMESPACES = {
     "tickets":            ("tickets",),
     "ai_engine":          ("ai_",),
@@ -56,7 +68,203 @@ NAMESPACES = {
     "anomaly_detection":  ("anomaly_",),
     "malware_detection":  ("malware_",),
     "diagnostics":        ("diagnostics_",),
+
+    # ── core_module processes (retrofit, 2026-07-28) ─────────────────────────
+    # Table lists derived by parsing each process's SQL with this module's own
+    # classify(), so the audit and the enforcement agree by construction.
+    # Both start in WARN mode — see set_namespace_mode — because the lists are
+    # static-analysis output and have not yet been proven against real traffic.
+    "hw_monitor": {
+        "tables": (
+            "hw_metrics", "hw_notifications", "hw_anomaly_snapshots",
+            "scan_jobs", "scan_queue", "scan_conditions",
+            "agent_devices", "correlation_events",
+            # `scan_threats` and `scan_schedules`: SCHEMA-CREATION OWNERSHIP ONLY
+            # (confirmed by real Windows-agent traffic, 2026-07-28). hw_monitor
+            # runs `CREATE TABLE IF NOT EXISTS` for both at startup but never
+            # writes a ROW to either — the row writes belong to dashboard
+            # (dashboard.py:6087 scan_threats, :6274 scan_schedules). The grant
+            # is kept (option 1) so enforce-mode schema init is not denied; the
+            # row-write ownership, and scan_jobs' shared ownership (hw_monitor
+            # dispatches, dashboard manages), are resolved with the dashboard
+            # DM-wiring work, not here.
+            "scan_threats", "scan_schedules",
+            # `fan_status` was in the audit but was dropped when the list was
+            # first transcribed into this registry. WARN mode surfaced it on the
+            # first real run — precisely the transcription error a static list
+            # cannot catch about itself.
+            "fan_status",
+            # NOTE: `enrollment_tokens` is created by alert_manager/database.py,
+            # not by hw_monitor — hw_monitor only UPDATEs it. Listing it here
+            # grants the write, but the ownership question is open and tracked
+            # (same shape as nemesis_fwd/users). Do NOT read this entry as a
+            # settled claim that hw_monitor owns the table.
+            "enrollment_tokens",
+        ),
+    },
+    "watchdog": {
+        # Disjoint from hw_monitor despite the shared `hw_` prefix — the exact
+        # case explicit table lists were added for.
+        "tables": ("hw_alerts", "hw_alert_cooldowns"),
+    },
+    "nemesis_fwd": {
+        # audit_log is append-only and written by several actors; the helper adds
+        # its own attribution rows there.
+        "tables": ("audit_log",),
+        # COLUMN GRANT. The helper enforces account lockout itself (confirmed
+        # 2026-07-28), which means maintaining the three fields that make up the
+        # lockout state machine. `users` belongs to authentication, and the
+        # helper must never be able to touch password_hash, role, or is_active —
+        # a firewall helper that can grant itself admin is not a security
+        # boundary. The grant says exactly that and nothing more.
+        "columns": {
+            "users": ("failed_attempts", "lockout_until", "lockout_tier"),
+        },
+    },
 }
+
+# ── namespace enforcement mode (ADR 0001 rollout seam) ───────────────────────
+#
+# Turning the guard on for several long-running daemons at once risks an
+# AccessDenied in a process at 3am over a table nobody remembered. WARN mode
+# performs the full check and logs exactly what WOULD have been denied, while
+# allowing the write — so a namespace can be proven complete against real
+# traffic before it is allowed to break anything.
+#
+# OFF is retained for the existing `enforce=False` callers and means "do not
+# check at all"; it is NOT the same as WARN, which is the distinction that
+# matters during a retrofit.
+MODE_ENFORCE = "enforce"
+MODE_WARN = "warn"
+MODE_OFF = "off"
+
+_MODES = {}
+
+
+def set_namespace_mode(module, mode):
+    """Set enforcement mode for one module. Default for any module is ENFORCE."""
+    if mode not in (MODE_ENFORCE, MODE_WARN, MODE_OFF):
+        raise DataManagerError("unknown namespace mode: %r" % (mode,), module=module)
+    _MODES[module] = mode
+
+
+def namespace_mode(module):
+    return _MODES.get(module, MODE_ENFORCE)
+
+
+def _split_top_level(text, sep=","):
+    """Split on ``sep`` only at paren-depth 0 and outside quotes.
+
+    Naive ``text.split(",")`` is wrong for SQL: ``SET a = COALESCE(x, 0), b = 1``
+    splits into three pieces, and a string literal containing a comma splits into
+    two. This is an access-control parser, so getting that wrong means either
+    denying a legitimate write or — far worse — failing to notice a column that
+    was assigned.
+    """
+    parts, buf, depth, quote = [], [], 0, None
+    for ch in text:
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"', "`"):
+            quote = ch; buf.append(ch); continue
+        if ch == "(":
+            depth += 1; buf.append(ch); continue
+        if ch == ")":
+            depth -= 1; buf.append(ch); continue
+        if ch == sep and depth == 0:
+            parts.append("".join(buf)); buf = []; continue
+        buf.append(ch)
+    if quote is not None or depth != 0:
+        return None                      # unbalanced — refuse to guess
+    parts.append("".join(buf))
+    return parts
+
+
+_SET_RE = re.compile(r"\bset\b(.*?)(?:\bwhere\b|\breturning\b|$)",
+                     re.IGNORECASE | re.DOTALL)
+
+
+def updated_columns(sql):
+    """Columns assigned by an UPDATE, or ``None`` if that cannot be determined.
+
+    ``None`` is NOT "no columns" — it means the statement could not be parsed
+    with confidence, and every caller must treat it as a denial. Fail-closed is
+    the only safe reading: an unparsed assignment is an unknown write.
+    """
+    m = _SET_RE.search(sql)
+    if not m:
+        return None
+    assignments = _split_top_level(m.group(1))
+    if assignments is None:
+        return None
+    cols = []
+    for a in assignments:
+        if not a.strip():
+            return None
+        lhs = _split_top_level(a, "=")
+        if lhs is None or len(lhs) < 2:
+            return None                  # no assignment, or an ambiguous one
+        name = _ident(lhs[0])
+        if not name or not _IDENT_RE.match(name):
+            return None                  # not a bare column name — refuse
+        cols.append(name.lower())
+    return cols or None
+
+
+def allowed_columns(module, table):
+    """Column-level grant for ``module`` on ``table``, or ``None`` if it has none."""
+    spec = NAMESPACES.get(module)
+    if not isinstance(spec, dict):
+        return None
+    grants = spec.get("columns") or {}
+    cols = grants.get(table)
+    return {c.lower() for c in cols} if cols else None
+
+
+def check_write(module, table, op, sql=None):
+    """THE single decision point for every write. True = the write may proceed.
+
+    Kept as one function so enforce/warn/off can never drift between the
+    GuardedConnection path and the DataManager helper methods.
+    """
+    mode = namespace_mode(module)
+    if mode == MODE_OFF:
+        return True
+    if allowed(module, table):
+        return True
+
+    # ── column-level grant ───────────────────────────────────────────────────
+    # A narrow, deliberate widening of ADR 0001, added 2026-07-28. Two real
+    # cases drove it, both found in one audit pass: nemesis_fwd maintaining the
+    # lockout state on `users`, and hw_monitor updating `enrollment_tokens`
+    # created by database.py. Both are legitimate writes to a table the process
+    # does not own, and both are confined to specific columns.
+    #
+    # Deliberately restricted to UPDATE. INSERT/DELETE/DROP affect whole rows or
+    # the table itself, so "you may touch these columns" is not a meaningful
+    # limit on them — granting those needs full table ownership.
+    grant = allowed_columns(module, table)
+    if grant is not None and op == "update":
+        cols = updated_columns(sql) if sql else None
+        if cols is not None and set(cols) <= grant:
+            return True
+        # Unparseable, or touches something outside the grant: fall through to
+        # the warn/deny path below. Never assume in the caller's favour.
+        log.debug("data_manager: column grant not satisfied module=%r table=%r cols=%r grant=%r",
+                  module, table, cols, sorted(grant))
+
+    if mode == MODE_WARN:
+        # Deliberately WARNING, not INFO: this is a real access violation that is
+        # being allowed through on purpose, and it must be greppable.
+        log.warning(
+            "data_manager: WOULD DENY (warn-only) module=%r op=%s table=%r "
+            "— not in its namespace; add it or fix the caller before enforcing",
+            module, (op or "?").upper(), table)
+        return True
+    return False
 
 _WRITE_OPS = frozenset(("insert", "replace", "update", "delete", "create", "alter", "drop"))
 _READ_OPS = frozenset(("select", "with", "pragma", "explain", "begin", "commit",
@@ -172,7 +380,15 @@ def allowed(module, table):
         return False                    # unidentifiable write target — fail-closed
     if table == OP_LOG_TABLE:
         return False                    # the audit log is never module-writable
-    return any(table.startswith(p) for p in NAMESPACES[module])
+    spec = NAMESPACES[module]
+    if isinstance(spec, dict):
+        # Exact table names are checked BEFORE prefixes: an explicit grant is the
+        # precise statement of ownership, and a namespace may legitimately carry
+        # tables that share no prefix with each other.
+        if table in {t.lower() for t in spec.get("tables", ())}:
+            return True
+        return any(table.startswith(p) for p in spec.get("prefixes", ()))
+    return any(table.startswith(p) for p in spec)
 
 
 # ── guarded connection ────────────────────────────────────────────────────────
@@ -195,7 +411,7 @@ class GuardedConnection:
     def execute(self, sql, params=()):
         op, table = classify(sql)
         if is_write(op):
-            self._guard(op, table)
+            self._guard(op, table, sql)
         cur = self._raw.execute(sql, params)
         if is_write(op):
             self._dm._log_op(self._raw, self._module, table, op, cur.rowcount)
@@ -204,7 +420,7 @@ class GuardedConnection:
     def executemany(self, sql, seq_of_params):
         op, table = classify(sql)
         if is_write(op):
-            self._guard(op, table)
+            self._guard(op, table, sql)
         cur = self._raw.executemany(sql, seq_of_params)
         if is_write(op):
             self._dm._log_op(self._raw, self._module, table, op, cur.rowcount)
@@ -215,7 +431,7 @@ class GuardedConnection:
         for stmt in stmts:
             op, table = classify(stmt)
             if is_write(op):
-                self._guard(op, table)
+                self._guard(op, table, stmt)
         cur = self._raw.executescript(script)
         for stmt in stmts:
             op, table = classify(stmt)
@@ -223,14 +439,27 @@ class GuardedConnection:
                 self._dm._log_op(self._raw, self._module, table, op, None)
         return cur
 
-    def _guard(self, op, table):
+    def _guard(self, op, table, sql=None):
         if not self._enforce:
             return
-        if not allowed(self._module, table):
+        if not check_write(self._module, table, op, sql=sql):
             raise AccessDenied(
                 f"module {self._module!r} may not {op.upper()} table {table!r} "
                 f"— write-own violation (ADR 0001/0006)",
                 module=self._module, table=table, op=op, kind="access_denied")
+
+    def cursor(self):
+        """Return a GUARDED cursor.
+
+        Without this override, ``conn.cursor().execute("INSERT ...")`` bypasses
+        access control completely: the cursor comes from the RAW connection, so
+        the guard never sees the statement and the operation log never records
+        it. No module used cursors when the DM was written, which is why the gap
+        stayed latent — but it was always a hole, and the core_module retrofit
+        walks straight into it (hw_monitor and watchdog issue most of their
+        writes through cursors).
+        """
+        return GuardedCursor(self, self._raw.cursor())
 
     # delegate everything else to the raw connection
     def __getattr__(self, name):
@@ -248,6 +477,49 @@ class GuardedConnection:
 
 
 # ── the manager ───────────────────────────────────────────────────────────────
+
+class GuardedCursor:
+    """Cursor proxy applying the same write-own check as :class:`GuardedConnection`.
+
+    Deliberately a thin wrapper: it defers the decision to the owning guarded
+    connection so the two paths can never diverge in what they allow.
+    """
+
+    def __init__(self, guarded_conn, raw_cursor):
+        object.__setattr__(self, "_gc", guarded_conn)
+        object.__setattr__(self, "_raw", raw_cursor)
+
+    def execute(self, sql, params=()):
+        op, table = classify(sql)
+        if is_write(op):
+            self._gc._guard(op, table, sql)
+        cur = self._raw.execute(sql, params)
+        if is_write(op):
+            self._gc._dm._log_op(self._gc._raw, self._gc._module, table, op, None)
+        return cur
+
+    def executemany(self, sql, seq):
+        op, table = classify(sql)
+        if is_write(op):
+            self._gc._guard(op, table, sql)
+        cur = self._raw.executemany(sql, seq)
+        if is_write(op):
+            self._gc._dm._log_op(self._gc._raw, self._gc._module, table, op, None)
+        return cur
+
+    def executescript(self, script):
+        for stmt in _split_statements(script):
+            op, table = classify(stmt)
+            if is_write(op):
+                self._gc._guard(op, table, stmt)
+        return self._raw.executescript(script)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_raw"), name)
+
+    def __iter__(self):
+        return iter(self._raw)
+
 
 class DataManager:
     """Singleton DB access layer. One per process, built from the shared DB path."""
@@ -362,7 +634,7 @@ class DataManager:
         pre-increment value) with no read-modify-write window. Generalises the
         tickets_seq v0 fix."""
         self._check_ident(seq_table, column)
-        if not allowed(module, seq_table):
+        if not check_write(module, seq_table, "update"):
             raise AccessDenied(
                 f"module {module!r} may not write sequence {seq_table!r}",
                 module=module, table=seq_table, op="next_sequence", kind="access_denied")
@@ -387,7 +659,7 @@ class DataManager:
         ``text_value=True`` stores the value as TEXT with an INTEGER cast
         (the ``ai_rate_state`` v0 shape); otherwise an INTEGER column."""
         self._check_ident(table, key_col, val_col)
-        if not allowed(module, table):
+        if not check_write(module, table, "insert"):
             raise AccessDenied(
                 f"module {module!r} may not write counter {table!r}",
                 module=module, table=table, op="increment_counter", kind="access_denied")
@@ -425,7 +697,7 @@ class DataManager:
         instead (still access-checked + logged)."""
         cols = list(data.keys())
         self._check_ident(table, *cols, *conflict_cols)
-        if not allowed(module, table):
+        if not check_write(module, table, "insert"):
             raise AccessDenied(
                 f"module {module!r} may not write {table!r}",
                 module=module, table=table, op="upsert", kind="access_denied")

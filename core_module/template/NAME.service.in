@@ -1,0 +1,33 @@
+[Unit]
+Description=Nemesis __DISPLAY_NAME__
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=nemesis-db
+ExecStart=/usr/bin/python3 /opt/nemesis/core_module/__NAME__/process.py
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+
+# Arms nemesis_privsep.attest() — without this the attestation is inert.
+Environment=NEMESIS_EXPECT_USER=__SERVICE_USER__
+Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
+
+# Hardening. NOTE: several of these IMPLY NoNewPrivileges=yes and empty the
+# capability bounding set. `systemctl show` will still report what you wrote
+# here, not what the kernel applied — verify via /proc/<pid>/status.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+# 0770, not 0750: WAL sidecars need DIRECTORY write.
+ReadWritePaths=/var/lib/nemesis
+LogsDirectory=nemesis/__NAME__
+LogsDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target

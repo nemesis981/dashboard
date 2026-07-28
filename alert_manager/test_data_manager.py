@@ -262,6 +262,148 @@ def test_failure(dm):
                   "unsafe identifier rejected")
 
 
+# ── 6. explicit table lists + the shared-prefix collision (2026-07-28) ────────
+def test_explicit_table_lists(dm):
+    print("6. explicit table lists (shared prefix, disjoint ownership)")
+    # Two modules sharing the `xh_` prefix but owning disjoint tables — the exact
+    # hw_monitor / watchdog case a prefix grant cannot express.
+    dm_mod.NAMESPACES["t_mon"] = {"tables": ("xh_metrics", "xh_notifications")}
+    dm_mod.NAMESPACES["t_wat"] = {"tables": ("xh_alerts",)}
+    check(dm_mod.allowed("t_mon", "xh_metrics"), "t_mon may write its own xh_metrics")
+    check(dm_mod.allowed("t_wat", "xh_alerts"), "t_wat may write its own xh_alerts")
+    check(not dm_mod.allowed("t_wat", "xh_metrics"),
+          "t_wat may NOT write t_mon's xh_metrics (prefix grant could not express this)")
+    check(not dm_mod.allowed("t_mon", "xh_alerts"),
+          "t_mon may NOT write t_wat's xh_alerts")
+    # prefix form still works unchanged
+    check(dm_mod.allowed("tickets", "tickets_seq"), "prefix namespaces still work")
+
+
+# ── 7. three-state enforcement mode ──────────────────────────────────────────
+class _LogCap:
+    """Capture WARNING records emitted by data_manager for assertions."""
+    def __enter__(self):
+        import logging
+        self.recs = []
+        self._h = logging.Handler()
+        self._h.emit = lambda r: self.recs.append(r.getMessage())
+        dm_mod.log.addHandler(self._h)
+        self._lvl = dm_mod.log.level
+        dm_mod.log.setLevel(logging.WARNING)
+        return self
+    def __exit__(self, *a):
+        dm_mod.log.removeHandler(self._h)
+        dm_mod.log.setLevel(self._lvl)
+
+
+def test_three_state_modes(dm):
+    print("7. three-state enforcement mode")
+    dm_mod.NAMESPACES["t_mode"] = {"tables": ("tm_own",)}
+    check(dm_mod.namespace_mode("t_mode") == dm_mod.MODE_ENFORCE, "default mode is ENFORCE")
+    check(not dm_mod.check_write("t_mode", "tm_foreign", "insert"),
+          "ENFORCE denies a foreign table")
+    with _LogCap() as cap:
+        dm_mod.set_namespace_mode("t_mode", dm_mod.MODE_WARN)
+        allowed = dm_mod.check_write("t_mode", "tm_foreign", "insert")
+    check(allowed, "WARN allows the foreign write through")
+    check(any("WOULD DENY" in m and "tm_foreign" in m for m in cap.recs),
+          "WARN logs a greppable WOULD DENY naming the table")
+    with _LogCap() as cap:
+        dm_mod.set_namespace_mode("t_mode", dm_mod.MODE_OFF)
+        allowed = dm_mod.check_write("t_mode", "tm_foreign", "insert")
+    check(allowed, "OFF allows the foreign write")
+    check(not cap.recs, "OFF logs nothing (distinct from WARN)")
+    dm_mod.set_namespace_mode("t_mode", dm_mod.MODE_ENFORCE)
+    check(not dm_mod.check_write("t_mode", "tm_foreign", "insert"), "back to ENFORCE denies again")
+    expect_raises(DataManagerError,
+                  lambda: dm_mod.set_namespace_mode("t_mode", "banana"),
+                  "unknown mode rejected")
+
+
+# ── 8. column grants — the nemesis_fwd/users case (security-critical) ─────────
+def test_column_grant(dm):
+    print("8. column grants (UPDATE-only, fail-closed parsing)")
+    dm_mod.NAMESPACES["t_fwd"] = {
+        "tables": ("tf_audit",),
+        "columns": {"tf_users": ("failed_attempts", "lockout_until", "lockout_tier")},
+    }
+    def allow(sql, op="update", table="tf_users"):
+        return dm_mod.check_write("t_fwd", table, op, sql=sql)
+    # legitimate lockout writes
+    check(allow("UPDATE tf_users SET failed_attempts = failed_attempts + 1 WHERE id=?"),
+          "increment of a granted column allowed")
+    check(allow("UPDATE tf_users SET failed_attempts=?, lockout_until=?, lockout_tier=? WHERE id=?"),
+          "all three granted columns allowed")
+    check(allow("UPDATE tf_users SET failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE id=?"),
+          "reset (NULL/0) allowed")
+    # privilege-escalation attempts — MUST be denied
+    check(not allow("UPDATE tf_users SET password_hash='x' WHERE id=1"),
+          "cannot write ungranted password_hash")
+    check(not allow("UPDATE tf_users SET failed_attempts=0, password_hash='x' WHERE id=1"),
+          "cannot smuggle password_hash beside a granted column")
+    check(not allow("UPDATE tf_users SET role='admin' WHERE id=1"),
+          "cannot write role")
+    check(not dm_mod.check_write("t_fwd", "tf_users", "delete", sql="DELETE FROM tf_users WHERE id=1"),
+          "grant is UPDATE-only: DELETE denied")
+    check(not dm_mod.check_write("t_fwd", "tf_users", "insert",
+                                 sql="INSERT INTO tf_users(id) VALUES(1)"),
+          "grant is UPDATE-only: INSERT denied")
+    # parser edge cases — deny when unsure
+    check(allow("UPDATE tf_users SET failed_attempts = COALESCE(failed_attempts,0)+1 WHERE id=?"),
+          "comma inside a function call is not a second column")
+    check(not allow("UPDATE tf_users SET lockout_until='a,b', password_hash='y' WHERE id=1"),
+          "comma inside a string literal does not hide a column")
+    check(not allow("UPDATE tf_users SET password_hash='a=b' WHERE id=1"),
+          "'=' inside a literal does not confuse the LHS")
+    check(not allow("UPDATE tf_users SET failed_attempts = COALESCE(x, 0 WHERE id=1"),
+          "unbalanced parens -> denied")
+    check(not dm_mod.check_write("t_fwd", "tf_users", "update", sql=None),
+          "no sql supplied -> denied (cannot verify => refuse)")
+    # scoped to the granted table only
+    check(not allow("UPDATE tf_other SET failed_attempts=1 WHERE id=1", table="tf_other"),
+          "grant does not extend to another table")
+
+
+# ── 9. GuardedCursor + executescript (regression: the .cursor()/script traps) ─
+def test_guarded_cursor_and_script(dm):
+    print("9. GuardedCursor + executescript guarding")
+    dm_mod.NAMESPACES["t_cur"] = {"tables": ("tc_own",)}
+    # Create both tables OUT OF BAND (raw connection): a guarded t_cur connection
+    # correctly refuses to CREATE tc_foreign, which it does not own, so the tables
+    # must exist before the guarded-write assertions below.
+    import sqlite3 as _sqlite3
+    _raw = _sqlite3.connect(dm._db_path)
+    _raw.execute("CREATE TABLE IF NOT EXISTS tc_own (x INTEGER)")
+    _raw.execute("CREATE TABLE IF NOT EXISTS tc_foreign (x INTEGER)")
+    _raw.commit(); _raw.close()
+    conn = dm.connect("t_cur")
+
+    cur = conn.cursor()
+    check(type(cur).__name__ == "GuardedCursor", "cursor() returns a GuardedCursor, not a raw cursor")
+    cur.execute("INSERT INTO tc_own VALUES (1)"); conn.commit()
+    check(True, "owned write via cursor succeeds")
+    expect_raises(AccessDenied,
+                  lambda: conn.cursor().execute("INSERT INTO tc_foreign VALUES (1)"),
+                  "foreign write via cursor DENIED (no guard bypass through .cursor())")
+
+    # executescript on BOTH GuardedConnection and GuardedCursor must run the guard
+    # (and not raise NameError — the 2026-07-28 copy/paste bug). A foreign write in
+    # the script must surface as AccessDenied, proving the guard executed cleanly.
+    expect_raises(AccessDenied,
+                  lambda: conn.executescript("INSERT INTO tc_foreign VALUES (2);"),
+                  "GuardedConnection.executescript guards a foreign write (not NameError)")
+    expect_raises(AccessDenied,
+                  lambda: conn.cursor().executescript("INSERT INTO tc_foreign VALUES (3);"),
+                  "GuardedCursor.executescript guards a foreign write")
+    # an owned-only script runs without raising
+    try:
+        conn.executescript("INSERT INTO tc_own VALUES (4); INSERT INTO tc_own VALUES (5);")
+        check(True, "owned-only executescript runs cleanly")
+    except Exception as e:  # noqa: BLE001
+        check(False, f"owned-only executescript should not raise (got {type(e).__name__}: {e})")
+    conn.close()
+
+
 def main():
     tmp = tempfile.mkdtemp(prefix="dm_test_")
     db = os.path.join(tmp, "test.db")
@@ -273,6 +415,10 @@ def main():
     test_logging(dm)
     test_actor_on_raw_writes(dm)
     test_failure(dm)
+    test_explicit_table_lists(dm)
+    test_three_state_modes(dm)
+    test_column_grant(dm)
+    test_guarded_cursor_and_script(dm)
     print()
     if _failures:
         print(f"RESULT: {len(_failures)} FAILURE(S):")

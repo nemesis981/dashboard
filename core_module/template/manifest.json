@@ -1,0 +1,16 @@
+{
+  "name": "template_process",
+  "display_name": "Template Process",
+  "description": "One line, plain English. Shown in Settings AND given to the AI as context, so write it for a user who is troubleshooting, not for a developer.",
+  "stopping_this_means": "What stops working while this process is disabled. REQUIRED — the AI quotes it when advising a user to stop this process, and the Settings toggle shows it as the confirmation text.",
+  "version": "0.1.0",
+  "interval_seconds": 60,
+  "disableable": true,
+  "requires_credential_to_disable": true,
+  "max_disable_minutes": 30,
+  "namespace": {
+    "tables": []
+  },
+  "service_user": "nemesis-template",
+  "unit_name": "template-process"
+}
