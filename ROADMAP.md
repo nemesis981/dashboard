@@ -12,7 +12,9 @@ Nemesis Firewall v1.0.0 is publicly available at [github.com/nemesis981/dashboar
 - Ticket system for security investigation tracking
 - Hardware monitor with per-sensor graphs, baseline anomaly detection, and historical analysis
 - Community Submission Queue (placeholder for future community threat feed)
-- Backup/restore system with scheduled backups
+- Backup/restore system with scheduled backups (data-capture layer; see
+  [ADR 0018](docs/architecture/0018-attacker-resistant-backup-and-manifest-recovery.md) for the
+  medium-protection, remote-action, and whole-system-recovery design around it, not yet built)
 - Configuration wizard (no terminal required for settings changes)
 - Diagnostics page with 12 automated checks and one-click support submission
 - Install script tested on Ubuntu 22.04/24.04/26.04
