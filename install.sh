@@ -765,6 +765,10 @@ setup_nemesis_group() {
     # secrets, which the services receive via systemd EnvironmentFile (read by
     # the manager as root) and therefore do not need directly.
     groupadd --system nemesis-db 2>/dev/null || true
+    # Socket group for nemesis-fwd. BOTH authorised peers must be members or
+    # they cannot open /run/nemesis/fwd.sock (mode 0660 root:nemesis-fw) at all —
+    # the helper never even sees the connection to refuse it.
+    groupadd --system nemesis-fw 2>/dev/null || true
     local _svc_user
     for _svc_user in nemesis-diag nemesis-hwmon nemesis-alertw \
                      nemesis-vpndns nemesis-canary nemesis-watchdog; do
@@ -773,7 +777,10 @@ setup_nemesis_group() {
                     --gid nemesis-db "$_svc_user" 2>/dev/null || true
         fi
     done
-    ok "Service users created (nemesis-db group + 6 per-service accounts)"
+    # Grant socket access to the two peers the firewall helper authorises.
+    usermod -a -G nemesis-fw "$SUDO_USER" 2>/dev/null || true
+    usermod -a -G nemesis-fw nemesis-alertw 2>/dev/null || true
+    ok "Service users created (nemesis-db + nemesis-fw groups, 6 per-service accounts)"
     ok "Group 'nemesis' ready"
 
     usermod -aG nemesis "$SUDO_USER"

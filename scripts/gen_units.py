@@ -132,6 +132,48 @@ SERVICES = {
     exe=f"{NEW_ROOT}/alert_manager/diagnostics_watcher.py",
     after=["network.target"], wants=[],
     extra=["EnvironmentFile=/etc/nemesis.env"]),
+ "nemesis-fwd": dict(
+    dest="alert_manager", desc="Nemesis Privileged Firewall Helper", user="root",
+    exe=f"{NEW_ROOT}/alert_manager/nemesis_fwd.py",
+    after=["network.target"], wants=[],
+    # RUNS AS ROOT, DELIBERATELY. ufw enforces an application-level real-UID
+    # check, so no capability grant lets a non-root process drive it. Privilege
+    # is RELOCATED into this one small single-purpose process behind three
+    # verification layers — not eliminated. Every hardening directive that
+    # implies NoNewPrivileges is therefore omitted here for the same reason it
+    # was for dashboard: they would break the very thing this process exists to
+    # do.
+    # The SAME trap that bit dashboard this morning: ProtectKernelTunables,
+    # ProtectKernelModules, ProtectKernelLogs, ProtectControlGroups, ProtectClock,
+    # RestrictSUIDSGID, RestrictRealtime, RestrictNamespaces, LockPersonality and
+    # SystemCallFilter each IMPLY NoNewPrivileges=yes and strip CapBnd to empty
+    # (measured 2026-07-28: CapBnd 0000000000000000). An empty bounding set means
+    # even root holds no CAP_NET_ADMIN, so ufw's netlink/iptables work fails —
+    # in the one process whose entire purpose is running ufw.
+    #
+    # Verify with /proc/<pid>/status (CapBnd, NoNewPrivs), never systemctl show:
+    # the configured and effective values diverge silently, which is exactly how
+    # this was missed the first time.
+    omit_hardening=["NoNewPrivileges", "ProtectSystem", "ProtectHome",
+                    "PrivateTmp", "SystemCallFilter",
+                    "ProtectKernelTunables", "ProtectKernelModules",
+                    "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
+                    "RestrictSUIDSGID", "RestrictRealtime", "RestrictNamespaces",
+                    "LockPersonality"],
+    omit_capability_drop=True,
+    extra=[
+      # RuntimeDirectory is load-bearing: a socket in a directory the app group
+      # can write is vulnerable to squatting — unlink it, bind your own, and you
+      # MITM every firewall decision. systemd owns and clears this one.
+      "RuntimeDirectory=nemesis",
+      "RuntimeDirectoryMode=0755",
+      "Environment=NEMESIS_FWD_SOCKET=/run/nemesis/fwd.sock",
+      f"Environment=NEMESIS_DASH_USER={INSTALL_USER}",
+      "Environment=NEMESIS_ALERTW_USER=nemesis-alertw",
+      "Environment=NEMESIS_FWD_GROUP=nemesis-fw",
+      # Credential-cache idle timeout (view ops only; writes always re-verify).
+      "Environment=NEMESIS_FWD_CACHE_IDLE=300",
+    ]),
  "vpn-dns-guard": dict(
     dest="core", desc="Nemesis VPN-Aware Upstream DNS Guard", user="nemesis-vpndns",
     exe=f"{NEW_ROOT}/core/vpn_dns_guard.py",
@@ -251,4 +293,4 @@ if CHECK_ONLY:
             print(f"    {d.replace(ROOT + '/', '')}")
         print("\n  Run: python3 scripts/gen_units.py")
         sys.exit(1)
-    print("gen_units --check: PASS — all 8 units match the generator")
+    print("gen_units --check: PASS — all %d units match the generator" % len(SERVICES))

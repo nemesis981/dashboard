@@ -25,7 +25,7 @@ def run() -> dict:
     # Count today's alerts
     try:
         r = subprocess.run(
-            ["sudo", "tail", "-n", "200000", "/var/log/suricata/fast.log"],
+            ["tail", "-n", "200000", "/var/log/suricata/fast.log"],
             capture_output=True, text=True, timeout=30,
         )
         p1 = p2 = p3 = 0
@@ -52,7 +52,7 @@ def run() -> dict:
     # Tail suricata.log for errors
     try:
         r = subprocess.run(
-            ["sudo", "tail", "-n", "50", "/var/log/suricata/suricata.log"],
+            ["tail", "-n", "50", "/var/log/suricata/suricata.log"],
             capture_output=True, text=True, timeout=10,
         )
         log_lines = r.stdout.splitlines() if r.stdout else []

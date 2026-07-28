@@ -36,3 +36,8 @@ docs/COLLABORATION.md
 # Installer sidecar conf — can hold a live enrollment token + Tailscale pre-auth key
 # (build_installer.py --token bakes one locally); must NEVER be committed (Rule 8).
 nemesis_install.conf
+
+# migrate_to_opt.sh's runtime marker — records the pre-migration mode/path for
+# --rollback. Repo-root, untracked-but-present after any real migration run;
+# excluded rather than deleted, since do_rollback still needs to read it.
+.nemesis-premigration-mode

@@ -97,11 +97,16 @@ def cleanup(rule_id):
 
 
 def patch_externals(live):
+    # 2026-07-28: alert_watcher no longer calls ufw_delete. The expiry path is
+    # expire_quarantine(), a narrower op the helper only honours after
+    # independently confirming the quarantines row is active and past its
+    # expires_at. The key is still called "ufw_delete" so the existing
+    # assertions below read unchanged — it now counts expiry calls.
     calls = {"ufw_insert": [], "ufw_delete": [], "emails": []}
     saved = {
         "enrich": alert_watcher.enrich_ip,
         "insert": alert_watcher.ufw_insert_top,
-        "delete": alert_watcher.ufw_delete,
+        "delete": alert_watcher.expire_quarantine,
         "email": alert_watcher.send_email,
     }
 
@@ -130,7 +135,7 @@ def patch_externals(live):
             return True
 
         alert_watcher.ufw_insert_top = fake_insert
-        alert_watcher.ufw_delete = fake_delete
+        alert_watcher.expire_quarantine = fake_delete
 
     return calls, saved
 
@@ -138,7 +143,7 @@ def patch_externals(live):
 def restore(saved):
     alert_watcher.enrich_ip = saved["enrich"]
     alert_watcher.ufw_insert_top = saved["insert"]
-    alert_watcher.ufw_delete = saved["delete"]
+    alert_watcher.expire_quarantine = saved["delete"]
     alert_watcher.send_email = saved["email"]
 
 

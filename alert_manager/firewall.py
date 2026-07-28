@@ -1,41 +1,46 @@
 """Shared helpers for parsing Suricata fast.log lines and managing UFW rules.
 
-Both the dashboard (runs as `paul`) and alert_watcher (runs as `root`) import
-from this module. The ufw_* helpers auto-detect whether to prepend `sudo`
-based on the current effective UID, so callers don't need to know.
+The ADR-0005 firewall chokepoint. Nothing in Nemesis calls ufw directly any
+more: every operation goes through nemesis-fwd, the privileged helper that owns
+the privilege and verifies the caller before acting.
 
-Single source of truth: any change to UFW invocation goes here.
+WHY THIS CHANGED (2026-07-28). ufw enforces an application-level real-UID check
+(`ufw/util.py`: `if do_checks and os.getuid() != 0: raise OSError(EPERM)`), so a
+hardened, de-privileged service can never drive it — capabilities change what a
+process may DO, never what getuid() RETURNS. When alert_watcher was
+de-privileged its `sudo -n ufw` calls began failing, and the previous
+`load_blocked_ips()` turned that failure into an empty set with nothing logged:
+
+    rc, out, _err = _run_ufw("status")
+    if rc != 0:
+        return set()          # indistinguishable from "nothing is blocked"
+
+FAIL LOUD. Every function here now raises on transport failure or refusal. A
+firewall action that silently does nothing is worse than one that loudly
+refuses, and the silent version is precisely what hid the outage.
+
+`load_blocked_ips()` is GONE, not reimplemented. alert_watcher used it for a
+dedup cache; block operations are idempotent at the ufw level, so the cache was
+an optimisation whose only real effect was to hide this failure.
+
+TWO CALLER PATHS, distinguished by the helper's peer policy, not by anything
+asserted here:
+  * unattended (alert_watcher) — no credential. Allowed block_ip, deny_ip and
+    expire_quarantine; structurally incapable of anything else.
+  * admin (dashboard) — every write needs a fresh admin password, verified by
+    the helper against the stored bcrypt hash.
 """
 
-import os
 import logging
 import ipaddress
-import subprocess
 from datetime import datetime
 
-UFW_BIN = "/usr/sbin/ufw"
-UFW_TIMEOUT = 10
+import fw_client
+from fw_client import (  # noqa: F401  (re-exported for callers)
+    FirewallError, FirewallDenied, FirewallUnavailable,
+)
 
 log = logging.getLogger(__name__)
-
-
-def _ufw_argv(*args):
-    """Build the argv for a ufw invocation, prepending sudo if not running as root."""
-    cmd = [UFW_BIN, *args]
-    if os.geteuid() != 0:
-        cmd = ["sudo", "-n", *cmd]
-    return cmd
-
-
-def _run_ufw(*args):
-    """Run a ufw subcommand and return (returncode, stdout, stderr)."""
-    result = subprocess.run(
-        _ufw_argv(*args),
-        capture_output=True,
-        text=True,
-        timeout=UFW_TIMEOUT,
-    )
-    return result.returncode, result.stdout, result.stderr
 
 
 def _valid_ip(ip):
@@ -46,62 +51,72 @@ def _valid_ip(ip):
         return False
 
 
+# ── unattended path (alert_watcher) ──────────────────────────────────────────
+
 def ufw_insert_top(ip):
-    """Insert a deny rule at position 1 (used for auto-quarantine)."""
+    """Auto-quarantine: deny rule at position 1. Raises on failure.
+
+    Idempotent at the ufw level — re-adding an existing deny is harmless, which
+    is why the dedup cache was removed rather than replaced.
+    """
     if not _valid_ip(ip):
-        log.warning("refusing to insert ufw rule for invalid IP: %r", ip)
-        return False
-    rc, _out, err = _run_ufw("insert", "1", "deny", "from", ip)
-    if rc == 0:
-        log.info("ufw insert 1 deny from %s applied", ip)
-        return True
-    log.error("ufw insert failed for %s (rc=%d): %s", ip, rc, err.strip())
-    return False
+        raise ValueError("refusing to block invalid IP: %r" % (ip,))
+    fw_client.block_ip(ip)
+    log.info("firewall: block_ip %s applied via nemesis-fwd", ip)
+    return True
 
 
-def ufw_deny_append(ip):
-    """Append a deny rule at the end (used for manual block confirmations)."""
+def ufw_deny_append(ip, username=None, session_id=None, password=None):
+    """Append a deny rule (permanent block).
+
+    Reached both unattended (alert_watcher's `block` action) and by an admin.
+    Credential arguments are forwarded untouched; the HELPER decides what its
+    peer policy requires. This side never asserts privilege on its own behalf.
+    """
     if not _valid_ip(ip):
-        log.warning("refusing to append ufw rule for invalid IP: %r", ip)
-        return False
-    rc, _out, err = _run_ufw("deny", "from", ip)
-    if rc == 0:
-        log.info("ufw deny from %s applied", ip)
-        return True
-    log.error("ufw deny failed for %s (rc=%d): %s", ip, rc, err.strip())
-    return False
+        raise ValueError("refusing to deny invalid IP: %r" % (ip,))
+    fw_client.deny_ip(ip, username, session_id, password)
+    log.info("firewall: deny_ip %s applied via nemesis-fwd", ip)
+    return True
 
 
-def ufw_delete(ip):
-    """Remove the deny rule for an IP. Returns True if removed, False otherwise."""
+def expire_quarantine(ip):
+    """Release a quarantine the DATABASE confirms has already expired.
+
+    Deliberately NOT a general unblock. The helper independently re-derives from
+    the `quarantines` table whether this IP has an active row past its
+    expires_at, and refuses otherwise — so an unattended caller cannot lift a
+    block it merely wants lifted, only one already due for release.
+    """
     if not _valid_ip(ip):
-        return False
-    rc, _out, err = _run_ufw("delete", "deny", "from", ip)
-    if rc == 0:
-        log.info("ufw delete deny from %s applied", ip)
-        return True
-    log.warning("ufw delete for %s (rc=%d): %s",
-                ip, rc, err.strip() or "no matching rule")
-    return False
+        raise ValueError("refusing to expire invalid IP: %r" % (ip,))
+    fw_client.expire_quarantine(ip)
+    log.info("firewall: expire_quarantine %s applied via nemesis-fwd", ip)
+    return True
 
 
-def load_blocked_ips():
-    """Return the set of IPs currently blocked by ufw. Empty set on failure."""
-    try:
-        rc, out, _err = _run_ufw("status")
-        if rc != 0:
-            return set()
-        ips = set()
-        for line in out.splitlines():
-            if "DENY" not in line:
-                continue
-            for token in line.split():
-                if _valid_ip(token):
-                    ips.add(token)
-        return ips
-    except Exception as e:
-        log.warning("could not read ufw status: %s", e)
-        return set()
+# ── admin path (dashboard) — fresh credential required for every write ───────
+
+def ufw_delete(ip, username, session_id, password):
+    """Admin-initiated unblock. The password is verified by the helper against
+    the stored hash; this process never sees a verification result it could
+    forge."""
+    if not _valid_ip(ip):
+        raise ValueError("refusing to unblock invalid IP: %r" % (ip,))
+    fw_client.unblock_ip(ip, username, session_id, password)
+    log.info("firewall: unblock_ip %s applied via nemesis-fwd by %s", ip, username)
+    return True
+
+
+def list_blocked(username, session_id, password=None):
+    """Admin view of blocked IPs. Gated by the same credential as writes; the
+    helper may satisfy it from its short idle-timeout cache."""
+    return fw_client.list_blocked(username, session_id, password).get("blocked", [])
+
+
+def list_rules(username, session_id, password=None):
+    """Full numbered ruleset, for the queued rules-management feature."""
+    return fw_client.list_rules(username, session_id, password).get("rules", "")
 
 
 def parse_alert(alert_line):

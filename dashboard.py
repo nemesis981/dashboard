@@ -78,7 +78,8 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_enrollment_tokens_table)
 from ip_enrichment import enrich_ip
 import tailscale_api
-from firewall import parse_alert, ufw_delete, ufw_deny_append
+from firewall import (parse_alert, ufw_delete, ufw_deny_append,
+                      FirewallError, FirewallDenied, FirewallUnavailable)
 import hw_monitor
 import modules_loader
 import diagnostics as _diag
@@ -115,7 +116,15 @@ _BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
 auth_log = logging.getLogger("nemesis.auth")
 # Sessions need a STABLE secret key — persist one outside the repo (0600,
 # gitignored) so a restart doesn't invalidate everyone's session.
-_SECRET_KEY_PATH = os.path.join(_HERE, "alert_manager", ".flask_secret")
+# Lives in the DATA directory, not the code tree. Under ProtectSystem=strict
+# /opt/nemesis is read-only, so a missing secret here could be read but never
+# regenerated — turning a self-healing case into an unrecoverable startup
+# failure exactly when the file is absent. Falls back to the legacy in-tree
+# path if that is where it already lives, so this is safe pre- and post-move.
+_LEGACY_SECRET_PATH = os.path.join(_HERE, "alert_manager", ".flask_secret")
+_SECRET_KEY_PATH = os.path.join(nemesis_paths.DATA_DIR, ".flask_secret")
+if not os.path.exists(_SECRET_KEY_PATH) and os.path.exists(_LEGACY_SECRET_PATH):
+    _SECRET_KEY_PATH = _LEGACY_SECRET_PATH
 
 
 def _load_secret_key() -> str:
@@ -230,6 +239,36 @@ def _create_user(username: str, display_name: str, password: str, role: str = "a
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def _fw_credential():
+    """Admin password for a privileged firewall action, from the POST body.
+
+    Never stored, never logged, never cached on this side. It is forwarded to
+    nemesis-fwd, which verifies it against the stored bcrypt hash itself — this
+    process deliberately has no way to assert "already verified", so a
+    compromised dashboard has no boolean to forge.
+    """
+    data = request.get_json(silent=True) or {}
+    return data.get("password")
+
+
+def _fw_session_id():
+    try:
+        return session.get("_id")
+    except Exception:
+        return None
+
+
+def _fw_error_response(exc):
+    """Map a helper refusal to an HTTP response. Fails CLOSED and says so."""
+    if isinstance(exc, FirewallUnavailable):
+        return jsonify({"error": "firewall service unavailable — no rule was "
+                                 "changed", "kind": "unavailable"}), 503
+    kind = getattr(exc, "kind", "internal")
+    status = {"credential_denied": 401, "admin_denied": 403, "locked_out": 423,
+              "peer_denied": 403, "bad_request": 400}.get(kind, 502)
+    return jsonify({"error": str(exc), "kind": kind}), status
 
 
 def _actor() -> str:
@@ -544,7 +583,7 @@ def get_suricata_alerts():
         return _suricata_cache["lines"]
     try:
         result = subprocess.run(
-            ["sudo", "tail", "-n", "100", "/var/log/suricata/fast.log"],
+            ["tail", "-n", "100", "/var/log/suricata/fast.log"],
             capture_output=True, text=True
         )
         lines = [l for l in result.stdout.strip().split("\n") if l]
@@ -583,7 +622,7 @@ def get_alert_counts():
                 and now_mono - _alert_counts_cache["ts"] < _ALERT_COUNTS_CACHE_TTL):
             return cached
         result = subprocess.run(
-            ["sudo", "tail", "-n", "200000", "/var/log/suricata/fast.log"],
+            ["tail", "-n", "200000", "/var/log/suricata/fast.log"],
             capture_output=True, text=True, timeout=30,
         )
         prefix = today + "-"
@@ -624,7 +663,7 @@ def _get_today_drilldown():
         return cached
 
     result = subprocess.run(
-        ["sudo", "tail", "-n", "200000", "/var/log/suricata/fast.log"],
+        ["tail", "-n", "200000", "/var/log/suricata/fast.log"],
         capture_output=True, text=True, timeout=30,
     )
     prefix = today + "-"
@@ -846,12 +885,24 @@ def _ensure_audit_log_table():
 
 
 def _audit(action, rule_id=None, ip=None):
-    """Record a state-changing decision. `user` is derived from request.remote_addr."""
+    """Record a state-changing decision, attributed to the logged-in USERNAME.
+
+    This used to store ``request.remote_addr``, which meant every row on a
+    locally-reached dashboard read ``127.0.0.1``: the column is named `user`,
+    but the audit log could not tell you who did anything. `_actor()` is the
+    existing resolver (Flask-Login username, client IP only when nobody is
+    authenticated), so audit attribution now matches what nemesis-fwd records
+    for the same action instead of contradicting it.
+
+    The `ip` argument is the TARGET of the action (the address being blocked or
+    unblocked), not the client — the two were never the same field.
+    """
     try:
         _ensure_audit_log_table()
         try:
-            user = request.remote_addr or "unknown"
+            user = _actor()
         except RuntimeError:
+            # No request context: scheduled sweeps and other unattended callers.
             user = "system"
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         try:
@@ -946,7 +997,7 @@ def render_quarantine_banner_html(quarantines):
             </div>
             <div class="q-actions">
                 <button class="btn btn-block" onclick="confirmQuarantine({q['id']})">✓ Confirm</button>
-                <button class="btn btn-ignore" onclick="liftQuarantine({q['id']}, {json.dumps(q['ip'])})">↻ Lift</button>
+                <button class="btn btn-ignore" onclick="liftQuarantine({q['id']}, &quot;{html.escape(q['ip'])}&quot;)">↻ Lift</button>
             </div>
         </div>""")
     return "".join(rows)
@@ -2087,6 +2138,26 @@ def api_quarantine_confirm(q_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/firewall/credential/drop", methods=["POST"])
+def api_firewall_credential_drop():
+    """Immediately invalidate this session's cached view credential.
+
+    Called by the page on visibility/focus loss. Dropping your OWN cached
+    credential is never a privileged act, so it needs no credential — requiring
+    one would be circular. Best-effort: the helper's idle timeout is the actual
+    guarantee and holds regardless of whether this is ever called.
+    """
+    try:
+        import fw_client
+        fw_client.drop_credential(_actor(), _fw_session_id())
+        return jsonify({"success": True})
+    except Exception as exc:
+        # Never surface an error for this — it is an optimisation, and a failed
+        # drop must not break page teardown.
+        auth_log.info("firewall credential drop failed (non-fatal): %s", exc)
+        return jsonify({"success": False}), 200
+
+
 @app.route("/api/quarantine/<int:q_id>/lift", methods=["POST"])
 def api_quarantine_lift(q_id):
     try:
@@ -2101,7 +2172,16 @@ def api_quarantine_lift(q_id):
         if status != "active":
             conn.close()
             return jsonify({"error": f"quarantine status is {status}, cannot lift"}), 409
-        ufw_ok = ufw_delete(ip)
+        # Admin-initiated unblock: a fresh credential is required every time,
+        # verified by nemesis-fwd against the stored hash. If it refuses, the DB
+        # is NOT updated — showing a lifted quarantine whose ufw rule is still
+        # in place would be worse than refusing.
+        try:
+            ufw_delete(ip, _actor(), _fw_session_id(), _fw_credential())
+        except FirewallError as exc:
+            conn.close()
+            return _fw_error_response(exc)
+        ufw_ok = True
         c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
         c.execute("UPDATE quarantines SET status='lifted', actor=? WHERE id=?", (_actor(), q_id))
         conn.commit()
@@ -2263,6 +2343,25 @@ def test_enrichment(ip):
 def set_action(rule_id, action):
     try:
         src_ip = request.args.get("ip", "")
+        # The firewall call goes FIRST, before any write transaction is opened
+        # here. Two independent reasons, the first learned the hard way:
+        #
+        #  1. nemesis-fwd writes its OWN audit row into this same database. When
+        #     this route held an uncommitted write txn across the helper call,
+        #     that write hit SQLITE_BUSY -> "database is locked", so every
+        #     admin-initiated block silently lost its helper-side audit record
+        #     while still applying the rule and returning 200. A privileged
+        #     firewall write with no audit trail is exactly what this helper
+        #     exists to prevent.
+        #  2. If the block fails, nothing should have been recorded as blocked.
+        #
+        # This mirrors the lift route, which has always ordered it this way.
+        if action == "block" and src_ip:
+            # Admin-initiated permanent block — fresh credential each time.
+            try:
+                ufw_deny_append(src_ip, _actor(), _fw_session_id(), _fw_credential())
+            except FirewallError as exc:
+                return _fw_error_response(exc)
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
         c.execute("UPDATE alerts SET action=? WHERE rule_id=?", (action, rule_id))
@@ -2272,8 +2371,6 @@ def set_action(rule_id, action):
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
                 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
                 (rule_id, "", "", 1, "", "UNKNOWN", action, now, now))
-        if action == "block" and src_ip:
-            ufw_deny_append(src_ip)
         conn.commit()
         conn.close()
         _audit(action=action, rule_id=rule_id, ip=(src_ip or None))
@@ -7691,6 +7788,29 @@ def dashboard():
     </div>
 
     <!-- Alert Modal -->
+<div id="fwCredModal" onclick="if(event.target===this)fwCredCancel()"
+     style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:2000">
+<div style="background:#0d1117;border:1px solid #1e2d4e;border-radius:8px;padding:24px;max-width:420px;margin:12% auto;position:relative">
+    <h3>&#128274; Confirm Admin Password</h3>
+    <p id="fwCredWhat" style="color:#ccc;font-size:0.9em;margin:4px 0 10px"></p>
+    <label style="color:#aaa;font-size:0.85em">Admin password</label>
+    <input type="password" id="fwCredInput" autocomplete="current-password"
+           placeholder="Password"
+           style="width:100%;padding:8px;margin-top:4px;background:#161b22;color:#e6edf3;
+                  border:1px solid #30363d;border-radius:4px;font-size:1em"
+           onkeydown="if(event.key==='Enter')fwCredOk();if(event.key==='Escape')fwCredCancel()">
+    <p id="fwCredErr" style="color:#ff6666;font-size:0.85em;min-height:1.1em;margin:6px 0 0"></p>
+    <div style="margin-top:16px;display:flex;gap:8px">
+        <button type="button" onclick="fwCredOk()"
+                style="background:#1f6feb;color:#fff;border:none;border-radius:4px;
+                       padding:8px 18px;font-size:0.95em;cursor:pointer">Confirm</button>
+        <button type="button" onclick="fwCredCancel()"
+                style="background:#30363d;color:#e6edf3;border:none;border-radius:4px;
+                       padding:8px 18px;font-size:0.95em;cursor:pointer">Cancel</button>
+    </div>
+</div>
+</div>
+
     <div class="modal" id="alertModal">
         <div class="modal-content" style="max-height:85vh;overflow-y:auto">
             <h3>🔍 Nemesis AI Analysis</h3>
@@ -8176,12 +8296,98 @@ def dashboard():
                 }});
         }}
 
+        /* ── Privileged firewall actions ──────────────────────────────
+           Every ufw change is performed by nemesis-fwd, which verifies the
+           admin password itself against the stored hash. This page cannot
+           assert "already verified" — there is no such field to send. */
+        /* In-page modal with a real masked field. Deliberately NOT
+           window.prompt(): that renders the password in plaintext as it is
+           typed, which would undercut the credential verification this whole
+           path exists to enforce. Returns a Promise so callers can await it. */
+        var _fwCredResolve = null;
+        function fwPrompt(actionLabel) {{
+            document.getElementById("fwCredWhat").textContent =
+                "This action requires re-entering your admin password: " + actionLabel + ".";
+            document.getElementById("fwCredErr").textContent = "";
+            var inp = document.getElementById("fwCredInput");
+            inp.value = "";
+            document.getElementById("fwCredModal").style.display = "flex";
+            setTimeout(function () {{ inp.focus(); }}, 30);
+            return new Promise(function (resolve) {{ _fwCredResolve = resolve; }});
+        }}
+
+        function _fwCredClose() {{
+            document.getElementById("fwCredModal").style.display = "none";
+            /* Never leave the password sitting in the DOM. */
+            document.getElementById("fwCredInput").value = "";
+        }}
+
+        function fwCredOk() {{
+            var v = document.getElementById("fwCredInput").value;
+            if (!v) {{
+                document.getElementById("fwCredErr").textContent = "Password required.";
+                return;
+            }}
+            _fwCredClose();
+            if (_fwCredResolve) {{ var r = _fwCredResolve; _fwCredResolve = null; r(v); }}
+        }}
+
+        function fwCredCancel() {{
+            _fwCredClose();
+            if (_fwCredResolve) {{ var r = _fwCredResolve; _fwCredResolve = null; r(null); }}
+        }}
+
+        function fwHandleError(d, fallback) {{
+            if (d && d.kind === "unavailable") {{
+                alert("Firewall service unavailable — no rule was changed.");
+            }} else if (d && d.kind === "credential_denied") {{
+                alert("Incorrect password. No rule was changed.");
+            }} else if (d && d.kind === "locked_out") {{
+                alert("Account is locked out. No rule was changed.");
+            }} else {{
+                alert(fallback + ": " + ((d && d.error) || "unknown"));
+            }}
+        }}
+
+        /* Best-effort acceleration ONLY. The server enforces a short idle
+           timeout regardless of whether this ever fires; a hostile or
+           non-cooperating client simply does not send it.
+           Honest limitation: browsers expose no true "screen locked" event.
+           Locking the screen does trigger this (the browser loses focus), but
+           so does switching tabs — an accepted tradeoff that errs toward
+           prompting more often. */
+        function fwDropCredential() {{
+            try {{
+                navigator.sendBeacon("/api/firewall/credential/drop");
+            }} catch (e) {{ /* never block page teardown on this */ }}
+        }}
+        document.addEventListener("visibilitychange", function () {{
+            if (document.visibilityState === "hidden") fwDropCredential();
+        }});
+        window.addEventListener("blur", fwDropCredential);
+
         function takeAction(action) {{
             var url = "/api/action/" + currentRuleId + "/" + action;
             if (action === "block" && currentSrcIp) url += "?ip=" + encodeURIComponent(currentSrcIp);
-            fetch(url, {{method: "POST"}}).then(r => r.json()).then(data => {{
-                closeModal();
-                location.reload();
+            var body = {{}};
+            var pwPromise = (action === "block")
+                /* Writes always require a fresh credential — never cached. */
+                ? fwPrompt("block " + (currentSrcIp || "this source"))
+                : Promise.resolve("");
+            pwPromise.then(function (pw) {{
+              if (action === "block") {{
+                  if (!pw) return;
+                  body.password = pw;
+              }}
+              fetch(url, {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify(body)
+              }}).then(r => r.json()).then(data => {{
+                  if (data && data.error) {{ fwHandleError(data, "Action failed"); return; }}
+                  closeModal();
+                  location.reload();
+              }}).catch(e => alert("Error: " + e));
             }});
         }}
 
@@ -9485,13 +9691,20 @@ def dashboard():
 
         function liftQuarantine(id, ip) {{
             if (!confirm("Lift this quarantine for " + ip + "? The ufw rule will be removed.")) return;
-            fetch("/api/quarantine/" + id + "/lift", {{method: "POST"}})
-                .then(r => r.json())
-                .then(d => {{
-                    if (d.success) {{ refreshDashboard(); }}
-                    else {{ alert("Lift failed: " + (d.error || "unknown")); }}
+            fwPrompt("lift the quarantine on " + ip).then(function (pw) {{
+                if (!pw) return;
+                fetch("/api/quarantine/" + id + "/lift", {{
+                    method: "POST",
+                    headers: {{"Content-Type": "application/json"}},
+                    body: JSON.stringify({{password: pw}})
                 }})
-                .catch(e => alert("Error: " + e));
+                    .then(r => r.json())
+                    .then(d => {{
+                        if (d.success) {{ refreshDashboard(); }}
+                        else {{ fwHandleError(d, "Lift failed"); }}
+                    }})
+                    .catch(e => alert("Error: " + e));
+            }});
         }}
 
         /* ── Firewall counter drilldown ── */

@@ -1,0 +1,40 @@
+[Unit]
+Description=Nemesis Privileged Firewall Helper
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=nemesis-db
+RuntimeDirectory=nemesis
+RuntimeDirectoryMode=0755
+Environment=NEMESIS_FWD_SOCKET=/run/nemesis/fwd.sock
+Environment=NEMESIS_DASH_USER=__INSTALL_USER__
+Environment=NEMESIS_ALERTW_USER=nemesis-alertw
+Environment=NEMESIS_FWD_GROUP=nemesis-fw
+Environment=NEMESIS_FWD_CACHE_IDLE=300
+
+# Activates runtime privilege attestation (nemesis_privsep). Absent =>
+# the check stays inert, which is what makes the code safe pre-migration.
+Environment=NEMESIS_EXPECT_USER=root
+Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
+
+ExecStart=/usr/bin/python3 /opt/nemesis/alert_manager/nemesis_fwd.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+LogsDirectory=nemesis/nemesis-fwd
+LogsDirectoryMode=0750
+# 0770 on the data dir: SQLite in WAL mode creates -wal/-shm siblings
+# there, so the service group needs directory write, not just traverse.
+ReadWritePaths=/var/lib/nemesis
+
+# --- privilege boundary (identical across all Nemesis units) ------------------
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

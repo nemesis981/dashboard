@@ -14,9 +14,9 @@ from email_utils import send_email
 from firewall import (
     parse_alert,
     ufw_insert_top,
-    ufw_delete,
     ufw_deny_append,
-    load_blocked_ips,
+    expire_quarantine,
+    FirewallError,
 )
 
 LOG_FILE = "/var/log/suricata/fast.log"
@@ -120,12 +120,20 @@ def insert_quarantine_row(ip, rule_id, actor="system"):
         conn.close()
 
 
-def block_ip_permanent(ip, blocked_cache):
-    """Used for the 'block' action (non-quarantine path) — append rule, dedup via cache."""
-    if ip in blocked_cache:
-        return
-    if ufw_deny_append(ip):
-        blocked_cache.add(ip)
+def block_ip_permanent(ip):
+    """The 'block' action (non-quarantine path) — append a permanent deny rule.
+
+    The dedup cache is gone. ufw block operations are idempotent, so re-adding
+    an existing rule is harmless, and the cache's only real effect was to hide a
+    failing firewall: load_blocked_ips() returned an empty set when ufw was
+    unreachable, which looked exactly like "nothing is blocked yet".
+    """
+    try:
+        ufw_deny_append(ip)
+    except FirewallError as exc:
+        # Loud. A firewall action that silently does nothing is the failure mode
+        # that hid the 2026-07-27 outage for a day.
+        log.error("BLOCK FAILED for %s — firewall unreachable or refused: %s", ip, exc)
 
 
 def send_quarantine_email(parsed, enrichment):
@@ -145,7 +153,7 @@ def send_quarantine_email(parsed, enrichment):
     send_email(subject, body)
 
 
-def process_new_alert(parsed, blocked_cache):
+def process_new_alert(parsed):
     rule_id = parsed["rule_id"]
     src_ip = parsed["src_ip"]
     enrichment = None
@@ -158,8 +166,14 @@ def process_new_alert(parsed, blocked_cache):
 
     if parsed["priority"] == 1 and threat == "CRITICAL" and src_ip:
         insert_alert(parsed, risk_level=threat, action="auto-quarantine")
-        if src_ip in blocked_cache or ufw_insert_top(src_ip):
-            blocked_cache.add(src_ip)
+        try:
+            ufw_insert_top(src_ip)
+        except FirewallError as exc:
+            # Do NOT record a quarantine row for a rule that was never applied —
+            # that would show the operator a block that does not exist.
+            log.error("AUTO-QUARANTINE FAILED rule_id=%s ip=%s — no ufw rule applied: %s",
+                      rule_id, src_ip, exc)
+        else:
             insert_quarantine_row(src_ip, rule_id)
             try:
                 send_quarantine_email(parsed, enrichment)
@@ -167,16 +181,13 @@ def process_new_alert(parsed, blocked_cache):
                 log.error("quarantine email failed: %s", e)
             log.warning("AUTO-QUARANTINE rule_id=%s ip=%s threat=%s",
                         rule_id, src_ip, threat)
-        else:
-            log.error("ufw insert failed; rule_id=%s ip=%s left as auto-quarantine without rule",
-                      rule_id, src_ip)
     else:
         insert_alert(parsed, risk_level=threat, action="pending")
         log.info("new P%d rule_id=%s src=%s threat=%s -> pending",
                  parsed["priority"], rule_id, src_ip, threat)
 
 
-def handle_line(line, blocked_cache):
+def handle_line(line):
     parsed = parse_alert(line)
     if not parsed or not parsed["rule_id"]:
         return
@@ -186,7 +197,7 @@ def handle_line(line, blocked_cache):
     action = lookup_action(rule_id)
 
     if action is None:
-        process_new_alert(parsed, blocked_cache)
+        process_new_alert(parsed)
         return
 
     if action == "ignore":
@@ -196,13 +207,13 @@ def handle_line(line, blocked_cache):
 
     if action == "block":
         if parsed["src_ip"]:
-            block_ip_permanent(parsed["src_ip"], blocked_cache)
+            block_ip_permanent(parsed["src_ip"])
     elif action == "auto-quarantine":
         return
     # pending / monitor / unknown: nothing else to do
 
 
-def expiry_sweep(blocked_cache):
+def expiry_sweep():
     now = datetime.now().isoformat()
     conn = sqlite3.connect(DB_PATH, timeout=5.0)
     try:
@@ -216,8 +227,14 @@ def expiry_sweep(blocked_cache):
         rows = c.fetchall()
         for q_id, ip, rule_id, action in rows:
             if action == "auto-quarantine":
-                if ufw_delete(ip):
-                    blocked_cache.discard(ip)
+                # expire_quarantine, not a general unblock: the helper re-checks
+                # the quarantines table itself and refuses unless this row is
+                # genuinely active and past expires_at.
+                try:
+                    expire_quarantine(ip)
+                except FirewallError as exc:
+                    log.error("EXPIRY FAILED for %s — ufw rule may still be in "
+                              "place: %s", ip, exc)
                 c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
                 c.execute("UPDATE quarantines SET status='expired' WHERE id=?", (q_id,))
                 log.info("auto-quarantine expired: ip=%s rule_id=%s, ufw rule removed",
@@ -234,10 +251,10 @@ def expiry_sweep(blocked_cache):
         conn.close()
 
 
-def sweep_loop(blocked_cache):
+def sweep_loop():
     while _running:
         try:
-            expiry_sweep(blocked_cache)
+            expiry_sweep()
         except Exception as e:
             log.exception("sweep failed: %s", e)
         for _ in range(int(SWEEP_INTERVAL)):
@@ -280,16 +297,16 @@ def main():
     log.info("alert_watcher starting (log=%s db=%s)", LOG_FILE, DB_PATH)
     init_alerts_db()
     init_quarantines_db()
-    blocked_cache = load_blocked_ips()
-    log.info("loaded %d already-blocked IPs from ufw", len(blocked_cache))
-    expiry_sweep(blocked_cache)
-    sweeper = threading.Thread(target=sweep_loop, args=(blocked_cache,), daemon=True)
+    # No dedup cache: ufw block ops are idempotent, and the cache's empty-set-
+    # on-failure behaviour is what hid the 2026-07-27 firewall outage.
+    expiry_sweep()
+    sweeper = threading.Thread(target=sweep_loop, daemon=True)
     sweeper.start()
     for line in tail(LOG_FILE):
         if not _running:
             break
         try:
-            handle_line(line, blocked_cache)
+            handle_line(line)
         except Exception as e:
             log.exception("error handling line: %s", e)
     log.info("alert_watcher stopped")
