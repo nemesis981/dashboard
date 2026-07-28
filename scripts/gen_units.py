@@ -39,6 +39,42 @@ SERVICES = {
     dest="alert_manager", desc="Security Dashboard", user=INSTALL_USER,
     exe=f"{NEW_ROOT}/dashboard.py",
     after=["network.target"], wants=[],
+    # DASHBOARD HARDENING EXCEPTION (2026-07-27 incident; codified 2026-07-28).
+    #
+    # This is the WORKAROUND, not the fix. Dashboard elevates via `sudo -n` in
+    # ~10 places, including alert_manager/firewall.py — the ADR-0005 ufw
+    # chokepoint. The real fix is CAP_NET_ADMIN/CAP_NET_RAW with firewall.py
+    # calling ufw directly (the device-scanner precedent); that is a code change
+    # and is still pending. Until it lands, these five directives must stay off
+    # or dashboard starts, looks healthy, and silently cannot block or
+    # quarantine anything.
+    #
+    # Each omission is measured or read from the code, not assumed:
+    #   NoNewPrivileges     kernel ignores setuid -> sudo cannot elevate at all.
+    #                       Verified: `setpriv --no-new-privs sudo -n ufw` -> blocked.
+    #   CapabilityBoundingSet / AmbientCapabilities
+    #                       the sudo'd root child inherits an EMPTY bounding set,
+    #                       so ufw has no CAP_NET_ADMIN. Verified:
+    #                       `setpriv --bounding-set=-all sudo -n ufw` -> blocked.
+    #                       This one is easy to miss: NoNewPrivileges=no alone is
+    #                       NOT sufficient.
+    #   ProtectSystem       ufw writes /etc/ufw/user.rules when rules change;
+    #                       strict makes /etc read-only (status would still work,
+    #                       so this fails only on the paths that matter).
+    #   ProtectHome         dashboard.py:5404 offers /home/<user> as a backup
+    #                       destination root; hiding /home breaks backup-to-home.
+    #   PrivateTmp          dashboard.py uses /tmp/nemesis_env_update.tmp,
+    #                       /tmp/nemesis-scan-*.log, and /tmp/nemesis-backup.log —
+    #                       the last written by a CRON job outside the service
+    #                       namespace, which a private /tmp would hide entirely.
+    #
+    # SystemCallFilter is also omitted: sudo's setuid path under @system-service
+    # was NOT verified, and this is not the change to find out in.
+    #
+    # Everything else the other seven units get, dashboard gets.
+    omit_hardening=["NoNewPrivileges", "ProtectSystem", "ProtectHome",
+                    "PrivateTmp", "SystemCallFilter"],
+    omit_capability_drop=True,
     extra=[
       f"WorkingDirectory={NEW_ROOT}",
       f"Environment=PYTHONPATH={NEW_ROOT}/alert_manager",
@@ -186,8 +222,16 @@ for name, cfg in SERVICES.items():
         "# there, so the service group needs directory write, not just traverse.",
         f"ReadWritePaths={DATA_DIR}",
     ]
-    body = "\n".join(lines) + "\n" + HARDENING
-    if name != "device-scanner":
+    # Per-service hardening omissions (see the dashboard entry for why this
+    # exists). Filter by directive NAME so an omission cannot silently miss a
+    # line whose value later changes.
+    omit = set(cfg.get("omit_hardening", []))
+    hardening = "\n".join(
+        ln for ln in HARDENING.splitlines()
+        if not any(ln.startswith(d + "=") for d in omit))
+
+    body = "\n".join(lines) + "\n" + hardening
+    if name != "device-scanner" and not cfg.get("omit_capability_drop"):
         body += "\nCapabilityBoundingSet=\nAmbientCapabilities="
     body += "\n\n[Install]\nWantedBy=multi-user.target\n"
 

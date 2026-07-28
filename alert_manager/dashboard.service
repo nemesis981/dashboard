@@ -29,10 +29,6 @@ LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/nemesis
 
 # --- privilege boundary (identical across all Nemesis units) ------------------
-NoNewPrivileges=yes
-ProtectHome=yes
-ProtectSystem=strict
-PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -44,10 +40,7 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 SystemCallArchitectures=native
-SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
-CapabilityBoundingSet=
-AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target
