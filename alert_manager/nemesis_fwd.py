@@ -55,6 +55,7 @@ import time
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import nemesis_paths  # noqa: E402
+import data_manager  # noqa: E402
 
 try:
     import bcrypt
@@ -88,6 +89,14 @@ HDR = struct.Struct("!I")
 MAX_REQUEST_BYTES = 64 * 1024
 
 log = logging.getLogger("nemesis.fwd")
+
+#: Tiered account lockout — IDENTICAL thresholds to the dashboard login path
+#: (dashboard.py `_LOCKOUT_TIERS`). The two paths share the SAME lockout columns
+#: on `users`, by design: a brute-force attempt is a brute-force attempt whether
+#: it arrives at the login form or this socket, and it should count toward one
+#: budget, not two independent ones. (attempts_threshold, lockout_minutes).
+#: Kept in sync deliberately — if the dashboard policy changes, change it here.
+_LOCKOUT_TIERS = ((3, 5), (5, 15), (10, 60))
 
 # Operations that only READ firewall state. Everything else is a write and can
 # never be satisfied from cache.
@@ -220,7 +229,7 @@ def load_admin(username):
         with _db() as conn:
             row = conn.execute(
                 "SELECT username, password_hash, role, is_active, lockout_until, "
-                "failed_attempts FROM users WHERE username = ?", (username,)
+                "failed_attempts, lockout_tier FROM users WHERE username = ?", (username,)
             ).fetchone()
     except Exception as exc:
         log.exception("fwd: user lookup failed")
@@ -260,20 +269,111 @@ def verify_credential(row, password):
         # recording it.
         _note_failed_attempt(row["username"])
         raise Denied("credential_denied", "invalid credentials")
+    # Success: clear any accumulated failure/lockout state for this account.
+    _clear_failed_attempts(row)
     return True
 
 
+_DM = None
+
+
+def _dm():
+    """Lazy Data Manager, used ONLY for the helper's `users`-table writes.
+
+    Routing these through the guard is what makes the column grant real rather
+    than a comment: the DM physically refuses any UPDATE that touches a column
+    outside {failed_attempts, lockout_until, lockout_tier}, so even a coding
+    error in THIS file cannot make the firewall helper write password_hash,
+    role, or is_active. Mode is ENFORCE, not warn — every users write here is
+    new, deliberate code with a known column set, so there is no unknown legacy
+    traffic to discover first, and a violation should be BLOCKED, not logged.
+    Reads stay on the plain _db() connection (read-any; no guard needed).
+    """
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(nemesis_paths.db_path())
+        data_manager.set_namespace_mode("nemesis_fwd", data_manager.MODE_ENFORCE)
+    return _DM
+
+
 def _note_failed_attempt(username):
-    """Increment failed_attempts so this socket cannot be used as an
-    unthrottled password oracle. Best-effort: never breaks the refusal."""
+    """Record a failed credential attempt AND apply the tiered lockout.
+
+    This is the throttle that stops the socket being used as an unthrottled
+    password oracle. Incrementing a counter is not enough on its own — until
+    2026-07-28 the helper incremented `failed_attempts` but never set a lockout,
+    so an attacker hitting the socket directly got unlimited attempts while the
+    counter climbed harmlessly. This now mirrors the dashboard login path: cross
+    a tier and the account is locked for that tier's window, against the SAME
+    shared lockout columns, so attempts from either surface count as one budget.
+
+    Best-effort: a failure to record must never turn a refusal into anything
+    else, so every error is logged and swallowed.
+    """
     try:
         with _db() as conn:
-            conn.execute(
-                "UPDATE users SET failed_attempts = failed_attempts + 1 WHERE username = ?",
-                (username,))
-            conn.commit()
+            row = conn.execute(
+                "SELECT id, failed_attempts, lockout_tier FROM users WHERE username=?",
+                (username,)).fetchone()
+        if row is None:
+            return
+        fa = int(row["failed_attempts"] or 0) + 1
+        tier = int(row["lockout_tier"] or 0)
+
+        # Highest tier newly crossed by this attempt (mirrors dashboard: keep the
+        # highest, and never re-trigger a tier already applied).
+        triggered = None
+        for idx, (threshold, minutes) in enumerate(_LOCKOUT_TIERS, start=1):
+            if fa >= threshold and tier < idx:
+                triggered = (idx, minutes)
+
+        guard = _dm().connect("nemesis_fwd")
+        try:
+            if triggered:
+                tnum, minutes = triggered
+                from datetime import datetime, timedelta
+                lock_until = (datetime.now() + timedelta(minutes=minutes)).isoformat(
+                    timespec="seconds")
+                guard.execute(
+                    "UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? "
+                    "WHERE id=?", (fa, lock_until, tnum, row["id"]))
+                guard.commit()
+                log.warning("fwd: account %r locked out (tier %d, %d min) after "
+                            "%d failed attempts", username, tnum, minutes, fa)
+            else:
+                guard.execute(
+                    "UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
+                guard.commit()
+        finally:
+            guard.close()
     except Exception:
         log.exception("fwd: could not record failed attempt for %s", username)
+
+
+def _clear_failed_attempts(row):
+    """Reset the lockout state after a SUCCESSFUL credential verification.
+
+    Without this the counter only ever climbs: a legitimate admin who mistypes
+    a few times then succeeds would march toward a lockout on their next
+    honest slip. Mirrors the dashboard's reset-on-success. No-op when already
+    clear, so the common success path does not write.
+    """
+    try:
+        if not (row["failed_attempts"] or row["lockout_until"] or row["lockout_tier"]):
+            return
+    except Exception:
+        pass
+    try:
+        guard = _dm().connect("nemesis_fwd")
+        try:
+            guard.execute(
+                "UPDATE users SET failed_attempts=0, lockout_until=NULL, lockout_tier=0 "
+                "WHERE username=?", (row["username"],))
+            guard.commit()
+        finally:
+            guard.close()
+    except Exception:
+        log.exception("fwd: could not clear failed attempts for %s", row["username"])
 
 
 # ── degraded-state signalling ────────────────────────────────────────────────
