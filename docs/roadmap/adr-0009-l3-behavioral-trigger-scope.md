@@ -176,10 +176,13 @@ line made for Fork B.
    load at MSP multi-site scale vs. a single home network.
 3. **Agent-to-agent WiFi redirect ownership is RESOLVED (Open Item #1, addendum)**, but resolving
    it surfaced a new unscoped dependency: **peer-enrollment lookup / fleet-roster distribution
-   (Piece 5)** — roster-push vs. lookup-on-heartbeat not decided. Separately, whether the
-   ownership decision actually *protects* anything depends on Fork B's tunnel being INLINE vs.
-   MIRROR — **`adr-0009-l3-fork-b-scope.md` doesn't state which** (recorded as a documentation
-   gap in the addendum, not resolved here).
+   (Piece 5)** — roster-push vs. lookup-on-heartbeat not decided. The mirror-vs-inline question
+   this item previously carried is **no longer open**: `adr-0009-l3-fork-b-scope.md` decided
+   **MIRROR** on 2026-07-26 (its "Mechanism: MIRROR" section). The consequence for redirect
+   ownership is therefore settled rather than feared — an origin-owned redirect does **not** gate
+   traffic reaching its destination; it can only alert or escalate after the fact. Note this
+   constrains Fork B's own transport only: a connection-level inline gate still exists one layer
+   up in **Tier 2** (TLS interception), for connections Tier 2 has decrypted.
 4. **No target hardware baseline (Open Item #3)** — blocks turning any of the above into a real
    session estimate or resource-cost validation.
 
@@ -187,8 +190,8 @@ line made for Fork B.
 [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) (the direction this
 scopes, incl. the now-RESOLVED Open Item 1 that Piece 5 depends on),
 [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the transport this trigger feeds
-into, esp. Piece 1's reputation-verdict selection, and Pieces 2–3's unstated INLINE-vs-MIRROR
-gap), ADR 0009's "Enrollment enriches detection" table (the existing lateral-movement scoring
+into, esp. Piece 1's reputation-verdict selection, and Pieces 2–3's MIRROR mechanism,
+decided 2026-07-26), ADR 0009's "Enrollment enriches detection" table (the existing lateral-movement scoring
 this may or may not extend), [community-signal-dedup.md](community-signal-dedup.md),
 [open-source-threat-feeds.md](open-source-threat-feeds.md) (flagged overlap, Piece 4),
 [lateral-movement-outbreak-detection.md](lateral-movement-outbreak-detection.md) (the
