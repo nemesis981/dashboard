@@ -180,6 +180,45 @@ def _policy_default_route_ifaces():
     return ifaces
 
 
+def masquerade_egress_iface():
+    """The interface Fork B's NAT should masquerade out of, or None.
+
+    Returns the first MAIN-table default-route interface whose kernel kind is NOT a
+    tunnel. Added 2026-07-29 for ADR-0009 Fork B Piece 2 (tunnel-routed Suricata),
+    which must source-NAT forwarded tailnet traffic to whatever egress is currently
+    real.
+
+    WHY THIS SHAPE, rather than trusting `_default_route_ifaces()` wholesale or
+    pinning an interface name at install time:
+
+      * Pinning a name (`-o enp131s0`) silently stops masquerading correctly the
+        moment the egress changes. It cannot be right in both VPN states.
+      * Trusting the main default route alone is wrong for the redirect-gateway
+        case, where that route IS the tunnel — it would hand back a tunnel device
+        and NAT would be applied to the wrong egress.
+      * Kind-matching (never name-matching) is the same rule TUNNEL_KINDS already
+        enforces elsewhere in this module: vendor WireGuard builds use arbitrary
+        device names, so `tun0`-style heuristics are not safe.
+
+    **Verified on PIA ONLY** — the same caveat ADR 0002 states for this module as a
+    whole. It is correct for PIA-style SPLIT-TUNNEL VPNs, which keep the main
+    default route on the physical NIC and divert host traffic via fwmark/source
+    policy routing into a separate table (`piavpnrt`). This function deliberately
+    reads only the MAIN table, so PIA's tunnel does not mask the real egress.
+
+    **Redirect-gateway VPNs (OpenVPN `redirect-gateway`, WireGuard
+    `AllowedIPs=0.0.0.0/0`) are NOT handled, and FAIL VISIBLY.** Those replace the
+    main default route with the tunnel, every candidate is a tunnel kind, and this
+    returns None. That is the required behaviour: the caller must refuse to install
+    a masquerade rule rather than guess an interface and silently NAT to the wrong
+    egress. Do not "fix" this by falling back to the first interface found.
+    """
+    for iface in _default_route_ifaces():
+        if _iface_kind(iface) not in TUNNEL_KINDS:
+            return iface
+    return None
+
+
 def detect_tunnel():
     """
     Detect whether THIS host has a usable VPN tunnel up.
@@ -560,8 +599,21 @@ def main(argv):
         _print(reconcile(force="restore"))
     elif arg == "--once":
         _print(reconcile())
+    elif arg == "--egress-iface":
+        # For ADR-0009 Fork B Piece 2: install.sh asks which interface to
+        # masquerade out of. Prints the name and exits 0, or prints nothing and
+        # exits 1 when no non-tunnel default egress exists (redirect-gateway VPN).
+        # The non-zero exit is the contract — callers must treat it as "do not
+        # install a NAT rule", never as "pick something".
+        iface = masquerade_egress_iface()
+        if not iface:
+            print("", end="")
+            return 1
+        print(iface)
+        return 0
     else:
         main_loop()
+    return 0
 
 
 if __name__ == "__main__":
@@ -572,4 +624,7 @@ if __name__ == "__main__":
                                     "..", "alert_manager"))
     import nemesis_privsep
     nemesis_privsep.attest_from_env("vpn-dns-guard")
-    main(sys.argv)
+    # Propagate main()'s return as the exit status: --egress-iface's non-zero
+    # exit is a contract ("no safe egress found — do not install NAT"), and it
+    # is worthless if the shell always sees 0.
+    sys.exit(main(sys.argv))

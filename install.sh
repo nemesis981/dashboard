@@ -1005,6 +1005,104 @@ deploy_services() {
 # STEP 9/9 — UFW FIREWALL & COMPLETION
 ###############################################################################
 
+configure_forkb_nat() {
+    # ── ADR-0009 Fork B Piece 2 — source-NAT for tunnel-routed inspection ──────
+    #
+    # Fork B forwards tailnet-sourced flows out to the internet so a central
+    # Suricata can inspect them. That needs source-NAT, because the destination
+    # cannot route 100.64.0.0/10 back. This installs the masquerade rule ONLY.
+    #
+    # net.ipv4.ip_forward IS DELIBERATELY LEFT AT 0 HERE. Read this before
+    # "fixing" that:
+    #
+    #   Tailscale owns the head of the FORWARD chain. `iptables -S` shows
+    #   `-A FORWARD -j ts-forward` FIRST, ahead of every ufw chain, and inside it
+    #   `-A ts-forward -i tailscale0 -j MARK ...` followed by
+    #   `-A ts-forward -m mark --mark 0x40000/0xff0000 -j ACCEPT`. ACCEPT is
+    #   terminating, so any forwarded packet arriving on tailscale0 is accepted
+    #   before ufw ever sees it. `ufw route` rules CANNOT gate this traffic — a
+    #   rule added there would look like an open-relay lock and control nothing.
+    #
+    #   Therefore ip_forward=0 is currently the ONLY thing preventing this box
+    #   from forwarding tunnel traffic. Enabling it at install time would make the
+    #   box an open forwarding path for anything that reaches the tailnet, gated
+    #   solely by Tailscale's own ACLs. Fork B validation enables it per-run and
+    #   restores it; a production-grade FORWARD gate is an unresolved design
+    #   question (ufw is the mandated chokepoint, but Tailscale pre-empts it).
+    #
+    # EGRESS INTERFACE IS DERIVED, NOT PINNED. A hardcoded interface silently
+    # stops matching whenever egress changes. We ask vpn_dns_guard for the
+    # main-table default-route interface whose kernel kind is not a tunnel
+    # (kind-matched, never name-matched — vendor WireGuard builds use arbitrary
+    # device names).
+    #
+    #   *** VERIFIED ON PIA ONLY *** — same caveat ADR 0002 states for that
+    #   module. Correct for PIA-style SPLIT-TUNNEL VPNs. For redirect-gateway
+    #   VPNs (OpenVPN `redirect-gateway`, WireGuard AllowedIPs=0.0.0.0/0) the
+    #   derivation finds no non-tunnel egress, exits non-zero, and we install NO
+    #   rule rather than guess. That refusal is the required behaviour.
+    #
+    # KNOWN GAP — FORK B IS PIA-DOWN-ONLY (2026-07-29):
+    #   PIA does not replace the main default route; it straddles it with
+    #   0.0.0.0/1 and 128.0.0.0/1 via the tunnel. Those are MORE SPECIFIC than
+    #   `default`, so when PIA is connected, forwarded traffic actually leaves via
+    #   tun0 while this derivation still (correctly) reports the physical NIC. The
+    #   `-o <iface>` rule below therefore does not match, and traffic would exit
+    #   the tunnel un-NATed. Fork B is consequently scoped PIA-DOWN-ONLY.
+    #
+    #   This was accepted deliberately rather than papered over. The alternatives
+    #   were: masquerade without `-o` (works in both states, but sends inspected
+    #   traffic through the user's VPN — a security posture decision that should
+    #   not be made as a side effect of a NAT rule), or add a policy route pinning
+    #   Fork B traffic to the non-tunnel egress (deliberately bypasses the VPN,
+    #   and is more than Piece 2 was scoped for).
+    #
+    #   PIA is currently disabled on this deployment anyway, for unrelated and
+    #   still-undiagnosed Nemesis errors — see PUNCHLIST.md, "[FUTURE] PIA VPN
+    #   deliberately disabled". Fork B's PIA-up support is gated on that item.
+    #   Whoever picks it up: fixing the PIA compatibility issue does NOT by itself
+    #   make Fork B work with PIA up. This rule needs revisiting too, and Layer 3
+    #   measurements taken PIA-down do not transfer (different egress, different
+    #   TTL, tun0 MTU 1441 vs 1500).
+    #
+    # STATIC CONFIG: the derived interface is baked into before.rules at install
+    # time. If the physical NIC is replaced or renamed, re-run install.sh or edit
+    # /etc/ufw/before.rules by hand.
+    local _egress
+    if ! _egress=$(python3 "$DASHBOARD_DIR/core/vpn_dns_guard.py" --egress-iface 2>/dev/null) \
+       || [[ -z "$_egress" ]]; then
+        warn "Fork B NAT skipped: no non-tunnel default egress found."
+        warn "  This is expected on redirect-gateway VPNs (OpenVPN redirect-gateway,"
+        warn "  WireGuard AllowedIPs=0.0.0.0/0). Refusing to guess an interface."
+        return 0
+    fi
+
+    if grep -q "NEMESIS-FORKB-NAT" /etc/ufw/before.rules 2>/dev/null; then
+        ok "Fork B NAT rule already present in before.rules (egress: $_egress)"
+        return 0
+    fi
+
+    cp /etc/ufw/before.rules "/etc/ufw/before.rules.pre-nemesis-forkb.$(date +%Y%m%d-%H%M%S)"
+    # ufw's before.rules starts with a *filter table; a *nat table must precede it.
+    cat > /tmp/.nemesis-forkb-nat <<EOF
+# NEMESIS-FORKB-NAT (ADR-0009 Fork B Piece 2, added by install.sh)
+# Source-NAT tailnet-originated forwarded traffic. Inert while
+# net.ipv4.ip_forward=0, which is the installed default — see configure_forkb_nat()
+# in install.sh for why, and for the PIA-up limitation.
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s 100.64.0.0/10 -o $_egress -j MASQUERADE
+COMMIT
+
+EOF
+    cat /etc/ufw/before.rules >> /tmp/.nemesis-forkb-nat
+    mv /tmp/.nemesis-forkb-nat /etc/ufw/before.rules
+    chmod 0640 /etc/ufw/before.rules
+    ok "Fork B NAT rule installed (masquerade 100.64.0.0/10 out $_egress)"
+    info "  net.ipv4.ip_forward left at 0 — Fork B validation enables it per-run"
+}
+
+
 ufw_and_finish() {
     step_header "9/9" "Firewall Rules & Final Checks"
 
@@ -1020,6 +1118,7 @@ ufw_and_finish() {
         warn "Remember to restrict port 5001 to your host PC's IP only after install:"
         warn "  sudo ufw delete allow 5001 && sudo ufw allow from <host-ip> to any port 5001"
     fi
+    configure_forkb_nat
     ufw --force enable
     ok "UFW enabled with local-network-only rules"
 
