@@ -102,8 +102,15 @@ _LOCKOUT_TIERS = ((3, 5), (5, 15), (10, 60))
 # Operations that only READ firewall state. Everything else is a write and can
 # never be satisfied from cache.
 READ_OPS = {"list_blocked", "list_rules"}
-WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "add_rule", "remove_rule",
-             "expire_quarantine"}
+# Keep this set exactly equal to the write ops that EXIST in OPS below. `add_rule`
+# and `remove_rule` were listed here until 2026-07-29 without ever being
+# implemented, appearing in OPS, or being granted to any peer — a declared-but-
+# absent op in a security allowlist reads as capability that is not there, and
+# invites designing against it. Removed rather than implemented: the Fork B work
+# that might have used them established that `ufw route` cannot gate
+# tunnel-sourced forwarded traffic at all (Tailscale's ts-forward ACCEPTs it ahead
+# of every ufw chain), so there is no route op for these names to become.
+WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine"}
 NO_CREDENTIAL_OPS = {"ping", "drop_credential"}
 
 #: Authorisation is a property of WHICH PROCESS CONNECTED, resolved from the
