@@ -798,7 +798,7 @@ def _enrich_drilldown_with_db(rules: dict) -> dict:
     if not rules:
         return rules
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 2 (_enrich_drilldown_with_db)
         conn.row_factory = sqlite3.Row
         c = conn.cursor()
         ids = list(rules.keys())
@@ -890,7 +890,7 @@ def get_active_alerts():
 
 def get_review_queue():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 2 (get_review_queue)
         c = conn.cursor()
         c.execute("""
             SELECT rule_id, rule_name, classification, times_seen, last_seen, src_ip
@@ -918,7 +918,7 @@ def get_review_queue():
 
 def get_device_name(mac, ip):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 2 (get_device_name)
         c = conn.cursor()
         c.execute("SELECT friendly_name, device_type, trusted FROM devices WHERE mac = ?", (mac.lower(),))
         result = c.fetchone()
@@ -932,7 +932,7 @@ def get_device_name(mac, ip):
 
 def get_network_devices():
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 2 (get_network_devices)
         c = conn.cursor()
         c.execute("SELECT mac, ip, friendly_name, device_type, trusted FROM devices ORDER BY ip")
         db_devices = c.fetchall()
@@ -1461,7 +1461,7 @@ def _header_status_data() -> dict:
     quar_pending = 0
     diag_verdict = None
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 2 (_header_status_data)
         c = conn.cursor()
 
         def _alerts(level):
@@ -1570,7 +1570,7 @@ def _valid_installer_token(token):
     A spent (used), revoked, or expired token HARD-FAILS the download — no fallback
     (ADR 0011 immediate hardening; Phase 1 delivery, Fork 3 uses-check)."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 2 (_valid_installer_token)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM enrollment_tokens "
@@ -1763,7 +1763,7 @@ def install_windows_zip(token):
 def _render_agent_devices_html() -> str:
     """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 2 (_render_agent_devices_html)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             "SELECT device_id, device_name, os, os_version, hardware_summary, "
@@ -2564,9 +2564,9 @@ def settings_page():
     # Read anomaly_detection settings from DB
     _ad_manual = True
     try:
-        _ad_conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn = _dm_conn()   # §9 batch 2 (settings_page)
         def _ad_st(k, d=""):
-            r = _ad_conn.execute(
+            r = conn.execute(
                 "SELECT value FROM anomaly_state WHERE key=?", (k,)
             ).fetchone()
             return r[0] if r else d
@@ -2578,7 +2578,7 @@ def settings_page():
         _ad_cisa_active = _ad_st("cisa_active_control", "dropdown")
         _ad_cisa_mode   = _ad_st("cisa_dropdown_mode",  "high_only")
         _ad_cisa_score  = _ad_st("cisa_slider_score",   "60")
-        _ad_conn.close()
+        conn.close()
     except Exception:
         _ad_ab_active  = "dropdown"; _ad_ab_mode  = "off";       _ad_ab_score  = "40"
         _ad_cisa_active = "dropdown"; _ad_cisa_mode = "high_only"; _ad_cisa_score = "60"
@@ -4998,7 +4998,7 @@ def firewall_db():
     )
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 2 (firewall_db)
         c = conn.cursor()
         c.execute("SELECT * FROM alerts ORDER BY last_seen DESC")
         alerts = c.fetchall()
@@ -5396,7 +5396,7 @@ def api_hw_history():
         col = sensor if sensor in valid_cols else "cpu_temp"
 
     try:
-        conn = sqlite3.connect(hw_monitor.DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_hw_history)  # hw_monitor.DB_PATH == DB_PATH (both /var/lib/nemesis/alerts.db)
         if fan_key:
             rows = conn.execute(
                 f"SELECT timestamp, fans_json, is_anomalous FROM hw_metrics "
@@ -5514,7 +5514,7 @@ def api_hw_notifications():
 def api_hw_snapshot_detail(snap_id):
     """Return a single hw_anomaly_snapshots row including top_processes."""
     try:
-        conn = sqlite3.connect(hw_monitor.DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_hw_snapshot_detail)  # hw_monitor.DB_PATH == DB_PATH (both /var/lib/nemesis/alerts.db)
         row = conn.execute(
             """SELECT id, sensor_key, reading_value, baseline_avg, deviation,
                       captured_at, top_processes, cpu_pct, ram_mb,
@@ -5957,7 +5957,7 @@ def api_hw_devices():
             # Friendly name: prefer devices table lookup by device_id, then agent name
             friendly = ag.get("device_name") or did
             try:
-                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                conn = _dm_conn()   # §9 batch 1 (api_hw_devices)
                 row = conn.execute(
                     "SELECT friendly_name FROM devices WHERE mac=?", (did,)
                 ).fetchone()
@@ -6036,7 +6036,7 @@ def api_scan_devices():
         pending_map  = hw_monitor.get_pending_count_per_device()
         now_ts       = datetime.now()
 
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_scan_devices)
 
         def _last_scan(did):
             row = conn.execute(
@@ -6302,7 +6302,7 @@ def api_scan_status():
     if not scan_id:
         return jsonify({"error": "scan_id required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_scan_status)
         row = conn.execute(
             "SELECT device_id, path, status, progress_pct, files_scanned, threats_found, "
             "started_at, completed_at FROM scan_jobs WHERE scan_id=?", (scan_id,)
@@ -6323,7 +6323,7 @@ def api_scan_results():
     """GET /api/scan/results?device_id=<id>"""
     device_id = request.args.get("device_id", "")
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_scan_results)
         if device_id:
             rows = conn.execute(
                 "SELECT t.file_path, t.threat_name, t.action_taken, t.detected_at, "
@@ -6374,7 +6374,7 @@ def api_scan_history():
     """GET all scan history, optionally filtered by device_id."""
     device_id = request.args.get("device_id", "")
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_scan_history)
         if device_id:
             rows = conn.execute(
                 "SELECT scan_id, device_id, path, status, progress_pct, files_scanned, "
@@ -6403,7 +6403,7 @@ def api_agent_notify():
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 1 (api_agent_notify)
         row = conn.execute(
             "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
         ).fetchone()
