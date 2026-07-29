@@ -13,9 +13,25 @@ import nemesis_paths
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 
 def lookup_mac_vendor(mac):
+    """Vendor name for a MAC's OUI, or "Unknown" — never the server's error body.
+
+    The status check is load-bearing. api.macvendors.com answers an unregistered
+    OUI with 404 and a JSON error body, and the old code returned r.text
+    unconditionally — so update_devices() stored that body as the device's
+    friendly_name and the dashboard displayed it as the device's name. Confirmed
+    in production 2026-07-29: a device was inserted named
+    `{"errors":{"detail":"Not Found"}}`.
+
+    This is not a rare edge. A locally-administered / randomised MAC (the
+    privacy-MAC behaviour every modern phone ships with) has no OUI to look up by
+    construction, so it 404s every time.
+    """
     try:
         r = requests.get(f"https://api.macvendors.com/{mac}", timeout=5)
-        return r.text.strip()
+        if r.status_code != 200:
+            return "Unknown"
+        # An empty 200 body would otherwise be stored as an empty name.
+        return r.text.strip() or "Unknown"
     except:
         return "Unknown"
 
