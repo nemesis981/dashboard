@@ -41,3 +41,6 @@ nemesis_install.conf
 # --rollback. Repo-root, untracked-but-present after any real migration run;
 # excluded rather than deleted, since do_rollback still needs to read it.
 .nemesis-premigration-mode
+
+# Local security-test reports & artifacts — not committed for now (2026-07-29)
+docs/testing/
