@@ -92,6 +92,7 @@ _FAST_LOG_RULE_RE = re.compile(r'\[1:(\d+):\d+\] (.+?) \[\*\*\]')
 _FAST_LOG_CLASS_RE = re.compile(r'\[Classification: ([^\]]+)\]')
 
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
+import database          # module handle: canonical DDL owner (init_audit_log_table)
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table)
@@ -953,23 +954,15 @@ def get_network_devices():
         return []
 
 def _ensure_audit_log_table():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
-    try:
-        c = conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TIMESTAMP NOT NULL,
-                rule_id TEXT,
-                ip TEXT,
-                action TEXT NOT NULL,
-                user TEXT
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)")
-        conn.commit()
-    finally:
-        conn.close()
+    """Delegates to the canonical DDL owner (§9, 2026-07-29).
+
+    The CREATE used to live here, which made dashboard the de-facto schema owner
+    of a table it merely shares — nemesis_fwd writes attribution rows to
+    `audit_log` too. The DDL now sits in alert_manager/database.py beside the
+    other five core tables. Kept as a thin wrapper rather than replacing the call
+    sites, so the create-before-write guarantee stays exactly where it was.
+    """
+    database.init_audit_log_table()
 
 
 def _audit(action, rule_id=None, ip=None):

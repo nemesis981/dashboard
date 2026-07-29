@@ -104,6 +104,48 @@ def init_devices_table():
     finally:
         conn.close()
 
+def init_audit_log_table():
+    """Canonical DDL for `audit_log` (per-action attribution, append-only).
+
+    Moved here from dashboard 2026-07-29, same reasoning as init_scan_tables():
+    schema ownership belongs in one module rather than in whichever process
+    happened to need the table first. This one has TWO legitimate row writers —
+    dashboard (`_audit`) and nemesis_fwd (`audit()`), both registered shared
+    writers in the Data Manager — so leaving the CREATE in dashboard made it the
+    de-facto schema owner purely by accident of history.
+
+    NOTE, so this is not misread: unlike the scan-table move, no grant changes
+    here. Both writers genuinely INSERT rows and keep their full table grants;
+    column grants could not express it either, being UPDATE-only. What this
+    changes is only that the CREATE stops being issued through a caller's guarded
+    connection, which is what makes the DDL consistent with the other five core
+    tables owned by this module.
+
+    Runs on a RAW connection like its siblings, so no namespace grant is needed to
+    call it. `IF NOT EXISTS`, so any process may call it and later calls are
+    no-ops.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        # Byte-identical to what dashboard created, verified against the live
+        # schema — an existing database is untouched.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP NOT NULL,
+                rule_id TEXT,
+                ip TEXT,
+                action TEXT NOT NULL,
+                user TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_scan_tables():
     """Canonical DDL for `scan_threats` and `scan_schedules`.
 
