@@ -1047,3 +1047,38 @@ CSRF issues, and one machine-to-machine auth gap in `hw_monitor.py`). These four
 wait on the deferred design — see the private writeup for exact locations and fix
 direction, and decide separately whether/when to act on them.
 
+### [DONE — 2026-07-29] `alerts.action` claimed "auto-quarantine" when the block had failed
+Found during the nemesis-fwd health/failsafe audit. `alert_watcher.process_new_alert()` wrote the
+alert row with `action="auto-quarantine"` **before** attempting `ufw_insert_top()`. If the helper
+was down (or any `FirewallError` fired), the block never landed but the alerts table already
+asserted it had. The `quarantines` table was correctly left empty — there is an explicit comment
+there about not showing "a block that does not exist" — so the two tables disagreed, and the one
+the dashboard surfaces most prominently was the one that lied.
+
+- [x] **Fixed**: the ufw call now happens first. On success the alert is recorded as
+  `auto-quarantine` and the quarantine row is inserted (unchanged behaviour). On failure the
+  alert is recorded as `pending` — the same value every other unacted alert gets — so it lands
+  in front of the operator instead of hiding behind a block that never happened. Verified both
+  paths against a scratch DB: failure → `action='pending'`, 0 quarantine rows; success →
+  `action='auto-quarantine'`, 1 quarantine row.
+- [ ] **Not covered**: alerts written before this fix still carry the wrong `action`. No
+  migration was attempted — the affected rows cannot be distinguished from genuine
+  auto-quarantines after the fact without cross-referencing ufw state at the time. Low impact
+  (the quarantines table is authoritative for what is actually blocked), but worth knowing if
+  historical alert data is ever audited.
+
+### [LOW] `degraded.jsonl` has no reader — the degraded-state channel terminates in a file
+Found during the same audit. `nemesis_fwd.signal_degraded()` writes structured records to
+`/var/lib/nemesis/degraded.jsonl` (env `NEMESIS_DEGRADED_LOG`), and **nothing reads it** — grep
+finds zero consumers outside `nemesis_fwd.py` itself. Same shape as the helper's `ping` op, which
+is exposed in `NO_CREDENTIAL_OPS` and reachable via `fw_client.ping()` but is **polled by nothing**.
+
+So the helper has two working health-signalling mechanisms and neither is wired to anything that
+watches. Combined with `Restart=always` + `StartLimitBurst=5` (defaults elsewhere), a crash loop
+ends with the helper **down, not restarting, and unannounced** — the ERROR line in alert-watcher's
+journal is currently the only signal that enforcement has stopped.
+
+Not urgent in itself, but it is the concrete piece of the larger nemesis-fwd health/failsafe
+design (watchdog decision, wiring ping/degraded.jsonl to a watcher, an incident runbook) which is
+held as its own scoped follow-up. Filed so the two orphaned mechanisms are not rediscovered a
+third time.
