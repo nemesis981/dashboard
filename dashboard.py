@@ -6159,7 +6159,7 @@ def _run_local_clamscan(scan_id, path):
 
         final_status = "threats_found" if threats else "clean"
 
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 3 (_run_local_clamscan) — INSERT scan_threats / UPDATE scan_jobs (granted)
         row = conn.execute("SELECT id, files_scanned FROM scan_jobs WHERE scan_id=?", (scan_id,)).fetchone()
         job_id      = row[0] if row else None
         files_count = row[1] if row else 0
@@ -6182,7 +6182,7 @@ def _run_local_clamscan(scan_id, path):
     except Exception as e:
         log.exception("local clamscan failed (scan_id=%s): %s", scan_id, e)
         try:
-            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn = _dm_conn()   # §9 batch 3 (_run_local_clamscan) — UPDATE scan_jobs (granted)
             conn.execute(
                 "UPDATE scan_jobs SET status='error', completed_at=? WHERE scan_id=?",
                 (datetime.now().isoformat(), scan_id),
@@ -6209,7 +6209,7 @@ def _update_local_scan_progress(scan_id, log_file, status):
                     files_scanned += 1
                 if "FOUND" in line:
                     threats_found += 1
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 3 (_update_local_scan_progress) — UPDATE scan_jobs (granted)
         conn.execute(
             "UPDATE scan_jobs SET status=?, files_scanned=?, threats_found=? WHERE scan_id=?",
             (status, files_scanned, threats_found, scan_id),
@@ -6231,7 +6231,7 @@ def api_scan_trigger():
 
     scan_id = str(_uuid_mod.uuid4())
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 api_scan_trigger — INSERT scan_jobs (granted)
         conn.execute(
             "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
             "VALUES (?, ?, ?, 'running', ?)",
@@ -6243,7 +6243,7 @@ def api_scan_trigger():
         if device_id == "local":
             # Run ClamAV directly on the Nemesis host
             if not shutil.which("clamscan"):
-                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                conn = _dm_conn()   # §9 api_scan_trigger — UPDATE scan_jobs status=error (granted)
                 conn.execute("UPDATE scan_jobs SET status='error' WHERE scan_id=?", (scan_id,))
                 conn.commit()
                 conn.close()
@@ -6253,7 +6253,7 @@ def api_scan_trigger():
             t.start()
         else:
             # Send command to remote agent; queue if offline
-            conn = sqlite3.connect(DB_PATH, timeout=5.0)
+            conn = _dm_conn()   # §9 api_scan_trigger — SELECT agent_devices (read — passes through)
             row = conn.execute(
                 "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
             ).fetchone()
@@ -6272,7 +6272,7 @@ def api_scan_trigger():
                     log.warning("Could not reach agent %s: %s", agent_ip, e)
             if not agent_reachable:
                 # Agent offline — delete the eager scan_job and queue instead
-                conn = sqlite3.connect(DB_PATH, timeout=5.0)
+                conn = _dm_conn()   # §9 api_scan_trigger — DELETE scan_jobs (granted)
                 conn.execute("DELETE FROM scan_jobs WHERE scan_id=?", (scan_id,))
                 conn.commit()
                 conn.close()
@@ -6350,7 +6350,7 @@ def api_scan_schedule():
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 3 (api_scan_schedule) — INSERT scan_schedules (granted)
         conn.execute(
             "INSERT INTO scan_schedules (device_id, schedule_type, scheduled_time) "
             "VALUES (?, ?, ?)", (device_id, schedule_type, scheduled_time)
@@ -6450,7 +6450,7 @@ def api_update_friendly_name():
     if not device_id or not friendly_name:
         return jsonify({"error": "device_id and friendly_name required"}), 400
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 3 (api_update_friendly_name) — UPDATE agent_devices.device_name (COLUMN grant) + devices (granted)
         conn.execute(
             "UPDATE agent_devices SET device_name=? WHERE device_id=?",
             (friendly_name, device_id)
