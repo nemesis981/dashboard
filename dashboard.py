@@ -17,6 +17,25 @@ import socket
 import uuid as _uuid_mod
 from datetime import datetime, timedelta
 
+# Root logger configuration. UNRELATED to the Data Manager work below — this
+# restores visibility that was already coded and silently discarded.
+#
+# Without this the root logger has NO handlers, so Python falls back to
+# `logging.lastResort`, which is fixed at WARNING. Every log.info() in this file
+# was therefore written, formatted, and thrown away — and the warnings and
+# .exception() tracebacks that did survive arrived unformatted, with no level and
+# no logger name, because lastResort applies no formatter. Confirmed by the
+# error-code audit, 2026-07-29.
+#
+# No timestamp in the format on purpose: systemd's journal stamps every line, and
+# a second timestamp inside the message is noise. Called before Flask serves
+# anything so werkzeug finds a root handler already present and does not attach
+# its own — otherwise every HTTP request line would be logged twice.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+
 log = logging.getLogger(__name__)
 
 _suricata_cache = {"ts": 0.0, "lines": []}
