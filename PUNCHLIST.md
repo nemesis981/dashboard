@@ -25,6 +25,14 @@ history.
   pre-rewrite commit hashes by name — those mentions are now stale (describe a commit ID that
   no longer exists on `main`). Cosmetic, not broken; fix opportunistically.
 
+- [ ] **NEW (found 2026-07-28 closeout): a commit made AFTER the 2026-07-26 rewrite reintroduces
+  the same class of leak.** Commit `9ffac56`'s own message quotes the literal real install
+  username instead of a placeholder, describing the manifest.json bug it fixed — it's now in
+  public git history a second time, in the commit log itself, postdating the cleaned history so
+  it isn't covered by the prior rewrite. Needs an operator decision (rewrite again vs. accept as
+  residual, same reasoning as the older portion above) — not actioned yet, deliberately not
+  decided the same night as a live pen-test run. See `docs/handoff/HANDOFF.md` Open Items #2.
+
 ### [FIX-NOW] — concurrency races (multi-writer, real today)
 From `docs/audits/single-user-assumptions-audit-2026-06-28.md` §1. NOT a commercial-tier
 concern: Nemesis already runs 6 concurrent writer processes against one shared `alerts.db`,

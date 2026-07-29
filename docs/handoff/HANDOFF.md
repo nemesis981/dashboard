@@ -1,174 +1,193 @@
 # HANDOFF — current state
 
-> Last updated **2026-07-27 (full-day closeout, Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-07-28 (full-day closeout, Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
 > live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
 >
-> 🚨 **THE INSTALL LOCATION CHANGED TODAY.** `~/dashboard` → **`/opt/nemesis`** (code) and
-> **`/var/lib/nemesis`** (database). `/home/<user>/dashboard` no longer exists as a git repo.
-> Every doc that says `~/dashboard` or `/home/<user>/dashboard` — including **CLAUDE.md's own
-> "Key paths" section and its Morning Status commands** — is now wrong. Not fixed tonight
-> (flagged as tomorrow's top priority below); until it is, `find ~/dashboard` and
-> `git -C ~/dashboard` in CLAUDE.md will silently return nothing.
-> ✅ **Six of eight services no longer run as root** — dedicated per-service system users,
-> kernel-verified privilege attestation, `systemd-analyze` exposure 9.6 UNSAFE → 2.0 OK.
-> ⚠️ **A real production incident happened today** (~25 min degraded, all 8 services
-> crash-looping) and was recovered — see "The incident" below. Root cause: a migration script
-> gap, now itself an open item, not yet fully closed.
-> ✅ **Dashboard is deliberately still unhardened** (9.2 UNSAFE) — not an oversight, see below.
+> 🎯 **Window 1 is running a ~4hr penetration test tonight** against an isolated Linux host and
+> a Windows 11 agent (a separate, isolated test lab — NOT production). Production Nemesis
+> (`/opt/nemesis`) is uninvolved and, as of this closeout, healthy: all 9 services
+> active/running/0 restarts, tree clean, `HEAD` == `origin/main`. Both windows should come up
+> fresh tomorrow morning — read this file first.
+> ✅ **core_module layout move is 5/6 complete.** Six daemons relocated from `alert_manager/`
+> into per-process `core_module/<name>/` directories; five have had their old `alert_manager/`
+> copy removed (Commit B). `alert_watcher` is the one holdout — see Open Items #1, it's a real,
+> understood block, not neglect.
+> ⚠️ **New Rule-8 finding tonight, not yet acted on:** a commit message already in public
+> history quotes a literal real username. See Open Items #2 — needs an operator decision, not a
+> unilateral fix, especially not right before tonight's test.
+> ✅ **The install.sh core_module gap (found during today's Commit-B work) is fixed and
+> verified** — fresh installs now correctly resolve migrated-service units.
 
 ---
 
-## The relocation + de-privileging effort (today's session arc)
+## Today's arc (2026-07-28) — five threads across one long session
 
-Started on the PUNCHLIST `[FIX-NOW]` fd-leak. Expanded, via operator decisions through the day,
-into: fd-leak fix → a Data Manager gatekeeper assessment → a PostgreSQL evaluation (**deferred**
-— measured SQLite/WAL at 18,126–25,619 w/s against a 1,000 w/s worst-case projection, ~25x
-headroom; the throughput case didn't survive measurement) → a dedicated-writer-process
-assessment (**deferred** — measured Unix-socket IPC at 62,666 w/s, viable but superseded) →
-service de-privileging → an `/opt` relocation → a production incident and recovery. Both
-deferred assessments live only in conversation right now — flagged for a roadmap
-stub/ADR decision, not made yet.
+Full raw log: `docs/handoff/worklog/2026-07-28-001.md`. Curated narrative:
+`docs/handoff/supplements/2026-07-28-001.md`. Summary:
 
-Six commits, all pushed, `HEAD` = `7e804a6`:
-```
-a38a068  fix(anomaly_detection): guarantee DB connection close on exception
-84a57d2  feat(privsep): kernel-verified privilege attestation, wired into all six services
-597c302  feat(paths): canonical DB path resolver, staged for the /opt relocation
-a133892  feat(scripts): /opt relocation migration tool, VM-proven
-5e9fcc0  feat(units): /opt layout + per-service de-privileging across all 8 units
-7e804a6  fix(paths,privsep): complete the DB-path migration and make services start under /opt
-```
+1. **Morning audit** found and fixed a real gap: `dashboard.service`'s deliberate hardening
+   exception (see below) wasn't codified in `gen_units.py` — a future regeneration could have
+   silently hardened it and broken `sudo -n ufw`. (`bc36219`, `bd23f2b`) Also fixed CLAUDE.md's
+   remaining stale `~/dashboard` paths. (`ebd3bf6`)
+2. **CSRF fix** — three quarantine/action routes were GET-as-write; now POST-only.
+   Window 2 edited `dashboard.py` directly (user-authorized, urgent — Window 1 was blocked on
+   it). (`8c8bce9`, amended from `e7360d5` to fix a wrong cross-reference in the message)
+3. **`nemesis_fwd.py`** — a new privileged ufw-helper process with three independent
+   verification layers (kernel-verified peer identity via `SO_PEERCRED`, a users-table
+   admin-account lookup, a bcrypt credential check) plus `PEER_POLICY` per-peer op
+   allowlists, deploy tooling, and (later) tiered account lockout matching `dashboard.py`'s own
+   scheme. (`3cf0e4d`, `7d4999a`, `401b58d`)
+4. **Design capture** — ADR 0018 (attacker-resistant backup medium protection + manifest-based
+   recovery) and a roadmap stub for three future Windows-agent requirements tied to the paused
+   memory-injection module. (`045cedc`, `2c2d580`, `04a3b88`)
+5. **Data Manager v1.1** — explicit table lists, three-state enforcement modes, column-level
+   grants. (`c10a9d3`)
+6. **core_module layout move** — six daemons relocated from `alert_manager/` into
+   `core_module/<name>/`, copy-then-delete across two commits per service. Commit A (additive,
+   all six) landed, then Commit B (remove the old copy) landed for five of six. (`9ffac56`,
+   `eb5a35b`, `04c9e11`, `85e2baa`, `dd95de1`, `fbce915`) — see the state table below.
 
-Three bugs were caught in review and held before landing (details:
-`docs/handoff/supplements/2026-07-27-001.md`): a standalone `--verify` false-fail in
-`migrate_to_opt.sh`, four systemd units silently losing real ordering dependencies on
-regeneration (fixed with an explicit `after`/`wants` list model plus a new
-`gen_units.py --check` drift guard), and a rollback warning pointing at a snapshot path
-nothing created (fixed by having `install.sh` actually create it).
+Two private audits ran alongside (kept out of the public repo per Rule 10 — read as an attack
+roadmap otherwise): dashboard's sensitive-action surfaces vs. the three-layer-verified pattern,
+and the core_module identity/DB-access landscape. Both in
+`~/work/nemesis-internal/known-limitations/`.
 
-## THE INCIDENT (2026-07-27, ~25 min degraded production) — read before touching migrate_to_opt.sh
+**Review discipline caught five real bugs today, all held and re-verified before landing** (not
+trusted from a handoff claim) — see the supplement for full detail on each: a Data Manager
+`executescript()` NameError, missing test coverage for the same retrofit, a
+`migrate_core_module.sh --verify` silent-abort bug (`set -euo pipefail` + grep-no-match), the
+`install.sh` core_module blind spot, and — most recently — two live consumers of the old
+`alert_watcher.py` path that contradicted a "confirmed not imported anywhere" claim.
 
-The operator ran `scripts/migrate_to_opt.sh --run` for real. Code and DB moved cleanly
-(integrity confirmed), but the migration script does **not** deploy unit files (`install.sh`
-does) — so all 8 deployed units still pointed at the now-deleted `/home/<user>/dashboard`.
-`do_migrate` restarts every service at the end of its run; with stale units this drove all 8
-into crash loops (`dashboard` hit `StartLimitBurst`/`failed`; the other 7 hit
-`INVALIDARGUMENT`/"can't open file", restart counters 23+). Recovered forward, one service at
-a time, verifying each.
-
-**Current state independently re-confirmed via `systemctl show` (not relayed):** all 8
-services `active`/`running`, `NRestarts=0`, correct `/opt/nemesis` `ExecStart` paths.
-
-**`migrate_to_opt.sh` should not be run by anyone else as-is** (open item below) — it must
-either deploy units itself or refuse to restart services when the installed units still
-reference the old path. `--verify` also still doesn't check unit-path-correctness at all
-(only code location, DB location, old-path-gone) — a different gap from the standalone
-`--verify` bug fixed earlier the same day.
-
-## Current state — de-privileging model
+## core_module layout — current state
 
 ```
-dashboard            <user>              /opt/nemesis/dashboard.py            (NOT hardened, see below)
-watchdog             nemesis-watchdog  /opt/nemesis/alert_manager/watchdog.py
-hw-monitor           nemesis-hwmon     /opt/nemesis/alert_manager/hw_monitor.py
-alert-watcher        nemesis-alertw    /opt/nemesis/alert_manager/alert_watcher.py
-device-scanner       <user>              /opt/nemesis/alert_manager/device_scanner.py
-malware-canary       nemesis-canary    /opt/nemesis/alert_manager/malware_canary.py
-diagnostics-watcher  nemesis-diag      /opt/nemesis/alert_manager/diagnostics_watcher.py
-vpn-dns-guard        nemesis-vpndns    /opt/nemesis/core/vpn_dns_guard.py
+alert-watcher        core_module/alert_watcher/alert_watcher.py             LIVE, old alert_manager/ copy STILL PRESENT
+hw-monitor            core_module/hw_monitor/hw_monitor.py                   LIVE, old copy REMOVED (Commit B done)
+device-scanner       core_module/device_scanner/device_scanner.py           LIVE, old copy REMOVED (Commit B done)
+watchdog              core_module/watchdog/watchdog.py                       LIVE, old copy REMOVED (Commit B done)
+malware-canary       core_module/malware_canary/malware_canary.py           LIVE, old copy REMOVED (Commit B done)
+diagnostics-watcher  core_module/diagnostics_watcher/diagnostics_watcher.py  LIVE, old copy REMOVED (Commit B done)
 ```
 
-`systemd-analyze` exposure: 9.6 UNSAFE → 2.0 OK for the six de-privileged services;
-device-scanner 2.2 (retains `CAP_NET_RAW`, see Open Items #10 below); dashboard unchanged at
-9.2 UNSAFE, deliberately. UIDs for the six confirmed directly (`id`): 985/990/991/992/993/994,
-all `gid=972 (nemesis-db)`. Attestation: kernel-verified at runtime (euid, `CapEff`,
-`NoNewPrivs` read from `/proc/self/status`), never inferred from the unit file — the pattern
-follows a private L3 `SYSTEMD_FAIL_OPEN` finding (a unit that asks for isolation it cannot get
-starts anyway, unrestricted). Journal confirmation of the attestation lines and the live
-`/etc/sudoers.d/` listing were **not independently verifiable this session** (no passwordless
-sudo available) — see Open Items #3.
-
-**Dashboard is deliberately not hardened.** It elevates via `sudo -n` in ~10 places, including
-`alert_manager/firewall.py` (the ADR-0005 ufw chokepoint). `NoNewPrivileges=yes` makes the
-kernel ignore setuid, so sudo cannot elevate under it — proven, not assumed (`sudo -n ufw
-status` succeeds normally, fails under `--no-new-privs`). A hardened dashboard would have
-started, looked healthy, and been unable to block or quarantine anything — a silent loss of a
-core security function. The unit carries an in-file comment explaining this; do not add
-hardening directives to it before the `firewall.py` sudo call sites are rewritten to use a
-capability directly (deferred to tomorrow, operator-confirmed, do not scope tonight — the
-CAP_NET_RAW/CAP_NET_ADMIN rewrite of `firewall.py` and the other sudo call sites, matching the
-device-scanner precedent, is what closes dashboard's 9.2 score).
-
-Data: `/var/lib/nemesis/alerts.db`, `<user>:nemesis-db 0660`, directory 0770 (load-bearing, not
-0750 — SQLite WAL mode creates `-wal`/`-shm` siblings in the directory, and 0750 reproduces the
-same "attempt to write a readonly database" failure behind the 2026-07-18 fd-exhaustion
-incident).
+All six systemd units already point at `core_module/<name>/` in production (independently
+confirmed via `systemctl show -p ExecStart`, not just read from a handoff claim) — the
+remaining `alert_watcher.py`/`alert-watcher.service` files sitting in `alert_manager/` are
+dead weight, not live, but can't be deleted yet (see Open Items #1). `dashboard` and
+`nemesis-fwd` remain in `alert_manager/` by design (not part of this move);
+`vpn-dns-guard` remains in `core/` by design.
 
 ## Open items
 
-1. **`.nemesis-premigration-mode` is untracked and not gitignored** — confirmed at the
-   `/opt/nemesis` repo root (content: mode `775`, path `/home/<user>/dashboard`). The only thing
-   making the tree dirty; will fail `migrate_to_opt.sh`'s own dirty-tree preflight on any
-   future run. Needs a `.gitignore` entry.
-2. **`/etc/nemesis.env` line 18, `NEMESIS_AGENT_EXE`, still holds a `/home/<user>` path** —
-   confirmed by direct read. Not corrected during the migration; deliberately not granted to
-   Window 1, since write access to that file means the ability to rewrite all 16 secrets.
-3. **Three temporary sudoers grants need removal at end-of-effort:**
-   `nemesis-deprivilege-step1`, `nemesis-relocation`, `nemesis-dashboard-unit`. Only partially
-   corroborated this session (via the pre-migration USB snapshot, which predates incident
-   recovery and shows 2 of the 3 plus two others not in this list) — confirm the actual live
-   `/etc/sudoers.d/` before removing anything.
-4. **`migrate_to_opt.sh` should not be run by anyone else as-is** — the defect behind tonight's
-   incident (see above).
-5. **PUNCHLIST fd-leak entry was stale — corrected this session.** Root cause was never
-   `eve.json` handling; it was unclosed SQLite connections in `_set_state`, fixed in `a38a068`.
-6. **`docs/reference/operational-notes.md` still carries the same stale eve.json framing** —
-   flagged, not fixed tonight (prose, deserves its own pass).
-7. **Six files still compute raw tree-relative `alerts.db` paths** — all historical/test
-   tooling, no production service: `alert_manager/test_quarantine.py`, three
-   `scripts/stage2_migrate_*`, `scripts/wal_concurrent_smoketest.py`, `test_anomaly_cleanup.py`.
-8. **`device_scanner.py` and `dashboard.py` have no attestation call** — their units declare
-   `NEMESIS_EXPECT_USER` and nothing reads it. Cosmetic.
-9. **`dashboard.py` has a duplicate `sys.path.insert`** — 4 occurrences total (lines 6, 19, 75,
-   107), not just the 2 originally flagged.
-10. **`device_scanner.py`'s `scan_network()` still shells out via `["sudo", "nmap", ...]`
-    unconditionally** — no code path uses the unit's new `AmbientCapabilities=CAP_NET_RAW`
-    instead. The "CAP_NET_RAW replaces the unrestricted sudo nmap grant" framing from the units
-    commit isn't realized at the code level yet: either the old sudoers grant is still live and
-    now redundant, or it was revoked and the scanner is silently broken. Needs a code decision
-    (Window 1's lane).
-11. **ADR 0015 vs. `venue-guest-network.md` tension** (carried forward from 07-26) — needs an
-    operator decision before either guest-enrollment vision gets built.
-12. **No target hardware baseline exists** (carried forward) — still blocks turning any
-    L3/Tier-1/Tier-2 scoping doc into a real session estimate.
-13. **Legal review** (carried forward) — hard prerequisite for ADR 0016's PII-collection half,
-    not yet started.
+1. **`alert_watcher.py` Commit B is blocked on two fixes, held from landing tonight:**
+   - `alert_manager/test_quarantine.py:29-30` — `sys.path.insert(0, .../alert_manager)` then
+     `import alert_watcher`; needs the path updated to resolve from `core_module/alert_watcher/`
+     once the old copy is gone.
+   - `scripts/deploy_nemesis_fwd.sh:82`, `check_sources()` — hardcodes
+     `alert_manager/alert_watcher.py` in its required-files list; needs updating to
+     `core_module/alert_watcher/alert_watcher.py` or every future ufw-helper deploy preflight
+     will hard-fail once the old file is gone.
+   Both are small, mechanical fixes — Window 1's lane. Once landed, Window 2 re-verifies (test
+   still imports cleanly, `check_sources()` still passes) before the final Commit B.
+2. **NEW Rule-8 finding (found at tonight's closeout sweep, not yet acted on):** commit
+   `9ffac56`'s own message quotes the literal real install username instead of a placeholder —
+   it's in public git history a second time, in the commit log itself, in a commit made *after*
+   the 2026-07-26 scoped history rewrite (so it postdates the cleaned history and isn't covered
+   by it). A rewrite is significant and hard to reverse — **needs an explicit operator decision,
+   not a unilateral fix**, and deliberately not actioned tonight, hours before a live test.
+   Flagged in `PUNCHLIST.md` for follow-up.
+3. **Three temporary sudoers grants still present** (confirmed via direct `ls
+   /etc/sudoers.d/` tonight): the de-privileging/relocation-era grants remain live. Carried
+   forward unresolved from 07-27 — no action taken today, not urgent, but should be cleaned up
+   once the de-privileging effort is fully closed out.
+4. **`/etc/nemesis.env` line 18, `NEMESIS_AGENT_EXE`, still holds a real home path** —
+   unchanged since 07-27; deliberately not granted to Window 1 (write access to that file means
+   rewriting all 16 secrets).
+5. **`migrate_to_opt.sh` should not be run by anyone else as-is** — carried forward from the
+   07-27 incident; the script still doesn't deploy unit files itself and `--verify` still
+   doesn't check unit-path correctness. Unrelated to (and does not overlap with) tonight's
+   core_module tooling, which is a separate, newer script (`migrate_core_module.sh`) built with
+   this exact failure mode in mind from the start.
+6. **`device_scanner.py`'s `scan_network()` still shells out via unconditional `sudo nmap`** —
+   carried forward from 07-27, re-confirmed still true during today's core_module identity/DB
+   audit. The unit's `CAP_NET_RAW` grant isn't used at the code level yet. Window 1's lane.
+7. **No ADR written yet for the relocation + de-privileging model** (carried forward from
+   07-27 as "ADR 0017 needed") — still undone; ADR 0018 landed today but covers backup design,
+   not this. Architecturally significant and currently documented only in commit messages.
+8. **`docs/operations/backupproc.md` still not re-verified against the `/opt/nemesis` layout**
+   — read today; it turns out to be written path-agnostically (references "the dashboard
+   service" / "the dashboard project", not a literal old path), so it may not need an edit, but
+   the actual revert procedure has not been re-run against the current layout. Treat as
+   unconfirmed until it is.
+9. **Six files still compute raw tree-relative `alerts.db` paths** (carried forward from
+   07-27) — `alert_manager/test_quarantine.py`, three `scripts/stage2_migrate_*`,
+   `scripts/wal_concurrent_smoketest.py`, `test_anomaly_cleanup.py`. Note:
+   `test_quarantine.py` is both this AND item #1's blocker — same file, two separate reasons
+   it needs attention.
+10. **`nemesis_fwd.py` connection-leak** (found during today's core_module identity/DB audit,
+    private): `_db()` returns a plain `sqlite3.Connection` used via `with _db() as conn:` in
+    four places — the context manager only handles the transaction, never closes the
+    connection, leaking one per call. Documented privately, not fixed tonight.
+11. **`device_scanner.py`/`dashboard.py` have no attestation call** (carried forward,
+    cosmetic) — their units declare `NEMESIS_EXPECT_USER` and nothing reads it.
+12. **`dashboard.py` has a duplicate `sys.path.insert`** (carried forward, cosmetic) — 4
+    occurrences (lines 6, 19, 75, 107).
+13. **ADR 0015 vs. `venue-guest-network.md` tension** (carried forward) — needs an operator
+    decision before either guest-enrollment vision gets built.
+14. **No target hardware baseline exists** (carried forward) — blocks turning L3/Tier-1/Tier-2
+    scoping docs into real session estimates.
+15. **Legal review** (carried forward) — hard prerequisite for ADR 0016's PII-collection half,
+    not started.
+
+**Resolved since 07-27:** `.nemesis-premigration-mode` is now gitignored (confirmed present in
+`.gitignore`) — the file is still on disk (harmless, root-owned, gitignored) but no longer
+makes the tree dirty or threatens `migrate_to_opt.sh`'s preflight. 07-27's item #1 closed.
 
 ## Roadmap baseline
 
-`docs/audits/roadmap-state-audit-2026-07-26.md` — **4 SHIPPED / 8 PARTIAL / 51 PARKED, 63
-total.** Unchanged — no `docs/roadmap/*.md` files were touched by any of today's six commits
-(all code fixes for the relocation/de-privileging effort), so no re-audit was needed.
+`docs/audits/roadmap-state-audit-2026-07-28.md` — **4 SHIPPED / 8 PARTIAL / 52 STUB/PARKED, 64
+total.** Drift since the 07-26 baseline: +1 file (`windows-agent-memory-injection-rework-
+prereqs.md`, added today, correctly PARKED); no items shipped or moved.
 
-## Docs that need the path fixed — TOP PRIORITY for tomorrow
+## Current state — de-privileging model (paths updated for the core_module move; users/hardening posture unchanged since 07-27)
 
-Flagging only, not done tonight (a ~28-reference edit deserves its own pass, not a rushed
-tack-on at the end of a long session) — but this is the single highest-priority open item,
-since leaving it stale actively breaks the morning routine rather than just reading oddly:
-- **CLAUDE.md "Key paths"** — every path is wrong.
-- **CLAUDE.md's own Morning Status commands** — `find ~/dashboard` / `git -C ~/dashboard` will
-  silently return nothing starting tomorrow.
-- **`docs/operations/backupproc.md`** — references the old location and the DB's old in-tree
-  position.
-- **New ADR needed** (probably 0017) — the relocation + de-privileging model (per-service
-  users, `nemesis-db` group, runtime attestation, the dashboard carve-out) is architectural and
-  currently undocumented anywhere except commit messages and this handoff.
-- **ADR 0003** — its backup design remains unimplemented; the DB has moved, changing what a
-  backup targets.
-- **Rule 10 decision needed, not made tonight:** the attestation pattern derives from a private
-  L3 `SYSTEMD_FAIL_OPEN` finding. The general approach (assert privilege at runtime, never
-  trust the unit file) reads as publishable; the L3 harness detail stays private.
+```
+dashboard            <user>            /opt/nemesis/dashboard.py                     (NOT hardened, deliberate)
+watchdog              nemesis-watchdog  core_module/watchdog/watchdog.py
+hw-monitor            nemesis-hwmon     core_module/hw_monitor/hw_monitor.py
+alert-watcher        nemesis-alertw    core_module/alert_watcher/alert_watcher.py
+device-scanner       <user>            core_module/device_scanner/device_scanner.py  (retains CAP_NET_RAW)
+malware-canary       nemesis-canary    core_module/malware_canary/malware_canary.py
+diagnostics-watcher  nemesis-diag      core_module/diagnostics_watcher/diagnostics_watcher.py
+vpn-dns-guard        nemesis-vpndns    core/vpn_dns_guard.py
+nemesis-fwd          (dedicated user)  alert_manager/nemesis_fwd.py                  (new today)
+```
+
+`systemd-analyze` exposure and UID details unchanged since 07-27 (not re-measured tonight — no
+hardening directives changed today, only file locations). **Dashboard remains deliberately
+unhardened** — see below for the full reasoning (still current, not revisited today).
+
+## THE INCIDENT (2026-07-27, ~25 min degraded production) — historical, still worth reading
+before touching `migrate_to_opt.sh`
+
+The operator ran `scripts/migrate_to_opt.sh --run` for real. Code and DB moved cleanly, but the
+migration script does not deploy unit files — all 8 units still pointed at the deleted old
+path, and `do_migrate`'s end-of-run restart drove all 8 into crash loops. Recovered forward,
+one service at a time. Root cause is still an open item (#5 above) — `migrate_to_opt.sh` was
+not touched today; the core_module tooling built today (`migrate_core_module.sh`) was
+deliberately designed around this exact failure mode (copy-then-delete, unit redeployed before
+restart, preflight that the new `ExecStart` path exists) and has been proven not to repeat it,
+five services deep.
+
+**Dashboard is deliberately not hardened.** It elevates via `sudo -n` in ~10 places, including
+`alert_manager/firewall.py` (the ADR-0005 ufw chokepoint) — though as of today that
+chokepoint's `ufw` calls are being migrated to route through `nemesis_fwd` instead (in
+progress, not complete). `NoNewPrivileges=yes` makes the kernel ignore setuid, so sudo cannot
+elevate under it — proven, not assumed. A hardened dashboard would start, look healthy, and be
+unable to block or quarantine anything. Do not add hardening directives to `dashboard.service`
+before the remaining `firewall.py` sudo call sites are rewritten to route through `nemesis_fwd`
+or a capability directly.
 
 ## LIVE vs DEFAULT-OFF (and why) — unchanged since 2026-07-02, still current
 
@@ -180,27 +199,29 @@ since leaving it stale actively breaks the morning routine rather than just read
 | **L2** — WinDivert reputation blocking | **default OFF globally** | Validated 2026-07-02; per-device toggle still unbuilt. |
 | **L2 on the trip-laptop** | **ON** (that one installer only) | Global default unchanged. |
 
-## Emergency fallback — NEEDS RE-VERIFICATION, path changed today
+## Emergency fallback — still flagged unconfirmed for the current layout
 
 `docs/operations/backupproc.md` — Procedure A (local uninstall) and Procedure B (Claude Code
 revert prompt). Revert tag `pre-l1l2l3-build-known-good` → `14b066b`, last verified byte-exact
-on 2026-07-26 (pre-relocation). **Not re-verified against the new `/opt/nemesis` layout** — the
-doc itself still references the old location (see "Docs that need the path fixed" above).
-Treat this procedure as unconfirmed for the current install until that doc is updated and
-re-tested.
+on 2026-07-26 (pre-relocation). The doc itself reads path-agnostic (see Open Items #8) but the
+actual procedure has not been re-run against the current `/opt/nemesis` + core_module layout.
+**If tonight's pen test needs this, treat it as unconfirmed and proceed carefully** — but note
+the pen test targets a separate, isolated lab (Linux host + Windows 11 agent), not this
+production box, so this fallback should not be needed tonight.
 
 ## Pointers
-- Today's narrative: `docs/handoff/supplements/2026-07-27-001.md`.
-- Prior narratives: `docs/handoff/supplements/2026-07-26-001.md`, `2026-07-25-001.md` (morning
-  audit), `-002.md` (ADR 0006 build), `-003.md` (loader-enforcement + L3 consolidation),
-  `2026-07-02-001.md`.
-- Snapshots (USB, both directions verified restorable):
-  `2026-07-27-1846-pre-opt-migration-run` (current rollback target),
-  `2026-07-27-1625-pre-opt-relocation` (superseded), `2026-07-27-1537-pre-service-deprivileging`.
-- Private module + evaluation docs (outside this repo): `~/work/nemesis-internal/`.
-- Fallback: `docs/operations/backupproc.md` (needs re-verification, see above); tag
+- Today's narrative: `docs/handoff/supplements/2026-07-28-001.md`; raw log:
+  `docs/handoff/worklog/2026-07-28-001.md`.
+- Prior narratives: `docs/handoff/supplements/2026-07-27-001.md`, `2026-07-26-001.md`,
+  `2026-07-25-001.md` (morning audit), `-002.md` (ADR 0006 build), `-003.md` (loader-enforcement
+  + L3 consolidation), `2026-07-02-001.md`.
+- Private module + audit docs (outside this repo): `~/work/nemesis-internal/`, specifically
+  tonight's two new audits under `known-limitations/`
+  (`dashboard-sensitive-surfaces-audit-2026-07-28.md`,
+  `core-module-identity-and-db-audit-2026-07-28.md`).
+- Fallback: `docs/operations/backupproc.md` (unconfirmed for current layout, see above); tag
   `pre-l1l2l3-build-known-good` (`14b066b`).
-- Latest audits: `docs/audits/roadmap-state-audit-2026-07-26.md`.
+- Latest audits: `docs/audits/roadmap-state-audit-2026-07-28.md`.
 - Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
 
 ## Topology (durable, unchanged)
@@ -208,3 +229,6 @@ re-tested.
 - `:5000` Flask dashboard (ufw-blocked from LAN). `:5001` hw-monitor agent endpoint
   (`/enroll`, `/enrollment_status`, `/hw_data`, `/api/agent/uninstall`, `/reputation_dataset` live).
 - `:5002` agent command listener — localhost-bound + unauthenticated.
+- `nemesis-fwd` (new today) — a Unix-socket-based privileged helper for ufw operations,
+  reachable only by the dashboard and alert-watcher peers, each independently verified via
+  kernel-level peer credentials + an admin-account + credential check.
