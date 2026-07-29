@@ -180,14 +180,31 @@ deliberately designed around this exact failure mode (copy-then-delete, unit red
 restart, preflight that the new `ExecStart` path exists) and has been proven not to repeat it,
 five services deep.
 
-**Dashboard is deliberately not hardened.** It elevates via `sudo -n` in ~10 places, including
-`alert_manager/firewall.py` (the ADR-0005 ufw chokepoint) — though as of today that
-chokepoint's `ufw` calls are being migrated to route through `nemesis_fwd` instead (in
-progress, not complete). `NoNewPrivileges=yes` makes the kernel ignore setuid, so sudo cannot
-elevate under it — proven, not assumed. A hardened dashboard would start, look healthy, and be
-unable to block or quarantine anything. Do not add hardening directives to `dashboard.service`
-before the remaining `firewall.py` sudo call sites are rewritten to route through `nemesis_fwd`
-or a capability directly.
+**Dashboard is deliberately not hardened.** `NoNewPrivileges=yes` makes the kernel ignore
+setuid, so sudo cannot elevate under it — proven, not assumed. A hardened dashboard would
+start, look healthy, and be unable to perform the operations it still shells out for.
+
+**The ADR-0005 ufw chokepoint migration is COMPLETE** (corrected 2026-07-29 by the §9
+dashboard-identity audit; this section previously said "in progress, not complete"). All six
+firewall operations — `block_ip`, `deny_ip`, `unblock_ip`, `expire_quarantine`, `list_blocked`,
+`list_rules` — route through `fw_client` to `nemesis_fwd`, and `alert_manager/firewall.py`
+now contains no `subprocess` call and no `sudo` at all.
+
+What still blocks hardening is therefore NOT firewall.py. It is **seven remaining `sudo` call
+sites in `dashboard.py`**, none of them ufw:
+
+```
+:558          sudo systemctl status clamav-daemon     read-only status
+:5454, :5654  sudo systemctl restart dashboard        self-restart ×2
+:5464         sudo bash <uninstall_script> --yes      uninstall
+:5568-5570    sudo cp/chown/chmod /etc/nemesis.env    the 16-secret env rewrite
+```
+
+Do not add hardening directives to `dashboard.service` until all seven are gone. The
+self-restart pair likely resolves to a polkit rule scoped to the Nemesis units (precedent:
+`10-nemesis-watchdog.rules`); the `/etc/nemesis.env` rewrite is the hard one and needs its own
+design. This half stays PARKED — it is independent of the dashboard DB de-privileging work,
+which needs no identity change at all.
 
 ## LIVE vs DEFAULT-OFF (and why) — unchanged since 2026-07-02, still current
 

@@ -121,6 +121,35 @@ NAMESPACES = {
             "users": ("failed_attempts", "lockout_until", "lockout_tier"),
         },
     },
+
+    # ── dashboard (HANDOFF §9 phase 1, 2026-07-29) ───────────────────────────────
+    #
+    # Registered in WARN mode (set from dashboard.py's startup) while its 40
+    # direct sqlite3 sites migrate to this guard one at a time. Nothing is denied
+    # yet.
+    #
+    # DELIBERATELY PARTIAL — this is the whole point of the entry. dashboard
+    # writes ELEVEN tables; only the four that no other namespace claims are
+    # granted here. The other seven are already granted elsewhere:
+    #
+    #     scan_jobs, agent_devices, enrollment_tokens,
+    #     scan_threats, scan_schedules  ........ hw_monitor
+    #     audit_log ............................ nemesis_fwd
+    #     users ................................ nemesis_fwd (column grant)
+    #
+    # Granting those here as well would put two namespaces on the same tables and
+    # quietly reduce write-own from an access control to a logger. They are held
+    # pending an ownership decision (two of them — scan_threats/scan_schedules —
+    # are already flagged as open questions in hw_monitor's entry above, and
+    # enrollment_tokens carries the same caveat). WARN mode is what produces the
+    # evidence for that decision: every dashboard write to one of the seven logs
+    # a WOULD DENY line naming the table, without blocking anything.
+    #
+    # Do NOT add the seven here to "make the warnings stop". The warnings are the
+    # deliverable.
+    "dashboard": {
+        "tables": ("alerts", "quarantines", "devices", "login_events"),
+    },
 }
 
 # ── namespace enforcement mode (ADR 0001 rollout seam) ───────────────────────

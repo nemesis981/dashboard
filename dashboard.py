@@ -107,6 +107,27 @@ PIHOLE_IP = os.environ.get("PIHOLE_IP", "127.0.0.1:8080")
 PIHOLE_PASSWORD = os.environ.get("PIHOLE_PASSWORD", "")
 sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 import nemesis_paths  # noqa: E402
+import data_manager  # noqa: E402
+
+# HANDOFF §9 phase 1: register dashboard's namespace mode before anything can
+# open a guarded connection. WARN, not ENFORCE — the 40 direct sqlite3 sites are
+# migrating one at a time, and seven of the eleven tables dashboard writes are
+# owned by another namespace pending an ownership decision. WARN runs the full
+# check and logs `WOULD DENY` without blocking the write, so neither the
+# migration nor the ownership evidence can take production down. Do not flip this
+# to ENFORCE until every site is migrated AND the seven are resolved.
+#
+# THIS LINE'S POSITION IS LOAD-BEARING — keep it immediately after
+# `import data_manager`, above every DM connection in the process.
+# `namespace_mode()` returns MODE_ENFORCE for any module it has not been told
+# about (data_manager.py: `_MODES.get(module, MODE_ENFORCE)`), so a guarded
+# connection opened before this call runs is an ENFORCING one. In that window a
+# dashboard write to any of the seven conflicted tables raises AccessDenied and
+# FAILS, instead of logging WOULD DENY and succeeding. Moving this below any
+# `connect()`, wrapping it in a conditional, or importing this module from
+# something that skips it converts a warning into an outage.
+data_manager.set_namespace_mode("dashboard", data_manager.MODE_WARN)
+
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alert_manager", "alerts.db"))
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
