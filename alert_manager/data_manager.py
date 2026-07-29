@@ -94,13 +94,19 @@ NAMESPACES = {
             # first real run — precisely the transcription error a static list
             # cannot catch about itself.
             "fan_status",
-            # NOTE: `enrollment_tokens` is created by alert_manager/database.py,
-            # not by hw_monitor — hw_monitor only UPDATEs it. Listing it here
-            # grants the write, but the ownership question is open and tracked
-            # (same shape as nemesis_fwd/users). Do NOT read this entry as a
-            # settled claim that hw_monitor owns the table.
-            "enrollment_tokens",
+            # `enrollment_tokens` RESOLVED 2026-07-29 and moved to a column grant
+            # below — hw_monitor is the token CONSUMER, not its owner.
         ),
+        # COLUMN GRANT (resolved 2026-07-29). dashboard mints tokens; hw_monitor's
+        # only write to this table, ever, is `SET uses = uses + 1` at enrollment.
+        # This is the network-facing process on :5001 handling untrusted agent
+        # payloads, so the narrow grant is doing real work: a compromised
+        # hw_monitor physically cannot mint a token, extend expires_at, raise
+        # max_uses, or clear `revoked`. It can only advance a counter that its own
+        # SQL already bounds (`uses < max_uses AND revoked=0 AND expires_at > ?`).
+        "columns": {
+            "enrollment_tokens": ("uses",),
+        },
     },
     "watchdog": {
         # Disjoint from hw_monitor despite the shared `hw_` prefix — the exact
@@ -147,8 +153,39 @@ NAMESPACES = {
     #
     # Do NOT add the seven here to "make the warnings stop". The warnings are the
     # deliverable.
+    # Ownership resolutions, 2026-07-29. The DM supports MULTIPLE registered
+    # writers per table where the sharing is genuine — that is an operator
+    # decision, not a workaround, and it is preferred over forcing a single owner
+    # with call-through forwarding.
     "dashboard": {
-        "tables": ("alerts", "quarantines", "devices", "login_events"),
+        "tables": (
+            # sole writer
+            "alerts", "quarantines", "devices", "login_events",
+            # row owner; hw_monitor holds a `uses`-only column grant (see above)
+            "enrollment_tokens",
+            # SHARED WRITER with hw_monitor. Symmetric: both INSERT and UPDATE the
+            # same columns over the same job lifecycle, from two legitimate
+            # dispatch paths (operator-initiated and agent-initiated). A column
+            # grant cannot express this — dashboard needs INSERT and DELETE, and
+            # column grants are UPDATE-only by design.
+            "scan_jobs",
+            # SHARED WRITER with nemesis_fwd. Append-only attribution log with
+            # several legitimate authors.
+            "audit_log",
+            # FULL grant, deliberately overlapping nemesis_fwd's narrow one.
+            # dashboard INSERTs accounts and maintains the SAME three lockout
+            # columns nemesis_fwd maintains — one shared lockout budget across
+            # both surfaces, which is the documented intent of nemesis_fwd's
+            # grant. The overlap is the design, not a conflict.
+            "users",
+        ),
+        # COLUMN GRANT. hw_monitor owns agent_devices rows (it INSERTs them at
+        # enrollment); dashboard never inserts, and only UPDATEs these four for
+        # operator actions — approve/reject and rename. UPDATE-only fits exactly.
+        "columns": {
+            "agent_devices": ("enrollment_status", "enrolled_by",
+                              "enrolled_at", "device_name"),
+        },
     },
 }
 
