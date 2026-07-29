@@ -51,6 +51,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -208,12 +209,37 @@ class CredentialCache:
 
 # ── database (ground truth for layers 2 and 3) ───────────────────────────────
 
+@contextmanager
 def _db():
+    """Connection scope that GUARANTEES close(), for the helper's plain reads.
+
+    Until 2026-07-29 this returned a bare ``sqlite3.Connection`` used as
+    ``with _db() as conn:`` at all four call sites. That shape looks correct and
+    still leaks: sqlite3's connection context manager is a TRANSACTION context
+    manager — it commits or rolls back on exit and never closes — so every call
+    leaked a connection and its file descriptor until the cyclic GC happened to
+    collect it. Same mechanism, same anti-pattern, and the same warning already
+    written up in ``modules/anomaly_detection/module.py``'s ``_db()``, whose
+    docstring records the 2026-07-18 fd-exhaustion incident it caused there.
+
+    It matters more in this process than in a periodic detection cycle: this is a
+    long-lived socket server, so the leak accrues per REQUEST — up to three
+    connections for a single deny (load_admin, a failed-attempt record, audit)
+    with no natural process restart to reset the count.
+
+    The inner ``with conn:`` preserves the exact commit/rollback semantics the
+    call sites had before, so this change adds close() and nothing else. (This
+    is why it is not a verbatim copy of anomaly_detection's close-only version.)
+    """
     import sqlite3
     conn = sqlite3.connect(nemesis_paths.db_path(), timeout=5.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def load_admin(username):
