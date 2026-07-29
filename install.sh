@@ -480,7 +480,10 @@ install_system_deps() {
     apt-get update -y
 
     info "Installing core system packages..."
-    apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw
+    # `acl` provides setfacl, used to grant nemesis-canary traverse-only access to
+    # the install user's home so the ransomware canary can see its bait. Usually
+    # present on Ubuntu, but the canary silently fails without it — declare it.
+    apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw acl
 
     info "Installing core Python packages..."
     pip3 install --break-system-packages flask requests psutil
@@ -781,6 +784,40 @@ setup_nemesis_group() {
     usermod -a -G nemesis-fw "$SUDO_USER" 2>/dev/null || true
     usermod -a -G nemesis-fw nemesis-alertw 2>/dev/null || true
     ok "Service users created (nemesis-db + nemesis-fw groups, 6 per-service accounts)"
+
+    # ── canary visibility (2026-07-29) ───────────────────────────────────────
+    # The ransomware canary plants bait in the install user's home and polls it
+    # from malware-canary.service, which runs as nemesis-canary. Two things must
+    # be true or the poll reports every bait file as "deleted / encrypted-in-
+    # place" forever:
+    #
+    #   1. malware-canary.service must NOT have ProtectHome=yes — that masks
+    #      /home inside its mount namespace. Handled in scripts/gen_units.py,
+    #      which sets ProtectHome=read-only for that unit only.
+    #   2. nemesis-canary must be able to TRAVERSE the install user's home. Home
+    #      directories are commonly 0750, and nemesis-canary is not in the user's
+    #      group, so without this it cannot stat anything beneath it.
+    #
+    # A traverse-only ACL is used rather than `chmod o+x`: it grants exactly one
+    # account exactly x (no read, no listing) instead of opening traversal to
+    # every local account, including the other service users.
+    #
+    # This is not cosmetic. Both conditions were missing between 2026-07-25 and
+    # 2026-07-29 and the canary produced ~33,500 false CRITICAL findings, opened
+    # no tickets, and exhausted the outbound mail rate limit — while never once
+    # detecting anything. Losing this on a rebuild silently reproduces all of it.
+    if command -v setfacl >/dev/null 2>&1; then
+        if setfacl -m "u:nemesis-canary:--x" "/home/$SUDO_USER" 2>/dev/null; then
+            ok "Canary traverse ACL set on /home/$SUDO_USER (u:nemesis-canary:--x)"
+        else
+            warn "Could not set canary traverse ACL on /home/$SUDO_USER — the ransomware
+     canary will report all bait as deleted until this is granted manually:
+       setfacl -m u:nemesis-canary:--x /home/$SUDO_USER"
+        fi
+    else
+        warn "setfacl not found (install 'acl'). Canary bait under /home/$SUDO_USER will be
+     invisible to malware-canary.service until nemesis-canary can traverse it."
+    fi
     ok "Group 'nemesis' ready"
 
     usermod -aG nemesis "$SUDO_USER"

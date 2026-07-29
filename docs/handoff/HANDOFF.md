@@ -78,6 +78,48 @@ dead weight, not live, but can't be deleted yet (see Open Items #1). `dashboard`
 `nemesis-fwd` remain in `alert_manager/` by design (not part of this move);
 `vpn-dns-guard` remains in `core/` by design.
 
+## Ransomware canary — two out-of-repo preconditions (2026-07-29)
+
+The Layer-B canary depends on **two things that are not Python code**, and it had
+neither between 2026-07-25 and 2026-07-29. The result: ~33,500 false CRITICAL findings,
+zero tickets opened, the outbound mail rate limit exhausted (14,441 failed sends), and no
+actual detection capability at any point. Both are now in place and both are automated,
+but they are listed here because losing either one silently reproduces all of it — the
+canary keeps reporting, it just reports garbage.
+
+1. **`malware-canary.service` must not run with `ProtectHome=yes`.** That masks `/home`
+   inside the unit's mount namespace, so every bait file is invisible and the poll reports
+   `deleted / encrypted-in-place`. `scripts/gen_units.py` now sets `ProtectHome=read-only`
+   for this unit alone (via `omit_hardening`), and read-only is sufficient — the daemon
+   only ever stats and hashes the bait; planting happens from dashboard.
+2. **`nemesis-canary` must be able to traverse the install user's home.** Home dirs are
+   typically `0750` and `nemesis-canary` is not in the user's group, so even with `/home`
+   visible it cannot stat anything beneath it. Handled by a **traverse-only ACL**:
+   ```
+   setfacl -m u:nemesis-canary:--x /home/<install-user>
+   ```
+   `install.sh` applies this during service-user setup and now installs the `acl` package
+   explicitly. A traverse-only ACL is used instead of `chmod o+x` so exactly one account
+   gains `x` — no read, no directory listing, and nothing granted to the other service
+   accounts.
+
+**Verifying it is actually working** (both conditions, in one check):
+```
+grep ' /home ' /proc/$(systemctl show -p MainPID --value malware-canary)/mountinfo
+    # a line containing "inaccessible" means condition 1 is broken
+getfacl -p /home/<install-user> | grep nemesis-canary
+    # missing means condition 2 is broken
+tail -2 /var/log/nemesis/malware-canary/malware_canary.log
+    # healthy looks like: "canary: clean — 4/4 bait ok"
+```
+Note the daemon logs to that **file**, not the journal — `journalctl -u malware-canary`
+shows only systemd's own lines and will look deceptively quiet.
+
+Bait filenames are deliberately plausible (`Account passwords.docx`,
+`2026 Tax Return (draft).xlsx`, …) rather than self-identifying. Trade-off recorded in
+`modules/malware_detection/module.py`: this hides the trap from a targeted attacker, but
+loses the old `DO_NOT_DELETE` label that stopped the *user* deleting bait and false-tripping.
+
 ## Open items
 
 1. **`alert_watcher.py` Commit B is blocked on two fixes, held from landing tonight:**
