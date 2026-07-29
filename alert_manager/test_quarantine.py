@@ -26,12 +26,22 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # this dir (alert_manager)
-import alert_watcher  # noqa: E402
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Derived from this file's location (this dir holds alerts.db) — no hardcoded
-# home dir. (ADR 0001, Stage 1.)
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "alerts.db")
+# alert_watcher.py lives in core_module/alert_watcher/ after the 2026-07-28
+# layout move; its siblings (database, firewall, email_utils, ip_enrichment,
+# nemesis_paths) are still here in alert_manager/. Both directories are needed,
+# with core_module first so this resolves to the relocated copy.
+sys.path.insert(0, _HERE)  # alert_manager/ — alert_watcher's sibling imports
+sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "core_module", "alert_watcher"))
+import alert_watcher  # noqa: E402
+import nemesis_paths  # noqa: E402
+
+# Same resolution alert_watcher itself uses, so the test reads the database the
+# watcher actually writes. Computing it from this file's location instead was a
+# silent failure: alerts.db no longer sits in the tree, so sqlite3.connect()
+# created an empty stray DB here and every check ran against it. (ADR 0001.)
+DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DASHBOARD = "http://127.0.0.1:5000"
 TEST_IP = "203.0.113.99"
 RULE_IDS = {"confirm": "9999991", "lift": "9999992", "expire": "9999993"}

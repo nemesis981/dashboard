@@ -79,7 +79,7 @@ check_sources() {
     local missing=0 f
     for f in alert_manager/nemesis_fwd.py alert_manager/fw_client.py \
              alert_manager/nemesis-fwd.service alert_manager/firewall.py \
-             alert_manager/alert_watcher.py dashboard.py; do
+             core_module/alert_watcher/alert_watcher.py dashboard.py; do
         if [ -f "$TREE/$f" ]; then ok "present: $f"
         else printf "  %sFAIL%s missing: %s\n" "$RED" "$RST" "$f"; missing=1; fi
     done

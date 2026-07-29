@@ -122,6 +122,12 @@ SERVICES = {
     ]),
  "alert-watcher": dict(
     dest="alert_manager", desc="Nemesis Alert Watcher", user="nemesis-alertw",
+    # NOTE: this literal alert_manager/ path is intentionally stale — the
+    # CORE_MODULE block below (~line 197) overrides dest/exe/PYTHONPATH for
+    # this service to core_module/alert_watcher/ before generation. Verified
+    # correct via `gen_units.py --check`. Do NOT "fix" this line to
+    # core_module/ directly — that would double-apply the override and
+    # reproduce the 2026-07-27 incident. Leave it as the pre-override base.
     exe=f"{NEW_ROOT}/alert_manager/alert_watcher.py",
     # Ordered after Suricata: this service tails /var/log/suricata/fast.log,
     # which Suricata creates. Starting first means tailing a file that does not
