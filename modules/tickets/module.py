@@ -31,7 +31,31 @@ import logging
 import threading
 from datetime import datetime, timedelta
 from flask import request, jsonify
-from flask_login import current_user
+
+# OPTIONAL, and it must stay optional (2026-07-29).
+#
+# This module is imported by background services to file tickets —
+# core_module/watchdog, core_module/hw_monitor, and modules/malware_detection
+# (which the malware-canary service loads in-process). None of them is a Flask
+# app, none has a request context, and each runs as its own service account.
+# `flask_login` was installed only in the dashboard user's ~/.local, so for those
+# accounts this module-scope import raised ModuleNotFoundError and every
+# open_ticket() call from a daemon failed — silently, because each call site
+# wraps it in try/except. Auto-ticketing was dead for all three services.
+#
+# `current_user` is used at exactly two places in this file, both inside Flask
+# route handlers, and both already read it defensively via
+# getattr(current_user, "username", "unknown"). Falling back to None therefore
+# changes nothing for the web paths (getattr returns "unknown" exactly as it
+# would for an anonymous session) while letting a daemon import and use the
+# ticket API at all.
+#
+# A web-session library must not decide whether a background service can file a
+# ticket.
+try:
+    from flask_login import current_user
+except ImportError:  # pragma: no cover - exercised by every non-dashboard service
+    current_user = None
 
 from modules import NemesisModule, get_data_manager
 
