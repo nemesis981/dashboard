@@ -9,8 +9,6 @@ Group=nemesis-db
 Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis
 WorkingDirectory=/opt/nemesis/alert_manager
 EnvironmentFile=/etc/nemesis.env
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
 
 # Activates runtime privilege attestation (nemesis_privsep). Absent =>
 # the check stays inert, which is what makes the code safe pre-migration.

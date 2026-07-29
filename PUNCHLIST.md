@@ -1008,6 +1008,32 @@ lower-risk path for one laptop pre-trip).
   more gracefully / self-report on resource exhaustion (too-many-open-files) instead of
   silently hanging. Flag for a later error-handling pass — not part of the fd-leak fix itself.
 
+### [LOW] `device_scanner.py` logs via `print()` — convert to `logging` like every other daemon
+Filed 2026-07-29. `core_module/device_scanner/device_scanner.py` is the **only** Nemesis daemon
+that writes its output with bare `print()`; the other five use `logging`, whose handlers flush
+per record:
+
+```
+alert_watcher.py  print=0 logging=23     malware_canary.py      print=0 logging=11
+watchdog.py       print=0 logging=23     diagnostics_watcher.py print=0 logging=14
+hw_monitor.py     print=0 logging=66     device_scanner.py      print=7 logging=0   <-- outlier
+```
+
+That outlier status is why one bug class only ever bit this service: systemd hands the process a
+pipe, Python block-buffers stdout at 8192 bytes, and the loop sleeps 300s between cycles — so at
+~89 bytes of output per cycle the first line reached the journal roughly **7.5 hours** after
+start. Measured 2026-07-29: a scan ran, found devices and wrote them to the DB while
+`journalctl -u device-scanner` stayed completely empty.
+
+**Already mitigated, so this is not urgent:** `run()` now calls
+`sys.stdout.reconfigure(line_buffering=True)` as its first statement, and the six error/warning
+paths go through `_loud()` (stderr, `flush=True`). Output is timely today.
+
+**The remaining debt** is consistency: no severity levels, no timestamps of its own, no
+`LOGS_DIRECTORY` handling, and a future refactor that drops the one-line buffering call silently
+reintroduces the invisibility. Convert the 7 `print()` calls to `logging` and the mitigation stops
+being load-bearing. No urgency — do it when the file is open for another reason.
+
 ### [LOW] `agent_devices.last_heartbeat_data` not populating (observed 2026-07-03, trip-laptop)
 - [ ] **`agent_devices.last_heartbeat_data` is not populating for trip-laptop despite
   hw_metrics/agent_last_seen updating normally** — real telemetry (cpu/ram/temp) is landing

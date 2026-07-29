@@ -95,11 +95,19 @@ SERVICES = {
     extra=[
       f"WorkingDirectory={NEW_ROOT}/alert_manager",
       "EnvironmentFile=/etc/nemesis.env",
-      # nmap -sn needs raw sockets for the ARP sweep that yields MAC addresses.
-      # Replaces the unrestricted `sudo nmap` grant, which was escalatable via
-      # --script. A bounded capability beats a shell-out to root.
-      "AmbientCapabilities=CAP_NET_RAW",
-      "CapabilityBoundingSet=CAP_NET_RAW",
+      # NO capability grant, deliberately — device-scanner needs no privilege.
+      #
+      # This carried AmbientCapabilities/CapabilityBoundingSet=CAP_NET_RAW from
+      # 2026-07-27, intended to replace the unrestricted `sudo nmap` grant (which
+      # was escalatable via --script). Neither half ever worked: NoNewPrivileges
+      # makes the kernel ignore setuid so the sudo could not elevate, and nmap
+      # gates raw-socket scanning on uid rather than on the capability, so the
+      # ambient grant produced no MAC addresses either. Both measured 2026-07-29.
+      #
+      # scan_network() now runs an UNPRIVILEGED `nmap -sn` and reads the MAC
+      # addresses out of the kernel's own ARP table (/proc/net/arp), which any
+      # user may read. Nothing in that path needs a capability, a raw socket, or
+      # sudo — so the grant is gone rather than relocated.
     ]),
  "hw-monitor": dict(
     dest="alert_manager", desc="Nemesis Hardware Monitor", user="nemesis-hwmon",
