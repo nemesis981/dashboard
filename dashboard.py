@@ -985,7 +985,7 @@ def _audit(action, rule_id=None, ip=None):
         except RuntimeError:
             # No request context: scheduled sweeps and other unattended callers.
             user = "system"
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (_audit)
         try:
             c = conn.cursor()
             c.execute(
@@ -1518,7 +1518,7 @@ def api_header_status():
 @app.route("/api/agent/<device_id>/approve", methods=["POST"])
 def api_agent_approve(device_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (api_agent_approve)
         conn.execute(
             "UPDATE agent_devices SET enrollment_status='approved', enrolled_by=?, enrolled_at=? "
             "WHERE device_id=?",
@@ -1534,7 +1534,7 @@ def api_agent_approve(device_id):
 @app.route("/api/agent/<device_id>/reject", methods=["POST"])
 def api_agent_reject(device_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (api_agent_reject)
         conn.execute("UPDATE agent_devices SET enrollment_status='rejected' WHERE device_id=?",
                      (device_id,))
         conn.commit()
@@ -1650,7 +1650,7 @@ def api_agent_installer_generate():
     expires = now + 2 * 3600   # short TTL (ADR 0011: 1-2h), was 24h
     creator = current_user.username if current_user.is_authenticated else "unknown"
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (api_agent_installer_generate)
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
@@ -2198,7 +2198,7 @@ def api_quarantines():
 @app.route("/api/quarantine/<int:q_id>/confirm", methods=["POST"])
 def api_quarantine_confirm(q_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (api_quarantine_confirm)
         c = conn.cursor()
         c.execute("SELECT ip, rule_id, status FROM quarantines WHERE id = ?", (q_id,))
         row = c.fetchone()
@@ -2242,7 +2242,7 @@ def api_firewall_credential_drop():
 @app.route("/api/quarantine/<int:q_id>/lift", methods=["POST"])
 def api_quarantine_lift(q_id):
     try:
-        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        conn = _dm_conn()   # §9 batch 4 (api_quarantine_lift)
         c = conn.cursor()
         c.execute("SELECT ip, rule_id, status FROM quarantines WHERE id = ?", (q_id,))
         row = c.fetchone()
@@ -2276,7 +2276,7 @@ def api_quarantine_lift(q_id):
 def update_device():
     try:
         data = request.json
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 4 (update_device)
         c = conn.cursor()
         c.execute("""UPDATE devices SET friendly_name=?, device_type=?, notes=?, trusted=? 
                      WHERE mac=?""",
@@ -2300,7 +2300,7 @@ def analyze_alert(rule_id):
                 enrichment = enrich_ip(src_ip)
             except Exception:
                 enrichment = None
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 4 (analyze_alert)
         c = conn.cursor()
         c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
         existing = c.fetchone()
@@ -2443,7 +2443,7 @@ def set_action(rule_id, action):
                 ufw_deny_append(src_ip, _actor(), _fw_session_id(), _fw_credential())
             except FirewallError as exc:
                 return _fw_error_response(exc)
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 4 (set_action)
         c = conn.cursor()
         c.execute("UPDATE alerts SET action=? WHERE rule_id=?", (action, rule_id))
         if c.rowcount == 0:
@@ -5309,7 +5309,7 @@ def firewall_db():
 @app.route("/api/db-action/<int:alert_id>/<action>")
 def db_action(alert_id, action):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # §9 batch 4 (db_action)
         c = conn.cursor()
         c.execute("SELECT rule_id, src_ip FROM alerts WHERE id=?", (alert_id,))
         row = c.fetchone()
