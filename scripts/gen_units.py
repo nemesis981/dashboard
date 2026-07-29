@@ -147,7 +147,37 @@ SERVICES = {
     dest="alert_manager", desc="Nemesis Ransomware Canary Monitor", user="nemesis-canary",
     exe=f"{NEW_ROOT}/alert_manager/malware_canary.py",
     after=["network.target"], wants=[],
-    extra=["EnvironmentFile=/etc/nemesis.env"]),
+    # CANARY VISIBILITY EXCEPTION (2026-07-29).
+    #
+    # ProtectHome=yes masked /home inside this service's mount namespace — proven
+    # from /proc/<pid>/mountinfo, which showed /home bind-mounted to
+    # systemd/inaccessible/dir. Every bait file under the install user's home was
+    # invisible to the daemon: os.path.isfile() returned False and the poll loop
+    # took the "file missing (deleted / encrypted-in-place)" branch for all four
+    # canaries, every 30s, from the moment they were planted on 2026-07-25.
+    # ~33,500 false CRITICAL findings. The canary had never once worked.
+    #
+    # read-only, NOT full access: this daemon only ever READS the bait
+    # (_poll_canary_once -> isfile / _sha256 / stat). Planting and removal run
+    # from dashboard as the install user, never from here.
+    #
+    # WHY NOT BindReadOnlyPaths= for just the canary paths — two reasons, and the
+    # second is a trap worth recording:
+    #   1. The paths come from the runtime `canary_dirs` setting, so a unit-level
+    #      list goes stale the moment canaries are re-planted elsewhere, silently.
+    #      That is precisely the failure mode this fix exists to remove.
+    #   2. Binding individual FILES is actively wrong for a canary. A bind mount
+    #      keeps resolving to the original inode after the real file is unlinked,
+    #      so the daemon would go on seeing a canary that ransomware had already
+    #      deleted — turning a detection tool into a blind one. (Binding the parent
+    #      DIRECTORIES would detect deletions correctly, but still goes stale.)
+    #
+    # Tradeoff accepted: this daemon can now read everything under /home. It
+    # cannot write there, it holds no capabilities (CapabilityBoundingSet= is
+    # empty), and it is not network-facing — unlike hw-monitor on :5001.
+    omit_hardening=["ProtectHome"],
+    extra=["EnvironmentFile=/etc/nemesis.env",
+           "ProtectHome=read-only"]),
  "diagnostics-watcher": dict(
     dest="alert_manager", desc="Nemesis Connectivity Diagnostics Watcher", user="nemesis-diag",
     exe=f"{NEW_ROOT}/alert_manager/diagnostics_watcher.py",
