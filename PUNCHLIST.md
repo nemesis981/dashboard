@@ -736,10 +736,10 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   `Setup.exe` hard-gates on Tailscale (`installer_gui.py:194-198,245`); no pre-auth-key/invite
   flow exists; Beginner doc implies sharing the owner's account login (insecure). Blocks every
   real remote user. → design a pre-auth-key / device-invite flow; decide LAN-skip policy. (roadmap/ADR)
-- [ ] **PL-6 (High) — enrollment is a bearer-token model; device keypair ≠ stolen-media
-  protection.** auto_approve default + media over `:80` HTTP cleartext. → security review;
-  fold into **ADR 0005** (device-auth): bind token to invited identity, default manual approval,
-  out-of-band delivery, HTTPS media, shorter TTL, keypair pinning.
+- [ ] **[moved to private] PL-6 (High) — enrollment is a bearer-token model; device keypair ≠
+  stolen-media protection.** Moved to
+  `~/work/nemesis-internal/known-limitations/reauth-gap-and-active-bugs-audit-2026-07-29.md`
+  (Rule 10, 2026-07-29 sweep). Still needs to graduate to ADR 0005 (device-auth) per Rule 7.
 - [x] **PL-8 (High) — dashboard "Generate Windows Installer" serves the LEGACY system-Python
   `install_windows.ps1`, not a v1.0.6 frozen equivalent.** **RESOLVED (Phase-1 delivery
   foundation):** `/install/windows/<token>/zip` now serves a frozen-exe bundle (generic
@@ -851,31 +851,19 @@ SSH automation all worked.
 The Phase-1 delivery foundation (frozen-exe bundle serving, baked token + single-use Tailscale
 pre-auth key + tailnet target, download-side uses-check, TTL 24h→2h) landed code-side. Remaining:
 
-- [ ] **INFRA (not code) — serve install media over the TAILNET only, not cleartext `:80`.**
-  Code is now tailnet-AWARE (links + baked `nemesis_ip` prefer the tailnet via
-  `NEMESIS_TAILNET_ADDR` / `NEMESIS_PUBLIC_URL`), but the actual `:80`-cleartext→tailnet-only
-  **enforcement is a box infra change**, deliberately NOT done in the repo (nginx is external).
-  Capture-only proposal: **nginx `listen` bound to the tailnet interface only** for
-  `/install/windows/*`, and the inbound rule added **via `alert_manager/firewall.py`** (the
-  ADR 0005 ufw chokepoint — no ad-hoc `ufw`/`nft`). Apply on the box; verify the cleartext
-  `:80` install path is gone.
+- [ ] **[moved to private] Install media still served over cleartext `:80`, not tailnet-only.**
+  Moved to `~/work/nemesis-internal/known-limitations/reauth-gap-and-active-bugs-audit-2026-07-29.md`
+  (Rule 10, 2026-07-29 sweep) — describes exactly what's exposed on that path and the fix.
 - [ ] **OPS DEP — stage the generic frozen exe on the box.** `/install/windows/<token>/zip`
   assembles the bundle from a prebuilt generic `NemesisAgent-Setup.exe` at **`NEMESIS_AGENT_EXE`**
   (no per-request PyInstaller — the box is Linux). Build it on Windows/CI (`nemesis_agent/
   build_installer.py`) and place it at that path, else the route hard-fails 503. (Roadmap
   D-dep-2.)
-- [ ] **FOLLOW-UP (installer-side, Fork 4 consumption) — consume the baked conf safely.** The
-  served `nemesis_install.conf` carries the token + single-use pre-auth key in plaintext. The
-  installer MUST: (a) read it, run `tailscale up --authkey=<key>`, then **consume-and-delete the
-  conf** so creds do not linger on disk; (b) on a spent/failed key, show a clear **"this installer
-  is spent — ask your admin for a new one"** message (no silent retry/loop/half-install). A
-  **`CUSTOM_*.md` Tailscale guide** ships with that consumption code (Tier-2 vendor rule).
-- [ ] **FOLLOW-UP — purge spent pre-auth keys at rest.** `enrollment_tokens.preauth_key` is a
-  secret stored plaintext in `alerts.db` (mitigated by single-use + 2h TTL + revocable). When the
-  enroll path is built (Phase 2), **null the column on use/expiry** so spent keys do not linger.
-- [ ] **PHASE-2 NOTE — auto-approve default unchanged here.** This window left
-  `enrollment_tokens.auto_approve = 1` untouched (the manual-approval-default flip per ADR 0011
-  belongs with the enrollment-review card, Phase 2). Do not assume it flipped.
+- [ ] **[moved to private] Baked-conf consumption, plaintext-at-rest pre-auth keys, and the
+  auto-approve default — three related, unresolved items.** Moved to
+  `~/work/nemesis-internal/known-limitations/reauth-gap-and-active-bugs-audit-2026-07-29.md`
+  (Rule 10, 2026-07-29 sweep) — describes exact plaintext-secret handling and a current
+  permissive default in the live enrollment flow.
 
 ### [UNINSTALL / DE-ENROLL] — complete-uninstall follow-ups
 Ties to the de-enroll endpoint (`docs/roadmap/clean-uninstall-build-spec.md` §4, `:5001`
@@ -974,13 +962,10 @@ both, driver reaches STOPPED and outbound+inbound restore. The documented pair
 lists BOTH and notes the STOP_PENDING-until-handle-freed behavior so an operator doesn't stop at
 `sc stop` and think it failed.
 
-### [LOW] enrollment token: `auto_approve=0` tokens are never `uses`-consumed
-Found 2026-07-02. The enroll handler (`hw_monitor.py:1955-1956`) increments `uses` only
-`WHERE ... auto_approve=1`. So a **single-use** manual-approval (`auto_approve=0`) token is never
-marked spent — it stays valid until its TTL expires and could enroll multiple devices in that window.
-Low severity (short TTL + the device still lands PENDING for manual approval). The specific token
-found (`build3-83`) was **revoked** as cleanup. Fix option: increment `uses` for all valid tokens,
-or revoke-on-first-enroll regardless of `auto_approve`.
+### [LOW — moved to private] enrollment token: `auto_approve=0` tokens are never `uses`-consumed
+Real, low-severity, unresolved gap in the enrollment-token consumption logic. Moved to
+`~/work/nemesis-internal/known-limitations/reauth-gap-and-active-bugs-audit-2026-07-29.md`
+(Rule 10, 2026-07-29 sweep) — same category as the enrollment/installer-delivery items below.
 
 ### [FUTURE — Option A] dashboard-integrated per-device `l2_enforce_enabled`
 Tonight shipped **Option B** (`49061c5`): `installer_gui.py` honors a baked `l2_enforce_enabled` from
@@ -1040,3 +1025,25 @@ being load-bearing. No urgency — do it when the file is open for another reaso
   correctly via the metrics path, but whatever writes the `last_heartbeat_data` blob on the device
   row isn't firing for this device. Low severity, not blocking, but check if any dashboard UI reads
   that column directly.
+
+### [DEFERRED — fold into diagnostics-page design] Step-up re-authentication audit + active-bug triage (2026-07-29)
+
+**Full writeup, deliberately NOT in this repo:**
+`~/work/nemesis-internal/known-limitations/reauth-gap-and-active-bugs-audit-2026-07-29.md`
+(per Rule 10 — a route-by-route map of every currently-exploitable gap in a live,
+publicly-distributed dashboard, including exact locations and payload shapes, reads as an
+attack roadmap otherwise).
+
+**Safe to state publicly:** two things were found. (1) The whole app has exactly one auth
+gate — a valid session cookie, nothing else, no step-up anywhere. Most sensitive actions
+(self-restart, uninstall, secret/env rewrites, module disable, agent enrollment approval,
+etc.) should eventually require fresh re-authentication, matching the pattern
+`nemesis_fwd.py` already uses for firewall actions. That work **stays deferred** — fold
+into the diagnostics-page design when it's picked up, don't build standalone. (2) A
+follow-up triage pass found **four items that are independently exploitable bugs today**,
+unrelated to whether step-up auth ever gets built (a route bypassing its own sibling's
+credential check, a shell-injection bug in a generated cron entry, two GET-that-mutates
+CSRF issues, and one machine-to-machine auth gap in `hw_monitor.py`). These four don't
+wait on the deferred design — see the private writeup for exact locations and fix
+direction, and decide separately whether/when to act on them.
+
