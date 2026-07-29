@@ -896,7 +896,11 @@ def get_review_queue():
         c.execute("""
             SELECT rule_id, rule_name, classification, times_seen, last_seen, src_ip
             FROM alerts
-            WHERE risk_level = 'HIGH' AND action = 'pending'
+            -- UPPER(COALESCE(...)): case-insensitive, matching the pattern already
+            -- used by _header_status_data. alerts.risk_level is uppercase today, but a
+            -- case-sensitive filter fails silently -- it returns rows, just not all of
+            -- them -- so it is the wrong shape for a review queue regardless.
+            WHERE UPPER(COALESCE(risk_level,'')) = 'HIGH' AND action = 'pending'
             ORDER BY last_seen DESC
             LIMIT 20
         """)
