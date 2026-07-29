@@ -148,6 +148,51 @@ import data_manager  # noqa: E402
 data_manager.set_namespace_mode("dashboard", data_manager.MODE_WARN)
 
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alert_manager", "alerts.db"))
+
+_DM = None
+
+
+def _dm():
+    """Lazy DataManager for dashboard's own access. Mirrors nemesis_fwd's `_dm()`.
+
+    Deliberately a dedicated instance rather than `modules.get_data_manager()`:
+    that one only exists after `modules_loader.init()` has run, and dashboard has
+    DB call sites that must work regardless of module-loading state. Neither
+    instance holds a persistent connection, so having both is free.
+    """
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(DB_PATH)
+    return _DM
+
+
+def _dm_conn():
+    """Guarded replacement for `sqlite3.connect(DB_PATH, timeout=5.0)`.
+
+    Reads pass straight through the guard and return the same raw cursor, so
+    `SELECT *`, positional row access, joins and `fetchall()` all behave exactly
+    as before. Writes are access-checked and logged — WARN mode today, so nothing
+    is denied yet.
+
+    `row_factory = None` is the load-bearing line. `DataManager.connect()` sets
+    `row_factory = sqlite3.Row` unconditionally, which would silently change every
+    migrated read from returning tuples to returning Rows. Measured consequence:
+    positional access and unpacking still work, but `json.dumps(row)` raises
+    `TypeError: Object of type Row is not JSON serializable` and
+    `isinstance(row, tuple)` flips to False — and 14 dashboard functions both
+    fetch rows and serialise them. Resetting it here keeps this swap a true
+    drop-in, so a de-privileging migration cannot change response payloads.
+    Sites that genuinely want Row (e.g. `_users_conn`) set it themselves, after.
+
+    NOT a context manager, and it does NOT auto-close: `GuardedConnection`
+    delegates `__enter__`/`__exit__` to sqlite3's TRANSACTION context manager,
+    exactly like a raw connection, so every existing `close()` / try-finally stays
+    correct unchanged. (Assuming otherwise is what produced the nemesis_fwd fd
+    leak — see its `_db()`.)
+    """
+    conn = _dm().connect("dashboard")
+    conn.row_factory = None
+    return conn
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 _BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
@@ -194,7 +239,10 @@ login_manager.login_message = "Please log in to access Nemesis."
 
 
 def _users_conn():
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    # HANDOFF §9 phase 1 (was sqlite3.connect(DB_PATH, timeout=5.0)). This site
+    # wants Row and sets it itself, after _dm_conn() has reset it — unchanged
+    # behaviour, and it stays correct if _dm_conn's default ever changes.
+    conn = _dm_conn()
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -636,7 +684,7 @@ def get_suricata_alerts():
 
 def get_db_alert(rule_id):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = _dm_conn()   # HANDOFF §9 phase 1 (was sqlite3.connect(DB_PATH))
         c = conn.cursor()
         c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
         result = c.fetchone()
@@ -972,7 +1020,7 @@ def _ensure_quarantines_table():
 
 def get_active_quarantines():
     _ensure_quarantines_table()
-    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    conn = _dm_conn()   # HANDOFF §9 phase 1 (was sqlite3.connect(DB_PATH, timeout=5.0))
     try:
         c = conn.cursor()
         c.execute("""
