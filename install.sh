@@ -848,11 +848,19 @@ deploy_services() {
     # them. Referenced by migrate_to_opt.sh --rollback.
     local UNIT_BACKUP_DIR="/var/backups/nemesis/units-$(date +%Y%m%d-%H%M%S)"
 
-    # Templates live in two directories: vpn-dns-guard ships from core/, every
-    # other unit from alert_manager/. The previous version searched only
-    # alert_manager/ AND omitted vpn-dns-guard from the list, so that unit was
-    # never deployed by the installer at all — a two-part gap, fixed here.
-    local svc_dirs=("$DASHBOARD_DIR/alert_manager" "$DASHBOARD_DIR/core")
+    # Units live in THREE places now: the six core_module daemons ship from
+    # core_module/<module>/<name>.service, vpn-dns-guard from core/, and
+    # dashboard + nemesis-fwd from alert_manager/. core_module/*/ is searched
+    # FIRST and by glob (not a hardcoded list) for two reasons:
+    #  * FIRST — a migrated service may still have a STALE alert_manager/<name>.service
+    #    on disk until its Commit B removes it; the core_module unit is the correct
+    #    one and must win, so a fresh install never deploys the old path.
+    #  * GLOB — install.sh should not have to track WHICH services are migrated.
+    #    Any service whose unit is under core_module/<x>/ is found automatically,
+    #    so this needs no edit when hw_monitor's or future moves finalize. (The
+    #    glob harmlessly also lists core_module/template/ etc., which carry no
+    #    <name>.service and so match nothing.)
+    local svc_dirs=("$DASHBOARD_DIR"/core_module/*/ "$DASHBOARD_DIR/alert_manager" "$DASHBOARD_DIR/core")
     local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" \
                      "device-scanner" "malware-canary" "diagnostics-watcher" \
                      "vpn-dns-guard")
