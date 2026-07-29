@@ -486,7 +486,15 @@ install_system_deps() {
     apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw acl
 
     info "Installing core Python packages..."
-    pip3 install --break-system-packages flask requests psutil
+    # flask-login is a HARD dependency of dashboard.py (module-scope import at
+    # dashboard.py:109) and was missing from this list until 2026-07-29 — on this
+    # box it only ever existed because someone ran `pip install --user` as the
+    # dashboard user, which puts it in ~/.local where no service account can see
+    # it. A fresh install would therefore produce a dashboard that cannot start,
+    # and it silently broke auto-ticketing for watchdog, hw-monitor and
+    # malware-canary (see modules/tickets/module.py). Installed system-wide here
+    # so every account that runs Nemesis code can import it.
+    pip3 install --break-system-packages flask flask-login requests psutil
 
     # Inspect dashboard.py for any third-party imports not yet installed
     info "Checking dashboard.py for additional Python requirements..."
