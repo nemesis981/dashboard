@@ -4,6 +4,7 @@ import time
 import sqlite3
 import signal
 import logging
+import ipaddress
 import threading
 from datetime import datetime, timedelta
 from logging.handlers import RotatingFileHandler
@@ -67,6 +68,62 @@ def lookup_action(rule_id):
         return row[0] if row else None
     finally:
         conn.close()
+
+
+#: Addresses auto-quarantine must NEVER block, however severe the alert.
+#: Loopback is unconditional; the rest comes from the unit's environment
+#: (Environment=NEMESIS_NEVER_BLOCK=192.168.4.69,100.87.130.25). Populating it
+#: with the host's own LAN + tailnet addresses is a REQUIRED deployment step:
+#: without it, a P1 host-defence alert whose src_ip is this machine would have
+#: the machine insert a deny rule against itself.
+_NEVER_BLOCK = {"127.0.0.1", "::1"} | {
+    a.strip() for a in os.environ.get("NEMESIS_NEVER_BLOCK", "").split(",") if a.strip()
+}
+
+
+def _no_external_intel(ip):
+    """True when external reputation data cannot meaningfully exist for this IP.
+
+    Deliberately `not is_global`, NOT `is_private`. They are not equivalent, and
+    the difference is load-bearing here: Python reports
+    `is_private == False` for CGNAT 100.64.0.0/10 — which is the TAILNET range
+    most enrolled agents actually live on (`agent_devices` is majority 100.x).
+    Using is_private would therefore have silently excluded every remote agent
+    from this path, leaving the exact "compromised enrolled agent" case the
+    threat model cares about still ungated. `not is_global` covers RFC1918,
+    loopback, link-local, the IANA documentation ranges AND CGNAT, while still
+    excluding genuinely routable addresses. Pinned by tests E/E2/E3.
+    """
+    try:
+        return not ipaddress.ip_address(ip).is_global
+    except ValueError:
+        return False
+
+
+def _threat_from_suricata(parsed):
+    """Map Suricata's own priority onto the EXISTING alerts.risk_level vocabulary.
+
+    Deliberately reuses the uppercase LOW/MEDIUM/HIGH/CRITICAL set that
+    `alert_manager/nemesis_severity.py` documents for this column — this
+    introduces no new vocabulary. HIGH is unused here on purpose: Suricata
+    priorities are 1-4 and only P1/P2 reach this code (`handle_line` drops the
+    rest), so only two mappings can ever be produced.
+    """
+    pri = parsed.get("priority")
+    if pri == 1:
+        return "CRITICAL"
+    if pri == 2:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _blockable(ip):
+    """Refuse to auto-quarantine the host's own addresses."""
+    if ip in _NEVER_BLOCK:
+        log.error("REFUSING auto-quarantine of %s — address is in NEMESIS_NEVER_BLOCK. "
+                  "Alert will be recorded as pending instead.", ip)
+        return False
+    return True
 
 
 def insert_alert(parsed, risk_level, action):
@@ -164,7 +221,20 @@ def process_new_alert(parsed):
             log.warning("enrich_ip failed for %s: %s", src_ip, e)
     threat = (enrichment or {}).get("threat_level", "LOW") or "LOW"
 
-    if parsed["priority"] == 1 and threat == "CRITICAL" and src_ip:
+    # ── LAN-internal sources: trust Suricata, not external reputation ────────
+    # enrich_ip consults EXTERNAL threat intel, which has nothing to say about an
+    # RFC1918 address. Before host-defence rules existed that was harmless — every
+    # alert came from a routable source. It is not harmless now: a compromised
+    # agent scanning the Nemesis host is P1 from a private IP, gets threat="LOW"
+    # by default, and can never pass the CRITICAL gate below. For those sources we
+    # derive severity from Suricata's OWN priority instead. Only ever an UPGRADE
+    # from the default LOW — a real external verdict is never overridden.
+    if src_ip and _no_external_intel(src_ip) and threat == "LOW":
+        threat = _threat_from_suricata(parsed)
+        log.info("no external intel for private src=%s — using Suricata priority "
+                 "P%s -> risk_level=%s", src_ip, parsed.get("priority"), threat)
+
+    if parsed["priority"] == 1 and threat == "CRITICAL" and src_ip and _blockable(src_ip):
         # Block FIRST, then record what actually happened. The alert row used to
         # be written as action="auto-quarantine" before the ufw call was even
         # attempted, so a failed block left the alerts table asserting a

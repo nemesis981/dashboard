@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 
 import psutil
@@ -35,6 +35,23 @@ WA_LISTEN_PORT   = 5001   # port for Windows-agent POST receiver
 
 log = logging.getLogger("hw_monitor")
 log.setLevel(logging.INFO)
+
+# ── :5001 pacing ─────────────────────────────────────────────────────────────
+# Token-bucket rate pacing for the agent channel, replacing the deferred
+# `ufw limit 5001/tcp`. :5001 has NO reverse proxy in front of it (verified
+# 2026-07-29: nginx fronts :80 -> :5000 only and has no 5001 stanza), so this
+# cannot live in nginx without first putting nginx in front of the agent
+# channel. It is therefore in-process. Disable with NEMESIS_5001_PACING=0;
+# all thresholds are env-tunable — see agent_pacing.from_env().
+import agent_pacing  # noqa: E402
+
+_PACER = agent_pacing.from_env()
+if _PACER is None:
+    log.warning("agent listener: :5001 pacing DISABLED (NEMESIS_5001_PACING=0)")
+else:
+    log.info("agent listener: :5001 pacing active — %.1f req/s sustained, "
+             "burst %.0f, max pace %.1fs", _PACER.rate, _PACER.burst,
+             _PACER.max_delay)
 if not log.handlers:
     _handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -2062,7 +2079,41 @@ def _start_windows_agent_listener():
             self.end_headers()
             self.wfile.write(body)
 
+        def _pace(self):
+            """Token-bucket pacing. True = proceed, False = already answered 429.
+
+            Replaces the deferred `ufw limit 5001/tcp`. Traffic inside the
+            sustained rate is untouched (delay 0.0); traffic above it is SLOWED
+            rather than blocked, so a fleet sharing one NAT address is never
+            locked out the way a connection-count cap would lock it out.
+
+            Sleeping here is only safe because this listener is a
+            ThreadingHTTPServer -- under the previous single-threaded server a
+            paced request would have stalled every other agent.
+            """
+            if _PACER is None:
+                return True
+            src = self.client_address[0] if self.client_address else "?"
+            d = _PACER.check(src)
+            if not d.allow:
+                log.warning("agent listener: shedding request from %s "
+                            "(flood pacing, retry_after=%ss)", src, d.retry_after)
+                body = b'{"error":"rate limited"}'
+                self.send_response(429)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Retry-After", str(d.retry_after))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return False
+            if d.delay > 0:
+                log.info("agent listener: pacing %s by %.2fs", src, d.delay)
+                time.sleep(d.delay)
+            return True
+
         def do_GET(self):
+            if not self._pace():
+                return
             from urllib.parse import urlparse, parse_qs
             parsed = urlparse(self.path)
             if parsed.path == "/enrollment_status":
@@ -2110,6 +2161,8 @@ def _start_windows_agent_listener():
             self._json(200, {"status": status})
 
         def do_POST(self):
+            if not self._pace():
+                return
             if self.path == "/enroll":
                 self._handle_enroll()
                 return
@@ -2175,8 +2228,18 @@ def _start_windows_agent_listener():
 
     def _serve():
         try:
-            server = HTTPServer(("0.0.0.0", WA_LISTEN_PORT), _WaHandler)
-            log.info("Agent listener started on port %d (nemesis_agent)", WA_LISTEN_PORT)
+            # ThreadingHTTPServer, not HTTPServer. The single-threaded server
+            # handles exactly one connection at a time, so ANY slow or stuck
+            # client -- a half-open socket, an agent on a bad link, a request
+            # that never sends its body -- blocks every other agent's heartbeat
+            # behind it for as long as it lasts. That is a live fragility
+            # independent of any flood: it needs one bad connection, not an
+            # attack. daemon_threads keeps shutdown immediate by not waiting on
+            # in-flight handlers, matching the daemon=True thread this runs in.
+            server = ThreadingHTTPServer(("0.0.0.0", WA_LISTEN_PORT), _WaHandler)
+            server.daemon_threads = True
+            log.info("Agent listener started on port %d (nemesis_agent, threaded)",
+                     WA_LISTEN_PORT)
             server.serve_forever()
         except Exception as e:
             log.error("agent listener failed to start: %s", e)

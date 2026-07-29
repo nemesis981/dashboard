@@ -78,6 +78,10 @@ DASH_USER = os.environ.get("NEMESIS_DASH_USER")
 #: Unattended caller. Adds automatic blocks; never removes one, never reads the
 #: ruleset. See PEER_POLICY.
 ALERTW_USER = os.environ.get("NEMESIS_ALERTW_USER", "nemesis-alertw")
+#: fail2ban's own service account. Same shape as ALERTW_USER: an unattended peer
+#: with no human behind it, controlled by a structural op-allowlist rather than a
+#: credential. See PEER_POLICY["fail2ban"].
+FAIL2BAN_USER = os.environ.get("NEMESIS_FAIL2BAN_USER", "nemesis-f2b")
 SOCKET_GROUP = os.environ.get("NEMESIS_FWD_GROUP", "nemesis-fw")
 UFW_BIN = "/usr/sbin/ufw"
 
@@ -135,6 +139,23 @@ PEER_POLICY = {
         "ops": {"block_ip", "deny_ip", "expire_quarantine"},
         "require_credential": False,
         "audit_actor": "alert-watcher",
+    },
+    "fail2ban": {
+        # Same structural pattern as alert-watcher, deliberately NOT a new trust
+        # mechanism: an unattended peer, no credential because there is no human,
+        # and a hard op allowlist as the substituted control.
+        #
+        # NARROWER than alert-watcher on purpose. fail2ban adds blocks and
+        # nothing else — it has no expire_quarantine, because it does not own the
+        # `quarantines` table and must not be able to release anything recorded
+        # there. Unbanning is fail2ban's own bantime expiring and re-running its
+        # actionunban, which routes back through block-removal on ITS side, not
+        # through a lift op here. It is structurally incapable of lifting a block
+        # placed by the dashboard or by alert-watcher, and of enumerating the
+        # ruleset, regardless of what fail2ban's own config is made to say.
+        "ops": {"block_ip", "deny_ip"},
+        "require_credential": False,
+        "audit_actor": "fail2ban",
     },
 }
 
@@ -820,7 +841,8 @@ def main():
         sys.exit(78)
 
     peer_uids = {}
-    for policy_name, user in (("dashboard", DASH_USER), ("alert-watcher", ALERTW_USER)):
+    for policy_name, user in (("dashboard", DASH_USER), ("alert-watcher", ALERTW_USER),
+                              ("fail2ban", FAIL2BAN_USER)):
         try:
             peer_uids[pwd.getpwnam(user).pw_uid] = policy_name
         except KeyError:
