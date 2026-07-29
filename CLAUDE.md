@@ -109,9 +109,10 @@ prompt — session is oriented in under 30 seconds.
 
 Fixed assignment — **window identity, model, and git-write privilege** are pinned as
 follows. The operator identifies a window by number in the FIRST message ("you are
-Window 1" / "you are Window 2"). A window has no way to know its own identity
-otherwise — the role comes from that load-time assignment, not from open order or
-timestamps. If a window is reopened after a crash, the operator re-states its number.
+Window 1" / "you are Window 2" / "you are Window 3"). A window has no way to know its
+own identity otherwise — the role comes from that load-time assignment, not from open
+order or timestamps. If a window is reopened after a crash, the operator re-states its
+number.
 
 ### Window 1 — BUILD window (role: Opus — currently Opus 5)
 - **Expected model: Opus** (currently `claude-opus-5` — bump this string when Anthropic
@@ -147,6 +148,30 @@ timestamps. If a window is reopened after a crash, the operator re-states its nu
   - Morning briefings → `docs/briefing/` (gitignored, local-only, latest run wins).
   - Audits (roadmap-vs-state, install/doc tests, security/PL findings, etc.) →
     `docs/audits/`, dated filename (e.g. `docs/audits/<topic>-audit-<date>.md`).
+
+### Window 3 — OVERFLOW window (role: ad hoc, model follows the TASK not the window) — never a git-writer
+- Opened situationally, not a standing window like 1 and 2 — for one-off, ad hoc, and
+  parallel work that doesn't need a dedicated build or docs/audit session running (e.g.
+  a quick investigation alongside whatever Windows 1 and 2 are already doing).
+- **Never commits or pushes — ever.** Same restriction as Window 1: git-write privilege
+  stays exclusively with Window 2, no exceptions for Window 3 either.
+- May pick up occasional audits and doc work as overflow **specifically when Window 2 is
+  busy** — hand off findings/drafts to Window 2 for it to review and commit, the same
+  handoff shape Window 1 uses for code.
+- **Expected model depends on the task just given, not on the window itself:** Opus for
+  writing code, Sonnet for docs/audits — mirroring Window 1's and Window 2's model
+  choices respectively, without inheriting either window's fixed identity. No launch
+  alias (unlike `nem1`/`nem2`) — opened as needed with whatever's already active.
+- **Cannot auto-switch models** (same limitation as Windows 1/2 — `/model` is
+  operator-typed, not tool-accessible) — but unlike their once-per-session check, Window
+  3 re-evaluates on EVERY task it's given, since the expected model can change task to
+  task within the same session. Before starting work on a new task, classify it (code-
+  writing → Opus expected; docs/audit → Sonnet expected) and compare against the
+  currently active model. If they don't match, **flag it in the first response** — e.g.
+  "Note: this looks like a code-writing task, expected Opus, currently running on
+  Sonnet 5" — then wait for the operator to switch (`/model opus[1m]` / `/model
+  claude-sonnet-5`) or explicitly say to proceed anyway, rather than silently doing
+  code-writing work on Sonnet or docs work on Opus.
 
 ### Both windows (shared discipline)
 - Commit-first, then push (performed in Window 2). HOLD the push for operator review on
@@ -217,9 +242,10 @@ alias nem2="cd /opt/nemesis && claude --model claude-sonnet-5"  # Window 2 — d
 ### Role self-check (first response)
 If you have NOT been told your window number this session, do not begin any task. Your
 first response must be to ask: **"Which window am I this session — Window 1 (build,
-Opus) or Window 2 (docs/audit, Sonnet, sole git-writer)?"** and wait for the operator's
-answer before proceeding. If the operator's first message already states it, skip the
-question and confirm instead (window number + role + model).
+Opus), Window 2 (docs/audit, Sonnet, sole git-writer), or Window 3 (overflow, ad hoc,
+never commits)?"** and wait for the operator's answer before proceeding. If the
+operator's first message already states it, skip the question and confirm instead
+(window number + role + model).
 
 **Model self-check is the first ACTION, every time identity is given** (fresh session
 or a mid-session re-statement after a crash) — before any task work. This is a
@@ -231,6 +257,10 @@ first response** rather than silently proceeding — e.g. "Note: expected Opus f
 Window 1, currently running on Sonnet 5" — then switch to the expected model
 (`/model claude-opus-5` / `/model claude-sonnet-5`) before starting the day's actual
 task.
+
+**Window 3 is the exception to "once per session"** — its expected model is per-task,
+not per-window, so it repeats this check before every task rather than once at session
+start. See the Window 3 section above for the task-classification detail.
 
 ---
 
