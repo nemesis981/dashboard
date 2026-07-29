@@ -365,10 +365,15 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
         modules.set_shared_db_path(HW_DB_PATH)
         from modules.tickets.module import open_ticket as _open_ticket, _get_settings as _tk_settings
         _tk = _tk_settings()
-        _sev_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        # Shared ladder (alert_manager/nemesis_severity.py) — was a private dict
+        # duplicated byte-for-byte in modules/malware_detection/module.py. The
+        # threshold default is rank("HIGH"), matching the literal 2 this replaced
+        # under the old 4-rung ordering; the ladder gained INFO at the bottom, so
+        # the number moved but the meaning did not.
+        import nemesis_severity as _sev
         _min_sev = _tk.get("min_severity_for_auto_ticket", "HIGH")
         if _tk.get("auto_ticket_on_alert", True) and \
-                _sev_order.get(severity, 0) >= _sev_order.get(_min_sev, 2):
+                _sev.meets_threshold(severity, _min_sev):
             _open_ticket(
                 sensor_key=key,
                 title=f"Auto: {breach}",
