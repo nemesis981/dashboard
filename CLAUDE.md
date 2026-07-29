@@ -425,6 +425,19 @@ window applies it going forward, the same way Rule 8's leak-scan applies to ever
 (Precedent/full inventory: the 2026-07-26 novel-mechanism disclosure audit and its resulting
 private-module carve-out for Tier 2 and the four follow-on items.)
 
+### 11. Test data written to the live dashboard must be labeled for later cleanup
+Any row inserted into the live `alerts.db` for testing/verification purposes (a test
+alert, device, ticket, scan job, quarantine, etc. — anything created to exercise a
+feature rather than a real detection) must carry both **the literal phrase "test data"**
+and **the date** in its description/notes/message field, e.g. `"test data 2026-07-29 —
+verifying auto-quarantine threshold"`. This applies regardless of which window creates
+the row (Window 1 verifying a build, Window 3 running a one-off check, etc.).
+
+Purpose: a later cleanup pass can find every test row with one grep/SQL search
+(`LIKE '%test data%'`) instead of having to guess which rows are real vs. synthetic from
+data alone. Do not rely on "I'll remember to delete it" or on it being obviously fake —
+label it at creation time, every time, no exceptions.
+
 ---
 
 ## TIER 2 — Nemesis-specific rules
