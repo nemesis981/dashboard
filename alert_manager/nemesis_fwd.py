@@ -475,13 +475,21 @@ def audit(action, actor, ip=None, detail=None):
 
     Returns True if the record landed. Fail-open: a False return does NOT undo
     the action, but it is never silent — see signal_degraded above.
+
+    Routed through the Data Manager (2026-07-29). This write used to go out on the
+    plain `_db()` connection, which meant the helper's registered `audit_log`
+    grant enforced nothing about it — the namespace said "nemesis_fwd may write
+    audit_log" while the actual statement bypassed the guard entirely. The grant
+    is now what permits the write, so the registry and the code agree, and the
+    insert is recorded in dm_operation_log like every other mediated write.
     """
+    guard = None
     try:
-        with _db() as conn:
-            conn.execute(
-                "INSERT INTO audit_log(ts, rule_id, ip, action, user) VALUES (?,?,?,?,?)",
-                (time.strftime("%Y-%m-%d %H:%M:%S"), detail, ip, action, actor))
-            conn.commit()
+        guard = _dm().connect("nemesis_fwd")
+        guard.execute(
+            "INSERT INTO audit_log(ts, rule_id, ip, action, user) VALUES (?,?,?,?,?)",
+            (time.strftime("%Y-%m-%d %H:%M:%S"), detail, ip, action, actor))
+        guard.commit()
         return True
     except Exception as exc:
         log.exception("fwd: audit write failed for %s/%s", action, actor)
@@ -496,6 +504,13 @@ def audit(action, actor, ip=None, detail=None):
             audit_action=action, actor=actor, target_ip=ip, request_id=detail,
             cause=type(exc).__name__, detail=str(exc)[:200])
         return False
+    finally:
+        # GuardedConnection wraps sqlite3's TRANSACTION context manager and does
+        # NOT close — the same shape that leaked an fd per request here until
+        # 2026-07-29. Closed explicitly, matching _note_failed_attempt and
+        # _clear_failed_attempts below.
+        if guard is not None:
+            guard.close()
 
 
 # ── ufw operations (argv built here, never supplied by the caller) ───────────
