@@ -165,15 +165,24 @@ def process_new_alert(parsed):
     threat = (enrichment or {}).get("threat_level", "LOW") or "LOW"
 
     if parsed["priority"] == 1 and threat == "CRITICAL" and src_ip:
-        insert_alert(parsed, risk_level=threat, action="auto-quarantine")
+        # Block FIRST, then record what actually happened. The alert row used to
+        # be written as action="auto-quarantine" before the ufw call was even
+        # attempted, so a failed block left the alerts table asserting a
+        # quarantine that did not exist. The quarantines table was already
+        # protected (below); this closes the same hole one table over.
         try:
             ufw_insert_top(src_ip)
         except FirewallError as exc:
+            # Nothing was blocked, so the alert is recorded as PENDING — the same
+            # action used for every other unacted alert, which puts it in front of
+            # the operator instead of hiding it behind a block that never landed.
+            insert_alert(parsed, risk_level=threat, action="pending")
+            log.error("AUTO-QUARANTINE FAILED rule_id=%s ip=%s — no ufw rule applied, "
+                      "alert recorded as pending: %s", rule_id, src_ip, exc)
+        else:
+            insert_alert(parsed, risk_level=threat, action="auto-quarantine")
             # Do NOT record a quarantine row for a rule that was never applied —
             # that would show the operator a block that does not exist.
-            log.error("AUTO-QUARANTINE FAILED rule_id=%s ip=%s — no ufw rule applied: %s",
-                      rule_id, src_ip, exc)
-        else:
             insert_quarantine_row(src_ip, rule_id)
             try:
                 send_quarantine_email(parsed, enrichment)
