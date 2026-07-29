@@ -1082,3 +1082,50 @@ Not urgent in itself, but it is the concrete piece of the larger nemesis-fwd hea
 design (watchdog decision, wiring ping/degraded.jsonl to a watcher, an incident runbook) which is
 held as its own scoped follow-up. Filed so the two orphaned mechanisms are not rediscovered a
 third time.
+
+### [FUTURE] PIA VPN deliberately disabled — unresolved Nemesis compatibility
+Filed 2026-07-29 during L3 Fork B Piece 2 scoping. **Not to be chased now** — recorded so it
+is not rediscovered from scratch, and because it is a hard precondition for L3 Fork B work.
+
+**State.** PIA is installed and its policy-routing rules are live (4 `piavpn*` rules in `ip rule`,
+a `piavpn.POSTROUTING` chain in nat), but the client is deliberately left **Disconnected** —
+confirmed directly via `piactl get connectionstate`, not inferred from iptables counters, which are
+cumulative and misleading. The operator turned it off because Nemesis threw errors while it was
+active. It
+reportedly **works fine sometimes**, so this is intermittent or configuration-dependent, not a hard
+incompatibility. The specific original error is not recorded anywhere we could find.
+
+**What is already built for this.** `core/vpn_dns_guard.py` (`vpn-dns-guard.service`, ADR 0002)
+exists precisely to solve the known half of it: a VPN killswitch blocks every egress that is not the
+tunnel, **including Pi-hole's upstream DNS forwarding**, so Pi-hole keeps answering LAN clients but
+stops resolving cache-misses (`FTL: failed to send UDP request (Operation not permitted)`). The
+guard watches for tunnel up/down and repoints `dns.upstreams` at a tunnel-reachable resolver,
+restoring on tunnel-down.
+
+**The open question.** That guard is **currently active** (`vpn-dns-guard`, NRestarts=0) and yet PIA
+is still off because of errors. So one of: the guard does not fully cover the DNS case; there is a
+second, non-DNS failure mode; or the guard has a defect. Nobody has re-tested since. **First
+diagnostic step for whoever picks this up:** reconnect PIA on a quiet box and capture what actually
+breaks, rather than reasoning from the guard's design — the guard may well be doing its job while
+something else fails.
+
+**Why it matters beyond convenience — this is the part that is easy to miss.** The killswitch
+mechanism that broke Pi-hole's upstream DNS is the *same class of problem* Fork B's Piece 2 will
+hit:
+Fork B forwards tunnel-sourced flows and masquerades them out the current egress. With a killswitch
+active, forwarded-and-masqueraded traffic is exactly the kind of non-tunnel egress a killswitch is
+designed to block. Nobody has tested that interaction.
+
+Consequences, concretely:
+- Piece 2's masquerade rule is written interface-independently
+  (`-s 100.64.0.0/10 ! -o tailscale0 -j MASQUERADE`) so it keeps working when PIA returns — but
+  "the rule still applies" is not the same as "the killswitch lets the packet out".
+- **L3 Layer 3 measurements taken with PIA off do not transfer to PIA on.** Different egress
+  interface, different TTL, and `tun0`'s MTU was 1441 vs 1500 on `enp131s0`. Any Layer 3 run must
+  record PIA state as a run variable; runs across different states are not comparable.
+- So Fork B egress **cannot be validated in the configuration the operator actually intends to
+  run** until this is resolved. Step 1's validation is deliberately PIA-off, and that limitation
+  should be stated in its results rather than discovered later.
+
+Related: `docs/architecture/0002-vpn-aware-dns-routing.md`, `core/vpn_dns_guard.py`,
+`docs/roadmap/adr-0009-l3-fork-b-scope.md` (Piece 2).
