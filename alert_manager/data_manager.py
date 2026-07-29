@@ -79,16 +79,13 @@ NAMESPACES = {
             "hw_metrics", "hw_notifications", "hw_anomaly_snapshots",
             "scan_jobs", "scan_queue", "scan_conditions",
             "agent_devices", "correlation_events",
-            # `scan_threats` and `scan_schedules`: SCHEMA-CREATION OWNERSHIP ONLY
-            # (confirmed by real Windows-agent traffic, 2026-07-28). hw_monitor
-            # runs `CREATE TABLE IF NOT EXISTS` for both at startup but never
-            # writes a ROW to either — the row writes belong to dashboard
-            # (dashboard.py:6087 scan_threats, :6274 scan_schedules). The grant
-            # is kept (option 1) so enforce-mode schema init is not denied; the
-            # row-write ownership, and scan_jobs' shared ownership (hw_monitor
-            # dispatches, dashboard manages), are resolved with the dashboard
-            # DM-wiring work, not here.
-            "scan_threats", "scan_schedules",
+            # `scan_threats` / `scan_schedules` — GRANT REMOVED 2026-07-29.
+            # hw_monitor never wrote a row to either; its only statements were the
+            # two CREATEs, which now live in alert_manager/database.py
+            # (init_scan_tables) alongside the DDL for devices, quarantines and
+            # enrollment_tokens. That function runs on a raw connection, so the
+            # CREATE no longer passes through this process's guard and needs no
+            # grant. dashboard owns the rows (see its entry below).
             # `fan_status` was in the audit but was dropped when the list was
             # first transcribed into this registry. WARN mode surfaced it on the
             # first real run — precisely the transcription error a static list
@@ -128,7 +125,7 @@ NAMESPACES = {
         },
     },
 
-    # ── dashboard (HANDOFF §9 phase 1, 2026-07-29) ───────────────────────────────
+    # ── dashboard (HANDOFF §9 phase 1, 2026-07-29) ───────────────────────────
     #
     # Registered in WARN mode (set from dashboard.py's startup) while its 40
     # direct sqlite3 sites migrate to this guard one at a time. Nothing is denied
@@ -163,6 +160,10 @@ NAMESPACES = {
             "alerts", "quarantines", "devices", "login_events",
             # row owner; hw_monitor holds a `uses`-only column grant (see above)
             "enrollment_tokens",
+            # SOLE row writer. hw_monitor's grant on both was removed 2026-07-29
+            # once its CREATEs moved to database.init_scan_tables() — it never
+            # wrote a row to either, verified before the move.
+            "scan_threats", "scan_schedules",
             # SHARED WRITER with hw_monitor. Symmetric: both INSERT and UPDATE the
             # same columns over the same job lifecycle, from two legitimate
             # dispatch paths (operator-initiated and agent-initiated). A column
@@ -188,6 +189,23 @@ NAMESPACES = {
         },
     },
 }
+
+# RESOLVED (2026-07-29) — `scan_threats` / `scan_schedules`.
+# The decision was "dashboard owns rows, hw_monitor owns schema/DDL only". The DDL
+# half is not expressible here: check_write() grants per table for EVERY write op,
+# and the only narrowing mechanism — column grants — is deliberately UPDATE-only,
+# so there is no way to say "CREATE but not INSERT".
+#
+# Rather than add a DDL-only grant type to this module (new surface in the
+# access-control path, for one case), the CREATEs moved to
+# alert_manager/database.py:init_scan_tables(), which already owns the DDL for
+# devices, quarantines and enrollment_tokens and runs on a raw connection.
+# hw_monitor's grant on both tables is therefore gone entirely — the decision is
+# now enforced rather than merely documented.
+#
+# NOTE for the OS-lock work: this pattern depends on database.py holding a RAW
+# connection. When database.py is itself migrated behind the Data Manager, DDL
+# ownership needs a real answer — see the non-dashboard connection audit.
 
 # ── namespace enforcement mode (ADR 0001 rollout seam) ───────────────────────
 #

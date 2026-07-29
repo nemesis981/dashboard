@@ -11,6 +11,7 @@ import os
 import signal
 import sqlite3
 import data_manager
+import database          # canonical DDL owner (init_scan_tables) — see init_db
 import subprocess
 import sys
 import threading
@@ -259,31 +260,16 @@ def init_db():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_device ON scan_jobs(device_id, started_at)")
 
-        # scan_threats: individual threat findings from scan jobs.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS scan_threats (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                scan_job_id     INTEGER NOT NULL,
-                device_id       TEXT NOT NULL,
-                file_path       TEXT NOT NULL,
-                threat_name     TEXT NOT NULL,
-                action_taken    TEXT,
-                detected_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        # scan_schedules: per-device scan schedules.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS scan_schedules (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                device_id       TEXT NOT NULL,
-                schedule_type   TEXT NOT NULL DEFAULT 'weekly',
-                scheduled_time  TEXT,
-                last_run_at     TIMESTAMP,
-                enabled         INTEGER DEFAULT 1
-            )
-        """)
+        # scan_threats / scan_schedules: DDL moved to alert_manager/database.py
+        # 2026-07-29 (init_scan_tables). hw_monitor never wrote a ROW to either —
+        # dashboard owns both — and holding the CREATE here forced a full table
+        # grant covering writes it does not perform. The call below still runs at
+        # exactly this point in startup, so ordering is unchanged; it just issues
+        # the CREATE on database.py's own raw connection instead of this process's
+        # guarded one. Keep the call: there is no systemd ordering between the
+        # services, so every process that needs the tables creates them itself.
         conn.commit()
+        database.init_scan_tables()
 
         # agent_devices migrations: add columns introduced after initial schema.
         existing_ag = {row[1] for row in c.execute("PRAGMA table_info(agent_devices)").fetchall()}

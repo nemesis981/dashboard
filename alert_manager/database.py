@@ -104,6 +104,60 @@ def init_devices_table():
     finally:
         conn.close()
 
+def init_scan_tables():
+    """Canonical DDL for `scan_threats` and `scan_schedules`.
+
+    Moved here from hw_monitor 2026-07-29 as part of the table-ownership
+    resolution. Both tables are written ONLY by dashboard (`scan_threats` rows at
+    dashboard.py:6175, `scan_schedules` at :6362); hw_monitor never wrote a row to
+    either — its only statements were these two CREATEs. Leaving the DDL there
+    forced hw_monitor to hold a full table grant covering INSERT/UPDATE/DELETE it
+    does not use, because the Data Manager grants per table for every write op and
+    its only narrowing mechanism (column grants) is deliberately UPDATE-only.
+
+    Relocating the DDL to this module — already the canonical DDL owner for
+    `devices`, `quarantines` and `enrollment_tokens` — resolves that without
+    adding a DDL-only grant type to the access-control module. This function runs
+    on a RAW connection, exactly like its siblings, so the CREATE is never issued
+    through a caller's guarded connection and no namespace grant is required to
+    call it.
+
+    `CREATE ... IF NOT EXISTS`, so whichever process calls first wins and the rest
+    are no-ops. There is NO systemd ordering between these services, which is why
+    every process that needs the tables calls this itself rather than assuming
+    another one ran first.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        # DDL byte-identical to what hw_monitor created, so an existing database
+        # is untouched and a fresh one gets the same schema.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_threats (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_job_id     INTEGER NOT NULL,
+                device_id       TEXT NOT NULL,
+                file_path       TEXT NOT NULL,
+                threat_name     TEXT NOT NULL,
+                action_taken    TEXT,
+                detected_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_schedules (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT NOT NULL,
+                schedule_type   TEXT NOT NULL DEFAULT 'weekly',
+                scheduled_time  TEXT,
+                last_run_at     TIMESTAMP,
+                enabled         INTEGER DEFAULT 1
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_users_table():
     """Canonical DDL for the core `users` table (Flask-Login auth).
 
