@@ -118,6 +118,40 @@ device is detected **at reconnection, before network access is granted**.
 Cloudflare Gateway (DNS inspection) + Zscaler (SSE / inspection proxy) + Cisco ISE (NAC / ZTNA)
 — **self-hosted, no per-user fees, data stays local**. Industry terms: **SASE / SSE**.
 
+## Addendum (2026-07-30) — multi-site deployments are a distinct case
+
+> Capture-only. **No change to the Decision above for single-site deployments.** This records a
+> case the original reasoning was not evaluated against.
+
+The "tunnel carries decisions, not data" decision rests on an explicitly **single-site** bandwidth
+argument: *"all device traffic hits the home connection twice. Unacceptable."* That is sound for a
+home or single office, where relaying internet-bound traffic through the local box is a pointless
+hairpin.
+
+**It does not transfer to multi-site deployments.** Consider a small franchise: a server at one
+location, other sites connecting via agents, with POS and back-office tooling at each. The traffic
+that matters — site-to-site business data — is **already crossing the public internet**. Routing
+it through the tunnel adds no hairpin, because it was inter-site regardless. The bandwidth
+objection largely evaporates while the confidentiality benefit is real.
+
+Today, only agent↔server telemetry rides the tunnel. Inter-site application traffic (sales,
+inventory, back-office sync) travels with whatever encryption the application itself provides.
+
+**Direction (not yet built):** subnet routing for **inter-site** traffic, direct for
+**internet-bound** traffic, decisions over the tunnel for both. This is additive to the Decision
+above rather than a reversal of it — that Decision concerns internet-bound data, and inter-site
+traffic is a different class.
+
+**Prerequisite, not optional:** subnet routing increases lateral-movement exposure — a compromised
+enrolled device gains routed reach into every advertised site network. Per-peer access controls
+restricting which peers reach which networks and ports must ship **with** subnet routing, not
+after it. Enabling routing without them trades a confidentiality gap for a worse lateral-movement
+gap.
+
+**Compliance:** deployments handling payment data need scoping by a qualified assessor before
+either subnet routing or Tier 2 inspection is enabled. Detail is held privately with the Tier 2
+design.
+
 ## AI hacking inflection point
 AI-assisted attacks are becoming the default vector. Signature-based detection fails against
 AI-generated novel malware. **Behavioral inspection catches malware by what it DOES, not what
