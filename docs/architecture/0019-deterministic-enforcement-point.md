@@ -66,8 +66,39 @@ is tracked with the inspection-tier design rather than here. This ADR's enforcem
 expected to be the component that programs such steering once a mechanism is chosen, which is
 the only dependency between the two.
 
+## Addendum (2026-07-30) — defect confirmed live; interim mitigation applied
+
+The gap this ADR addresses was **verified end to end against a live system**, not inferred: an
+access-control rule issued through the normal automated path was accepted, reported as applied,
+was present and correctly formed in the ruleset, and had **no effect** on one whole class of
+traffic. That class is the one carrying enrolled-device traffic, so the practical consequence was
+that the automated blocking capability did not function where it mattered most.
+
+An **interim, configuration-level mitigation** has since been applied and verified: rules issued
+through the same path now take effect, including in preference to explicit permissive rules
+below them. The installer reproduces the mitigation, and refuses to apply it if a required safety
+precondition is not already in place — failing toward the previous behaviour rather than toward a
+weaker security posture.
+
+**This changes the urgency, not the decision.** The mitigation:
+
+- still depends on **relative ordering** rather than deterministic placement — the same class of
+  race, with us now a participant in it rather than a bystander;
+- does not address other components that also claim priority positions on this host;
+- depends on a **third-party component continuing to offer a particular configuration option**,
+  where deterministic placement would depend on nothing external;
+- provides **none of the operational requirements** in the Decision above — no failsafe, no
+  dry-run, no drift detection.
+
+**Status moves from urgent to important.** A reader finding the emergency resolved should not
+conclude the work is unnecessary; the durable argument — owning a deterministic enforcement point
+— is unchanged and was always the substantive case.
+
+Evidence, mechanism, and the operational consequences of the mitigation are recorded in the
+private writeup referenced above.
+
 ## Status / next
 
-Proposed. No code changed. Sequenced after this ADR: build the enforcement table with its
+Proposed; **urgency downgraded 2026-07-30** (see addendum). No code changed for the table itself. Sequenced after this ADR: build the enforcement table with its
 lockout failsafe, then the relay core, then the inbound reverse relay. See the private writeup
 for the full evidence base, the specific design, and open questions.
