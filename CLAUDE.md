@@ -195,21 +195,30 @@ TLS-interception harness + implementation detail, moved out of the public repo f
 source-visibility). This rule covers it and any future similarly-carved-out private modules.
 - **Window 1 is the git-writer for these private repos** — it authors the code that lives
   there. It follows the SAME discipline as Window 2's public-repo practice: verify staged
-  content before committing, Rule-8 scan the staged diff, and push to all three of a private
-  module's configured remotes — **local** (a bare repo on this machine), **USB** (independent
-  physical storage), and **private GitHub** (`private: true`, access-restricted). **Confirmed
-  in place for `l3-tier2-tls-interception` (2026-07-26)**: all three remotes verified to
-  report the same HEAD after a push — same sync-check discipline as anything else in this
-  file.
-- **This three-remote pattern is specific to private modules — not a general repo
-  requirement.** The public dashboard repo intentionally has only `origin` (public GitHub),
-  and that's correct as-is, not a partial/unfinished version of this rule: GitHub itself is
-  that repo's durable, off-site copy — the entire reason it's hosted there. A private
-  module's GitHub remote is deliberately low-visibility instead, so it doesn't get that same
-  "the host is inherently a durable, mirrored copy" property for free — hence the extra
-  local + USB redundancy, specific to private-module content. **Verified 2026-07-26**, not
-  assumed: the public repo genuinely has a single `origin` remote, confirming the asymmetry
-  is intentional rather than a silently unfinished rollout of this rule.
+  content before committing, Rule-8 scan the staged diff, and push to every one of a private
+  module's configured remotes, then verify they all report the same HEAD — same sync-check
+  discipline as anything else in this file.
+- **Default remote set for private modules: `local` + `usb` ONLY (operator decision,
+  2026-07-29).** `local` is a bare repo on this machine; `usb` is independent physical
+  storage. **No GitHub remote by default.** The reason is not secrecy for its own sake — it's
+  that some private-module content is a novel solution the operator wants a head start on,
+  and off-machine hosting is a deliberate choice to make per module rather than a default to
+  inherit. **Confirmed in place for `firewall-enforcement-engine` (2026-07-29)**: both
+  remotes verified reporting the same HEAD after push; USB confirmed a genuine separate
+  device, not a folder on the same disk.
+- **Pre-existing exception — `l3-tier2-tls-interception` has three remotes**, including
+  private GitHub, from its 2026-07-26 setup (all three verified same-HEAD then). It predates
+  the local+USB default and has **not** been changed. Worth noting the asymmetry: that repo
+  holds the *more* sensitive content (the Tier 2 design itself) on the *wider* remote set.
+  Resolving it means deleting the GitHub repo, not just dropping the remote — already-pushed
+  commits stay until the remote repo is removed. **Operator's call, deliberately left open.**
+- **Remote redundancy is specific to private modules — not a general repo requirement.** The
+  public dashboard repo intentionally has only `origin` (public GitHub), and that's correct
+  as-is, not a partial/unfinished version of this rule: GitHub itself is that repo's durable,
+  off-site copy — the entire reason it's hosted there. A private module has no such
+  inherently-mirrored host, which is exactly why it carries its own local + USB redundancy.
+  **Verified 2026-07-26**, not assumed: the public repo genuinely has a single `origin`
+  remote, confirming the asymmetry is intentional rather than a silently unfinished rollout.
 - **Window 2 remains sole git-writer for the PUBLIC repo only.** This does NOT change or
   extend that rule. The two repos have two git-writers by design — ownership follows
   authorship: Window 1 authors the private-module code, Window 2 authors the public docs.
