@@ -1129,3 +1129,62 @@ Consequences, concretely:
 
 Related: `docs/architecture/0002-vpn-aware-dns-routing.md`, `core/vpn_dns_guard.py`,
 `docs/roadmap/adr-0009-l3-fork-b-scope.md` (Piece 2).
+
+### [FUTURE] Headscale as a self-hosted Tailscale control plane (VPN-swap evaluation, 2026-07-29)
+
+**Why this exists.** While scoping ADR 0019 we asked whether swapping the VPN product would
+dissolve the netfilter chain-ownership conflict instead of solving it. It would not — see the
+conclusion below — but the evaluation surfaced one option worth keeping, and re-deriving it later
+would be tedious. Capture-only; **nothing was built or changed.**
+
+**The conclusion that closed the question.** Swapping Tailscale does **not** avoid needing ADR
+0019's enforcement table. The chain-ownership conflict is not unique to the mesh overlay — another
+root-privileged VPN client on this box contends for the same positions regardless of which overlay
+runs (measured findings in the private writeup referenced from ADR 0019), so a deterministic
+enforcement point is required either way. A swap reduces the number of competitors from two to
+one; it does not remove the problem. Migration was sized at **16–24 sessions** (OpenVPN) or **10–15** (WireGuard) against
+infrastructure that currently works — disproportionate to a conflict a 4–6 session nft table
+resolves deterministically. **Recommendation was: do not migrate.**
+
+**The option worth keeping.** The strongest argument against Tailscale is not its netfilter
+behaviour — it is that `tailscale.com` is an **external control plane in the enrollment path**.
+If it is unreachable or the account lapses, agents cannot enroll. That sits awkwardly against the
+product thesis (*"self-hosted, no per-user fees, data stays local"* — ADR 0009) and is the kind of
+thing a security-conscious buyer asks about.
+
+**Headscale** is a self-hosted, API-compatible Tailscale control plane. It keeps the Tailscale
+client, the tailnet CIDR, `tailscale up --authkey`, exit-node support, and essentially all of
+`nemesis_agent/installer_gui.py` (123 Tailscale references) — replacing only the coordination
+server with one we run. Estimated **3–5 sessions**. It keeps the Tailscale client and therefore
+that client's netfilter-management behaviour, so the chain conflict stays and ADR 0019 is still
+required.
+
+**Caveat to check before committing:** Headscale still relies on reachable DERP relays for NAT
+traversal. Whether that meaningfully reduces the external dependency depends on whether we run
+our own DERP or use the public ones — verify before treating this as "fully self-hosted".
+
+**If a migration ever does happen, the target is plain WireGuard, not OpenVPN.** OpenVPN's
+defining cost is that it requires running a CA (key management, revocation, CRL, expiry) and it
+returns nothing WireGuard lacks except TCP/443 obfuscation — which only matters if enrolled agents
+must traverse restrictive corporate firewalls that block UDP. Tailscale *is* WireGuard underneath,
+so plain WireGuard keeps the crypto and performance and drops only the control plane.
+
+**Two findings from the evaluation that stand on their own:**
+- **ADR 0011's trust model is not Tailscale-specific.** Its root of trust — *"TRUST signal = the
+  SERVER-OBSERVED tailnet source IP ONLY (client cannot forge it)"* — transfers cleanly to any
+  tunnel, since a server-assigned pool IP is equally unforgeable post-decrypt. The property is
+  portable; only the wording and the key-minting mechanism (`alert_manager/tailscale_api.py`,
+  OAuth → single-use pre-auth keys) are Tailscale-bound.
+- **Track A's exit-node step is per-device and gated on a SaaS console approval.** That is a
+  Tailscale limitation, not an inherent one — OpenVPN and WireGuard both do per-client routing via
+  server-side config (`client-config-dir` / `push "redirect-gateway def1"`) with no console and no
+  approval. Does not change Track A's plan; explains why that step carries an external dependency.
+
+**Decision-flipping fact, still unknown:** whether this site sits behind CGNAT. If it does, plain
+WireGuard and OpenVPN both need infrastructure we do not have, Tailscale's DERP becomes
+non-substitutable, and Headscale becomes the only route to dropping the SaaS dependency. Check
+before revisiting.
+
+Related: `docs/architecture/0019-deterministic-enforcement-point.md`,
+`docs/architecture/0011-enrollment-security-model.md`,
+`docs/architecture/0009-security-inspection-proxy.md`, `alert_manager/tailscale_api.py`.
