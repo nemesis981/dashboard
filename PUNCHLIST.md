@@ -1130,6 +1130,30 @@ Consequences, concretely:
 Related: `docs/architecture/0002-vpn-aware-dns-routing.md`, `core/vpn_dns_guard.py`,
 `docs/roadmap/adr-0009-l3-fork-b-scope.md` (Piece 2).
 
+### [HIGH — private writeup] Phase 1 verification: two confirmed defects in shipped code (2026-07-30)
+
+End-to-end verification against a real enrolled Windows agent confirmed **two live defects**. Both
+writeups are kept private (Rule 10 / disclosure) because each reads as an exploitation roadmap
+until fixed:
+`~/work/nemesis-internal/known-limitations/phase1-verification-findings-2026-07-30.md`
+
+1. **Network access-control does not apply to one whole traffic class.** Blocks are accepted and
+   reported as applied, and have no effect on that path. Cause is chain-traversal ordering, not a
+   bug in the block logic — a co-resident daemon terminates evaluation before our rules are
+   reached, and re-asserts that position automatically. Measured, not inferred: baseline traffic,
+   block applied, identical traffic still passing, plus root-level chain-order output. **This is
+   the defect ADR 0019's enforcement table exists to fix**, and it is the reason that work is
+   sequenced first.
+
+2. **Agent persistence is removed by the OS's own AV on a default install**, classified severe.
+   The agent appears to install correctly, then does not survive reboot. The detection is
+   behavioural and **correct** — the persistence mechanism also constitutes a
+   privilege-escalation vector on its own terms. Fix is architectural (service install,
+   non-user-writable path, code signing), **not** an AV exclusion request.
+
+A positive result worth recording alongside them: the helper's peer-authorization model held
+correctly throughout, refusing every out-of-policy operation attempted during the test.
+
 ### [FUTURE] Headscale as a self-hosted Tailscale control plane (VPN-swap evaluation, 2026-07-29)
 
 **Why this exists.** While scoping ADR 0019 we asked whether swapping the VPN product would

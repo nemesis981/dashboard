@@ -1103,6 +1103,103 @@ EOF
 }
 
 
+configure_tailnet_enforcement() {
+    # ── Make ufw the real enforcement point for tunnel traffic ────────────────
+    #
+    # VERIFIED DEFECT (2026-07-30, live test against an enrolled agent):
+    # Tailscale's default netfilter mode inserts `-A INPUT -j ts-input` AHEAD of
+    # every ufw chain, and ts-input ends with `-i tailscale0 -j ACCEPT`. ACCEPT
+    # is terminating, so EVERY ufw rule — including per-IP denies written by
+    # nemesis_fwd on a Suricata alert — is unreachable for tunnel traffic.
+    # Measured: a block was accepted, reported "Rule inserted", and the blocked
+    # peer still completed a TCP connection to this box.
+    #
+    # `--netfilter-mode=nodivert` keeps Tailscale MAINTAINING its chains but
+    # stops it jumping to them, so ufw is reached. We deliberately do NOT re-add
+    # a jump to ts-input: that chain carries the blanket ACCEPT, so jumping to it
+    # would reinstate the defect.
+    #
+    # Not jumping to ts-input means WE must provide the one rule in it that is
+    # load-bearing for security: the tailnet anti-spoof DROP. ADR 0011's
+    # enrollment trust rests on "the server-observed tailnet source IP cannot be
+    # forged" — that guarantee IS this rule. It must sit ABOVE ufw's conntrack
+    # RELATED,ESTABLISHED accept, or a spoofed packet matching an existing flow
+    # is accepted before it is checked.
+    #
+    # NOT a substitute for the deterministic enforcement table (ADR 0019): under
+    # nodivert WE place the jumps, which is still insertion-order, not priority.
+    # This closes a live hole; ADR 0019 remains the durable answer.
+
+    if ! command -v tailscale >/dev/null 2>&1; then
+        info "Tailscale not installed — skipping tailnet enforcement setup"
+        return 0
+    fi
+
+    if grep -q "NEMESIS-TAILNET-ANTISPOOF" /etc/ufw/before.rules 2>/dev/null; then
+        ok "Tailnet anti-spoof guard already present in before.rules"
+    else
+        cp /etc/ufw/before.rules "/etc/ufw/before.rules.pre-nemesis-tailnet.$(date +%Y%m%d-%H%M%S)"
+        # Insert immediately after the loopback ACCEPT: after it so the box's own
+        # tailnet-sourced loopback traffic is unaffected, before the conntrack
+        # accept so spoofed packets cannot ride an existing flow.
+        python3 - <<'EOF'
+import re
+p = "/etc/ufw/before.rules"
+s = open(p).read()
+anchor = "-A ufw-before-input -i lo -j ACCEPT"
+rule = (anchor + "\n\n"
+        "# NEMESIS-TAILNET-ANTISPOOF — replaces the DROP that ts-input provided\n"
+        "# before --netfilter-mode=nodivert. ADR 0011 enrollment trust depends on\n"
+        "# this. MUST stay above the conntrack RELATED,ESTABLISHED accept below.\n"
+        "-A ufw-before-input -s 100.64.0.0/10 ! -i tailscale0 -j DROP")
+if anchor in s:
+    open(p, "w").write(s.replace(anchor, rule, 1))
+EOF
+        chmod 0640 /etc/ufw/before.rules
+        ok "Tailnet anti-spoof guard added to before.rules (IPv4)"
+    fi
+
+    if grep -q "NEMESIS-TAILNET-ANTISPOOF" /etc/ufw/before6.rules 2>/dev/null; then
+        ok "Tailnet anti-spoof guard already present in before6.rules"
+    else
+        cp /etc/ufw/before6.rules "/etc/ufw/before6.rules.pre-nemesis-tailnet.$(date +%Y%m%d-%H%M%S)"
+        python3 - <<'EOF'
+p = "/etc/ufw/before6.rules"
+s = open(p).read()
+anchor = "-A ufw6-before-input -i lo -j ACCEPT"
+rule = (anchor + "\n\n"
+        "# NEMESIS-TAILNET-ANTISPOOF (IPv6) — omitting this would leave the v6\n"
+        "# path spoofable while v4 is protected.\n"
+        "-A ufw6-before-input -s fd7a:115c:a1e0::/48 ! -i tailscale0 -j DROP")
+if anchor in s:
+    open(p, "w").write(s.replace(anchor, rule, 1))
+EOF
+        chmod 0640 /etc/ufw/before6.rules
+        ok "Tailnet anti-spoof guard added to before6.rules (IPv6)"
+    fi
+
+    # Guards must be LIVE before removing what they replace. Reload, verify, and
+    # only then change the netfilter mode — never the other way round.
+    ufw reload >/dev/null 2>&1 || true
+
+    if ! iptables -S ufw-before-input 2>/dev/null | grep -q "100.64.0.0/10"; then
+        warn "Tailnet anti-spoof guard is NOT live after reload — NOT changing netfilter mode"
+        warn "  ufw would be reachable but the spoofing guarantee would be gone. Fix first."
+        return 0
+    fi
+
+    tailscale set --netfilter-mode=nodivert 2>/dev/null ||         warn "Could not set netfilter-mode=nodivert (is tailscaled running?)"
+
+    if iptables -S INPUT 2>/dev/null | grep -q "j ts-input"; then
+        warn "ts-input is still jumped from INPUT — tunnel traffic still bypasses ufw"
+    else
+        ok "Tunnel traffic now governed by ufw (netfilter-mode=nodivert)"
+    fi
+    info "  ts-forward is also unjumped: replicate its loop-prevention DROP and the"
+    info "  nat-table SNAT before enabling ip_forward for subnet routing or Fork B"
+}
+
+
 ufw_and_finish() {
     step_header "9/9" "Firewall Rules & Final Checks"
 
@@ -1120,6 +1217,7 @@ ufw_and_finish() {
     fi
     configure_forkb_nat
     ufw --force enable
+    configure_tailnet_enforcement
     ok "UFW enabled with local-network-only rules"
 
     # nginx reverse proxy: Flask runs on 5000; nginx on 80 reverse-proxies to it
