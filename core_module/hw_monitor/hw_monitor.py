@@ -36,6 +36,11 @@ WA_LISTEN_PORT   = 5001   # port for Windows-agent POST receiver
 log = logging.getLogger("hw_monitor")
 log.setLevel(logging.INFO)
 
+if not log.handlers:
+    _handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(_handler)
+
 # ── :5001 pacing ─────────────────────────────────────────────────────────────
 # Token-bucket rate pacing for the agent channel, replacing the deferred
 # `ufw limit 5001/tcp`. :5001 has NO reverse proxy in front of it (verified
@@ -52,10 +57,6 @@ else:
     log.info("agent listener: :5001 pacing active — %.1f req/s sustained, "
              "burst %.0f, max pace %.1fs", _PACER.rate, _PACER.burst,
              _PACER.max_delay)
-if not log.handlers:
-    _handler = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
-    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
-    log.addHandler(_handler)
 
 # Prime psutil so the first cpu_percent() call returns a real value rather than 0.
 psutil.cpu_percent(interval=None, percpu=True)
@@ -1277,49 +1278,51 @@ def _update_agent_device(payload, remote_ip=None):
 
     try:
         conn = _db_connect()
-        if remote_ip:
-            conn.execute("""
-                INSERT INTO agent_devices
-                    (device_id, device_name, device_type, ip_address, connection_type,
-                     agent_last_seen, suricata_running, suricata_profile,
-                     last_scan_at, last_scan_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(device_id) DO UPDATE SET
-                    device_name     = excluded.device_name,
-                    device_type     = excluded.device_type,
-                    ip_address      = excluded.ip_address,
-                    connection_type = excluded.connection_type,
-                    agent_last_seen = excluded.agent_last_seen,
-                    suricata_running= excluded.suricata_running,
-                    suricata_profile= excluded.suricata_profile,
-                    last_scan_at    = excluded.last_scan_at,
-                    last_scan_result= excluded.last_scan_result
-            """, (device_id, device_name, device_type, remote_ip, conn_type,
-                  ts, suri_run, suri_prof, last_scan, last_result))
-        else:
-            conn.execute("""
-                INSERT INTO agent_devices
-                    (device_id, device_name, device_type, connection_type,
-                     agent_last_seen, suricata_running, suricata_profile,
-                     last_scan_at, last_scan_result)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(device_id) DO UPDATE SET
-                    device_name     = excluded.device_name,
-                    device_type     = excluded.device_type,
-                    connection_type = excluded.connection_type,
-                    agent_last_seen = excluded.agent_last_seen,
-                    suricata_running= excluded.suricata_running,
-                    suricata_profile= excluded.suricata_profile,
-                    last_scan_at    = excluded.last_scan_at,
-                    last_scan_result= excluded.last_scan_result
-            """, (device_id, device_name, device_type, conn_type,
-                  ts, suri_run, suri_prof, last_scan, last_result))
-        lt = payload.get("link_type")
-        if lt:
-            conn.execute("UPDATE agent_devices SET link_type=? WHERE device_id=?",
-                         (lt, device_id))
-        conn.commit()
-        conn.close()
+        try:
+            if remote_ip:
+                conn.execute("""
+                    INSERT INTO agent_devices
+                        (device_id, device_name, device_type, ip_address, connection_type,
+                         agent_last_seen, suricata_running, suricata_profile,
+                         last_scan_at, last_scan_result)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id) DO UPDATE SET
+                        device_name     = excluded.device_name,
+                        device_type     = excluded.device_type,
+                        ip_address      = excluded.ip_address,
+                        connection_type = excluded.connection_type,
+                        agent_last_seen = excluded.agent_last_seen,
+                        suricata_running= excluded.suricata_running,
+                        suricata_profile= excluded.suricata_profile,
+                        last_scan_at    = excluded.last_scan_at,
+                        last_scan_result= excluded.last_scan_result
+                """, (device_id, device_name, device_type, remote_ip, conn_type,
+                      ts, suri_run, suri_prof, last_scan, last_result))
+            else:
+                conn.execute("""
+                    INSERT INTO agent_devices
+                        (device_id, device_name, device_type, connection_type,
+                         agent_last_seen, suricata_running, suricata_profile,
+                         last_scan_at, last_scan_result)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_id) DO UPDATE SET
+                        device_name     = excluded.device_name,
+                        device_type     = excluded.device_type,
+                        connection_type = excluded.connection_type,
+                        agent_last_seen = excluded.agent_last_seen,
+                        suricata_running= excluded.suricata_running,
+                        suricata_profile= excluded.suricata_profile,
+                        last_scan_at    = excluded.last_scan_at,
+                        last_scan_result= excluded.last_scan_result
+                """, (device_id, device_name, device_type, conn_type,
+                      ts, suri_run, suri_prof, last_scan, last_result))
+            lt = payload.get("link_type")
+            if lt:
+                conn.execute("UPDATE agent_devices SET link_type=? WHERE device_id=?",
+                             (lt, device_id))
+            conn.commit()
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("_update_agent_device failed: %s", e)
 
@@ -1364,23 +1367,25 @@ def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
     """Insert into scan_queue if no pending entry already exists for this device."""
     try:
         conn = _db_connect()
-        existing = conn.execute(
-            "SELECT id FROM scan_queue WHERE device_id=? AND status='pending'",
-            (device_id,),
-        ).fetchone()
-        if not existing:
-            conn.execute(
-                "INSERT INTO scan_queue "
-                "(device_id, trigger_type, trigger_detail, scan_path) "
-                "VALUES (?, ?, ?, ?)",
-                (device_id, trigger_type, trigger_detail or "", scan_path or "/"),
-            )
-            conn.commit()
-            log.info(
-                "scan queued: device=%s trigger=%s detail=%s",
-                device_id, trigger_type, trigger_detail,
-            )
-        conn.close()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM scan_queue WHERE device_id=? AND status='pending'",
+                (device_id,),
+            ).fetchone()
+            if not existing:
+                conn.execute(
+                    "INSERT INTO scan_queue "
+                    "(device_id, trigger_type, trigger_detail, scan_path) "
+                    "VALUES (?, ?, ?, ?)",
+                    (device_id, trigger_type, trigger_detail or "", scan_path or "/"),
+                )
+                conn.commit()
+                log.info(
+                    "scan queued: device=%s trigger=%s detail=%s",
+                    device_id, trigger_type, trigger_detail,
+                )
+        finally:
+            conn.close()
     except Exception as e:
         log.warning("_queue_scan failed: %s", e)
 
