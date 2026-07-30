@@ -1,317 +1,170 @@
 # HANDOFF — current state
 
-> Last updated **2026-07-29 (full-day closeout, Window 2)**. Overwritten each closeout (latest
-> state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
-> live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8 (public repo).
+> Last updated **2026-07-30 (Window 2)**. Overwritten each closeout (latest state wins).
+> Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
+> live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
 >
-> ✅ **core_module layout move is now COMPLETE (6/6).** `alert_watcher` — yesterday's holdout —
-> was unblocked and its stale `alert_manager/` copy removed. All six daemons now live
-> exclusively in `core_module/<name>/`.
-> ✅ **Ransomware canary incident is root-caused and closed**, five bugs deep (see below) — not
-> just the two out-of-repo preconditions recorded mid-day, but also dedup/cooldown and the
-> underlying `isfile()`-ambiguity fix that landed later in the evening.
-> ✅ **Data Manager: all seven `dashboard.py` table-ownership conflicts resolved**, and every
-> DB site in `dashboard.py` (read and write) now routes through the guard — zero raw
-> `sqlite3.connect(DB_PATH)` sites remain. Namespace stays **WARN mode**, not ENFORCE, by
-> deliberate choice pending a quiet-journal period.
-> ✅ **Host-defense step 0 landed and appears deployed** (LAN-scan gating, a narrow `fail2ban`
-> `nemesis-fwd` peer, `:5001` pacing) — directly answers last night's pen-test finding of zero
-> host self-defense. Service restart timestamps confirm both `nemesis-fwd` (18:15) and
-> `hw-monitor` (20:07) restarted after the 17:54 commit, but this is deploy confirmation only —
-> **not yet functionally verified** (no test traffic run against the new gating/pacing tonight).
-> ⚠️ **Rule-8 finding from last night is still open, unchanged** — commit `9ffac56`'s message
-> quotes a literal real install username. Still needs an explicit operator decision (rewrite
-> vs. accept as residual). See Open Items below.
-> 🆕 **Private-module remote policy changed today (operator decision):** new private modules
-> default to **local + USB only, no GitHub remote**. `l3-tier2-tls-interception`'s existing
-> three-remote setup (incl. GitHub) is flagged as a pre-existing exception, left open.
+> Written to stand on its own — Paul may or may not be back today. Every claim below was
+> checked against live system state or Window 1's/Window 3's own session transcripts
+> directly, not just their self-reported summaries. Where something couldn't be
+> independently verified, that's stated explicitly rather than presented as confirmed.
 
 ---
 
-## Today's arc (2026-07-29) — seven threads, a very full day
+## 1. Live in production right now — verified, not assumed
 
-Full raw log: `docs/handoff/worklog/2026-07-29-001.md`. Curated narrative:
-`docs/handoff/supplements/2026-07-29-001.md`. Summary:
+- **Tailnet-block interim mitigation is active.** `tailscale debug prefs` → `NetfilterMode:
+  1` (= nodivert). Confirmed directly, not from a doc.
+- **Step 7 ufw hardening is live and done safely.** `ufw status verbose` shows `22/tcp
+  LIMIT IN 192.168.4.0/22` and `80/tcp LIMIT IN 192.168.4.0/22`, correctly *replacing* the
+  old plain `ALLOW` rules (not appended alongside them — the specific trap that would have
+  made the limit meaningless). No rule for port 443 or 5000; both still hit default-deny.
+- **fail2ban's `sshd-tailnet` jail split is live.** Confirmed via `/var/log/fail2ban.log`:
+  `sshd` (`maxretry=3, bantime=86400`) and `sshd-tailnet` (`maxretry=3, bantime=300`) both
+  started today.
+- **The fail2ban end-to-end ban test succeeded.** Confirmed via the `audit_log` table
+  directly (not trusted from either window's report): three ban/deny cycles against
+  `203.0.113.7` (RFC 5737 test address — expendable, non-routable), each attributed to
+  actor `fail2ban`, each cleanly expired afterward by `alert-watcher`. `quarantines` table
+  is currently empty (0 rows) — the test cleanup worked; **not yet explained is why
+  `<test-vm-tailnet-ip>`'s fresh block from today 11:05 (`fw_block_ip` by `alert-watcher`, per
+  `audit_log`) also shows no `quarantines` row** — worth a two-minute look before assuming
+  the dashboard's quarantine list reflects it correctly.
+- **`MAX_BUCKETS` pinned to 256** in `hw-monitor.service` (`Environment=`), the validated
+  value — code default remains 4096 as the wider fallback if the env var is absent.
+- **`nemesis_enforce` nft table exists, observe-only, zero authority.** Every rule is
+  `counter ... log`, no verdict — cannot drop, reject, or alter delivery by construction.
+  Not independently re-verified live this session (no sudo grant covers raw `nft list`),
+  but this property is provable from `scripts/nemesis-fw-render`'s code, which was read in
+  full.
+- **All 12 monitored services active**: dashboard, watchdog, alert-watcher, malware-canary,
+  diagnostics-watcher, vpn-dns-guard, nemesis-fwd, hw-monitor, device-scanner, suricata,
+  fail2ban, nginx.
+- **`<test-vm-tailnet-ip>` (test VM) is blocked**, deliberately, per the operator's own dashboard
+  unblock-path test. Re-confirmed via `ufw status` (`Anywhere DENY IN <test-vm-tailnet-ip>`).
+- **Local `HEAD` is 2 commits ahead of `origin/main`, not yet pushed** (`ac07b22`,
+  `19d9b5c` — see §2). Everything else through `e6cbbda` is already public.
+- **Deploy-lifetime sudoers grant removed.** `/etc/sudoers.d/nemesis-host-defence-deploy`
+  is gone (operator ran the removal directly); the permanent sibling
+  `nemesis-fwd-restart` is untouched. Confirmed via `sudo -n -l` no longer listing it — as
+  a side effect, several verification commands available to Window 2 yesterday (raw
+  `nft`/`iptables` reads, `fail2ban-client status`) are no longer available; today's
+  verification used `ufw` (still granted), direct log/DB reads, and file-permission-based
+  access instead.
 
-1. **core_module layout move finished (6/6)** — `alert_watcher`'s two blockers fixed
-   (`test_quarantine.py` import path + a `DB_PATH` bug that was silently testing against an
-   empty stray DB instead of the live one), stale copy removed. Same window fixed
-   `nemesis_fwd.py`'s per-request fd leak (Open Item #10, now deployed — see below).
-   (`e76b964`, `bfd7983`, `a096def`, `eeb5218`)
-2. **device-scanner fixes** — macvendors.com error bodies were being stored verbatim as
-   device names; `sudo nmap` was dead under `NoNewPrivileges` with no failure signal
-   (Open Item #6, now resolved), replaced with an unprivileged scan. (`459585b`, `5849a3b`)
-3. **Data Manager rollout** — thirteen commits taking the "dashboard" namespace from
-   WARN-mode-with-seven-conflicts to all conflicts resolved and every DB site routed through
-   the guard. Caught a dashboard root-logger bug (`log.info()` going nowhere) and a
-   `settings_page()` `NameError` silently reverting security settings to default on every page
-   load. (`5bd6259`→`5e9e23d`)
-4. **Severity/vocabulary consolidation** — one shared severity ladder (fixing a live bug
-   where lowercase `"critical"` never crossed a ticket threshold) and canonical-uppercase
-   malware vocabulary with case-insensitive reads. (`0b404f4`, `0e571f2`, `ed2c889`)
-5. **Process rules** — Window 3 formalized (overflow, never a git-writer); Rule 11 (test data
-   in live `alerts.db` must be labeled). (`79f1c06`, `941ec51`)
-6. **Ransomware canary incident, closed** — `ProtectHome=yes` had blinded the canary since
-   2026-07-25 (~33,500 false CRITICALs, mail rate limit exhausted, zero real detection). Five
-   fixes: the masking itself, non-atomic plant+baseline, the missing traverse ACL, dedup/cooldown,
-   and the `isfile()`-ambiguity underneath all of it. (`7373b10`, `9cc7746`, `c40f53d`,
-   `1705e9c`, `d577e10`)
-7. **Fork B / host-defense (evening)** — fixed flask-login missing from install.sh (had
-   silently broken ticket-filing for 3 of 4 services), added Fork B source-NAT, removed two
-   never-implemented `nemesis-fwd` ops, then shipped host-defense step 0 responding to last
-   night's pen-test gap. (`2530977`, `517b1e0`, `8c28525`, `480b1c8`, `1d63734`, `19c783f`,
-   `86a4c47`)
+## 2. Staged/tested but not yet deployed
 
-Closeout (Window 2): diff-audited and pushed `800b5e2`/`31aee8f` (ADR 0019 stub — full
-writeup kept private per Rule 10 in a new `~/work/nemesis-internal/firewall-enforcement-engine/`
-repo, local+USB remotes only; Headscale VPN-swap evaluation, capture-only, recommendation: do
-not migrate). Found and, on operator confirmation, committed two more files left uncommitted by
-a concurrent Window 1/3 session: the private-module remote policy change and an ADR 0019
-scope-boundary addition (`e9dab6e`, `2b75b27`).
+- **`nemesis-fw-apply` and `nemesis-fw-render`** — committed (`19d9b5c`) but **not pushed**,
+  per explicit instruction this session. Both reviewed line-by-line: lockout-failsafe
+  ordering is correct (revert armed before apply, LKG snapshot verified re-loadable before
+  trusted, scoped to `nemesis_enforce` only — never `flush ruleset`), observe-only property
+  in `nemesis-fw-render` is structurally guaranteed. `bash -n` clean, Rule-8 clean.
+- **ADR 0019 addendum** (`ac07b22`) — also committed, not pushed. Documents the defect and
+  interim mitigation at the correct level of abstraction (unlike `install.sh`'s comment,
+  see §5).
+- **Push decision is Paul's** — nothing above has been pushed this session per the explicit
+  "before any push" instruction. When ready: `git push origin main` from `/opt/nemesis`
+  publishes both.
 
-**Nine bugs fixed today**, all named in commit messages, not trusted from a handoff claim — see
-the supplement for the full list with commit hashes.
+## 3. Mid-flight — needs finishing, with exact next steps
 
-## core_module layout — COMPLETE
+- **ADR 0019 Increment 3's counter-agreement comparison — the one thing this increment
+  exists to prove, still not done.** Window 1's own words: "I won't call it complete
+  without it." Exact next step, per Window 1: one clean `nemesis-fw-apply` run, generate
+  real traffic, read both `nemesis_enforce`'s observe counters and ufw's own DROP counters
+  in a single command. Estimated ~10 minutes. The window-test run that already happened
+  reset the counters, so this needs a fresh cycle, not a re-read of old data.
+- **`install.sh`'s Rule-10 disclosure gap — flagged twice now, still unfixed.** The
+  `configure_tailnet_enforcement()` comment block has the same level of exploit-relevant
+  specificity (exact rule syntax, exact reproduction/measurement method) as the *private*
+  Finding 1 writeup, and it's already pushed to the public GitHub repo. The PUNCHLIST entry
+  and ADR 0019 addendum covering the same defect are correctly abstracted — only this one
+  file's comment is the outlier. Next step: decide whether to trim the comment in a new
+  commit (doesn't retract the already-public history) or accept as residual risk (same
+  category of decision as the still-open `9ffac56` username finding from 2026-07-28) —
+  **this is Paul's call, not a unilateral fix.**
+- **`<test-vm-tailnet-ip>` / `quarantines` table discrepancy** (see §1) — needs a two-minute check
+  before trusting the dashboard's quarantine list is currently accurate for that IP.
 
-```
-alert-watcher        core_module/alert_watcher/alert_watcher.py             LIVE, old copy REMOVED
-hw-monitor            core_module/hw_monitor/hw_monitor.py                   LIVE, old copy REMOVED
-device-scanner       core_module/device_scanner/device_scanner.py           LIVE, old copy REMOVED
-watchdog              core_module/watchdog/watchdog.py                       LIVE, old copy REMOVED
-malware-canary       core_module/malware_canary/malware_canary.py           LIVE, old copy REMOVED
-diagnostics-watcher  core_module/diagnostics_watcher/diagnostics_watcher.py  LIVE, old copy REMOVED
-```
+## 4. Blocked on a decision — Paul's calls
 
-All six daemons now live exclusively in `core_module/<name>/`; `alert_manager/` retains only
-`dashboard.py` and `nemesis_fwd.py` (by design) plus non-code artifacts (logs, `.db` files).
-`vpn-dns-guard` remains in `core/` by design.
+1. **`install.sh` disclosure fix** (§3) — trim now vs. accept as residual, and if trimming,
+   whether that needs a history rewrite to be meaningful given it's already public.
+2. **`nemesis-fw-apply`'s double-apply-overwrites-LKG gap** (found in review, non-blocking
+   today since the table has zero authority) — worth a guard (e.g., refuse a new `apply`
+   while a revert is pending) before Increment 4+ gives the table real DROP/REJECT
+   authority. Not urgent; flag before that increment starts.
+3. **`known-limitations/` still has zero version control.** Now holds six findings from
+   yesterday (three still unfixed operationally: agent persistence removal, every bound
+   service reachable from any tailnet peer, Suricata blind to inbound tailnet traffic) plus
+   everything from before — single disk, no history, no backup. Window 1 itself
+   recommended `git init` + local/USB remotes yesterday; not yet done.
+4. **`l3-tier2-tls-interception`'s GitHub remote** — still the open question from
+   2026-07-28/29 (keep vs. drop to local+USB-only like `firewall-enforcement-engine`).
+   Unchanged today.
+5. **Window 3 pushing directly to `origin/main`, twice now** (yesterday's one-off,
+   today's `eb1943c`, unacknowledged as a deviation this time) — worth deciding whether
+   this needs a firmer process guard or was legitimately authorized both times and just
+   needs clearer instruction-phrasing going forward ("prep for Window 2" vs. "go ahead").
 
-## Ransomware canary — root-caused and closed (2026-07-29)
+## 5. Known issues/gaps flagged today, not yet fixed
 
-The Layer-B canary had **two out-of-repo preconditions** missing between 2026-07-25 and
-2026-07-29 (~33,500 false CRITICAL findings, zero real tickets, the outbound mail rate limit
-exhausted at 14,441 failed sends, no actual detection capability the entire time):
+- `install.sh`'s over-specific defect comment (§3/§4) — the main one.
+- `nemesis-fw-apply`'s double-apply/LKG gap (§4) — non-blocking today.
+- Increment 3's counter-agreement comparison unmeasured (§3).
+- `<test-vm-tailnet-ip>`/`quarantines` discrepancy (§1/§3) — small, unexplained, worth a look.
+- Everything carried forward from yesterday's HANDOFF that wasn't touched today: the
+  Rule-8 username finding (`9ffac56`, still open, still needs an operator decision), the
+  three temporary sudoers grants (unrelated to today's removed one), `NEMESIS_AGENT_EXE`'s
+  real home path, `migrate_to_opt.sh` fragility, missing ADR for the relocation model,
+  `backupproc.md` unconfirmed for current layout, five files still computing raw
+  tree-relative `alerts.db` paths, cosmetic items (duplicate `sys.path.insert`, missing
+  attestation calls), ADR 0015 vs. venue-guest-network tension, no hardware baseline, legal
+  review not started. None of these were in scope today; listed so they aren't lost.
 
-1. **`malware-canary.service` must not run with `ProtectHome=yes`** — masked `/home` in the
-   unit's mount namespace, so every bait file read as `deleted / encrypted-in-place`.
-   `scripts/gen_units.py` now sets `ProtectHome=read-only` for this unit alone.
-2. **`nemesis-canary` must be able to traverse the install user's home** — handled by a
-   traverse-only ACL, `install.sh` now applies it and installs the `acl` package explicitly:
-   ```
-   setfacl -m u:nemesis-canary:--x /home/<install-user>
-   ```
+## 6. Repo-staleness issue — nemesis-fw-apply / nemesis-fw-render — RESOLVED today
 
-Fixing visibility surfaced (and required fixing) three more bugs, all now landed:
+This was flagged as an open item going into today: `scripts/nemesis-fw-apply` in the repo
+needed syncing with fixes made during testing (root guard, accurate dry-run error,
+`mktemp` usage), and `nemesis-fw-render` was missing from the repo entirely.
 
-3. **Non-atomic plant+baseline** — would have kept false-tripping even after visibility was
-   restored, because the baseline dated from a stale re-plant. Fixed atomically; bait filenames
-   are now plausible document names (`Account passwords.docx`, …) instead of a shared
-   self-identifying label — trade-off: hides the trap from a targeted attacker, but loses the
-   old protection against the *user* deleting bait and false-tripping.
-4. **No dedup/cooldown** — one stuck condition was capable of flooding alerts/emails.
-   Verified: a 4-file deletion now produces exactly 4 rows, then goes silent across subsequent
-   polls until the condition changes.
-5. **The root ambiguity underneath all of it** — `os.path.isfile()` returning `False` meant
-   either "genuinely deleted" or "I can't see this directory," indistinguishable. Now
-   disambiguated by parent-directory visibility; the same fix was applied to
-   `_module_enabled()`'s DB-read-error-reads-as-disabled bug (101 skipped polls had been
-   silently misreported as self-gated-off rather than as a failed check).
+**Status: fixed.** Window 1 confirmed the sync directly ("Repo synced — all three fixes now
+present... plus `nemesis-fw-render`... Both syntax-clean, Rule 8 clean") and Window 2
+independently re-verified by reading both files in full before committing — the versions
+now in git (`19d9b5c`, not yet pushed, see §2) do carry the root guard, the `FAILED
+VALIDATION` dry-run error message, `mktemp` for the temp validation file, and the
+`reset-failed` fix for the 33s-vs-60s timer bug. No further sync action needed. This item
+can be closed once `19d9b5c` is pushed.
 
-**Verifying it is actually working** (all preconditions, one check):
-```
-grep ' /home ' /proc/$(systemctl show -p MainPID --value malware-canary)/mountinfo
-    # a line containing "inaccessible" means precondition 1 is broken
-getfacl -p /home/<install-user> | grep nemesis-canary
-    # missing means precondition 2 is broken
-tail -5 /var/log/nemesis/malware-canary/malware_canary.log
-    # healthy looks like: "canary: clean — 4/4 bait ok", no flood of repeated findings
-```
-Note the daemon logs to that **file**, not the journal — `journalctl -u malware-canary` shows
-only systemd's own lines and looks deceptively quiet.
+## 7. Cross-references — read these directly, not duplicated here
 
-## Data Manager (ADR 0006) — dashboard namespace fully onboarded, still WARN mode
+- `~/work/nemesis-internal/scoping-and-estimates/v2.0-roadmap-2026-07-30.md` — the V2.0
+  three-phase roadmap. Updated today with sourced figures pulled from Window 1's live
+  session (not fabricated): the full 9-row Phase 1–3 sizing table, the fwmark/`ip rule`
+  convention's exact sub-allocation, and a resolution of the Piece E(b)
+  padding-vs-randomization question (padding stays, corrected from an earlier approved-but-
+  reverted shift toward randomization-only).
+- `~/work/nemesis-internal/l3-tier2-tls-interception/DESIGN-NOTE-2026-07-30-padding-scope.md`
+  — the Piece E(b) self-correction in full.
+- `docs/architecture/0019-deterministic-enforcement-point.md` (public stub, now with
+  today's addendum) / `~/work/nemesis-internal/firewall-enforcement-engine/ADR-0019-
+  deterministic-enforcement-point-FULL.md` (private full writeup).
+- `docs/architecture/0020-agent-model-and-tunnel-ownership.md` — new today, agent
+  model/transport decisions.
+- `docs/roadmap/track-c-metadata-tier-build-plan.md` — new today, approved to build,
+  6–9 sessions, consent-gate-first.
+- `~/work/nemesis-internal/known-limitations/phase1-verification-findings-2026-07-30.md` —
+  Findings 1–6, the private evidence base behind today's ADR 0019 addendum and ADR 0020.
+- `docs/handoff/supplements/2026-07-30-001.md` / `docs/handoff/worklog/2026-07-30-001.md`
+  — today's curated narrative and raw log respectively.
+- Prior day: `docs/handoff/supplements/2026-07-29-001.md`.
 
-As of tonight, the "dashboard" namespace has **all seven table-ownership conflicts resolved**
-(`enrollment_tokens`/`agent_devices` via column grants; `scan_jobs`/`audit_log`/`users` as
-genuine shared writers; `scan_threats`/`scan_schedules` DDL relocated to `database.py`,
-dropping `hw_monitor`'s now-unneeded grant) and **zero raw `sqlite3.connect(DB_PATH)` sites
-remain in `dashboard.py`** — every read and write site routes through `_dm_conn()`.
-
-The namespace is deliberately still registered in **WARN mode, not ENFORCE** — same discipline
-used for other namespaces: prove clean via a quiet journal period before flipping the switch.
-Not yet scheduled; treat as an open item if it's been quiet a while and nobody's flipped it.
-
-## Host-defense step 0 (2026-07-29 evening) — landed, deploy-confirmed, NOT functionally verified
-
-Directly responds to last night's 4-hour adversarial test finding of **zero host
-self-defense** (668 attacks, no damage, but also no detection against a direct port scan /
-flood / SSH brute-force on the Nemesis host itself — see
-`docs/testing/adversarial-test-2026-07-29.md`, gitignored/local-only). Three pieces:
-
-- LAN-internal severity now derives from Suricata priority when no external reputation data
-  exists (using `not is_global`, not `is_private`, so CGNAT/tailnet sources aren't excluded).
-- A new narrow **`fail2ban`** `nemesis-fwd` `PEER_POLICY` peer — `block_ip`/`deny_ip` only,
-  structurally unable to release quarantines.
-- `:5001` moved to `ThreadingHTTPServer` plus new token-bucket pacing (`agent_pacing.py`).
-
-**Deploy status:** `nemesis-fwd` restarted 18:15, `hw-monitor` restarted 20:07 — both after the
-17:54 commit, so both processes are running the new code. **This is deploy confirmation only.**
-No test traffic has been run against the new gating/pacing tonight; `NEMESIS_NEVER_BLOCK` status
-at deploy time not re-checked in this closeout. Verify before relying on it.
-
-## Open items
-
-1. **NEW (found 2026-07-28 closeout, still unresolved): Rule-8 finding** — commit `9ffac56`'s
-   own message quotes the literal real install username instead of a placeholder; it's in
-   public git history a second time, postdating the 2026-07-26 scoped rewrite so not covered by
-   it. Needs an explicit operator decision (rewrite again vs. accept as residual) — not touched
-   today either. See `PUNCHLIST.md`.
-2. **NEW (2026-07-29): `l3-tier2-tls-interception`'s three-remote asymmetry** — it predates
-   today's local+USB-only default for private modules and still has a GitHub remote, holding
-   the *more* sensitive Tier 2 design on the *wider* remote set. Resolving means deleting the
-   GitHub repo, not just dropping the remote. Operator's call, deliberately left open.
-3. **NEW (2026-07-29): PIA compatibility gap blocking Fork B validation** — PIA is installed
-   but left disconnected because Nemesis errors while it's active; filed, not investigated.
-4. **Data Manager "dashboard" namespace still WARN, not ENFORCE** — all conflicts resolved and
-   all sites migrated; flip is a deliberate, not-yet-scheduled follow-up.
-5. **Host-defense step 0 deployed but not functionally verified** — see above; run real test
-   traffic against the new LAN-scan gating / fail2ban peer / `:5001` pacing before trusting it
-   in an incident.
-6. **Three temporary sudoers grants still present** (carried forward from 07-27) — the
-   de-privileging/relocation-era grants remain live; not urgent, clean up once de-privileging
-   is fully closed out.
-7. **`/etc/nemesis.env` line 18, `NEMESIS_AGENT_EXE`, still holds a real home path** —
-   unchanged since 07-27; deliberately not granted to Window 1 (write access means rewriting
-   all 16 secrets).
-8. **`migrate_to_opt.sh` should not be run by anyone else as-is** — carried forward from the
-   07-27 incident; still doesn't deploy unit files itself and `--verify` still doesn't check
-   unit-path correctness.
-9. **No ADR written yet for the relocation + de-privileging model** — carried forward; ADR
-   0018/0019 landed since but cover backup design and enforcement-point design respectively,
-   not this. Still documented only in commit messages.
-10. **`docs/operations/backupproc.md` still not re-verified against the `/opt/nemesis`
-    layout** — reads path-agnostic so may not need an edit, but the actual revert procedure
-    has not been re-run against the current layout. Treat as unconfirmed.
-11. **Five files still compute raw tree-relative `alerts.db` paths** (was six — 
-    `test_quarantine.py` fixed today by `e76b964`): three `scripts/stage2_migrate_*`,
-    `scripts/wal_concurrent_smoketest.py`, `test_anomaly_cleanup.py`.
-12. **`device_scanner.py`/`dashboard.py` have no attestation call** (carried forward,
-    cosmetic) — their units declare `NEMESIS_EXPECT_USER` and nothing reads it.
-13. **`dashboard.py` has a duplicate `sys.path.insert`** (carried forward, cosmetic) — 4
-    occurrences (lines 6, 19, 75, 107).
-14. **ADR 0015 vs. `venue-guest-network.md` tension** (carried forward) — needs an operator
-    decision before either guest-enrollment vision gets built.
-15. **No target hardware baseline exists** (carried forward) — blocks turning L3/Tier-1/Tier-2
-    scoping docs into real session estimates.
-16. **Legal review** (carried forward) — hard prerequisite for ADR 0016's PII-collection half,
-    not started.
-
-**Resolved since 07-28:** alert_watcher Commit B / core_module 6/6 (was Open Item #1);
-device_scanner's unconditional `sudo nmap` (was Open Item #6); `nemesis_fwd.py` connection leak,
-now confirmed deployed via service restart (was Open Item #10).
-
-## Roadmap baseline
-
-`docs/audits/roadmap-state-audit-2026-07-28.md` — **4 SHIPPED / 8 PARTIAL / 52 STUB/PARKED, 64
-total.** No drift today (file-set and shipping both re-checked this morning, confirmed same-commit
-baseline). A separate, broader audit landed today —
-`docs/audits/proposed-features-status-2026-07-29.md` (all 64 roadmap items + 18 ADRs,
-operator-requested) — but it uses a different filename pattern and does not reset this baseline
-per the Morning Status routine's resolve-at-runtime rule.
-
-## Current state — de-privileging model (unchanged since 07-28; core_module move now fully
-## complete, not 5/6)
-
-```
-dashboard            <user>            /opt/nemesis/dashboard.py                     (NOT hardened, deliberate)
-watchdog              nemesis-watchdog  core_module/watchdog/watchdog.py
-hw-monitor            nemesis-hwmon     core_module/hw_monitor/hw_monitor.py
-alert-watcher        nemesis-alertw    core_module/alert_watcher/alert_watcher.py
-device-scanner       <user>            core_module/device_scanner/device_scanner.py  (retains CAP_NET_RAW)
-malware-canary       nemesis-canary    core_module/malware_canary/malware_canary.py
-diagnostics-watcher  nemesis-diag      core_module/diagnostics_watcher/diagnostics_watcher.py
-vpn-dns-guard         nemesis-vpndns    core/vpn_dns_guard.py
-nemesis-fwd           (dedicated user)  alert_manager/nemesis_fwd.py
-```
-
-`systemd-analyze` exposure and UID details unchanged since 07-27 (not re-measured tonight — no
-hardening directives changed today, only DB-access routing and application logic).
-**Dashboard remains deliberately unhardened** — see below, still current.
-
-## THE INCIDENT (2026-07-27, ~25 min degraded production) — historical, still worth reading
-before touching `migrate_to_opt.sh`
-
-The operator ran `scripts/migrate_to_opt.sh --run` for real. Code and DB moved cleanly, but the
-migration script does not deploy unit files — all 8 units still pointed at the deleted old
-path, and `do_migrate`'s end-of-run restart drove all 8 into crash loops. Recovered forward,
-one service at a time. Root cause is still an open item (#8 above) — `migrate_to_opt.sh` was
-not touched again today; `migrate_core_module.sh` remains deliberately designed around this
-exact failure mode and has been proven not to repeat it, six services deep now.
-
-**Dashboard is deliberately not hardened.** `NoNewPrivileges=yes` makes the kernel ignore
-setuid, so sudo cannot elevate under it — proven, not assumed. A hardened dashboard would
-start, look healthy, and be unable to perform the operations it still shells out for.
-
-**The ADR-0005 ufw chokepoint migration is COMPLETE.** All six firewall operations —
-`block_ip`, `deny_ip`, `unblock_ip`, `expire_quarantine`, `list_blocked`, `list_rules` — route
-through `fw_client` to `nemesis_fwd`, and `alert_manager/firewall.py` contains no `subprocess`
-call and no `sudo` at all.
-
-What still blocks hardening is therefore NOT firewall.py. It is **seven remaining `sudo` call
-sites in `dashboard.py`**, none of them ufw:
-
-```
-:558          sudo systemctl status clamav-daemon     read-only status
-:5454, :5654  sudo systemctl restart dashboard        self-restart ×2
-:5464         sudo bash <uninstall_script> --yes      uninstall
-:5568-5570    sudo cp/chown/chmod /etc/nemesis.env    the 16-secret env rewrite
-```
-
-Do not add hardening directives to `dashboard.service` until all seven are gone. The
-self-restart pair likely resolves to a polkit rule scoped to the Nemesis units (precedent:
-`10-nemesis-watchdog.rules`); the `/etc/nemesis.env` rewrite is the hard one and needs its own
-design. This half stays PARKED — it is independent of the dashboard DB de-privileging work,
-which needs no identity change at all.
-
-## LIVE vs DEFAULT-OFF (and why) — unchanged since 2026-07-02, still current
-
-| Capability | State | Why |
-|---|---|---|
-| **Feature 6** — IP-reputation cache | **ON** (observation-only) | Never enforces; agent pulls the server dataset for local measurement. |
-| **Feature 6 server endpoint** `GET /reputation_dataset` | **LIVE** | Serves real rows, no regression. |
-| **L1** — DNS enforcement plumbing | **default OFF** | Blocked by the unresolved ADR 0005 "Pi-hole refuses tunnel-sourced queries" problem. |
-| **L2** — WinDivert reputation blocking | **default OFF globally** | Validated 2026-07-02; per-device toggle still unbuilt. |
-| **L2 on the trip-laptop** | **ON** (that one installer only) | Global default unchanged. |
-
-## Emergency fallback — still flagged unconfirmed for the current layout
-
-`docs/operations/backupproc.md` — Procedure A (local uninstall) and Procedure B (Claude Code
-revert prompt). Revert tag `pre-l1l2l3-build-known-good` → `14b066b`, last verified byte-exact
-on 2026-07-26 (pre-relocation). The doc itself reads path-agnostic (see Open Items #10) but the
-actual procedure has not been re-run against the current layout. Treat as unconfirmed.
-
-## Pointers
-- Today's narrative: `docs/handoff/supplements/2026-07-29-001.md`; raw log:
-  `docs/handoff/worklog/2026-07-29-001.md`.
-- Prior narratives: `docs/handoff/supplements/2026-07-28-001.md`, `2026-07-27-001.md`,
-  `2026-07-26-001.md`, `2026-07-25-001.md` (morning audit), `-002.md` (ADR 0006 build),
-  `-003.md` (loader-enforcement + L3 consolidation), `2026-07-02-001.md`.
-- Private module + audit docs (outside this repo): `~/work/nemesis-internal/`, specifically
-  today's new `firewall-enforcement-engine/` (ADR 0019 full writeup, local+USB remotes only)
-  and yesterday's `known-limitations/` audits.
-- Fallback: `docs/operations/backupproc.md` (unconfirmed for current layout, see above); tag
-  `pre-l1l2l3-build-known-good` (`14b066b`).
-- Latest audits: `docs/audits/roadmap-state-audit-2026-07-28.md` (baseline),
-  `docs/audits/proposed-features-status-2026-07-29.md` (broader, non-baseline).
-- Real IPs/hosts/accounts/keys: `~/work/nemesis-private/local-config.md` (outside repo).
-
-## Topology (durable, unchanged)
-- `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`).
-- `:5000` Flask dashboard (ufw-blocked from LAN). `:5001` hw-monitor agent endpoint
-  (`/enroll`, `/enrollment_status`, `/hw_data`, `/api/agent/uninstall`, `/reputation_dataset` live;
-  now ThreadingHTTPServer + token-bucket pacing, see Host-defense step 0 above).
+## Topology (durable, unchanged from prior handoffs)
+- `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`), now behind
+  step-7's LAN-scoped SSH/HTTP rate limiting at the ufw layer in addition to nginx's own
+  `limit_req` from yesterday.
+- `:5000` Flask dashboard (ufw-blocked from LAN, unchanged). `:5001` hw-monitor agent
+  endpoint, ThreadingHTTPServer + token-bucket pacing (`MAX_BUCKETS=256` live).
 - `:5002` agent command listener — localhost-bound + unauthenticated.
-- `nemesis-fwd` — a Unix-socket-based privileged helper for ufw operations, reachable only by
-  the dashboard, alert-watcher, and (new today) fail2ban peers, each independently verified via
-  kernel-level peer credentials + an admin-account + credential check.
+- `nemesis-fwd` — Unix-socket privileged helper, peers: dashboard, alert-watcher,
+  `fail2ban` (narrow: `block_ip`/`deny_ip` only, cannot release).
