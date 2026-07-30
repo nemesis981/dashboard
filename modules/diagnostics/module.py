@@ -130,10 +130,12 @@ def _init_db() -> None:
 def _get_setting(key: str, default: str = "") -> str:
     try:
         conn = _conn()
-        row = conn.execute(
-            "SELECT value FROM diagnostics_settings WHERE key=?", (key,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT value FROM diagnostics_settings WHERE key=?", (key,)
+            ).fetchone()
+        finally:
+            conn.close()
         if row is not None:
             return row["value"]
     except Exception:
@@ -164,10 +166,12 @@ def _module_enabled(name: str = "diagnostics") -> bool:
     """
     try:
         conn = _conn()
-        row = conn.execute(
-            "SELECT enabled FROM modules_enabled WHERE module_name=?", (name,)
-        ).fetchone()
-        conn.close()
+        try:
+            row = conn.execute(
+                "SELECT enabled FROM modules_enabled WHERE module_name=?", (name,)
+            ).fetchone()
+        finally:
+            conn.close()
         if row is not None:
             return bool(row["enabled"])
     except Exception:
