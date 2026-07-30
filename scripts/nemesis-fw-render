@@ -1,0 +1,88 @@
+#!/bin/bash
+# ADR 0019 — Increment 3: render nemesis_enforce rules DERIVED from the
+# authoritative backend, in OBSERVE-ONLY mode.
+#
+# SINGLE-AUTHORITY CONSTRAINT (operator, 2026-07-30): the table is DERIVED,
+# never independently populated. Rules are generated from what ufw is ACTUALLY
+# ENFORCING right now — not from the DB, not from caller intent. If callers
+# could write here directly, the two rule sets would drift and the comparison
+# that justifies cutover would be measuring our own bookkeeping error rather
+# than real agreement.
+#
+# OBSERVE-ONLY BY CONSTRUCTION: every derived rule is `counter log` with NO
+# VERDICT. In nftables a rule without a verdict falls through to the next rule,
+# so these cannot drop, reject, or alter delivery. The chain policy stays
+# `accept`. This table has zero authority and cannot lock anyone out — which is
+# what makes it safe to run alongside the real enforcement path.
+#
+# THE COMPARISON THIS ENABLES: same rules, same traffic, two engines. If the
+# table's counter for an address increments while ufw's DROP counter for the
+# same address does not (or vice versa), the two disagree — and one of them is
+# wrong. Divergence is the signal; agreement over a real workload is what
+# justifies cutover.
+#
+#   render        write the derived ruleset to stdout
+#   render -o F   write to file F
+set -u
+
+OUT="${2:-/dev/stdout}"
+[ "${1:-render}" = "render" ] || { echo "usage: $0 render [-o file]"; exit 1; }
+[ "${2:-}" = "-o" ] && OUT="${3:?-o needs a path}"
+
+# ── source of truth: what ufw is enforcing THIS INSTANT ──────────────────────
+# Per-IP blocks land in ufw-user-input as `-s <addr> -j DROP` with no protocol
+# or port match — that is the shape nemesis_fwd's block_ip produces.
+mapfile -t V4 < <(iptables -S ufw-user-input 2>/dev/null \
+    | grep -E '^-A ufw-user-input -s [0-9.]+/[0-9]+ -j DROP$' \
+    | awk '{print $4}')
+mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
+    | grep -E '^-A ufw6-user-input -s [0-9a-fA-F:]+/[0-9]+ -j DROP$' \
+    | awk '{print $4}')
+
+{
+echo "# GENERATED — do not hand-edit. Derived from ufw's live ruleset by"
+echo "# nemesis-fw-render. Observe-only: counters and logs, no verdicts."
+echo "# Derived $( [ ${#V4[@]} -gt 0 ] && echo ${#V4[@]} || echo 0 ) IPv4 and $( [ ${#V6[@]} -gt 0 ] && echo ${#V6[@]} || echo 0 ) IPv6 block(s)."
+# ATOMIC REPLACE, not append. `nft -f` on an EXISTING table adds rules rather
+# than replacing them — so without this, every apply duplicates every rule and
+# the derived block list accumulates instead of being regenerated. That breaks
+# the single-source-of-truth property this whole increment depends on.
+# The bare `table` line ensures it exists so `delete` cannot error; the three
+# statements load as one atomic transaction.
+echo "table inet nemesis_enforce"
+echo "delete table inet nemesis_enforce"
+echo "table inet nemesis_enforce {"
+echo "    chain input {"
+echo "        type filter hook input priority -300; policy accept;"
+echo "        counter comment \"nemesis:input:traversed\""
+
+if [ ${#V4[@]} -eq 0 ] && [ ${#V6[@]} -eq 0 ]; then
+    echo "        # no blocks currently enforced by ufw — nothing to mirror"
+fi
+for a in "${V4[@]:-}"; do
+    [ -n "$a" ] || continue
+    # No verdict: counts and logs, then falls through. Log is rate-limited —
+    # an unbounded log rule on a blocked host that keeps retrying is a
+    # self-inflicted disk problem.
+    echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop \" comment \"observe:block:$a\""
+done
+for a in "${V6[@]:-}"; do
+    [ -n "$a" ] || continue
+    echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop6 \" comment \"observe:block6:$a\""
+done
+
+cat <<'NFT'
+    }
+    chain forward {
+        type filter hook forward priority -300; policy accept;
+        counter comment "nemesis:forward:traversed"
+    }
+    chain output {
+        type filter hook output priority -175; policy accept;
+        counter comment "nemesis:output:traversed"
+    }
+}
+NFT
+} > "$OUT"
+
+[ "$OUT" != "/dev/stdout" ] && echo "  wrote $OUT (${#V4[@]} v4, ${#V6[@]} v6 derived rules)" >&2

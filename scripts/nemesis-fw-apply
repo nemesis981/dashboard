@@ -1,0 +1,200 @@
+#!/bin/bash
+# ADR 0019 — lockout failsafe for the nemesis_enforce table.
+#
+# THE ORDERING THAT MATTERS: the revert timer is scheduled BEFORE the ruleset is
+# applied. If applying the ruleset kills our own connectivity, we never reach any
+# code that runs afterwards — so scheduling first is the only ordering that
+# survives its own failure mode.
+#
+# WHY systemd-run AND NOT A BACKGROUND PROCESS: a background process can be
+# killed, orphaned, or die with its parent shell, and then nothing reverts. A
+# transient systemd timer is owned by PID 1 and survives all of that.
+#
+# REVERT IS SCOPED TO OUR TABLE ONLY. It never runs `flush ruleset` — that would
+# wipe the iptables-nft compat tables that ufw, PIA and Tailscale live in. The
+# only thing this tool modifies is `table inet nemesis_enforce`, so the only
+# thing it restores is that table.
+#
+#   apply <file>   snapshot, verify, dry-run, arm revert, apply
+#   confirm        cancel the pending revert (keeps the applied ruleset)
+#   status         is a revert pending, and how long is left
+#   revert-now     restore immediately, do not wait for the timer
+#   selftest       prove the revert actually fires, against the empty table
+set -u
+
+[ "$(id -u)" -eq 0 ] || { echo "  FATAL: must run as root (privileged netfilter + /var/lib/nemesis writes)" >&2; exit 1; }
+
+TABLE="inet nemesis_enforce"
+UNIT="nemesis-fw-revert"
+LKG_DIR=/var/lib/nemesis/fw-lkg
+
+die() { echo "  ✗ $*" >&2; exit 1; }
+have_table() { nft list table $TABLE >/dev/null 2>&1; }
+
+snapshot() {
+    mkdir -p "$LKG_DIR"; chmod 0700 "$LKG_DIR"
+    local f="$LKG_DIR/lkg.nft"
+    if have_table; then
+        nft list table $TABLE > "$f" || die "could not snapshot current table"
+        # An unverified snapshot is one you discover is broken at the worst
+        # possible moment. Prove it re-loads before trusting it.
+        nft -c -f "$f" >/dev/null 2>&1 || die "snapshot does NOT re-load — refusing to proceed"
+        echo "  ✓ snapshot taken and verified restorable ($(wc -l < "$f") lines)"
+    else
+        : > "$f"
+        echo "  ✓ no existing table — safe state is 'table absent'"
+    fi
+}
+
+write_revert_script() {
+    cat > "$LKG_DIR/revert.sh" <<'EOF'
+#!/bin/bash
+# Restore the last-known-good nemesis_enforce table. Scoped: never flushes the
+# global ruleset. If the snapshot is empty, the safe state is no table at all.
+LKG=/var/lib/nemesis/fw-lkg/lkg.nft
+nft delete table inet nemesis_enforce 2>/dev/null
+if [ -s "$LKG" ]; then nft -f "$LKG" 2>/dev/null; fi
+logger -t nemesis-fw "LOCKOUT FAILSAFE FIRED: nemesis_enforce reverted to last-known-good"
+EOF
+    chmod 0700 "$LKG_DIR/revert.sh"
+}
+
+cmd_apply() {
+    local WINDOW="${NEMESIS_FW_WINDOW:-60}"
+    local NEW="${1:-}"
+    [ -n "$NEW" ] && [ -r "$NEW" ] || die "usage: $0 apply <ruleset-file>"
+
+    echo "── 1. snapshot last-known-good ──"
+    snapshot
+    write_revert_script
+
+    echo "── 2. dry-run the proposed ruleset ──"
+    local DRY; DRY=$(mktemp) || die "cannot create temp file — environment problem, not a ruleset problem"
+    if ! nft -c -f "$NEW" >"$DRY" 2>&1; then
+        sed 's/^/    /' "$DRY"; rm -f "$DRY"
+        die "proposed ruleset FAILED VALIDATION — nothing applied"
+    fi
+    rm -f "$DRY"
+    echo "  ✓ proposed ruleset parses"
+
+    echo "── 3. diff (current → proposed) ──"
+    diff -u "$LKG_DIR/lkg.nft" "$NEW" | sed 's/^/    /' | head -40 || true
+
+    echo "── 4. ARM revert BEFORE applying (window: ${WINDOW}s) ──"
+    # Stop AND reset-failed: systemd-run reuses the transient unit name, and a
+    # recently-stopped unit can carry OnActiveSec state into the next arm —
+    # producing a window SHORTER than the banner states. Measured 2026-07-30:
+    # back-to-back applies fired at 33s against a stated 60s; with reset-failed
+    # first, a clean run measured 60s exactly. The banner is the operator's only
+    # basis for deciding how long they have to test access, so it must be true.
+    systemctl stop "$UNIT.timer" 2>/dev/null
+    systemctl reset-failed "$UNIT.timer" "$UNIT.service" 2>/dev/null
+    systemd-run --quiet --on-active="${WINDOW}s" --unit="$UNIT" \
+        /bin/bash "$LKG_DIR/revert.sh" || die "could not arm revert timer — NOTHING APPLIED"
+    echo "  ✓ revert armed — fires in ${WINDOW}s unless confirmed"
+
+    echo "── 5. apply ──"
+    if ! nft -f "$NEW" 2>/tmp/.fwapply; then
+        sed 's/^/    /' /tmp/.fwapply
+        echo "  ✗ apply failed — reverting now rather than waiting"
+        /bin/bash "$LKG_DIR/revert.sh"; systemctl stop "$UNIT.timer" 2>/dev/null
+        die "apply failed, state restored"
+    fi
+    echo "  ✓ applied"
+    echo
+    echo "  ╔══════════════════════════════════════════════════════════════╗"
+    echo "  ║  TEST YOUR ACCESS NOW. Reverts automatically in ${WINDOW}s.        ║"
+    echo "  ║  Keep it:   sudo $(basename "$0") confirm"
+    echo "  ║  Undo now:  sudo $(basename "$0") revert-now"
+    echo "  ║  Console:   sudo nft delete table $TABLE"
+    echo "  ╚══════════════════════════════════════════════════════════════╝"
+}
+
+cmd_confirm() {
+    if systemctl is-active --quiet "$UNIT.timer"; then
+        systemctl stop "$UNIT.timer"
+        echo "  ✓ revert cancelled — applied ruleset kept"
+        logger -t nemesis-fw "operator confirmed nemesis_enforce ruleset; revert cancelled"
+    else
+        echo "  (no revert pending — nothing to confirm)"
+    fi
+}
+
+cmd_status() {
+    if systemctl is-active --quiet "$UNIT.timer"; then
+        echo "  REVERT PENDING:"
+        systemctl list-timers "$UNIT.timer" --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/    /'
+    else
+        echo "  no revert pending"
+    fi
+    have_table && echo "  table present: yes" || echo "  table present: no"
+}
+
+cmd_revert_now() {
+    /bin/bash "$LKG_DIR/revert.sh"
+    systemctl stop "$UNIT.timer" 2>/dev/null
+    echo "  ✓ reverted to last-known-good"
+}
+
+cmd_selftest() {
+    echo "════ SELFTEST — prove the revert actually fires ════"
+    echo "Runs against the empty table, where a failed revert costs nothing."
+    have_table || die "nemesis_enforce not present — run increment 1 first"
+
+    fingerprint() { nft list table $TABLE 2>/dev/null | sed -E "s/packets [0-9]+ bytes [0-9]+//" | md5sum | cut -c1-12; }
+    local BEFORE; BEFORE=$(fingerprint)
+    echo "  table fingerprint before: $BEFORE"
+
+    # A deliberately harmless change: one extra counter. Detectable, no effect.
+    cat > /tmp/.fwtest.nft <<'EOF'
+table inet nemesis_enforce {
+    chain input {
+        type filter hook input priority -300; policy accept;
+        counter comment "nemesis:input:traversed"
+        counter comment "SELFTEST-MARKER"
+    }
+    chain forward {
+        type filter hook forward priority -300; policy accept;
+        counter comment "nemesis:forward:traversed"
+    }
+    chain output {
+        type filter hook output priority -175; policy accept;
+        counter comment "nemesis:output:traversed"
+    }
+}
+EOF
+    echo
+    local TESTWIN=20
+    NEMESIS_FW_WINDOW=$TESTWIN cmd_apply /tmp/.fwtest.nft
+    echo
+    nft list table $TABLE | grep -q "SELFTEST-MARKER" \
+        && echo "  ✓ marker present — change is live" \
+        || die "marker absent — apply did not take effect"
+
+    echo "  deliberately NOT confirming. Armed for ${TESTWIN}s; waiting $((TESTWIN+15))s..."
+    sleep $((TESTWIN+15))
+    echo
+    if nft list table $TABLE 2>/dev/null | grep -q "SELFTEST-MARKER"; then
+        echo "  ✗✗ FAILSAFE DID NOT FIRE — marker still present."
+        echo "     Do NOT use this against a real ruleset."
+        systemctl stop "$UNIT.timer" 2>/dev/null; cmd_revert_now
+        exit 1
+    fi
+    local AFTER; AFTER=$(fingerprint)
+    echo "  ✓ FAILSAFE FIRED — marker gone"
+    echo "  table fingerprint after:  $AFTER"
+    [ "$BEFORE" = "$AFTER" ] \
+        && echo "  ✓ table restored EXACTLY to pre-test state" \
+        || echo "  ⚠ table differs from pre-test state — inspect"
+    echo
+    journalctl -t nemesis-fw --since "2 min ago" --no-pager 2>/dev/null | tail -3 | sed 's/^/    /'
+}
+
+case "${1:-}" in
+    apply)      shift; cmd_apply "$@" ;;
+    confirm)    cmd_confirm ;;
+    status)     cmd_status ;;
+    revert-now) cmd_revert_now ;;
+    selftest)   cmd_selftest ;;
+    *) echo "usage: $0 {apply <file>|confirm|status|revert-now|selftest}"; exit 1 ;;
+esac
