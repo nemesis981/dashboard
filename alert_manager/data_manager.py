@@ -113,7 +113,15 @@ NAMESPACES = {
     "nemesis_fwd": {
         # audit_log is append-only and written by several actors; the helper adds
         # its own attribution rows there.
-        "tables": ("audit_log",),
+        #
+        # quarantines (2026-07-30): INSERT + a dedup SELECT only, one row per
+        # fail2ban ban (record_fail2ban_quarantine). Shared with dashboard,
+        # which remains the only writer that can UPDATE status here (confirm/
+        # lift, both credentialed). The helper never updates or deletes a row
+        # in this table — see PEER_POLICY["fail2ban"] for why that boundary
+        # matters: this grant makes fail2ban's bans visible, it does not give
+        # the helper any release authority it didn't already structurally lack.
+        "tables": ("audit_log", "quarantines"),
         # COLUMN GRANT. The helper enforces account lockout itself (confirmed
         # 2026-07-28), which means maintaining the three fields that make up the
         # lockout state machine. `users` belongs to authentication, and the
@@ -157,7 +165,13 @@ NAMESPACES = {
     "dashboard": {
         "tables": (
             # sole writer
-            "alerts", "quarantines", "devices", "login_events",
+            "alerts", "devices", "login_events",
+            # SHARED WRITER with nemesis_fwd (2026-07-30). dashboard confirms/
+            # lifts rows here (credentialed); nemesis_fwd now also INSERTs one
+            # when fail2ban bans something, so that ban shows up next to
+            # alert-watcher's own auto-quarantines instead of only existing as
+            # an audit_log line. Same shape as the audit_log sharing below.
+            "quarantines",
             # row owner; hw_monitor holds a `uses`-only column grant (see above)
             "enrollment_tokens",
             # SOLE row writer. hw_monitor's grant on both was removed 2026-07-29

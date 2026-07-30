@@ -112,14 +112,21 @@ def ping():
 
 # ── unattended path (alert_watcher) ──────────────────────────────────────────
 
-def block_ip(ip, username=None, session_id=None, password=None):
+def block_ip(ip, username=None, session_id=None, password=None, jail=None):
     """Add a deny rule at the top. The only op alert_watcher may invoke.
 
     Idempotent at the ufw level, which is why alert_watcher no longer keeps a
     dedup cache — the cache was an optimisation, and the empty-set-on-failure
     it relied on is exactly what hid the outage.
+
+    `jail` (2026-07-30): fail2ban's ban shim only — which jail triggered this
+    ban (e.g. "sshd", "sshd-tailnet"), so nemesis_fwd can tag the resulting
+    quarantine record with it. Ignored by every other caller.
     """
-    return _request("block_ip", {"ip": ip}, username, session_id, password)
+    params = {"ip": ip}
+    if jail:
+        params["jail"] = jail
+    return _request("block_ip", params, username, session_id, password)
 
 
 def expire_quarantine(ip):

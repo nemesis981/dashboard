@@ -52,6 +52,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -153,6 +154,10 @@ PEER_POLICY = {
         # through a lift op here. It is structurally incapable of lifting a block
         # placed by the dashboard or by alert-watcher, and of enumerating the
         # ruleset, regardless of what fail2ban's own config is made to say.
+        #
+        # record_fail2ban_quarantine (2026-07-30) does not change any of this:
+        # nemesis_fwd writes that row itself, server-side, after block_ip has
+        # already run — fail2ban's own op set stays exactly {block_ip, deny_ip}.
         "ops": {"block_ip", "deny_ip"},
         "require_credential": False,
         "audit_actor": "fail2ban",
@@ -541,6 +546,69 @@ def audit(action, actor, ip=None, detail=None):
             guard.close()
 
 
+def record_fail2ban_quarantine(ip, jail):
+    """Give a fail2ban ban the same dashboard-visible record alert-watcher's
+    own auto-quarantines get (2026-07-30).
+
+    Before this, a fail2ban ban wrote only an audit_log row — real attribution,
+    but not a first-class, actionable record. jail.local's own action config
+    promises "lift from the Nemesis dashboard if required" (unban is a
+    deliberate no-op — see PEER_POLICY["fail2ban"] and action.d/nemesis-fwd.conf),
+    but with nothing in `quarantines`, there was nothing there to lift. This
+    closes that gap: same table, same "Lift" button alert-watcher's rows
+    already use.
+
+    Does NOT change what fail2ban's peer may do. This is called from HERE,
+    server-side, after nemesis_fwd itself has already executed block_ip on
+    fail2ban's behalf — fail2ban never touches this table, never gets
+    expire_quarantine or unblock_ip, and still cannot release a block placed by
+    itself, the dashboard, or alert-watcher. It only makes what nemesis_fwd
+    already did visible and liftable the normal way.
+
+    expires_at is informational only, matching the no-op-unban contract: fail2ban
+    still has no expire_quarantine grant, so nothing ever auto-releases this row
+    on that timer. Only an admin's dashboard lift (a real, credentialed
+    unblock_ip) changes its status.
+
+    Best-effort: failure here must never be mistaken for the ban itself having
+    failed. The ufw rule from op_block_ip is already in place by the time this
+    runs; a failure recording the quarantine is a visibility gap, not an
+    enforcement one, so it degrades the same way `audit`'s own failures do.
+    """
+    # jail comes from our own action config's <name> macro, not attacker
+    # input, but the socket protocol doesn't type-check it — clamp defensively,
+    # same posture as every other value this file takes from a caller.
+    jail = re.sub(r"[^A-Za-z0-9_-]", "", (jail or "sshd"))[:64] or "sshd"
+    rule_id = "fail2ban-%s" % jail
+    now = datetime.now()
+    expires = now + timedelta(hours=24)
+    guard = None
+    try:
+        guard = _dm().connect("nemesis_fwd")
+        existing = guard.execute(
+            "SELECT id FROM quarantines WHERE ip=? AND rule_id=? AND status='active'",
+            (ip, rule_id)).fetchone()
+        if existing:
+            return True
+        guard.execute(
+            "INSERT INTO quarantines (ip, rule_id, expires_at, created_at, status, actor) "
+            "VALUES (?, ?, ?, ?, 'active', ?)",
+            (ip, rule_id, expires.isoformat(), now.isoformat(), "fail2ban"))
+        guard.commit()
+        return True
+    except Exception:
+        log.exception("fwd: quarantine record failed for fail2ban ban of %s", ip)
+        signal_degraded(
+            ERR_AUDIT_WRITE_FAILED,
+            "fail2ban ban succeeded but its dashboard quarantine record was lost",
+            severity="warning", audit_action="fail2ban_quarantine_record",
+            actor="fail2ban", target_ip=ip)
+        return False
+    finally:
+        if guard is not None:
+            guard.close()
+
+
 # ── ufw operations (argv built here, never supplied by the caller) ───────────
 
 def _run_ufw(*args):
@@ -732,11 +800,16 @@ class Helper:
 
         if not policy["require_credential"]:
             # Unattended path. Layer 1 + the narrow allowlist ARE the control.
-            result = OPS[op](req.get("params") or {})
+            params = req.get("params") or {}
+            result = OPS[op](params)
             actor = policy["audit_actor"]
-            audit("fw_%s" % op, actor,
-                  ip=(req.get("params") or {}).get("ip"),
+            audit("fw_%s" % op, actor, ip=params.get("ip"),
                   detail=req.get("request_id"))
+            if peer_name == "fail2ban" and op == "block_ip":
+                # See record_fail2ban_quarantine's docstring: this makes the
+                # ban dashboard-visible and liftable. It does not give fail2ban
+                # any new op — the write happens here, not through the peer.
+                record_fail2ban_quarantine(params.get("ip"), params.get("jail"))
             log.info("fwd: %s ok for peer=%s (pid=%d, unattended)", op, peer_name, pid)
             return result
 
