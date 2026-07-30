@@ -49,6 +49,23 @@ applied by any path lacking a lockout failsafe — apply-then-confirm with auto-
 verified-restorable last-known-good snapshot, dry-run diffing, no apply-before-health-check on
 boot, and a documented physical/console recovery path. This requirement is not deferred.
 
+## Explicitly NOT solved by this ADR
+
+Recorded here so it is not later mistaken for something this work covered.
+
+Owning a deterministic enforcement point does **not** provide a mechanism for delivering live
+traffic into an in-path inspection gate. Passive/mirror-based inspection — a copy analysed after
+the fact, with the original untouched — cannot serve an in-path gate by construction: the copy
+has already missed the window in which the live packet would have been held. The two are
+complementary, not substitutes, and adopting the cheaper passive approach for the default
+detection tier does not answer how the optional in-path tier receives traffic.
+
+That delivery capability is currently **unbuilt and unscoped**. It is its own scoping effort —
+traffic steering into a userspace gate is a different problem from netfilter ownership — and it
+is tracked with the inspection-tier design rather than here. This ADR's enforcement table is
+expected to be the component that programs such steering once a mechanism is chosen, which is
+the only dependency between the two.
+
 ## Status / next
 
 Proposed. No code changed. Sequenced after this ADR: build the enforcement table with its
