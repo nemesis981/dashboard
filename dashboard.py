@@ -380,6 +380,46 @@ def _register_credential_failure(row, username, ip, ua,
     return False, 0, tier
 
 
+def _set_password(user_id: int, new_password: str):
+    """THE single place a password is changed. Returns (ok, reason).
+
+    Every path that sets a password — the authenticated change form, and later
+    the recovery-code flow — goes through here, so policy cannot drift between
+    them. A second setter is how one path ends up skipping validation.
+
+    Three things happen together, deliberately in one statement:
+
+      password_hash        the new bcrypt hash
+      password_changed_at  stamped NOW. Updated in the SAME UPDATE as the hash,
+                           never separately: if the two could diverge, a
+                           just-changed password could still read as expired,
+                           which is the failure that makes users distrust the
+                           expiry prompt and start writing passwords down.
+      lockout state        cleared. Completing an authenticated change is proof
+                           of control, so carrying a lockout forward past it
+                           would punish the legitimate owner for an attacker's
+                           failed attempts.
+
+    Validation is applied here rather than trusted from the caller — the same
+    reasoning as the helper validating write_env server-side.
+    """
+    ok, reason = passphrase.validate(new_password or "")
+    if not ok:
+        return False, reason
+    conn = _users_conn()
+    try:
+        now = datetime.now().isoformat(timespec="seconds")
+        conn.execute(
+            "UPDATE users SET password_hash=?, password_changed_at=?, "
+            "failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE id=?",
+            (_hash_password(new_password), now, user_id),
+        )
+        conn.commit()
+        return True, None
+    finally:
+        conn.close()
+
+
 def _create_user(username: str, display_name: str, password: str, role: str = "admin") -> int:
     conn = _users_conn()
     try:
@@ -665,6 +705,77 @@ def login():
                                error=f"Too many failed attempts. Account locked for {mins} minutes.")
     # Never reveal which field was wrong (security best practice).
     return render_template("login.html", error="Invalid username or password.")
+
+
+@app.route("/account/password", methods=["GET", "POST"])
+@login_required
+def change_password():
+    """Authenticated password change.
+
+    Requires the CURRENT password even though the caller is already logged in.
+    That is the whole point of the form: a hijacked session must not be able to
+    change the password and lock the real owner out of their own firewall. Being
+    logged in proves the session was valid at some point; re-entering the
+    password proves it is the owner sitting there now.
+
+    Failures are throttled on the SAME budget as login (see
+    _register_credential_failure) so this form cannot be used to guess the
+    password without limit.
+    """
+    row = _load_user_row("id", current_user.id)
+    if not row:
+        logout_user()
+        return redirect(url_for("login"))
+
+    if request.method == "GET":
+        return render_template("change_password.html", username=row["username"])
+
+    ip  = request.remote_addr or "unknown"   # same derivation as login()
+    ua  = request.headers.get("User-Agent", "")
+    cur = request.form.get("current_password") or ""
+    new = request.form.get("new_password") or ""
+    cfm = request.form.get("confirm_password") or ""
+
+    # An account already locked out cannot change its way out of the lockout.
+    if row["lockout_until"]:
+        try:
+            if datetime.fromisoformat(row["lockout_until"]) > datetime.now():
+                return render_template("change_password.html", username=row["username"],
+                                       error="Account is locked out. Try again later.")
+        except (TypeError, ValueError):
+            pass
+
+    if not _check_password(cur, row["password_hash"]):
+        locked, mins, _t = _register_credential_failure(
+            row, row["username"], ip, ua,
+            reason="bad_current_password", source="password-change",
+            action="change_password")
+        _audit("password_change_denied", ip=ip)
+        if locked:
+            return render_template("change_password.html", username=row["username"],
+                                   error=f"Too many failed attempts. Account locked for {mins} minutes.")
+        return render_template("change_password.html", username=row["username"],
+                               error="Current password is incorrect.")
+
+    if new != cfm:
+        return render_template("change_password.html", username=row["username"],
+                               error="New passwords do not match.")
+    if new == cur:
+        return render_template("change_password.html", username=row["username"],
+                               error="New password must be different from the current one.")
+
+    ok, reason = _set_password(row["id"], new)
+    if not ok:
+        return render_template("change_password.html", username=row["username"],
+                               error=reason or "Password does not meet requirements.")
+
+    # audit_log, not login_events: login_events records attempts to AUTHENTICATE.
+    # A completed password change is an administrative action on the account, and
+    # belongs with the other attributed state changes.
+    _audit("password_change", ip=ip)
+    auth_log.info("auth: password changed for %s from %s", row["username"], ip)
+    return render_template("change_password.html", username=row["username"],
+                           success="Password changed.")
 
 
 @app.route("/logout")
