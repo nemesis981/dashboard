@@ -31,6 +31,9 @@ asserted here:
     the helper against the stored bcrypt hash.
 """
 
+import os
+import socket
+import struct
 import logging
 import ipaddress
 from datetime import datetime
@@ -51,6 +54,128 @@ def _valid_ip(ip):
         return False
 
 
+# ── never-block guard ────────────────────────────────────────────────────────
+#
+# Lives HERE, at the ADR-0005 chokepoint, rather than in any one caller. It used
+# to exist only as alert_watcher._blockable(), which guarded the AUTOMATED
+# quarantine path — so the automated path was protected and the human-triggered
+# one was not. The dashboard would happily insert a deny rule against this host's
+# own LAN address, which is the opposite of the protection you would expect.
+# Putting it at the chokepoint means every caller inherits it, including callers
+# that do not exist yet.
+#
+# Loopback is unconditional. The rest comes from two sources, deliberately both:
+#
+#   1. RUNTIME-DERIVED local addresses. The host's own addresses are discovered
+#      from the live interface list, so this cannot be forgotten at install time,
+#      cannot go stale when DHCP moves the LAN address, and covers the tailnet
+#      address without anyone naming it. Configuration that must be remembered is
+#      configuration that gets missed — NEMESIS_NEVER_BLOCK is unset on a fresh
+#      install today for exactly that reason.
+#   2. RUNTIME-DERIVED default gateways, from /proc. Not local, so interface
+#      enumeration cannot see them, and the single most damaging address to block.
+#   3. NEMESIS_NEVER_BLOCK — the operator escape hatch, and ONLY that. Local
+#      addresses and gateways are covered automatically above, so this is for
+#      things automation cannot infer: an internal DNS server, a NAS, a
+#      management host. Ships EMPTY.
+#
+# Applied to the BLOCK paths only. It is deliberately NOT applied to unblock or
+# expire: refusing to REMOVE a rule on a protected address would block the exact
+# repair someone would need if one ever got there by another route.
+
+_NEVER_BLOCK_ALWAYS = {"127.0.0.1", "::1"}
+
+
+def _local_addresses():
+    """Every address currently configured on this host.
+
+    Best-effort by design: if the interface list cannot be read, the guard falls
+    back to loopback + NEMESIS_NEVER_BLOCK rather than failing the block. A
+    firewall that refuses to work because it could not enumerate interfaces would
+    be a worse failure than the one this guards against — but the degradation is
+    logged, never silent.
+    """
+    found = set()
+    try:
+        import psutil
+        for _iface, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                if snic.family in (socket.AF_INET, socket.AF_INET6):
+                    addr = (snic.address or "").split("%")[0]  # strip zone id
+                    if addr:
+                        found.add(addr)
+    except Exception as exc:
+        log.warning("firewall: could not enumerate local addresses (%s) — "
+                    "never-block guard falls back to loopback + "
+                    "NEMESIS_NEVER_BLOCK only", exc)
+    return found
+
+
+def _default_gateways():
+    """Default-route gateway addresses, read from /proc.
+
+    The one protected address that is NOT local, so runtime interface enumeration
+    cannot find it — and the most damaging single address to block, since denying
+    the gateway cuts this host off its own network entirely.
+
+    Read from /proc/net/route and /proc/net/ipv6_route rather than shelling out to
+    `ip route`: a file read needs no subprocess and no iproute2 binary inside a
+    sandboxed unit, matching the reasoning device_scanner uses for /proc/net/arp.
+
+    Derived per call rather than configured, for the same reason as the local
+    addresses: a gateway written into config at install time goes stale the moment
+    DHCP hands out a different one, and a stale protection is worse than none
+    because it reads as covered.
+    """
+    gws = set()
+    try:
+        with open("/proc/net/route") as fh:
+            next(fh, None)                      # header
+            for line in fh:
+                f = line.split()
+                # Destination 00000000 == default route; Gateway 0 == on-link.
+                if len(f) > 2 and f[1] == "00000000" and f[2] != "00000000":
+                    gws.add(socket.inet_ntoa(struct.pack("<L", int(f[2], 16))))
+    except Exception as exc:
+        log.warning("firewall: could not read IPv4 default route (%s) — "
+                    "gateway not added to the never-block set", exc)
+    try:
+        with open("/proc/net/ipv6_route") as fh:
+            for line in fh:
+                f = line.split()
+                # dest prefix all-zero == default; field 4 is the next hop.
+                if len(f) > 4 and f[0] == "0" * 32 and f[4] != "0" * 32:
+                    gws.add(socket.inet_ntop(socket.AF_INET6, bytes.fromhex(f[4])))
+    except Exception as exc:
+        log.warning("firewall: could not read IPv6 default route (%s) — "
+                    "gateway not added to the never-block set", exc)
+    return gws
+
+
+def never_block_set():
+    """Addresses this host must never deny. Recomputed per call, not cached:
+    interfaces come and go (tailnet up/down, DHCP renewal) and blocks are rare,
+    so a stale cache buys nothing and could miss a current address."""
+    never = set(_NEVER_BLOCK_ALWAYS)
+    never |= {a.strip() for a in os.environ.get("NEMESIS_NEVER_BLOCK", "").split(",")
+              if a.strip()}
+    never |= _local_addresses()
+    never |= _default_gateways()
+    return never
+
+
+def _guard_never_block(ip, op):
+    """Refuse a block against a protected address. Raises FirewallDenied."""
+    if ip in never_block_set():
+        log.error("REFUSING %s for %s — address is this host's own or is listed "
+                  "in NEMESIS_NEVER_BLOCK. No rule was applied.", op, ip)
+        raise FirewallDenied(
+            "never_block",
+            f"refusing to block {ip}: this is one of this host's own addresses "
+            f"(or is listed in NEMESIS_NEVER_BLOCK). Blocking it could cut the "
+            f"host off from its own network. No rule was applied.")
+
+
 # ── unattended path (alert_watcher) ──────────────────────────────────────────
 
 def ufw_insert_top(ip):
@@ -61,6 +186,7 @@ def ufw_insert_top(ip):
     """
     if not _valid_ip(ip):
         raise ValueError("refusing to block invalid IP: %r" % (ip,))
+    _guard_never_block(ip, "block_ip")
     fw_client.block_ip(ip)
     log.info("firewall: block_ip %s applied via nemesis-fwd", ip)
     return True
@@ -75,6 +201,7 @@ def ufw_deny_append(ip, username=None, session_id=None, password=None):
     """
     if not _valid_ip(ip):
         raise ValueError("refusing to deny invalid IP: %r" % (ip,))
+    _guard_never_block(ip, "deny_ip")
     fw_client.deny_ip(ip, username, session_id, password)
     log.info("firewall: deny_ip %s applied via nemesis-fwd", ip)
     return True
