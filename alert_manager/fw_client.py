@@ -148,6 +148,33 @@ def unblock_ip(ip, username, session_id, password):
     return _request("unblock_ip", {"ip": ip}, username, session_id, password)
 
 
+# ── admin path: privileged non-firewall ops (2026-07-31) ─────────────────────
+#
+# These are NOT firewall operations, and they are the point at which this client
+# stops being purely a ufw front-end. They exist because dashboard was
+# de-privileged: it has no sudo at all now, so restarting itself and writing
+# /etc/nemesis.env both have to be asked of the helper.
+#
+# Same credential rule as every other write: a fresh admin password each time,
+# verified by nemesis-fwd against the stored hash. Nothing is cached this side.
+
+def write_env(values, username, session_id, password):
+    """Merge key/value pairs into /etc/nemesis.env.
+
+    `values` is a plain {KEY: value} dict — never a file body. The helper owns
+    the allowlist, the value validation and the file write; this side sends
+    intent, not content. That is deliberate: a check performed here would be
+    bypassed by exactly the compromise the helper is designed to contain.
+    """
+    return _request("write_env", {"values": values}, username, session_id, password)
+
+
+def restart_dashboard(username, session_id, password):
+    """Restart dashboard.service. Takes no target — the helper restarts one
+    named unit and offers no way to name another."""
+    return _request("restart_dashboard", {}, username, session_id, password)
+
+
 def list_blocked(username, session_id, password=None):
     """Password may be omitted if the helper still holds a live cached
     verification for this (peer, user, session). The helper decides — the

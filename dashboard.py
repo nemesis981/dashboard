@@ -334,6 +334,12 @@ def _create_user(username: str, display_name: str, password: str, role: str = "a
         conn.close()
 
 
+#: Body fields that carry the admin credential rather than payload data. Any
+#: route that both takes a credential and treats the body as data must exclude
+#: these, or the credential is processed as if it were data.
+_CREDENTIAL_FIELDS = frozenset({"password"})
+
+
 def _fw_credential():
     """Admin password for a privileged firewall action, from the POST body.
 
@@ -3097,6 +3103,7 @@ def settings_page():
 <head>
     <title>Nemesis — Settings</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 700px; margin: 0 auto; }}
@@ -3974,9 +3981,19 @@ def settings_page():
             btn.textContent = 'Restarting…';
             btn.style.opacity = '0.6';
             msg.style.display = 'inline';
-            fetch('/api/restart', {{method: 'POST'}})
+            /* Restart is privileged now — it goes through nemesis-fwd. */
+            fwPrompt('restart the dashboard service').then(function (pw) {{
+              if (!pw) return;
+              fetch('/api/restart', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{password: pw}})
+              }})
                 .catch(function() {{}});
-            setTimeout(function() {{ location.reload(); }}, 5000);
+              /* Reload only after a real attempt — inside the prompt callback,
+                 so cancelling does not reload a page that never restarted. */
+              setTimeout(function() {{ location.reload(); }}, 5000);
+            }});   /* close fwPrompt().then( */
         }}
 
         // --- Module restart banner ---
@@ -4570,11 +4587,20 @@ def settings_page():
             var status = document.getElementById('wizSaveStatus');
             if (btn) {{ btn.disabled = true; btn.textContent = 'Saving…'; }}
             if (status) status.textContent = '';
-            fetch('/api/config/update', {{
+            /* Config save writes secrets into a root-owned file that seven
+               services source, so it is a privileged act and takes a fresh
+               admin password — same rule as block/unblock. */
+            fwPrompt('save configuration changes').then(function (pw) {{
+              if (!pw) {{
+                  if (btn) {{ btn.disabled = false; btn.textContent = 'Save Changes'; }}
+                  return;
+              }}
+              toSave.password = pw;
+              fetch('/api/config/update', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
                 body: JSON.stringify(toSave)
-            }})
+              }})
             .then(function(r) {{ return r.json(); }})
             .then(function(d) {{
                 if (d.ok) {{
@@ -4585,10 +4611,11 @@ def settings_page():
                     if (status) status.innerHTML = '<span style="color:#ff4444">&#x2717; ' + (d.error||'Save failed') + '</span>';
                 }}
             }})
-            .catch(function() {{
+              .catch(function() {{
                 if (btn) {{ btn.disabled = false; btn.textContent = 'Save Changes & Restart'; }}
                 if (status) status.innerHTML = '<span style="color:#ff4444">Request failed</span>';
-            }});
+              }});
+            }});   /* close fwPrompt().then( */
         }}
 
         loadScheduleConfig();
@@ -4698,6 +4725,7 @@ def diagnostics_page():
 <head>
     <title>Nemesis — Diagnostics</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 900px; margin: 0 auto; }}
@@ -5140,6 +5168,7 @@ def firewall_db():
 <head>
     <title>Nemesis - Alert Database</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; }}
@@ -5631,9 +5660,28 @@ def api_hw_snapshot_detail(snap_id):
 
 @app.route("/api/restart", methods=["POST"])
 def api_restart():
+    """Restart this service via nemesis-fwd. Requires a fresh admin credential.
+
+    The credential is read HERE, inside the request context, and passed into the
+    worker thread. _fw_credential() reads the POST body, which does not exist
+    once the request ends — reading it inside the thread would silently yield
+    None and every restart would be refused.
+
+    Still threaded with a short delay, for the original reason: this response has
+    to reach the browser before the process it came from is stopped.
+    """
+    import fw_client
+    actor, sid, cred = _actor(), _fw_session_id(), _fw_credential()
+
     def _do_restart():
         time.sleep(2)
-        subprocess.run(["sudo", "systemctl", "restart", "dashboard"])
+        try:
+            fw_client.restart_dashboard(actor, sid, cred)
+        except Exception as exc:
+            # Nothing can be returned to the caller by now — the response was
+            # sent two seconds ago. Log it rather than fail silently.
+            log.error("restart via helper failed: %s", exc)
+
     threading.Thread(target=_do_restart, daemon=True).start()
     return jsonify({"status": "restarting"})
 
@@ -5754,41 +5802,30 @@ def _read_nemesis_env() -> dict:
 
 
 def _update_nemesis_env(updates: dict) -> list:
-    """Write updated keys to /etc/nemesis.env, preserving comments and order.
+    """Ask nemesis-fwd to merge these keys into /etc/nemesis.env.
 
-    Returns list of updated key names. Raises on failure.
+    Returns the list of updated key names. Raises on failure.
+
+    This process no longer touches the file. It used to build the new contents
+    itself, stage them in /tmp and shell out to `sudo cp` — which stopped working
+    entirely when dashboard was de-privileged (2026-07-31: no sudo, and
+    NoNewPrivileges=yes means the kernel would ignore it even if it were
+    restored). The merge, the key allowlist and the atomic write now all happen
+    helper-side.
+
+    Sending intent rather than content is the security property, not an
+    implementation detail: /etc/nemesis.env is sourced by seven services via
+    EnvironmentFile, so its keys become their process environment. This route
+    previously accepted ARBITRARY keys and appended any it did not recognise.
+    The helper's allowlist cannot be bypassed by a compromised dashboard; a
+    check here could be.
     """
-    try:
-        with open("/etc/nemesis.env") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        lines = []
-
-    updated_keys: set = set()
-    new_lines = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#") and "=" in stripped:
-            k = stripped.split("=", 1)[0].strip()
-            if k in updates:
-                new_lines.append(f"{k}={updates[k]}\n")
-                updated_keys.add(k)
-                continue
-        new_lines.append(line)
-
-    for k, v in updates.items():
-        if k not in updated_keys:
-            new_lines.append(f"{k}={v}\n")
-            updated_keys.add(k)
-
-    tmp = "/tmp/nemesis_env_update.tmp"
-    with open(tmp, "w") as f:
-        f.writelines(new_lines)
-    subprocess.run(["sudo", "cp", tmp, "/etc/nemesis.env"], check=True)
-    subprocess.run(["sudo", "chown", "root:nemesis", "/etc/nemesis.env"], check=True)
-    subprocess.run(["sudo", "chmod", "640", "/etc/nemesis.env"], check=True)
-    os.unlink(tmp)
-    return list(updated_keys)
+    import fw_client
+    result = fw_client.write_env(
+        {str(k): str(v) for k, v in updates.items()},
+        _actor(), _fw_session_id(), _fw_credential(),
+    )
+    return list(result.get("updated") or [])
 
 
 @app.route("/api/config/current")
@@ -5856,7 +5893,16 @@ def api_config_current():
 def api_config_update():
     """Update specified keys in /etc/nemesis.env then restart services."""
     data = request.get_json(force=True, silent=True) or {}
-    updates = {k: str(v) for k, v in data.items() if v is not None and str(v).strip()}
+    # The admin credential travels in the SAME body as the config values, so it
+    # has to be excluded before they are treated as keys to write. Without this
+    # it is forwarded to the helper as a config key named "password" and refused
+    # ("invalid key name: 'password'") — which is the helper validating
+    # correctly, and this route handing it a malformed payload.
+    #
+    # Filtered by NAME rather than by trusting the caller to send it separately:
+    # the credential field is defined here, so the exclusion belongs here too.
+    updates = {k: str(v) for k, v in data.items()
+               if k not in _CREDENTIAL_FIELDS and v is not None and str(v).strip()}
     if not updates:
         return jsonify({"ok": False, "error": "No values provided"}), 400
     try:
@@ -5868,9 +5914,18 @@ def api_config_update():
     # Log only the KEY NAMES changed — never the values (they include secrets).
     _audit("config_update: " + ", ".join(sorted(updated)))
 
+    # Same credential-capture rule as api_restart(): read in the request
+    # context, use in the thread.
+    import fw_client
+    _actor_v, _sid_v, _cred_v = _actor(), _fw_session_id(), _fw_credential()
+
     def _restart():
         time.sleep(2)
-        subprocess.run(["sudo", "systemctl", "restart", "dashboard"])
+        try:
+            fw_client.restart_dashboard(_actor_v, _sid_v, _cred_v)
+        except Exception as exc:
+            log.error("post-config restart via helper failed: %s", exc)
+
     threading.Thread(target=_restart, daemon=True).start()
     return jsonify({"ok": True, "updated": updated})
 
@@ -6665,6 +6720,7 @@ def scan_page():
 <head>
     <title>Nemesis — Device Security Scanner</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 1400px; margin: 0 auto; }}
@@ -7348,6 +7404,7 @@ def hardware_all_page():
 <head>
     <title>Nemesis — All Device Hardware</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 1200px; margin: 0 auto; }}
@@ -7762,6 +7819,7 @@ def dashboard():
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
+    <script src="/static/fw-credential.js"></script>
     {incident_js_html}
     <script>{incident_state_js}</script>
 </head>
@@ -8007,28 +8065,7 @@ def dashboard():
     </div>
 
     <!-- Alert Modal -->
-<div id="fwCredModal" onclick="if(event.target===this)fwCredCancel()"
-     style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.75);z-index:2000">
-<div style="background:#0d1117;border:1px solid #1e2d4e;border-radius:8px;padding:24px;max-width:420px;margin:12% auto;position:relative">
-    <h3>&#128274; Confirm Admin Password</h3>
-    <p id="fwCredWhat" style="color:#ccc;font-size:0.9em;margin:4px 0 10px"></p>
-    <label style="color:#aaa;font-size:0.85em">Admin password</label>
-    <input type="password" id="fwCredInput" autocomplete="current-password"
-           placeholder="Password"
-           style="width:100%;padding:8px;margin-top:4px;background:#161b22;color:#e6edf3;
-                  border:1px solid #30363d;border-radius:4px;font-size:1em"
-           onkeydown="if(event.key==='Enter')fwCredOk();if(event.key==='Escape')fwCredCancel()">
-    <p id="fwCredErr" style="color:#ff6666;font-size:0.85em;min-height:1.1em;margin:6px 0 0"></p>
-    <div style="margin-top:16px;display:flex;gap:8px">
-        <button type="button" onclick="fwCredOk()"
-                style="background:#1f6feb;color:#fff;border:none;border-radius:4px;
-                       padding:8px 18px;font-size:0.95em;cursor:pointer">Confirm</button>
-        <button type="button" onclick="fwCredCancel()"
-                style="background:#30363d;color:#e6edf3;border:none;border-radius:4px;
-                       padding:8px 18px;font-size:0.95em;cursor:pointer">Cancel</button>
-    </div>
-</div>
-</div>
+     shared with settings_page(). Removed from this template 2026-07-31. -->
 
     <div class="modal" id="alertModal">
         <div class="modal-content" style="max-height:85vh;overflow-y:auto">
@@ -8524,50 +8561,8 @@ def dashboard():
            window.prompt(): that renders the password in plaintext as it is
            typed, which would undercut the credential verification this whole
            path exists to enforce. Returns a Promise so callers can await it. */
-        var _fwCredResolve = null;
-        function fwPrompt(actionLabel) {{
-            document.getElementById("fwCredWhat").textContent =
-                "This action requires re-entering your admin password: " + actionLabel + ".";
-            document.getElementById("fwCredErr").textContent = "";
-            var inp = document.getElementById("fwCredInput");
-            inp.value = "";
-            document.getElementById("fwCredModal").style.display = "flex";
-            setTimeout(function () {{ inp.focus(); }}, 30);
-            return new Promise(function (resolve) {{ _fwCredResolve = resolve; }});
-        }}
-
-        function _fwCredClose() {{
-            document.getElementById("fwCredModal").style.display = "none";
-            /* Never leave the password sitting in the DOM. */
-            document.getElementById("fwCredInput").value = "";
-        }}
-
-        function fwCredOk() {{
-            var v = document.getElementById("fwCredInput").value;
-            if (!v) {{
-                document.getElementById("fwCredErr").textContent = "Password required.";
-                return;
-            }}
-            _fwCredClose();
-            if (_fwCredResolve) {{ var r = _fwCredResolve; _fwCredResolve = null; r(v); }}
-        }}
-
-        function fwCredCancel() {{
-            _fwCredClose();
-            if (_fwCredResolve) {{ var r = _fwCredResolve; _fwCredResolve = null; r(null); }}
-        }}
-
-        function fwHandleError(d, fallback) {{
-            if (d && d.kind === "unavailable") {{
-                alert("Firewall service unavailable — no rule was changed.");
-            }} else if (d && d.kind === "credential_denied") {{
-                alert("Incorrect password. No rule was changed.");
-            }} else if (d && d.kind === "locked_out") {{
-                alert("Account is locked out. No rule was changed.");
-            }} else {{
-                alert(fallback + ": " + ((d && d.error) || "unknown"));
-            }}
-        }}
+        /* fwPrompt / fwCredOk / fwCredCancel / fwHandleError now live in
+           the same prompt for Settings-save and Restart. */
 
         /* Best-effort acceleration ONLY. The server enforces a short idle
            timeout regardless of whether this ever fires; a hostile or
