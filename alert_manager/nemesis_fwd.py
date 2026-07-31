@@ -118,6 +118,34 @@ READ_OPS = {"list_blocked", "list_rules"}
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine"}
 NO_CREDENTIAL_OPS = {"ping", "drop_credential"}
 
+#: audit_log action name per op. Introduced 2026-07-31, replacing a hardcoded
+#: `"fw_%s" % op` at both audit call sites.
+#:
+#: The prefix was fine while every op was a firewall operation. It stops being
+#: fine the moment this helper carries an op that is not — a service restart
+#: logged as `fw_restart_dashboard` would be actively misleading to anyone
+#: reading the audit trail or filtering it by prefix.
+#:
+#: The existing four names are reproduced EXACTLY. Renaming any of them would
+#: orphan the audit rows already written under the old name — audit_log is
+#: append-only and its history has to stay queryable.
+AUDIT_ACTION = {
+    "block_ip":          "fw_block_ip",
+    "deny_ip":           "fw_deny_ip",
+    "unblock_ip":        "fw_unblock_ip",
+    "expire_quarantine": "fw_expire_quarantine",
+}
+
+
+def audit_action_for(op):
+    """audit_log action name for an op.
+
+    Unmapped ops fall back to the op name UNPREFIXED rather than guessing a
+    prefix: a wrong-but-plausible `fw_` name is harder to notice than a bare
+    one, and every op that should carry a prefix is listed above.
+    """
+    return AUDIT_ACTION.get(op, op)
+
 #: Authorisation is a property of WHICH PROCESS CONNECTED, resolved from the
 #: kernel-supplied peer uid — never from anything in the request, so a caller
 #: cannot claim to be a different peer.
@@ -803,7 +831,7 @@ class Helper:
             params = req.get("params") or {}
             result = OPS[op](params)
             actor = policy["audit_actor"]
-            audit("fw_%s" % op, actor, ip=params.get("ip"),
+            audit(audit_action_for(op), actor, ip=params.get("ip"),
                   detail=req.get("request_id"))
             if peer_name == "fail2ban" and op == "block_ip":
                 # See record_fail2ban_quarantine's docstring: this makes the
@@ -830,7 +858,7 @@ class Helper:
         result = OPS[op](req.get("params") or {})
 
         if op in WRITE_OPS:
-            audit("fw_%s" % op, row["username"],
+            audit(audit_action_for(op), row["username"],
                   ip=(req.get("params") or {}).get("ip"),
                   detail=req.get("request_id"))
         log.info("fwd: %s ok for %s (pid=%d, fresh_credential=%s)",
