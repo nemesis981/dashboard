@@ -16,7 +16,7 @@
 - **Tailnet-block interim mitigation is active.** `tailscale debug prefs` → `NetfilterMode:
   1` (= nodivert). Confirmed directly, not from a doc.
 - **Step 7 ufw hardening is live and done safely.** `ufw status verbose` shows `22/tcp
-  LIMIT IN 192.168.4.0/22` and `80/tcp LIMIT IN 192.168.4.0/22`, correctly *replacing* the
+  LIMIT IN <lan-subnet>/22` and `80/tcp LIMIT IN <lan-subnet>/22`, correctly *replacing* the
   old plain `ALLOW` rules (not appended alongside them — the specific trap that would have
   made the limit meaningless). No rule for port 443 or 5000; both still hit default-deny.
 - **fail2ban's `sshd-tailnet` jail split is live.** Confirmed via `/var/log/fail2ban.log`:

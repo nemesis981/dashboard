@@ -72,7 +72,7 @@ def lookup_action(rule_id):
 
 #: Addresses auto-quarantine must NEVER block, however severe the alert.
 #: Loopback is unconditional; the rest comes from the unit's environment
-#: (Environment=NEMESIS_NEVER_BLOCK=192.168.4.69,100.87.130.25). Populating it
+#: (Environment=NEMESIS_NEVER_BLOCK=<lan-ip>,<tailnet-ip>). Populating it
 #: with the host's own LAN + tailnet addresses is a REQUIRED deployment step:
 #: without it, a P1 host-defence alert whose src_ip is this machine would have
 #: the machine insert a deny rule against itself.
