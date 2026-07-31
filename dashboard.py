@@ -4570,7 +4570,23 @@ def settings_page():
                 var el = document.getElementById('wf_' + k);
                 if (!el) return;
                 var v = el.value.trim();
-                if (v) _wiz.changes[k] = v;
+                if (!v) return;                       /* blank never clears a stored value */
+                /* Only fields the user actually EDITED. el.defaultValue is the
+                   value this input was RENDERED with, so this compares against
+                   what was on screen rather than against stored config.
+                
+                   That distinction is the whole fix. NETWORK_IFACE is rendered
+                   from live auto-detection, not from the stored value, so
+                   comparing to stored config would mark it "changed" whenever
+                   detection disagreed — which is exactly what happened on
+                   2026-07-31: two saves that touched only SMTP_HOST silently
+                   rewrote NETWORK_IFACE to the VPN interface, because the
+                   wizard sent every populated field rather than the edited one.
+                
+                   Secret fields render EMPTY (defaultValue ''), so typing any
+                   value counts as a change — which is correct, since there is
+                   nothing on screen to compare against. */
+                if (el.value !== el.defaultValue) _wiz.changes[k] = v;
             }});
         }}
 
