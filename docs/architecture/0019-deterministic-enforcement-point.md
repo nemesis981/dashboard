@@ -1,6 +1,13 @@
 # ADR 0019 — Deterministic Network Enforcement Point (owned nftables table)
 
-- **Status:** Proposed (design decided 2026-07-29 from measured evidence — **no code changed**)
+- **Status:** In progress. Increments 1–2 (priority placement, lockout failsafe)
+  **built and proven live**. Increment 3 (derived observe-only ruleset) **built and
+  registering real traffic**; its one remaining proof — a counter-agreement
+  comparison against ufw's own counters — **not yet started** as of 2026-07-31.
+  Increment 4 (cutover to real enforcement authority) **not started**, gated on
+  Increment 3. Design decided 2026-07-29 from measured evidence; code landed
+  2026-07-30 (`19d9b5c`, `nemesis-fw-apply` + `nemesis-fw-render`, pushed to
+  `origin/main`). See "Status / next" below for the full breakdown.
 - **Date:** 2026-07-29
 - **Affects:** `alert_manager/firewall.py` (the access-control chokepoint), `install.sh`,
   ADR 0005's "future firewall engine", the `CLAUDE.md` ad-hoc-`nft` prohibition, Fork B's
@@ -99,6 +106,18 @@ private writeup referenced above.
 
 ## Status / next
 
-Proposed; **urgency downgraded 2026-07-30** (see addendum). No code changed for the table itself. Sequenced after this ADR: build the enforcement table with its
-lockout failsafe, then the relay core, then the inbound reverse relay. See the private writeup
-for the full evidence base, the specific design, and open questions.
+**Urgency downgraded 2026-07-30** (see addendum) — this is about priority, not about
+whether the work exists. It does: `nemesis-fw-apply` and `nemesis-fw-render`
+(`19d9b5c`, 2026-07-30, pushed) implement the table and its failsafe. Per-increment
+state, as of 2026-07-31:
+
+| Increment | Status |
+|---|---|
+| 1 — priority placement | **Proven.** Table registers at the intended priority, ahead of every other chain observed on this host, verified live. |
+| 2 — lockout failsafe | **Proven.** Apply-then-confirm with auto-revert; the failsafe has been watched firing unattended, not just written. |
+| 3 — derived observe-only rules | **Built and registering real traffic**, but the one thing this increment exists to prove — that the table's observe-only verdicts agree with ufw's actual DROP/ACCEPT decisions over real traffic, measured via both sides' counters in a single command — has **not yet been run**. Not "in progress": no attempt is underway as of this writing. |
+| 4 — cutover to real enforcement authority | **Not started.** Explicitly gated on Increment 3's agreement comparison — cutover before that measurement would mean trusting the table's verdicts before anyone has checked they match reality. |
+
+Sequenced after this ADR: finish Increment 3's proof, cut over (Increment 4), then the
+relay core, then the inbound reverse relay. See the private writeup for the full
+evidence base, the specific design, and open questions.
