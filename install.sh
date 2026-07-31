@@ -977,7 +977,19 @@ deploy_services() {
     #    glob harmlessly also lists core_module/template/ etc., which carry no
     #    <name>.service and so match nothing.)
     local svc_dirs=("$DASHBOARD_DIR"/core_module/*/ "$DASHBOARD_DIR/alert_manager" "$DASHBOARD_DIR/core")
-    local svc_names=("dashboard" "watchdog" "hw-monitor" "alert-watcher" \
+    # nemesis-fwd FIRST, deliberately. It was missing from this list entirely
+    # until 2026-07-31: gen_units.py generates NINE units, this deployed EIGHT,
+    # so every fresh install shipped without the privileged firewall helper —
+    # no block, no unblock, no quarantine, no fail2ban ban path. The installer
+    # created the nemesis-fw group and all three peer accounts and then never
+    # deployed the helper they exist for. Found by the first end-to-end VM
+    # install test; no amount of reading install.sh in isolation had caught it,
+    # because nothing here referenced the service by name to be noticed missing.
+    #
+    # Ordered first because the loop below starts services in list order and
+    # every other peer depends on this one being up to reach the firewall.
+    local svc_names=("nemesis-fwd" \
+                     "dashboard" "watchdog" "hw-monitor" "alert-watcher" \
                      "device-scanner" "malware-canary" "diagnostics-watcher" \
                      "vpn-dns-guard")
     local deployed=0
