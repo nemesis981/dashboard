@@ -520,7 +520,7 @@ def audit(action, actor, ip=None, detail=None):
     try:
         guard = _dm().connect("nemesis_fwd")
         guard.execute(
-            "INSERT INTO audit_log(ts, rule_id, ip, action, user) VALUES (?,?,?,?,?)",
+            "INSERT INTO audit_log(ts, request_id, ip, action, user) VALUES (?,?,?,?,?)",
             (time.strftime("%Y-%m-%d %H:%M:%S"), detail, ip, action, actor))
         guard.commit()
         return True

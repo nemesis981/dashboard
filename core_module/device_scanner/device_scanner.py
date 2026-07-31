@@ -210,4 +210,15 @@ def run():
         time.sleep(300)
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before doing any work.
+    # Inert until the migrated unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    #
+    # Added 2026-07-31, with the nemesis-scan cutover. Until then this service was
+    # the only de-privileged daemon whose unit CLAIMED attestation ("Activates
+    # runtime privilege attestation") while the code never imported nemesis_privsep
+    # and never read NEMESIS_EXPECT_USER — so the variable was inert and the claim
+    # was false. systemd's hardening fails open, which is precisely why the unit
+    # file is not evidence of confinement; only this call is.
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("device-scanner")
     run()

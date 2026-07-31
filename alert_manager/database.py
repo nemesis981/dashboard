@@ -137,10 +137,31 @@ def init_audit_log_table():
                 rule_id TEXT,
                 ip TEXT,
                 action TEXT NOT NULL,
-                user TEXT
+                user TEXT,
+                request_id TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts)")
+        # Idempotent migration: separate the two meanings that shared `rule_id`.
+        #
+        # The column is named rule_id, but only ONE of the two writers puts a rule
+        # reference in it. dashboard `_audit()` writes a genuine alerts.rule_id;
+        # nemesis_fwd `audit()` was writing its per-request correlation id into the
+        # same column, so audit rows appeared to reference alerts that never existed
+        # (found 2026-07-31 while investigating the empty `quarantines` table — the
+        # mismatch is what made a non-bug look like data loss).
+        #
+        # Added as a SECOND column rather than renaming: rule_id keeps its meaning
+        # for dashboard's rows, which are correct as they stand.
+        #
+        # NOT backfilled, deliberately. Rows written before this migration may carry
+        # a request_id in `rule_id`. Deciding which historical rows came from which
+        # writer means inferring from the `action` prefix (fw_* => helper), which is
+        # a strong signal but not a guarantee — and this is an append-only audit
+        # table. A documented quirk is preferable to a guessed rewrite of audit history.
+        existing = {row[1] for row in c.execute("PRAGMA table_info(audit_log)").fetchall()}
+        if "request_id" not in existing:
+            c.execute("ALTER TABLE audit_log ADD COLUMN request_id TEXT")
         conn.commit()
     finally:
         conn.close()

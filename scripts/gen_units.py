@@ -187,6 +187,19 @@ SERVICES = {
     dest="alert_manager", desc="Nemesis Privileged Firewall Helper", user="root",
     exe=f"{NEW_ROOT}/alert_manager/nemesis_fwd.py",
     after=["network.target"], wants=[],
+    # NOT nemesis_privsep — corrected 2026-07-31. nemesis_fwd.py does not import
+    # that module and never reads NEMESIS_EXPECT_USER, so the variable below is
+    # INERT here. The identity is enforced anyway, and more strictly than
+    # attestation: main() hard-exits 78 unless os.geteuid() == 0
+    # (nemesis_fwd.py, "must run as root"). Refusing to start beats logging.
+    # The variable is kept for consistency with the other units, not because
+    # anything reads it — do not "fix" its absence of effect by wiring privsep
+    # in; the geteuid check already covers this service's only expected identity.
+    attest_comment=[
+      "# NEMESIS_EXPECT_USER is INERT for this service — nemesis_fwd.py neither",
+      "# imports nemesis_privsep nor reads this variable. Identity is enforced",
+      "# instead by a hard geteuid()==0 check in main() that exits 78 on failure.",
+    ],
     # RUNS AS ROOT, DELIBERATELY. ufw enforces an application-level real-UID
     # check, so no capability grant lets a non-root process drive it. Privilege
     # is RELOCATED into this one small single-purpose process behind three
@@ -325,8 +338,15 @@ for name, cfg in SERVICES.items():
         f"Group={DB_GROUP}",
         *cfg["extra"],
         "",
-        "# Activates runtime privilege attestation (nemesis_privsep). Absent =>",
-        "# the check stays inert, which is what makes the code safe pre-migration.",
+        # Per-service, because the default text is NOT true everywhere. Audited
+        # 2026-07-31: all 8 units carrying NEMESIS_EXPECT_USER also carried this
+        # comment, but only 6 entrypoints actually call nemesis_privsep. Overriding
+        # the text beats deleting it — the variable stays consistent across units,
+        # and the comment now describes what each service really does.
+        *cfg.get("attest_comment", [
+            "# Activates runtime privilege attestation (nemesis_privsep). Absent =>",
+            "# the check stays inert, which is what makes the code safe pre-migration.",
+        ]),
         f"Environment=NEMESIS_EXPECT_USER={cfg['user']}",
         f"Environment=NEMESIS_DB_PATH={DATA_DIR}/alerts.db",
         "",

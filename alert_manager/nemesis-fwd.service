@@ -14,8 +14,9 @@ Environment=NEMESIS_ALERTW_USER=nemesis-alertw
 Environment=NEMESIS_FWD_GROUP=nemesis-fw
 Environment=NEMESIS_FWD_CACHE_IDLE=300
 
-# Activates runtime privilege attestation (nemesis_privsep). Absent =>
-# the check stays inert, which is what makes the code safe pre-migration.
+# NEMESIS_EXPECT_USER is INERT for this service — nemesis_fwd.py neither
+# imports nemesis_privsep nor reads this variable. Identity is enforced
+# instead by a hard geteuid()==0 check in main() that exits 78 on failure.
 Environment=NEMESIS_EXPECT_USER=root
 Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
 

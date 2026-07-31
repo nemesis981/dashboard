@@ -99,6 +99,7 @@ Roadmap: N shipped / N partial / N parked (M total) — [drift note or "no chang
    - Why this is a rule and not a nicety: the audit's whole value is *diffing against what was
      true before*. A finding that lives only in a closed session can't be diffed, and a
      recurring drift pattern is invisible until you can compare three mornings side by side.
+   - **Also mirror this file** to `~/work/nemesis-internal/briefing/` — see Rule 12.
 
 Then ask: **"What would you like to work on today?"** This replaces the manual catch-up
 prompt — session is oriented in under 30 seconds.
@@ -395,6 +396,8 @@ notes that read as internal, but the repo is public — they leak just like code
   supplement is distilled from at closeout. Cadence: worklog (live) →
   supplement (closeout, curated) → HANDOFF.md (closeout, current state).
 - I provide the WHEN (I say "I'm done" / "fresh session"); the rule provides the WHAT.
+- **Also mirror `docs/handoff/`** (HANDOFF.md, supplements, worklog) to
+  `~/work/nemesis-internal/handoff/` whenever any of it is written — see Rule 12.
 - **Closeout health check (READ-ONLY — runs EVERY closeout, automatically; the LAST thing
   before the day is called done).** AFTER the supplement + HANDOFF refresh are committed AND
   pushed, run a read-only verification and report a one-line verdict. Confirm:
@@ -446,6 +449,32 @@ Purpose: a later cleanup pass can find every test row with one grep/SQL search
 (`LIKE '%test data%'`) instead of having to guess which rows are real vs. synthetic from
 data alone. Do not rely on "I'll remember to delete it" or on it being obviously fake —
 label it at creation time, every time, no exceptions.
+
+**DOCUMENTED EXCEPTION — `audit_log`.** This rule assumes the target table has a free-text
+description/notes/message field to carry the label. `audit_log` has none: its columns are
+`ts`, `rule_id`, `ip`, `action`, `user`, `request_id` — every one of them structured, none
+free-text. A test row there therefore CANNOT be labelled in-band, and the `LIKE '%test data%'`
+sweep will never find it. For `audit_log` only, the durable marker is: use an RFC 5737 address
+(`203.0.113.0/24` — expendable, non-routable, the established convention here) and record the
+row `id` + `request_id` in that session's worklog. Confirmed 2026-07-31 while verifying the
+`request_id` column; flagged here so it is not re-discovered later as a missed case. Do not
+generalise this exception — every other table has a field to label, and must be labelled.
+
+### 12. Local mirror for handoff/briefing docs
+`docs/handoff/` (`HANDOFF.md`, `supplements/`, `worklog/`) and `docs/briefing/` live inside
+`/opt/nemesis` — not convenient to reach from a `~/work/nemesis-internal` session. **Every
+time either is written or refreshed** (HANDOFF.md overwrite, a new supplement/worklog entry,
+or a new dated briefing — see Rule 9 and Morning Status §7), also copy the current file(s) to
+the mirror at `~/work/nemesis-internal/handoff/` and `~/work/nemesis-internal/briefing/` (same
+relative structure: `handoff/HANDOFF.md`, `handoff/supplements/`, `handoff/worklog/`,
+`briefing/YYYY-MM-DD.md`).
+- This is a **copy, not a move** — `/opt/nemesis` stays the source of truth; the mirror is for
+  easy local access only, not a second source of truth to keep independently in sync.
+- Content is already Rule-8-clean by the time it lands here (handoff docs and briefings are
+  both placeholder-sanitized before being written at all) — no extra sanitization step needed
+  for the copy itself.
+- The mirror directory follows whatever version-control state `~/work/nemesis-internal`
+  already has — copying files here does not by itself commit them there.
 
 ---
 
