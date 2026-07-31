@@ -6,9 +6,11 @@ drift between services through copy-paste. Writes into the repo tree (alert_mana
 
 Run after changing any unit setting:  python3 scripts/gen_units.py
 
-Placeholder __INSTALL_USER__ is substituted by install.sh at install time; it is
-only used by the two services that legitimately run as the install user
-(dashboard, device-scanner). The other six have dedicated static system users.
+Placeholder __INSTALL_USER__ is substituted by install.sh at install time. As of
+2026-07-31 NO service uses it: dashboard and device-scanner were the last two, and
+Cutover A/B moved them to nemesis-dash and nemesis-scan. All eight services now run
+as dedicated static system users, so no unit should reference the install account —
+if one reappears here, that is a regression, not a convenience.
 """
 import os
 import sys
@@ -36,7 +38,12 @@ INSTALL_USER = "__INSTALL_USER__"
 # unit must be represented here, or regenerating will eat it the same way.
 SERVICES = {
  "dashboard": dict(
-    dest="alert_manager", desc="Security Dashboard", user=INSTALL_USER,
+    # user: nemesis-dash as of 2026-07-31 (Cutover B). Was INSTALL_USER, which
+    # meant a fresh install put the network-facing dashboard on an account with a
+    # shell, a home directory and sudo — so a dashboard compromise started as an
+    # administrator. nemesis-dash has no sudo and shares no group with the install
+    # user beyond the three its capabilities require.
+    dest="alert_manager", desc="Security Dashboard", user="nemesis-dash",
     exe=f"{NEW_ROOT}/dashboard.py",
     after=["network.target"], wants=[],
     # DASHBOARD HARDENING EXCEPTION (2026-07-27 incident; codified 2026-07-28).
@@ -89,7 +96,13 @@ SERVICES = {
       "EnvironmentFile=/etc/nemesis.env",
     ]),
  "device-scanner": dict(
-    dest="alert_manager", desc="Nemesis Device Scanner", user=INSTALL_USER,
+    # user: NOT INSTALL_USER as of 2026-07-31 (Cutover A). The CORE_MODULE block
+    # below overrides dest/exe/PYTHONPATH for this service but NOT user, so this
+    # entry is the only place it is set — leaving it as INSTALL_USER meant every
+    # fresh install silently put device-scanner back on the install account and
+    # undid the cutover. The service needs no privilege at all: it reads
+    # /proc/net/arp and runs an unprivileged `nmap -sn`.
+    dest="alert_manager", desc="Nemesis Device Scanner", user="nemesis-scan",
     exe=f"{NEW_ROOT}/alert_manager/device_scanner.py",
     after=["network.target"], wants=[],
     extra=[
@@ -232,7 +245,10 @@ SERVICES = {
       "RuntimeDirectory=nemesis",
       "RuntimeDirectoryMode=0755",
       "Environment=NEMESIS_FWD_SOCKET=/run/nemesis/fwd.sock",
-      f"Environment=NEMESIS_DASH_USER={INSTALL_USER}",
+      # Must track dashboard.service's User= exactly. The helper resolves this
+      # name to a uid at startup and authorises that uid as the dashboard peer;
+      # if the two disagree, every firewall action fails closed with peer_denied.
+            "Environment=NEMESIS_DASH_USER=nemesis-dash",
       "Environment=NEMESIS_ALERTW_USER=nemesis-alertw",
       "Environment=NEMESIS_FWD_GROUP=nemesis-fw",
       # Credential-cache idle timeout (view ops only; writes always re-verify).
@@ -343,11 +359,24 @@ for name, cfg in SERVICES.items():
         # comment, but only 6 entrypoints actually call nemesis_privsep. Overriding
         # the text beats deleting it — the variable stays consistent across units,
         # and the comment now describes what each service really does.
-        *cfg.get("attest_comment", [
-            "# Activates runtime privilege attestation (nemesis_privsep). Absent =>",
-            "# the check stays inert, which is what makes the code safe pre-migration.",
+        # NEMESIS_EXPECT_USER is emitted ONLY for units that actually carry
+        # NoNewPrivileges. attest_from_env() asserts that bit and hard-exits 78 if
+        # it is missing, so declaring the expectation on a unit whose hardening is
+        # deliberately omitted guarantees the service never starts.
+        #
+        # This is not hypothetical: dashboard.py gained its privsep call on
+        # 2026-07-31 while dashboard.service still omits NoNewPrivileges (see its
+        # hardening exception above), and the pairing killed the service on the
+        # first restart. Deriving the line from omit_hardening rather than setting
+        # it by hand means it reappears automatically the moment dashboard is
+        # hardened — no second edit to remember, and no way for the two to drift.
+        *([] if "NoNewPrivileges" in cfg.get("omit_hardening", []) else [
+            *cfg.get("attest_comment", [
+                "# Activates runtime privilege attestation (nemesis_privsep). Absent =>",
+                "# the check stays inert, which is what makes the code safe pre-migration.",
+            ]),
+            f"Environment=NEMESIS_EXPECT_USER={cfg['user']}",
         ]),
-        f"Environment=NEMESIS_EXPECT_USER={cfg['user']}",
         f"Environment=NEMESIS_DB_PATH={DATA_DIR}/alerts.db",
         "",
         f"ExecStart=/usr/bin/python3 {cfg['exe']}",

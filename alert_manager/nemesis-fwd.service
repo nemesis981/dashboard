@@ -9,15 +9,11 @@ Group=nemesis-db
 RuntimeDirectory=nemesis
 RuntimeDirectoryMode=0755
 Environment=NEMESIS_FWD_SOCKET=/run/nemesis/fwd.sock
-Environment=NEMESIS_DASH_USER=__INSTALL_USER__
+Environment=NEMESIS_DASH_USER=nemesis-dash
 Environment=NEMESIS_ALERTW_USER=nemesis-alertw
 Environment=NEMESIS_FWD_GROUP=nemesis-fw
 Environment=NEMESIS_FWD_CACHE_IDLE=300
 
-# NEMESIS_EXPECT_USER is INERT for this service — nemesis_fwd.py neither
-# imports nemesis_privsep nor reads this variable. Identity is enforced
-# instead by a hard geteuid()==0 check in main() that exits 78 on failure.
-Environment=NEMESIS_EXPECT_USER=root
 Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
 
 ExecStart=/usr/bin/python3 /opt/nemesis/alert_manager/nemesis_fwd.py

@@ -4,16 +4,13 @@ After=network.target
 
 [Service]
 Type=simple
-User=__INSTALL_USER__
+User=nemesis-dash
 Group=nemesis-db
 WorkingDirectory=/opt/nemesis
 Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_monitor
 EnvironmentFile=-/etc/watchdog.env
 EnvironmentFile=/etc/nemesis.env
 
-# Activates runtime privilege attestation (nemesis_privsep). Absent =>
-# the check stays inert, which is what makes the code safe pre-migration.
-Environment=NEMESIS_EXPECT_USER=__INSTALL_USER__
 Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
 
 ExecStart=/usr/bin/python3 /opt/nemesis/dashboard.py

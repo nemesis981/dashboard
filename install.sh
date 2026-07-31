@@ -465,6 +465,24 @@ PIHOLE_PASSWORD=${CFG_PIHOLE_PASSWORD}
 # Update if Anthropic changes pricing — see: claude.com/pricing
 ANTHROPIC_INPUT_PRICE_PER_MTOK=${CFG_ANTHROPIC_INPUT_PRICE}
 ANTHROPIC_OUTPUT_PRICE_PER_MTOK=${CFG_ANTHROPIC_OUTPUT_PRICE}
+
+# ── Never-Block Exceptions (optional) ─────────────────────────────────────────
+# Comma-separated addresses Nemesis must NEVER add a firewall block against,
+# however severe the alert. Ships EMPTY on purpose — you probably do not need it.
+#
+# You do NOT need to list this machine's own addresses or your router/gateway.
+# Those are detected automatically every time a block is attempted, from the live
+# interface list and the kernel routing table, so they stay correct even when your
+# LAN address or gateway changes. Listing them here would add nothing and would go
+# stale the moment DHCP moved them.
+#
+# This is for addresses automation cannot work out on its own — something that
+# would break your network if it were ever blocked, but that this machine has no
+# way to recognise. For example an internal DNS server, a NAS, or a management
+# host on another subnet.
+#
+# Example:  NEMESIS_NEVER_BLOCK=10.0.0.5,10.0.0.6
+NEMESIS_NEVER_BLOCK=
 EOF
     ok "/etc/nemesis.env written"
 }
@@ -798,13 +816,27 @@ setup_nemesis_group() {
     # the helper never even sees the connection to refuse it.
     groupadd --system nemesis-fw 2>/dev/null || true
     local _svc_user
+    # nemesis-scan and nemesis-dash added 2026-07-31 (Cutover A/B). Before this,
+    # device-scanner and dashboard ran as the INSTALL USER — an account with a
+    # real shell, a home directory, and (on any normal install) sudo. A dashboard
+    # compromise therefore landed straight on an administrative identity. These
+    # two accounts exist so it lands on nothing.
     for _svc_user in nemesis-diag nemesis-hwmon nemesis-alertw \
-                     nemesis-vpndns nemesis-canary nemesis-watchdog; do
+                     nemesis-vpndns nemesis-canary nemesis-watchdog \
+                     nemesis-scan nemesis-dash; do
         if ! id "$_svc_user" &>/dev/null; then
             useradd --system --no-create-home --shell /usr/sbin/nologin \
                     --gid nemesis-db "$_svc_user" 2>/dev/null || true
         fi
     done
+    # nemesis-dash is the ONLY service account needing more than nemesis-db.
+    # Both memberships trace to an audited capability, and nothing else was
+    # granted: 'nemesis' for the RUNTIME read of /etc/nemesis.env behind the
+    # Settings UI (see the named exception above), 'nemesis-fw' to open the
+    # firewall helper's socket. Not folded into the loop above because no other
+    # account gets either.
+    usermod -a -G nemesis nemesis-dash 2>/dev/null || true
+    usermod -a -G nemesis-fw nemesis-dash 2>/dev/null || true
     # Grant socket access to the two peers the firewall helper authorises.
     usermod -a -G nemesis-fw "$SUDO_USER" 2>/dev/null || true
     usermod -a -G nemesis-fw nemesis-alertw 2>/dev/null || true
@@ -949,10 +981,13 @@ deploy_services() {
             cp -a "/etc/systemd/system/${svc}.service" "$UNIT_BACKUP_DIR/"
         fi
 
-        # Units now carry absolute /opt/nemesis paths and, for the six
-        # de-privileged services, their own static User=. The only substitution
-        # left is __INSTALL_USER__, used by the two services that legitimately
-        # run as the install user (dashboard, device-scanner).
+        # Units carry absolute /opt/nemesis paths and their own static User=.
+        # As of 2026-07-31 ALL EIGHT services run as dedicated system users —
+        # Cutover A/B moved the last two (dashboard, device-scanner) off the
+        # install account. The __INSTALL_USER__ substitution below is therefore
+        # now a no-op on the shipped templates; it is kept so a locally-modified
+        # unit that still uses the placeholder keeps working, not because any
+        # shipped unit needs it.
         sed -e "s|__INSTALL_USER__|$SUDO_USER|g" \
             "$src" > "/etc/systemd/system/${svc}.service"
         chmod 0644 "/etc/systemd/system/${svc}.service"
@@ -994,7 +1029,13 @@ deploy_services() {
     # group needs directory write or every service opens the DB read-only.
     local _data_dir="/var/lib/nemesis"
     local _db="$_data_dir/alerts.db"
-    install -d -m 0770 -o "$SUDO_USER" -g nemesis-db "$_data_dir"
+    # 2770, not 0770: the setgid bit. Without it, a file created here by a
+    # process whose PRIMARY group is not nemesis-db lands with the wrong group —
+    # and SQLite's WAL sidecars are created by whichever process opens the DB
+    # first. That locked every de-privileged service out of the database on the
+    # dev box (2026-07-31). setgid makes correct group ownership structural
+    # rather than dependent on which service happens to start first.
+    install -d -m 2770 -o "$SUDO_USER" -g nemesis-db "$_data_dir"
     [[ -f "$_db" ]] || touch "$_db"
     chown "$SUDO_USER" "$_db"
     chgrp nemesis-db "$_db"
@@ -1435,7 +1476,9 @@ restore_from_backup() {
 
     # alerts.db
     if [[ -f "$tmp_dir/alerts.db" ]]; then
-        install -d -m 0770 -o "$SUDO_USER" -g nemesis-db /var/lib/nemesis
+        # 2770 — setgid, same reason as the fresh-install path above. Both sites
+        # must carry it or the repair path silently re-creates the old hazard.
+        install -d -m 2770 -o "$SUDO_USER" -g nemesis-db /var/lib/nemesis
         cp "$tmp_dir/alerts.db" /var/lib/nemesis/alerts.db
         chown "$SUDO_USER" /var/lib/nemesis/alerts.db 2>/dev/null || true
         chgrp nemesis-db /var/lib/nemesis/alerts.db 2>/dev/null || true

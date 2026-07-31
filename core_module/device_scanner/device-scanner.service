@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=__INSTALL_USER__
+User=nemesis-scan
 Group=nemesis-db
 Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis
 WorkingDirectory=/opt/nemesis/alert_manager
@@ -12,7 +12,7 @@ EnvironmentFile=/etc/nemesis.env
 
 # Activates runtime privilege attestation (nemesis_privsep). Absent =>
 # the check stays inert, which is what makes the code safe pre-migration.
-Environment=NEMESIS_EXPECT_USER=__INSTALL_USER__
+Environment=NEMESIS_EXPECT_USER=nemesis-scan
 Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
 
 ExecStart=/usr/bin/python3 /opt/nemesis/core_module/device_scanner/device_scanner.py
