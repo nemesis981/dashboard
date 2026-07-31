@@ -244,7 +244,8 @@ def init_users_table():
                 last_login      TEXT,
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
                 lockout_until   TEXT,
-                lockout_tier    INTEGER NOT NULL DEFAULT 0
+                lockout_tier    INTEGER NOT NULL DEFAULT 0,
+                password_changed_at TEXT
             )
         """)
         # Guarded migration: add lockout_tier to users tables created before it
@@ -252,6 +253,28 @@ def init_users_table():
         cols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
         if "lockout_tier" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN lockout_tier INTEGER NOT NULL DEFAULT 0")
+        # Guarded migration: when the password was last SET, which `created_at`
+        # and `last_login` between them cannot answer. Prerequisite for the
+        # 30-day expiry policy — without it there is no way to tell a fresh
+        # password from one set a year ago.
+        #
+        # TWO STEPS, not a DEFAULT. SQLite requires ADD COLUMN defaults to be
+        # CONSTANT, so `DEFAULT created_at` is not expressible; the backfill has
+        # to be a separate UPDATE. (Contrast login_events.source, whose default
+        # 'login' is a literal and needed no second step.)
+        #
+        # Backfilling from created_at is a statement of fact, not a guess: there
+        # is no password-change path in the codebase yet, so for every existing
+        # row the password genuinely was set when the account was created.
+        #
+        # Deliberately NULLABLE. A NOT NULL column would need a constant default,
+        # which would have to be a fixed timestamp — instantly wrong for every
+        # account. NULL is handled by the expiry check as "unknown, treat as due
+        # for change" rather than being silently skipped.
+        if "password_changed_at" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
+            c.execute("UPDATE users SET password_changed_at = created_at "
+                      "WHERE password_changed_at IS NULL")
         conn.commit()
     finally:
         conn.close()
