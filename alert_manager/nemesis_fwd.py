@@ -913,6 +913,33 @@ def main():
               file=sys.stderr)
         sys.exit(78)
 
+    # Ensure the audit table exists BEFORE serving. This helper is one of the
+    # table's two writers but was never one of its creators: the only creation
+    # path was dashboard's _ensure_audit_log_table(), called LAZILY from _audit()
+    # — so on a fresh install, any firewall action occurring before the first
+    # dashboard action wrote into a table that did not exist yet.
+    #
+    # That is the normal case, not an edge case, and the 2026-07-31 VM install
+    # test hit it immediately: a fail2ban ban and an alert-watcher block both
+    # applied their ufw rules successfully and both LOST their audit records
+    # ("no such table: audit_log"). The fail-open design meant the firewall still
+    # worked and the loss was signalled loudly in two channels rather than being
+    # silent — which is why it was findable — but a privileged action with no
+    # audit trail is exactly what this helper exists to prevent.
+    #
+    # Safe from here: init_audit_log_table() is IF NOT EXISTS, idempotent, and
+    # documented as runnable from any process on a raw connection (no Data
+    # Manager grant needed). Failure is non-fatal — the helper's whole point is
+    # to keep the firewall working — but it is logged, and the per-write
+    # signal_degraded path still reports any record that is subsequently lost.
+    try:
+        import database
+        database.init_audit_log_table()
+        log.info("fwd: audit_log table ensured at startup")
+    except Exception as exc:
+        log.error("fwd: could not ensure audit_log table (%s) — firewall actions "
+                  "will still apply, but their audit records may be lost", exc)
+
     peer_uids = {}
     for policy_name, user in (("dashboard", DASH_USER), ("alert-watcher", ALERTW_USER),
                               ("fail2ban", FAIL2BAN_USER)):
