@@ -281,14 +281,100 @@ def init_login_events_table():
                 failure_reason TEXT,
                 lockout_tier  INTEGER,
                 session_id    TEXT,
-                user_agent    TEXT
+                user_agent    TEXT,
+                source        TEXT NOT NULL DEFAULT 'login',
+                action        TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_login_events_user_ts "
                   "ON login_events(username, timestamp)")
+        # Idempotent migration: this table gained a SECOND event source.
+        #
+        # Until 2026-07-31 every row was a dashboard login-form attempt, so the
+        # table needed no way to say where an attempt came from. nemesis-fwd also
+        # challenges for the admin password — on block, unblock, write_env and
+        # restart_dashboard — and those failures incremented the shared lockout
+        # counter while leaving no queryable row anywhere. Same credential, same
+        # lockout budget, half the evidence.
+        #
+        #   source  which surface the attempt arrived at: 'login' | 'nemesis-fwd'
+        #   action  the privileged op attempted (write_env, block_ip, ...).
+        #           NULL for login-form rows, which are not op-specific.
+        #
+        # DEFAULT 'login' is what makes the backfill correct rather than merely
+        # non-null: every pre-existing row genuinely IS a login-form attempt, so
+        # the default states a fact about the history instead of guessing at one.
+        existing = {row[1] for row in c.execute("PRAGMA table_info(login_events)").fetchall()}
+        if "source" not in existing:
+            c.execute("ALTER TABLE login_events ADD COLUMN source TEXT NOT NULL DEFAULT 'login'")
+        if "action" not in existing:
+            c.execute("ALTER TABLE login_events ADD COLUMN action TEXT")
         conn.commit()
     finally:
         conn.close()
+
+def record_auth_failure(username, source, action=None, lockout_tier=None,
+                        ip_address="local-socket",
+                        failure_reason="credential_denied"):
+    """Append ONE failed-authentication row to `login_events`. Returns True if it landed.
+
+    Added 2026-07-31. `login_events` had a single writer — the dashboard login
+    form — but the admin password is also challenged by nemesis-fwd on every
+    privileged op (block, unblock, write_env, restart_dashboard). Those failures
+    incremented the SHARED lockout counter and emitted a journal warning, leaving
+    no queryable row: same credential, same lockout budget, half the evidence.
+
+    WHY THIS LIVES HERE rather than the helper writing the table directly.
+    The obvious route was to add `login_events` to nemesis_fwd's Data Manager
+    grant. That was checked rather than assumed, and it cannot express what was
+    wanted: column grants are UPDATE-only by design (see data_manager.py's
+    check_write — "INSERT/DELETE/DROP affect whole rows or the table itself"), so
+    the narrowest available grant is the WHOLE TABLE — INSERT, UPDATE and DELETE
+    on an append-only authentication log. A component able to erase the record of
+    its own misuse is a weaker guarantee than one that cannot.
+
+    Moving the code instead follows the precedent set for `scan_threats`
+    (data_manager.py ~:207), where the same wall was hit and resolved the same
+    way. Runs on a RAW connection like init_audit_log_table(), so any process may
+    call it with no namespace grant, and it performs INSERT only — the helper is
+    structurally incapable of rewriting history through this path.
+
+    BEST-EFFORT, and deliberately so: this NEVER raises. Its caller in the helper
+    is the failed-credential path, where a refusal must stay a refusal — a
+    logging problem must never become an authentication outcome. Callers should
+    also invoke it AFTER applying the lockout, so that even a total failure here
+    costs evidence rather than the throttle itself.
+
+    `source` is required, with no default: a helper failure silently recorded as
+    a login-form attempt would be worse than not recording it, because it would
+    be believed.
+
+    `ip_address` defaults to a sentinel because the column is NOT NULL and a Unix
+    socket peer has no address. 'local-socket' is deliberately distinguishable
+    from the login path's 'unknown', which means "we should have had an IP and
+    did not".
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            conn.execute(
+                "INSERT INTO login_events(username, ip_address, success, "
+                "failure_reason, lockout_tier, source, action) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (username, ip_address or "local-socket", 0, failure_reason,
+                 lockout_tier, source, action),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        # Swallowed on purpose — see BEST-EFFORT above. Logged via print because
+        # this module has no logger and is imported by processes with different
+        # logging setups; the caller's own logging is the primary channel.
+        print("database: record_auth_failure failed for %r/%r" % (username, source))
+        return False
+
 
 def init_enrollment_tokens_table():
     """Canonical DDL for the core `enrollment_tokens` table.

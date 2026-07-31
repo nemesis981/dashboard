@@ -385,8 +385,12 @@ def load_admin(username):
     return row
 
 
-def verify_credential(row, password):
-    """Layer 3. bcrypt check performed HERE against the stored hash."""
+def verify_credential(row, password, op=None):
+    """Layer 3. bcrypt check performed HERE against the stored hash.
+
+    `op` is carried ONLY so a failure can be recorded against the operation that
+    was attempted. It has no bearing on whether the credential is accepted.
+    """
     if bcrypt is None:
         raise Denied("internal", "bcrypt unavailable in the helper")
     if not isinstance(password, str) or not password:
@@ -401,7 +405,7 @@ def verify_credential(row, password):
         # password itself, including its length. Length is not harmless: it
         # narrows a brute-force space, and a security product has no business
         # recording it.
-        _note_failed_attempt(row["username"])
+        _note_failed_attempt(row["username"], op)
         raise Denied("credential_denied", "invalid credentials")
     # Success: clear any accumulated failure/lockout state for this account.
     _clear_failed_attempts(row)
@@ -430,7 +434,7 @@ def _dm():
     return _DM
 
 
-def _note_failed_attempt(username):
+def _note_failed_attempt(username, op=None):
     """Record a failed credential attempt AND apply the tiered lockout.
 
     This is the throttle that stops the socket being used as an unthrottled
@@ -480,6 +484,28 @@ def _note_failed_attempt(username):
                 guard.commit()
         finally:
             guard.close()
+
+        # Evidence, recorded AFTER the lockout above — deliberately, and the
+        # ordering is the point. The lockout is the security CONTROL; this row is
+        # EVIDENCE. Placed first, a failure here could cost the throttle; placed
+        # last, the worst case is a missing record while the control still holds.
+        #
+        # Routed through database.record_auth_failure() rather than written here:
+        # it runs on a raw connection and INSERTs only, so this helper stays
+        # structurally unable to rewrite or delete authentication history. Adding
+        # `login_events` to this process's Data Manager grant would have handed it
+        # UPDATE and DELETE as well — column grants are UPDATE-only and cannot
+        # express "INSERT-only" (checked, not assumed; see that function).
+        #
+        # Never raises by contract, so it cannot disturb the refusal path even if
+        # the ordering above were ever changed.
+        try:
+            import database
+            database.record_auth_failure(
+                username, source="nemesis-fwd", action=op,
+                lockout_tier=(triggered[0] if triggered else None))
+        except Exception:
+            log.exception("fwd: could not record auth failure evidence for %s", username)
     except Exception:
         log.exception("fwd: could not record failed attempt for %s", username)
 
@@ -1032,7 +1058,7 @@ class Helper:
         if op in READ_OPS and self.cache.check_and_refresh(uid, username, session_id):
             fresh = False
         else:
-            verify_credential(row, (req.get("credential") or {}).get("password"))
+            verify_credential(row, (req.get("credential") or {}).get("password"), op)
             fresh = True
             if op in READ_OPS:
                 self.cache.remember(uid, username, session_id)
