@@ -323,10 +323,17 @@ def _create_user(username: str, display_name: str, password: str, role: str = "a
     conn = _users_conn()
     try:
         now = datetime.now().isoformat(timespec="seconds")
+        # password_changed_at is stamped HERE, not left to default.
+        #
+        # The column is nullable, and the 30-day expiry check treats NULL as
+        # "unknown — due for a change". Omitting it would therefore mark every
+        # freshly created account as already expired, forcing the operator to
+        # change the password they chose seconds earlier on a brand-new install.
+        # Caught by probe 2026-07-31 before the expiry check existed to expose it.
         cur = conn.execute(
-            "INSERT INTO users(username, display_name, password_hash, role, is_active, created_at) "
-            "VALUES(?,?,?,?,1,?)",
-            (username, display_name, _hash_password(password), role, now),
+            "INSERT INTO users(username, display_name, password_hash, role, is_active, "
+            "created_at, password_changed_at) VALUES(?,?,?,?,1,?,?)",
+            (username, display_name, _hash_password(password), role, now, now),
         )
         conn.commit()
         return cur.lastrowid
