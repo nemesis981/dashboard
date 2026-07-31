@@ -319,6 +319,67 @@ def _check_password(pw: str, pw_hash: str) -> bool:
         return False
 
 
+def _register_credential_failure(row, username, ip, ua,
+                                 reason="bad_password", source="login", action=None):
+    """Increment the failed-attempt budget and escalate lockout tiers on 3/5/10.
+
+    ONE copy of the tier table's consequences. Login is no longer the only form
+    that verifies this password — the change-password form checks the CURRENT
+    one — and a second copy of this logic is how the two drift until only one of
+    them still locks out.
+
+    The budget is shared between them ON PURPOSE. If each form had its own
+    counter, an attacker who exhausted login's allowance would simply move to
+    the change-password form and get a fresh one; the throttle would be
+    arithmetic, not a limit. Sharing it also means an authenticated form cannot
+    become an unmetered password oracle for a hijacked session.
+
+    Returns (locked, minutes, tier). Callers render their own message — this
+    decides consequences, not presentation.
+    """
+    fa   = int(row["failed_attempts"] or 0) + 1
+    tier = int(row["lockout_tier"] or 0)
+    triggered = None
+    for idx, (thr, mins, severity, do_email) in enumerate(_LOCKOUT_TIERS, start=1):
+        if fa >= thr and tier < idx:
+            triggered = (idx, mins, severity, do_email)   # keep the highest crossed tier
+
+    conn = _users_conn()
+    try:
+        if triggered:
+            tnum, mins, severity, do_email = triggered
+            lock_until = (datetime.now() + timedelta(minutes=mins)).isoformat(timespec="seconds")
+            conn.execute("UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? "
+                         "WHERE id=?", (fa, lock_until, tnum, row["id"]))
+        else:
+            conn.execute("UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if triggered:
+        tnum, mins, severity, do_email = triggered
+        _log_login_event(username, ip, False, f"lockout_tier_{tnum}", tnum, ua,
+                         source=source, action=action)
+        if tnum == 3:
+            _log_login_event(username, ip, False, "persistent_brute_force", 3, ua,
+                             source=source, action=action)
+        _open_security_ticket(
+            f"Login lockout tier {tnum} ({severity}) for {username}",
+            (f"{fa} failed credential attempts for '{username}' from {ip} "
+             f"(source: {source}). Account locked for {mins} minutes (tier {tnum})."),
+            severity)
+        if do_email:
+            _notify_email(
+                f"[Nemesis] Login lockout tier {tnum} ({severity}) for {username}",
+                f"{fa} failed credential attempts for '{username}' from {ip} "
+                f"(source: {source}). Locked for {mins} minutes.")
+        return True, mins, tnum
+
+    _log_login_event(username, ip, False, reason, tier, ua, source=source, action=action)
+    return False, 0, tier
+
+
 def _create_user(username: str, display_name: str, password: str, role: str = "admin") -> int:
     conn = _users_conn()
     try:
@@ -393,15 +454,25 @@ def _actor() -> str:
 
 # ── Auth audit + tiered-lockout side effects ──────────────────────────────────
 def _log_login_event(username, ip, success, failure_reason=None, lockout_tier=None,
-                     user_agent=None, session_id=None, tailscale_ip=None):
-    """One row per login attempt (success AND failure). geo_*/device_id are seams."""
+                     user_agent=None, session_id=None, tailscale_ip=None,
+                     source="login", action=None):
+    """One row per login attempt (success AND failure). geo_*/device_id are seams.
+
+    source/action default to the login path's values so every existing caller is
+    unchanged. They exist because login is no longer the only place a password is
+    verified — nemesis-fwd checks it for privileged ops, and the change-password
+    form checks the CURRENT password. All of it belongs in one table or the
+    picture of "who has been guessing at this password" is split across three.
+    """
     try:
         conn = _users_conn()
         conn.execute(
             "INSERT INTO login_events(username, ip_address, success, failure_reason, "
-            "lockout_tier, user_agent, session_id, tailscale_ip) VALUES (?,?,?,?,?,?,?,?)",
+            "lockout_tier, user_agent, session_id, tailscale_ip, source, action) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (username, ip or "unknown", 1 if success else 0, failure_reason,
-             lockout_tier, (user_agent or "")[:300], session_id, tailscale_ip),
+             lockout_tier, (user_agent or "")[:300], session_id, tailscale_ip,
+             source, action),
         )
         conn.commit()
         conn.close()
@@ -585,41 +656,13 @@ def login():
         _log_login_event(username, ip, False, "unknown_user", None, ua)
         return render_template("login.html", error="Invalid username or password.")
 
-    # Failure — known user: increment, escalate tier on 3 / 5 / 10 cumulative fails
-    fa   = int(row["failed_attempts"] or 0) + 1
-    tier = int(row["lockout_tier"] or 0)
-    triggered = None
-    for idx, (thr, mins, severity, do_email) in enumerate(_LOCKOUT_TIERS, start=1):
-        if fa >= thr and tier < idx:
-            triggered = (idx, mins, severity, do_email)   # keep the highest crossed tier
-
-    conn = _users_conn()
-    if triggered:
-        tnum, mins, severity, do_email = triggered
-        lock_until = (datetime.now() + timedelta(minutes=mins)).isoformat(timespec="seconds")
-        conn.execute("UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? WHERE id=?",
-                     (fa, lock_until, tnum, row["id"]))
-        conn.commit()
-        conn.close()
-        _log_login_event(username, ip, False, f"lockout_tier_{tnum}", tnum, ua)
-        if tnum == 3:
-            _log_login_event(username, ip, False, "persistent_brute_force", 3, ua)
-        _open_security_ticket(
-            f"Login lockout tier {tnum} ({severity}) for {username}",
-            (f"{fa} failed login attempts for '{username}' from {ip}. "
-             f"Account locked for {mins} minutes (tier {tnum})."),
-            severity)
-        if do_email:
-            _notify_email(
-                f"[Nemesis] Login lockout tier {tnum} ({severity}) for {username}",
-                f"{fa} failed login attempts for '{username}' from {ip}. Locked for {mins} minutes.")
+    # Failure — known user. The escalation itself lives in
+    # _register_credential_failure() because login is no longer the only form
+    # that verifies this password; see that function for why the budget is shared.
+    locked, mins, _tier = _register_credential_failure(row, username, ip, ua)
+    if locked:
         return render_template("login.html",
                                error=f"Too many failed attempts. Account locked for {mins} minutes.")
-
-    conn.execute("UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
-    conn.commit()
-    conn.close()
-    _log_login_event(username, ip, False, "bad_password", tier, ua)
     # Never reveal which field was wrong (security best practice).
     return render_template("login.html", error="Invalid username or password.")
 
