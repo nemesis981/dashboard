@@ -196,7 +196,11 @@ def _dm_conn():
     return conn
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
-_BACKUP_CFG_PATH = os.path.join(_HERE, "backup_config.json")
+# State, not code — so it belongs in DATA_DIR, not the tree. It was written to
+# _HERE, which worked only because the service ran as an account that owned the
+# repo. nemesis-dash does not, and ProtectSystem=strict makes /opt read-only to
+# the service regardless, so a schedule save would fail on both counts.
+_BACKUP_CFG_PATH = os.path.join(nemesis_paths.DATA_DIR, "backup_config.json")
 
 # ── Authentication (Flask-Login) ──────────────────────────────────────────────
 auth_log = logging.getLogger("nemesis.auth")
@@ -356,7 +360,10 @@ def _fw_error_response(exc):
                                  "changed", "kind": "unavailable"}), 503
     kind = getattr(exc, "kind", "internal")
     status = {"credential_denied": 401, "admin_denied": 403, "locked_out": 423,
-              "peer_denied": 403, "bad_request": 400}.get(kind, 502)
+              "peer_denied": 403, "bad_request": 400,
+              # never_block: refused locally by the chokepoint guard before the
+              # helper was ever contacted. 400 — the request itself is the problem.
+              "never_block": 400}.get(kind, 502)
     return jsonify({"error": str(exc), "kind": kind}), status
 
 
@@ -643,8 +650,12 @@ def get_pihole_stats():
 
 def get_clamav_status():
     try:
+        # No sudo: `systemctl status` is readable unprivileged. The sudo here was
+        # gratuitous, and it became actively harmful once this service stopped
+        # running as an account with any sudo rights (2026-07-31 de-privileging) —
+        # it would have turned a working status read into a permanent "Unknown".
         result = subprocess.run(
-            ["sudo", "systemctl", "status", "clamav-daemon"],
+            ["systemctl", "status", "clamav-daemon"],
             capture_output=True, text=True
         )
         return "Running" if "active (running)" in result.stdout else "Stopped"
@@ -2276,6 +2287,62 @@ def api_quarantine_lift(q_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route("/api/firewall/unblock", methods=["POST"])
+def api_firewall_unblock():
+    """Remove a deny rule applied by the admin-initiated block path.
+
+    Added 2026-07-31. Until now the dashboard could CREATE a permanent block it
+    had no way to remove: /api/quarantine/<id>/lift is the only other unblock
+    route and it requires a `quarantines` row, which block_ip_permanent()
+    deliberately never creates. The result was a two-click action with no
+    in-product undo — recovery meant `ufw delete` at a terminal, which is exactly
+    the expertise this product exists to not require.
+
+    Nothing new is granted to reach this: op `unblock_ip` was already implemented
+    in nemesis_fwd.OPS, already wrapped by fw_client, and already present in
+    PEER_POLICY["dashboard"]. Only the route and the button were missing.
+
+    Ordering mirrors api_quarantine_lift deliberately: the firewall call goes
+    FIRST and the DB is touched only if it succeeded. Reporting an alert as
+    unblocked while its ufw rule is still in place would be worse than refusing.
+
+    Resetting action -> 'pending' is load-bearing, not tidying. alert_watcher's
+    handle_line() re-applies block_ip_permanent() on the NEXT sighting for any
+    rule whose action is 'block', so leaving it would silently re-block the
+    address the user just released.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    ip = (data.get("ip") or "").strip()
+    rule_id = (data.get("rule_id") or "").strip()
+    if not ip:
+        return jsonify({"error": "ip is required"}), 400
+
+    # Admin-initiated unblock — a fresh credential every time, verified by
+    # nemesis-fwd against the stored hash. Same rule as block.
+    try:
+        ufw_delete(ip, _actor(), _fw_session_id(), _fw_credential())
+    except FirewallError as exc:
+        return _fw_error_response(exc)
+
+    try:
+        if rule_id:
+            conn = _dm_conn()
+            try:
+                c = conn.cursor()
+                c.execute("UPDATE alerts SET action='pending' WHERE rule_id=?", (rule_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        _audit(action="unblock", rule_id=rule_id or None, ip=ip)
+        return jsonify({"success": True, "ip": ip, "rule_id": rule_id})
+    except Exception as e:
+        # The rule IS gone at this point. Report success for the firewall action
+        # and surface the bookkeeping failure separately rather than implying the
+        # unblock did not happen.
+        log.exception("unblock succeeded for %s but bookkeeping failed", ip)
+        return jsonify({"success": True, "ip": ip, "warning": f"unblocked, but record update failed: {e}"})
+
+
 @app.route("/api/update-device", methods=["POST"])
 def update_device():
     try:
@@ -3447,7 +3514,7 @@ def settings_page():
                             <label class="dz-field-label" for="scheduleDestPath">Destination folder</label>
                             <div style="display:flex;gap:6px;align-items:center">
                                 <input id="scheduleDestPath" type="text" class="backup-path-input"
-                                       value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                                       value="{_default_backup_dir()}" placeholder="{_default_backup_dir()}"
                                        style="width:200px">
                                 <button onclick="openFsBrowser('scheduleDestPath','schedFsBrowser')"
                                         class="fs-browse-btn">Browse</button>
@@ -3498,7 +3565,7 @@ def settings_page():
                     <label class="dz-field-label" for="backupDestPath">Destination folder</label>
                     <div style="display:flex;gap:8px;align-items:center">
                         <input id="backupDestPath" type="text" class="backup-path-input"
-                               value="~/nemesis-backup/" placeholder="~/nemesis-backup/"
+                               value="{_default_backup_dir()}" placeholder="{_default_backup_dir()}"
                                style="flex:1;min-width:0;box-sizing:border-box">
                         <button onclick="openFsBrowser('backupDestPath','backupFsBrowser')"
                                 class="fs-browse-btn">Browse</button>
@@ -3522,7 +3589,7 @@ def settings_page():
                 <h3>Back Up Before Uninstalling?</h3>
                 <p>Your alerts history, tickets, and configuration can be saved now and
                    restored after a fresh reinstall.</p>
-                <p class="safe-note">&#x1F4BE; Backup will be saved to ~/nemesis-backup/</p>
+                <p class="safe-note">&#x1F4BE; Backup will be saved to {_default_backup_dir()}</p>
                 <div id="preBackupResult" class="backup-result" style="display:none;margin-bottom:12px"></div>
                 <div class="uninstall-actions">
                     <button class="btn-backup" id="btnPreBackup" onclick="doPreUninstallBackup()">Back Up Now</button>
@@ -3977,7 +4044,7 @@ def settings_page():
             fetch('/api/backup/create', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{dest_path: '~/nemesis-backup/'}})
+                body: JSON.stringify({{dest_path: '{_default_backup_dir()}'}})
             }})
             .then(function(r) {{ return r.json(); }})
             .then(function(data) {{
@@ -4017,21 +4084,14 @@ def settings_page():
             var cancelBtn = document.querySelector('#uninstallStep2 .btn-cancel');
             var result = document.getElementById('uninstallResult');
             if (document.getElementById('uninstallYesInput').value !== 'YES') return;
-            btn.classList.remove('ready');
-            btn.textContent = 'Uninstalling…';
-            if (cancelBtn) cancelBtn.disabled = true;
-            result.style.display = 'none';
-            fetch('/api/uninstall', {{method: 'POST'}})
-                .then(function(r) {{ return r.json(); }})
-                .then(function(data) {{
-                    result.textContent = data.message || 'Uninstall started.';
-                    result.style.display = 'block';
-                    if (window._refreshTimer) clearInterval(window._refreshTimer);
-                }})
-                .catch(function() {{
-                    result.textContent = 'Request sent — services stopping now.';
-                    result.style.display = 'block';
-                }});
+            // The /api/uninstall endpoint was REMOVED 2026-07-31 (see dashboard.py).
+            // A web-reachable root uninstall is not a capability that should exist,
+            // so this no longer calls the server at all.
+            if (btn) btn.classList.remove('ready');
+            if (cancelBtn) cancelBtn.disabled = false;
+            result.textContent = 'Uninstall is no longer available from the web interface. '
+                + 'Run the uninstall script from a terminal on the server.';
+            result.style.display = 'block';
         }}
 
         // --- Backup modal ---
@@ -4066,7 +4126,7 @@ def settings_page():
             var btn = document.getElementById('btnCreateBackup');
             var result = document.getElementById('backupResult');
             var dest = (document.getElementById('backupDestPath').value || '').trim()
-                       || '~/nemesis-backup/';
+                       || '{_default_backup_dir()}';
             btn.disabled = true;
             btn.textContent = 'Creating…';
             result.className = 'backup-result';
@@ -4133,7 +4193,7 @@ def settings_page():
             var result = document.getElementById('scheduleResult');
             var freq = document.getElementById('scheduleFreq').value;
             var dest = (document.getElementById('scheduleDestPath').value || '').trim()
-                       || '~/nemesis-backup/';
+                       || '{_default_backup_dir()}';
             result.textContent = 'Saving…';
             result.style.color = '#aaa';
             result.style.display = 'block';
@@ -4173,7 +4233,7 @@ def settings_page():
                 return;
             }}
             var input = document.getElementById(inputId);
-            var startPath = ((input ? input.value : '') || '~/nemesis-backup/').trim();
+            var startPath = ((input ? input.value : '') || '{_default_backup_dir()}').trim();
             browser.style.display = 'block';
             _fsBrowse(inputId, browserId, startPath);
         }}
@@ -5035,6 +5095,28 @@ def firewall_db():
             tip_m = html.escape(tip_m, quote=True)
             tip_p = html.escape(tip_p, quote=True)
 
+            # Unblock hand-off (2026-07-31). Blocking an alert flips it out of the
+            # dashboard's pending views, so the modal carrying the Unblock button —
+            # and the credential prompt it needs — is no longer reachable from
+            # there. This page is where a blocked alert IS still listed, so it has
+            # to offer the way back.
+            #
+            # A LINK, not an action: it opens the alert modal on the main page
+            # rather than unblocking directly. Two reasons. The credential prompt
+            # (fwPrompt/fwHandleError) is defined only in dashboard()'s template,
+            # and duplicating a password dialog is exactly the kind of thing that
+            # drifts out of sync. More importantly, a privileged firewall change
+            # must never be triggerable by following a URL — that is CSRF-shaped,
+            # and no confirmation dialog makes it acceptable.
+            unblock_link = ""
+            if a[7] == "block" and a[11]:
+                unblock_link = (
+                    f"""<a href="/?alert={html.escape(str(a[1]), quote=True)}" """
+                    f"""onclick="event.stopPropagation()" """
+                    f"""style="display:inline-block;margin-left:8px;color:#00d4ff;font-size:0.85em" """
+                    f"""title="Opens this alert so you can unblock {html.escape(str(a[11]), quote=True)}">&#128275; Unblock</a>"""
+                )
+
             rows += f"""<tr class="db-row-click" style="{row_style}cursor:pointer" onclick="{row_notes_onclick}">
                 <td style="color:#bbb">{rule_id}</td>
                 <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" title="{tip_m}">{rule_name}</td>
@@ -5049,6 +5131,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="block" else ""}>block</option>
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
+                    {unblock_link}
                 </td>
                 <td style="color:#bbb;font-size:0.85em;white-space:nowrap">Notes ▸</td>
             </tr>"""
@@ -5541,20 +5624,17 @@ def api_restart():
     return jsonify({"status": "restarting"})
 
 
-@app.route("/api/uninstall", methods=["POST"])
-def api_uninstall():
-    uninstall_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uninstall.sh")
-    def _do_uninstall():
-        time.sleep(3)
-        subprocess.run(["sudo", "bash", uninstall_script, "--yes"])
-    threading.Thread(target=_do_uninstall, daemon=True).start()
-    return jsonify({
-        "status": "uninstalling",
-        "message": (
-            "Nemesis Firewall is being removed. This page will go offline shortly — "
-            "that means it worked. To reinstall, run:  sudo bash ~/dashboard/install.sh"
-        ),
-    })
+# REMOVED 2026-07-31 — POST /api/uninstall (operator decision).
+#
+# It ran `sudo bash uninstall.sh --yes`: a web-reachable, root-privileged removal
+# of the entire product. Deleted outright rather than routed through the
+# privileged helper, because this is not a capability that should exist behind
+# any gate, however narrow — the blast radius of a dashboard compromise included
+# destroying the installation, and no allowlist makes that acceptable.
+#
+# Uninstall is CLI-only now: run the uninstall script from a terminal on the
+# server. The Settings UI still has the modal, but its confirm button no longer
+# calls an endpoint (see doUninstall() in the rendered JS).
 
 
 def _backup_candidates():
@@ -5576,16 +5656,56 @@ def _backup_candidates():
     return files
 
 
+def _browse_roots():
+    """Directory roots the filesystem browser may show.
+
+    Was `[f"/home/{getpass.getuser()}", "/media", "/mnt"]`, which silently assumed
+    the service runs as a human with a real home directory. That stopped being
+    true on 2026-07-31: dashboard runs as `nemesis-dash`, a --no-create-home
+    system account whose passwd home field (`/home/nemesis-dash`) does not exist.
+    `expanduser("~")` still RESOLVES to it, so the old code would have offered an
+    uncreatable path as its default and fallback rather than failing usefully.
+
+    Removable media first — it is the correct destination for a backup anyway
+    (Rule 6: independent storage). NEMESIS_BROWSE_ROOTS (colon-separated) lets an
+    install add its own; the install user's home only appears if it is configured
+    AND exists, so this degrades instead of breaking.
+
+    Note for the hardening step: ProtectHome=yes makes /home appear empty to this
+    service, so any /home root becomes unusable regardless of what is configured.
+    """
+    roots = ["/media", "/mnt"]
+    extra = os.environ.get("NEMESIS_BROWSE_ROOTS", "").strip()
+    if extra:
+        roots = [r for r in extra.split(":") if r.strip()] + roots
+    return [r for r in roots if os.path.isdir(r)] or ["/media"]
+
+
+def _default_backup_dir():
+    """Default backup destination when the caller does not supply one.
+
+    NOT `~/nemesis-backup/` — see _browse_roots() for why `~` is meaningless for
+    this service now. NEMESIS_BACKUP_DIR overrides.
+
+    The default lives under the state dir because that is reliably writable by
+    the nemesis-db group. It is deliberately NOT a Rule-6-compliant location: a
+    backup on the same disk as the original dies with it, and one sitting beside
+    the live DB is the exact restore-trap removed from /var/lib/nemesis earlier
+    today. Operators should point this at removable media; the default only
+    guarantees the feature works, not that the result is a durable backup.
+    """
+    return os.environ.get("NEMESIS_BACKUP_DIR", "/var/lib/nemesis/backups")
+
+
 @app.route("/api/filesystem/browse")
 def api_filesystem_browse():
-    import getpass
-    path_raw = request.args.get("path", "~").strip() or "~"
-    path = os.path.realpath(os.path.expanduser(path_raw))
+    path_raw = request.args.get("path", "").strip()
+    allowed_roots = _browse_roots()
+    fallback = allowed_roots[0]
 
-    user = getpass.getuser()
-    allowed_roots = [f"/home/{user}", "/media", "/mnt"]
+    path = os.path.realpath(os.path.expanduser(path_raw)) if path_raw else fallback
     if not any(path.startswith(r) for r in allowed_roots):
-        path = os.path.expanduser("~")
+        path = fallback
 
     parent = os.path.dirname(path)
     if not any(parent.startswith(r) for r in allowed_roots):
@@ -5840,7 +5960,7 @@ def api_backup_size():
 @app.route("/api/backup/create", methods=["POST"])
 def api_backup_create():
     data = request.get_json(force=True, silent=True) or {}
-    dest_raw = (data.get("dest_path") or "~/nemesis-backup/").strip()
+    dest_raw = (data.get("dest_path") or _default_backup_dir()).strip()
     dest = os.path.expanduser(dest_raw)
     try:
         os.makedirs(dest, exist_ok=True)
@@ -5864,7 +5984,7 @@ def api_backup_create():
 
 @app.route("/api/backup/schedule", methods=["GET", "POST"])
 def api_backup_schedule():
-    default_cfg = {"enabled": False, "schedule": "daily", "destination": "~/nemesis-backup/"}
+    default_cfg = {"enabled": False, "schedule": "daily", "destination": _default_backup_dir()}
 
     if request.method == "GET":
         try:
@@ -5876,7 +5996,7 @@ def api_backup_schedule():
     data = request.get_json(force=True, silent=True) or {}
     enabled = bool(data.get("enabled", False))
     schedule = data.get("schedule", "daily")
-    destination = (data.get("destination") or "~/nemesis-backup/").strip()
+    destination = (data.get("destination") or _default_backup_dir()).strip()
     cfg = {"enabled": enabled, "schedule": schedule, "destination": destination}
 
     try:
@@ -7902,6 +8022,7 @@ def dashboard():
             <div id="modalContent">Analyzing...</div>
             <div style="margin-top:15px">
                 <button class="btn btn-block" onclick="takeAction('block')" id="btnBlock">🚫 Block IP</button>
+                <button class="btn btn-monitor" onclick="unblockIp()" id="btnUnblock">🔓 Unblock IP</button>
                 <button class="btn btn-ignore" onclick="takeAction('ignore')" id="btnIgnore">✓ Ignore Rule</button>
                 <button class="btn btn-monitor" onclick="takeAction('monitor')" id="btnMonitor">👁 Monitor</button>
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
@@ -8473,6 +8594,28 @@ def dashboard():
                   closeModal();
                   location.reload();
               }}).catch(e => alert("Error: " + e));
+            }});
+        }}
+
+        /* Symmetric counterpart to takeAction('block'). Deliberately placed on the
+           same modal: the block is applied from here, so the undo belongs here too
+           rather than somewhere the user has to go hunting for. */
+        function unblockIp() {{
+            if (!currentSrcIp) {{ alert("No source IP on this alert to unblock."); return; }}
+            /* Same rule as block — an unblock is a firewall write, so it takes a
+               fresh credential and never a cached one. */
+            fwPrompt("unblock " + currentSrcIp).then(function (pw) {{
+                if (!pw) return;
+                fetch("/api/firewall/unblock", {{
+                    method: "POST",
+                    headers: {{"Content-Type": "application/json"}},
+                    body: JSON.stringify({{ip: currentSrcIp, rule_id: currentRuleId, password: pw}})
+                }}).then(r => r.json()).then(data => {{
+                    if (data && data.error) {{ fwHandleError(data, "Unblock failed"); return; }}
+                    if (data && data.warning) {{ alert("Unblocked " + currentSrcIp + " — note: " + data.warning); }}
+                    closeModal();
+                    location.reload();
+                }}).catch(e => alert("Error: " + e));
             }});
         }}
 
@@ -9763,6 +9906,18 @@ def dashboard():
         }}
         updateActionButtonLabels();
 
+        /* Deep link from the alert database page: /?alert=<rule_id> opens that
+           alert's modal, so the Unblock button and its credential prompt stay
+           reachable for an alert that has dropped out of the pending views.
+           Deliberately only OPENS the modal — following a link must never
+           perform a privileged firewall change. */
+        (function () {{
+            try {{
+                var deepLink = new URLSearchParams(window.location.search).get("alert");
+                if (deepLink) {{ viewAlert(deepLink, ""); }}
+            }} catch (e) {{ /* convenience only — never break the page over it */ }}
+        }})();
+
         function confirmQuarantine(id) {{
             if (!confirm("Confirm this block permanently? The ufw rule will be kept and the alert marked 'block'.")) return;
             fetch("/api/quarantine/" + id + "/confirm", {{method: "POST"}})
@@ -9985,4 +10140,14 @@ def dashboard():
 </html>"""
 
 if __name__ == "__main__":
+    # Assert the privilege boundary against the kernel before serving anything.
+    # Inert until the unit sets NEMESIS_EXPECT_USER (see nemesis_privsep).
+    #
+    # Added 2026-07-31 with the nemesis-dash cutover. Without this call the
+    # unit's NEMESIS_EXPECT_USER would be decorative — exactly the false-
+    # attestation state corrected in nemesis-fwd's unit earlier today, where a
+    # comment claimed a check that no code performed. systemd's hardening
+    # directives fail open, so the unit file is never evidence of confinement.
+    import nemesis_privsep
+    nemesis_privsep.attest_from_env("dashboard")
     app.run(host="0.0.0.0", port=5000)
