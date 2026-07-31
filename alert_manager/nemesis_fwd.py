@@ -48,6 +48,7 @@ import signal
 import socket
 import struct
 import subprocess
+import tempfile
 import sys
 import threading
 import time
@@ -86,6 +87,46 @@ FAIL2BAN_USER = os.environ.get("NEMESIS_FAIL2BAN_USER", "nemesis-f2b")
 SOCKET_GROUP = os.environ.get("NEMESIS_FWD_GROUP", "nemesis-fw")
 UFW_BIN = "/usr/sbin/ufw"
 
+#: The environment file write_env maintains. Overridable for testing only.
+NEMESIS_ENV_PATH = os.environ.get("NEMESIS_ENV_PATH", "/etc/nemesis.env")
+
+#: Keys write_env may set. AUTHORITATIVE SOURCE: the `fields` array in
+#: dashboard.py `_wizCollectChanges()` (~:4547) — that is what the Settings form
+#: actually SENDS, which is not the same as what it renders. Two fields it
+#: renders (_NET_IP, _NET_SUBNET) are read-only and filtered client-side, and
+#: PIHOLE_IP appears elsewhere on the page but is never submitted; neither
+#: belongs here. If a field is added to that array, add it here too — a key the
+#: form sends but this rejects turns into a silent "save did nothing".
+#:
+#: The allowlist lives HERE, helper-side, deliberately. Until 2026-07-31 the
+#: dashboard route accepted ARBITRARY keys and the writer appended any it did not
+#: recognise, so /etc/nemesis.env — sourced by seven services via
+#: EnvironmentFile, and therefore turned into their process environment — could
+#: be given any key at all. A dashboard-side check would be bypassed by the very
+#: compromise this helper exists to contain.
+ENV_WRITE_ALLOWED_KEYS = frozenset({
+    "WATCHDOG_EMAIL", "WATCHDOG_PASSWORD", "WATCHDOG_TO",
+    "SMTP_HOST", "SMTP_PORT",
+    "ANTHROPIC_API_KEY", "ABUSEIPDB_KEY", "IPINFO_TOKEN",
+    "NETWORK_IFACE", "PIHOLE_PASSWORD",
+})
+
+#: Refused unconditionally, even if one is ever mistakenly allowlisted above.
+#: These change how a process loads code rather than how it behaves, so writing
+#: one into a file that becomes seven services' environment is the difference
+#: between a config change and arbitrary code execution. Belt and braces: the
+#: allowlist already excludes them, and this makes a future mistake non-fatal.
+ENV_WRITE_DENIED_KEYS = frozenset({
+    "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "PYTHONPATH",
+    "PYTHONSTARTUP", "BASH_ENV", "IFS",
+})
+
+#: Shape constraints on a value. A newline is the important one: it would inject
+#: a SECOND assignment into the file, which is how an allowlisted key becomes a
+#: way to set a denied one.
+ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+ENV_VALUE_MAX = 2048
+
 #: Idle timeout for the view-credential cache. Configurable, not hardcoded, so
 #: it can be tuned without a design change. 300s matches sudo's long-standing
 #: timestamp_timeout default.
@@ -115,7 +156,8 @@ READ_OPS = {"list_blocked", "list_rules"}
 # that might have used them established that `ufw route` cannot gate
 # tunnel-sourced forwarded traffic at all (Tailscale's ts-forward ACCEPTs it ahead
 # of every ufw chain), so there is no route op for these names to become.
-WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine"}
+WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
+             "write_env", "restart_dashboard"}
 NO_CREDENTIAL_OPS = {"ping", "drop_credential"}
 
 #: audit_log action name per op. Introduced 2026-07-31, replacing a hardcoded
@@ -134,6 +176,10 @@ AUDIT_ACTION = {
     "deny_ip":           "fw_deny_ip",
     "unblock_ip":        "fw_unblock_ip",
     "expire_quarantine": "fw_expire_quarantine",
+    # svc_ rather than fw_: these are not firewall operations, and a service
+    # restart filed under fw_* would mislead anyone reading the audit trail.
+    "write_env":         "svc_write_env",
+    "restart_dashboard": "svc_restart_dashboard",
 }
 
 
@@ -157,7 +203,8 @@ def audit_action_for(op):
 #: regardless of what its own code does or is made to do.
 PEER_POLICY = {
     "dashboard": {
-        "ops": {"list_blocked", "list_rules", "block_ip", "deny_ip", "unblock_ip"},
+        "ops": {"list_blocked", "list_rules", "block_ip", "deny_ip", "unblock_ip",
+                "write_env", "restart_dashboard"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -741,6 +788,139 @@ def op_expire_quarantine(params):
     return {"ip": ip, "quarantine_id": row["id"], "output": out.strip()}
 
 
+def _run_systemctl(*args):
+    p = subprocess.run(["/usr/bin/systemctl", *args],
+                       capture_output=True, text=True, timeout=30)
+    return p.returncode, p.stdout, p.stderr
+
+
+def _validate_env_updates(params):
+    """Validate a write_env payload. Returns {key: value}. Raises Denied.
+
+    Every check is HERE rather than in the caller: the caller is explicitly
+    modelled as potentially compromised, so a check it performs is a check an
+    attacker simply skips.
+    """
+    values = (params or {}).get("values")
+    if not isinstance(values, dict) or not values:
+        raise Denied("bad_request", "values must be a non-empty object")
+    if len(values) > len(ENV_WRITE_ALLOWED_KEYS):
+        raise Denied("bad_request", "too many keys")
+
+    clean = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not ENV_KEY_RE.match(key):
+            raise Denied("bad_request", "invalid key name: %r" % (key,))
+        # Denylist FIRST, so it holds even if the allowlist is ever wrong.
+        if key in ENV_WRITE_DENIED_KEYS:
+            raise Denied("bad_request",
+                         "refusing to set %s: it changes how processes load "
+                         "code, not how Nemesis behaves" % key)
+        if key not in ENV_WRITE_ALLOWED_KEYS:
+            raise Denied("bad_request", "key not permitted: %s" % key)
+        if not isinstance(value, str):
+            raise Denied("bad_request", "value for %s must be a string" % key)
+        if len(value) > ENV_VALUE_MAX:
+            raise Denied("bad_request",
+                         "value for %s exceeds %d bytes" % (key, ENV_VALUE_MAX))
+        if any(c in value for c in ("\n", "\r", "\x00")):
+            # The one that matters: a newline injects a SECOND assignment, which
+            # is how an allowlisted key becomes a way to set a denied one.
+            raise Denied("bad_request",
+                         "value for %s may not contain newlines or NUL" % key)
+        clean[key] = value
+    return clean
+
+
+def op_write_env(params):
+    """Merge keys into NEMESIS_ENV_PATH, preserving comments and order.
+
+    The helper performs the whole read-merge-write itself. The caller never
+    supplies a file body and never stages a temp file — it sends key/value pairs
+    and this process decides what the file becomes. That is what makes the
+    allowlist meaningful, and it also removes the /tmp hand-off the dashboard
+    previously needed.
+
+    Written atomically: temp file in the SAME directory, ownership and mode set
+    BEFORE the swap, then os.replace(). A torn or briefly world-readable
+    /etc/nemesis.env would expose 16 secrets, so it must never exist on disk in
+    that state, not even momentarily.
+    """
+    updates = _validate_env_updates(params)
+
+    try:
+        with open(NEMESIS_ENV_PATH) as fh:
+            lines = fh.readlines()
+    except FileNotFoundError:
+        lines = []
+    except OSError as exc:
+        raise Denied("io_failed", "cannot read %s: %s" % (NEMESIS_ENV_PATH, exc))
+
+    seen = set()
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in updates:
+                out.append("%s=%s\n" % (key, updates[key]))
+                seen.add(key)
+                continue
+        out.append(line)
+    for key, value in updates.items():
+        if key not in seen:
+            out.append("%s=%s\n" % (key, value))
+            seen.add(key)
+
+    directory = os.path.dirname(NEMESIS_ENV_PATH) or "/"
+    tmp_path = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".nemesis.env.")
+        with os.fdopen(fd, "w") as fh:
+            fh.writelines(out)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, 0o640)
+        try:
+            gid = grp.getgrnam("nemesis").gr_gid
+        except KeyError:
+            raise Denied("io_failed", "group 'nemesis' does not exist")
+        os.chown(tmp_path, 0, gid)
+        os.replace(tmp_path, NEMESIS_ENV_PATH)
+        tmp_path = None
+    except Denied:
+        raise
+    except OSError as exc:
+        raise Denied("io_failed", "cannot write %s: %s" % (NEMESIS_ENV_PATH, exc))
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    # KEY NAMES only. The values are secrets and are never logged, anywhere.
+    log.info("fwd: write_env updated %s", ", ".join(sorted(seen)))
+    return {"updated": sorted(seen)}
+
+
+def op_restart_dashboard(params):
+    """Restart dashboard.service. Takes NO parameters, deliberately.
+
+    Not restart_service(name): a name parameter is an injection surface for no
+    benefit when exactly one unit is ever restarted here.
+
+    --no-block matters. The caller IS the dashboard, so a blocking restart would
+    stop the process waiting on this socket before it could read the reply. This
+    queues the job and returns, letting the helper answer first.
+    """
+    rc, out, err = _run_systemctl("restart", "--no-block", "dashboard")
+    if rc != 0:
+        raise Denied("restart_failed", err.strip() or "systemctl restart failed")
+    log.info("fwd: restart_dashboard queued")
+    return {"restarting": True, "unit": "dashboard"}
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
     "list_blocked": op_list_blocked,
@@ -748,6 +928,8 @@ OPS = {
     "block_ip": op_block_ip,
     "deny_ip": op_deny_ip,
     "unblock_ip": op_unblock_ip,
+    "write_env": op_write_env,
+    "restart_dashboard": op_restart_dashboard,
 }
 
 
