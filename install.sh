@@ -829,6 +829,28 @@ setup_nemesis_group() {
                     --gid nemesis-db "$_svc_user" 2>/dev/null || true
         fi
     done
+    # nemesis-f2b — fail2ban's peer identity. Created SEPARATELY, not in the loop
+    # above, because its primary group is nemesis-fw rather than nemesis-db: it
+    # never touches the database. nemesis_fwd writes the quarantine row itself,
+    # server-side, as root; this account exists only to OPEN the helper socket, so
+    # nemesis-db would be an unnecessary grant.
+    #
+    # Why it needs its own identity at all: nemesis_fwd authorises by SO_PEERCRED,
+    # so a ban is authorised by WHICH ACCOUNT connected. fail2ban itself runs as
+    # root and drops to this account (`runuser -u nemesis-f2b`) precisely so the
+    # ban arrives as the narrow fail2ban peer — allowed block_ip/deny_ip and
+    # nothing else — instead of as root.
+    #
+    # SCOPE (2026-07-31): this creates the ACCOUNT only. The fail2ban integration
+    # that uses it — jail.local, action.d/nemesis-fwd.conf and the nemesis-f2b-ban
+    # shim — is NOT yet shipped in this repo, so on a fresh install the account is
+    # correct but inert. That is deliberate and pending a separate Rule 10
+    # disclosure review, not an oversight.
+    if ! id nemesis-f2b &>/dev/null; then
+        useradd --system --no-create-home --shell /usr/sbin/nologin \
+                --gid nemesis-fw nemesis-f2b 2>/dev/null || true
+    fi
+
     # nemesis-dash is the ONLY service account needing more than nemesis-db.
     # Both memberships trace to an audited capability, and nothing else was
     # granted: 'nemesis' for the RUNTIME read of /etc/nemesis.env behind the

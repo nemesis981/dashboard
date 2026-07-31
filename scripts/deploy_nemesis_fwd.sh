@@ -18,6 +18,7 @@
 # OVERRIDES (used to rehearse this on the VM):
 #   DASH_USER=...      dashboard's OS user      (default: read from dashboard.service)
 #   ALERTW_USER=...    alert-watcher's OS user  (default: read from alert-watcher.service)
+#   F2B_USER=...       fail2ban's peer account   (default: nemesis-f2b)
 #   NEMESIS_ASSUME_YES=1   skip the interactive cutover confirmation
 #
 set -euo pipefail
@@ -31,6 +32,11 @@ unit_user() { systemctl show -p User --value "$1" 2>/dev/null || true; }
 
 DASH_USER="${DASH_USER:-$(unit_user dashboard)}"
 ALERTW_USER="${ALERTW_USER:-$(unit_user alert-watcher)}"
+# Not derived via unit_user(): fail2ban runs from its own distribution unit, not a
+# Nemesis one, so there is no User= to read. The default must therefore match
+# nemesis_fwd.py's own FAIL2BAN_USER default — if the two ever drift, the helper
+# authorises one account while this script verifies another.
+F2B_USER="${F2B_USER:-nemesis-f2b}"
 FW_GROUP="nemesis-fw"
 DB_GROUP="nemesis-db"
 
@@ -72,6 +78,15 @@ check_users() {
     else
         # Not fatal: the helper logs a warning and that peer simply cannot connect.
         warn "alert-watcher user '$ALERTW_USER' absent — that peer will be unable to connect"
+    fi
+    # Same treatment as alert-watcher, and optional for a further reason: the
+    # fail2ban INTEGRATION (jail.local, action.d, the ban shim) is not shipped in
+    # this repo yet, so a correct install can legitimately have the account with
+    # nothing using it. Never fatal.
+    if id "$F2B_USER" >/dev/null 2>&1; then
+        ok "fail2ban peer user '$F2B_USER' exists (uid $(id -u "$F2B_USER"))"
+    else
+        warn "fail2ban peer user '$F2B_USER' absent — fail2ban bans will not reach nemesis-fwd"
     fi
 }
 
@@ -305,6 +320,23 @@ EOF
     printf '%s' "$peers" | grep -q "dashboard(uid=$(id -u "$DASH_USER"))" \
         || die "helper did not authorise $DASH_USER as the dashboard peer"
     ok "dashboard peer resolved to $DASH_USER (uid $(id -u "$DASH_USER"))"
+
+    # fail2ban peer — VERIFIED, not assumed, but never fatal. Checking it here
+    # closes the gap that let this peer be wired entirely by hand: the helper
+    # resolves it from its own FAIL2BAN_USER default, so nothing else confirms the
+    # account this script expects is the account the helper actually authorised.
+    # A mismatch is silent otherwise — bans would simply never arrive.
+    if id "$F2B_USER" >/dev/null 2>&1; then
+        if printf '%s' "$peers" | grep -q "fail2ban(uid=$(id -u "$F2B_USER"))"; then
+            ok "fail2ban peer resolved to $F2B_USER (uid $(id -u "$F2B_USER"))"
+        else
+            warn "helper did NOT authorise $F2B_USER as the fail2ban peer — check
+       NEMESIS_FAIL2BAN_USER in the unit against F2B_USER here; fail2ban bans
+       will not reach nemesis-fwd until they agree"
+        fi
+    else
+        warn "fail2ban peer user '$F2B_USER' absent — skipping its peer check"
+    fi
 
     # ping as the dashboard user, through the real socket.
     sudo -u "$DASH_USER" -g "$FW_GROUP" python3 - "$SOCK" <<'PY' || die "ping from the dashboard peer failed"
