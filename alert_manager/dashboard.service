@@ -11,6 +11,9 @@ Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_mo
 EnvironmentFile=-/etc/watchdog.env
 EnvironmentFile=/etc/nemesis.env
 
+# Activates runtime privilege attestation (nemesis_privsep). Absent =>
+# the check stays inert, which is what makes the code safe pre-migration.
+Environment=NEMESIS_EXPECT_USER=nemesis-dash
 Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
 
 ExecStart=/usr/bin/python3 /opt/nemesis/dashboard.py
@@ -26,6 +29,8 @@ LogsDirectoryMode=0750
 ReadWritePaths=/var/lib/nemesis
 
 # --- privilege boundary (identical across all Nemesis units) ------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes
@@ -37,7 +42,10 @@ RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 LockPersonality=yes
 SystemCallArchitectures=native
+SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
 
 [Install]
 WantedBy=multi-user.target

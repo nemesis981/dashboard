@@ -46,42 +46,40 @@ SERVICES = {
     dest="alert_manager", desc="Security Dashboard", user="nemesis-dash",
     exe=f"{NEW_ROOT}/dashboard.py",
     after=["network.target"], wants=[],
-    # DASHBOARD HARDENING EXCEPTION (2026-07-27 incident; codified 2026-07-28).
+    # DASHBOARD HARDENING — mostly LIFTED 2026-07-31 (Cutover B + Phase 3).
     #
-    # This is the WORKAROUND, not the fix. Dashboard elevates via `sudo -n` in
-    # ~10 places, including alert_manager/firewall.py — the ADR-0005 ufw
-    # chokepoint. The real fix is CAP_NET_ADMIN/CAP_NET_RAW with firewall.py
-    # calling ufw directly (the device-scanner precedent); that is a code change
-    # and is still pending. Until it lands, these five directives must stay off
-    # or dashboard starts, looks healthy, and silently cannot block or
-    # quarantine anything.
+    # This block used to omit FIVE directives plus the capability drop, because
+    # dashboard elevated via `sudo -n` and hardening would have left it running,
+    # looking healthy, and silently unable to block anything. That premise is
+    # gone: dashboard runs as nemesis-dash, which has no sudo at all, and every
+    # firewall operation goes through nemesis-fwd over its socket.
     #
-    # Each omission is measured or read from the code, not assumed:
-    #   NoNewPrivileges     kernel ignores setuid -> sudo cannot elevate at all.
-    #                       Verified: `setpriv --no-new-privs sudo -n ufw` -> blocked.
-    #   CapabilityBoundingSet / AmbientCapabilities
-    #                       the sudo'd root child inherits an EMPTY bounding set,
-    #                       so ufw has no CAP_NET_ADMIN. Verified:
-    #                       `setpriv --bounding-set=-all sudo -n ufw` -> blocked.
-    #                       This one is easy to miss: NoNewPrivileges=no alone is
-    #                       NOT sufficient.
-    #   ProtectSystem       ufw writes /etc/ufw/user.rules when rules change;
-    #                       strict makes /etc read-only (status would still work,
-    #                       so this fails only on the paths that matter).
-    #   ProtectHome         dashboard.py:5404 offers /home/<user> as a backup
-    #                       destination root; hiding /home breaks backup-to-home.
-    #   PrivateTmp          dashboard.py uses /tmp/nemesis_env_update.tmp,
-    #                       /tmp/nemesis-scan-*.log, and /tmp/nemesis-backup.log —
-    #                       the last written by a CRON job outside the service
-    #                       namespace, which a private /tmp would hide entirely.
+    # So NoNewPrivileges, ProtectSystem, SystemCallFilter and the capability drop
+    # are now ON. Their original justifications were all "the sudo child needs
+    # X" — there is no sudo child.
     #
-    # SystemCallFilter is also omitted: sudo's setuid path under @system-service
-    # was NOT verified, and this is not the change to find out in.
+    # TWO remain omitted, and NOT for the reasons the old comment gave. Those
+    # reasons had gone stale (it cited a /home backup destination that has since
+    # been re-homed, and a /tmp env-staging file on a code path that is dead).
+    # The real blockers, both measured on the 2026-07-31 fresh-install VM:
     #
-    # Everything else the other seven units get, dashboard gets.
-    omit_hardening=["NoNewPrivileges", "ProtectSystem", "ProtectHome",
-                    "PrivateTmp", "SystemCallFilter"],
-    omit_capability_drop=True,
+    #   ProtectHome   POST /api/malware/finding/<id>/quarantine runs
+    #                 _quarantine_file() IN THIS PROCESS and shutil.move()s the
+    #                 finding's path, which can be anywhere the scanner looked —
+    #                 including a user's home. ProtectHome makes /home appear
+    #                 empty, so quarantining such a finding would fail.
+    #                 `read-only` does not help: the operation is a MOVE.
+    #                 Unblocked by routing quarantine through a helper op.
+    #
+    #   PrivateTmp    /tmp/nemesis-scan-<id>.log is WRITTEN by hw_monitor.py:1578
+    #                 and READ by dashboard.py:6249 — two different services
+    #                 sharing a /tmp path. A private namespace hides one from the
+    #                 other. Unblocked by moving that log off shared /tmp.
+    #
+    # Both follow-ups are logged, not scheduled. Do not enable either directive
+    # until its specific blocker is actually removed — each one silently breaks a
+    # working feature, which is exactly how the 2026-07-27 incident happened.
+    omit_hardening=["ProtectHome", "PrivateTmp"],
     extra=[
       f"WorkingDirectory={NEW_ROOT}",
       # dashboard imports hw_monitor AS A LIBRARY (23 symbols across ~15 routes:
