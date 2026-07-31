@@ -775,6 +775,23 @@ setup_nemesis_group() {
     # 'nemesis' group — that group grants read of /etc/nemesis.env and its 16
     # secrets, which the services receive via systemd EnvironmentFile (read by
     # the manager as root) and therefore do not need directly.
+    #
+    # NAMED EXCEPTION — nemesis-dash (added 2026-07-31, effective at Cutover B).
+    # The dashboard account IS a member of 'nemesis', and it is the only service
+    # account that is. Stated explicitly rather than added silently, because it
+    # is a real exception to the principle directly above, not an oversight.
+    #
+    # Why it cannot follow the rule: the principle holds only for services whose
+    # ONLY need for the file is at startup, where systemd reads EnvironmentFile
+    # as root and hands the values over. Dashboard additionally reads
+    # /etc/nemesis.env at RUNTIME — _read_nemesis_env() backs the Settings config
+    # UI, which displays and edits those values long after startup. No
+    # EnvironmentFile mechanism can satisfy a read that happens on request.
+    #
+    # Scope of the exception: read-only membership in 'nemesis' (the file is
+    # 0640 root:nemesis). It grants no write path — config WRITES go through the
+    # privileged helper, never through this group. Do not widen it to other
+    # service accounts; none of them read the file at runtime.
     groupadd --system nemesis-db 2>/dev/null || true
     # Socket group for nemesis-fwd. BOTH authorised peers must be members or
     # they cannot open /run/nemesis/fwd.sock (mode 0660 root:nemesis-fw) at all —
