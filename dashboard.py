@@ -5360,8 +5360,22 @@ def firewall_db():
             style="background:#00d4ff;color:#1a1a2e;border:none;padding:6px 14px;cursor:pointer;border-radius:4px;font-weight:bold;font-size:0.9em">Search Notes</button>
     </div>
     <div id="noteSearchResults" style="display:none;background:#0d1117;border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:16px;max-height:300px;overflow-y:auto"></div>
+    <!-- Standing note, not decoration. The dropdown below sets FUTURE policy and
+         never touches the firewall; setting it to "block" applied nothing, and
+         setting it back to "pending" removed nothing. That read as an immediate
+         control twice on 2026-07-31 — once during testing and once on production,
+         where a rule that was never created appeared to be successfully removed. -->
+    <div style="background:#1c1f26;border-left:3px solid #ffaa00;border-radius:4px;
+                padding:10px 14px;margin-bottom:16px;color:#ddd;font-size:0.9em">
+        <strong style="color:#ffaa00">These settings apply to the NEXT alert, not right now.</strong><br>
+        Changing the dropdown decides what Nemesis does the next time a rule fires. It does
+        <strong>not</strong> block or unblock anything immediately, and changing it back does
+        <strong>not</strong> remove a block that is already in place.<br>
+        To block or unblock an address <em>now</em>, open the alert and use
+        &#128683; Block IP / &#128275; Unblock IP.
+    </div>
     <table>
-        <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Action</th><th>Times Seen</th><th>Last Seen</th><th>Change</th><th>Notes</th></tr>
+        <tr><th>Rule ID</th><th>Rule Name</th><th>Risk</th><th>Current Policy</th><th>Times Seen</th><th>Last Seen</th><th title="Sets what happens the NEXT time this rule fires. It does not block or unblock anything right now — use the alert view for that.">Policy on next alert &#9432;</th><th>Notes</th></tr>
         {rows}
     </table>
 
