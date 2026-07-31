@@ -9,7 +9,77 @@ they surface, so that when a baseline is written it is written from evidence rat
 
 ---
 
-## Measured: fresh-install VM run, 2026-07-31
+## BASELINE (valid): clean-base install, 2026-07-31 13:04:51 → 13:05:36
+
+**This supersedes the first run below, whose duration figure was invalid.**
+
+Base preparation, so the provenance is honest: cloned the Ubuntu 26.04 master, then explicitly
+purged what it carried pre-staged — **45 `remove` + 4 `purge` dpkg events at 13:03**, covering
+`pihole-meta`, `suricata`, `suricata-update`, `clamav`, `clamav-daemon`, `clamav-freshclam`,
+`clamdscan`, `clamav-base`, plus pip `flask`/`psutil`/`requests`. Verified absent before
+installing. VirtualBox snapshot `blank-ubuntu-26.04-purged` taken so the state is reproducible.
+
+Installed from `origin/main` (`b2f2a73`) — the tree including the Gap 7 and Gap 9 fixes.
+
+### Install duration: 45s total — and this figure IS valid
+
+**53 dpkg install events** during the run, and ClamAV's signature database
+(`main.cvd` 89 MB + `daily.cvd` 23 MB + `bytecode.cvd` 0.3 MB ≈ **112 MB**) downloaded fresh
+at 13:05. This was real from-scratch work, not a no-op over pre-existing packages.
+
+| Step | Duration |
+|---|---|
+| 1/9 Preflight | 0s |
+| 2/9 System dependencies | 8s |
+| 3/9 Pi-hole | 3s |
+| 4/9 Suricata | 8s |
+| **5/9 ClamAV + malware deps** | **14s** (longest — the 112 MB signature pull) |
+| 6/9 Nemesis group & permissions | 0s |
+| 7/9 Hardware discovery | 0s |
+| 8/9 Deploying systemd services | 4s |
+| 9/9 Firewall rules & final checks | 7s |
+| **TOTAL** | **45s** |
+
+**Caveat on generalising it:** this ran on a fast host over a fast link with a nearby mirror.
+The dominant cost is network (112 MB ClamAV + package downloads), so on a slow connection this
+is minutes, not seconds. Treat 45s as the FLOOR, not the expected time.
+
+### CPU — comfortable, not the constraint
+
+Peak load **1.16** on 2 vCPU during install; idle after: `0.00 0.17 0.15`. Headroom throughout.
+
+### RAM — the binding constraint, confirmed on a clean base
+
+| | |
+|---|---|
+| Peak during install | **2219 MB** |
+| Idle, all services running | **2186 MB used of 3398 MB — 1212 MB available** |
+
+| Process | RSS |
+|---|---|
+| `clamd` | **968.7 MB** |
+| `gnome-shell` | 317.3 MB |
+| `python3` (Nemesis) | 66.0 MB |
+| `Suricata-Main` | 57.1 MB |
+
+Near-identical to the first run, which makes it a repeatable number rather than a fluke.
+**ClamAV alone is ~44% of the whole 4 GB budget**, and it grows with signature-set size — the
+112 MB pulled today is a floor, not a fixed cost. Nemesis's own Python services are ~66 MB
+combined, i.e. **~3%**. Sizing this appliance is essentially a decision about clamd.
+
+This VM runs a desktop; `gnome-shell` at 317 MB would not exist headless, putting a headless
+install near **~1.85 GB used**.
+
+**Verdict on 2 vCPU / 4 GB: adequate headless (~1.5 GB headroom), tight with a desktop,
+RAM-bound not CPU-bound.** 8 GB removes the only pressure point; more vCPU would not.
+
+### Disk
+
+11.4 GB used of 25 GB (49%) with everything installed.
+
+---
+
+## SUPERSEDED: first VM run, 2026-07-31 (duration figure INVALID)
 
 VirtualBox clone of the Ubuntu 26.04 master. **2 vCPU / 4096 MB allocated** (3398 MB visible
 to the guest), 25 GB disk, bridged. Installed from `origin/main` (`6158691`) via
