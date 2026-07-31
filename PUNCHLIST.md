@@ -1212,3 +1212,20 @@ before revisiting.
 Related: `docs/architecture/0019-deterministic-enforcement-point.md`,
 `docs/architecture/0011-enrollment-security-model.md`,
 `docs/architecture/0009-security-inspection-proxy.md`, `alert_manager/tailscale_api.py`.
+
+### [SMALL] Two cosmetic finds from the 2026-07-31 change-password build
+Captured during step 1b (auth work); neither chased, per Rule 7.
+
+- [ ] **`templates/login.html` forgot-password hint points at the pre-`/opt` path.** It tells the
+  user to SSH in and run `python3 ~/dashboard/core/manage.py reset-password <username>`. That path
+  has been wrong since the 2026-07-27 relocation — the tree is `/opt/nemesis` now. This is the one
+  instruction shown to someone who is *already locked out*, so a stale path here costs more than
+  its size suggests: it's the recovery path failing at exactly the moment it's needed. Worth
+  re-checking when the root-only `nemesis-admin reset-password` CLI lands (queued step 5 of the
+  recovery-codes sequence) — that CLI will likely replace this hint's wording entirely, so fixing
+  the path now and the wording again later may be one edit, not two.
+
+- [ ] **`tickets` row id 26 has an empty `title`.** Pre-existing, unrelated to the auth work —
+  spotted only because a tier-1 lockout test wrote ticket 27 next to it. Not investigated. Worth
+  one look to confirm it's a benign old row rather than a write path that can leave a ticket
+  untitled (an untitled ticket is effectively invisible in the queue UI).
