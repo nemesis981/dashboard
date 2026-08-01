@@ -70,6 +70,7 @@ def _choose_password() -> str:
         pw = ""
     if not pw:
         return suggested
+    pw = pw.strip()          # same normalisation the dashboard applies on set
     ok, reason = passphrase.validate(pw)
     if not ok:
         print(f"Weak password: {reason}")
