@@ -3236,10 +3236,32 @@ def api_vpn_status():
     return jsonify({**vpn, "split_tunnel_apps": split_tunnel})
 
 
-@app.route("/api/vpn/<action>")
+@app.route("/api/vpn/<action>", methods=["POST"])
 def api_vpn_action(action):
+    """Connect/disconnect the VPN. POST-only, and not forgeable cross-origin.
+
+    This was a bare GET, so a plain <img src="/api/vpn/disconnect"> on any page
+    the operator visited while signed in would drop the tunnel silently. The
+    action allowlist below was already here; what was missing was any protection
+    against the request being made on the operator's behalf without their intent.
+
+    POST alone is not sufficient — an HTML form can POST cross-origin. Requiring
+    a JSON content-type is what closes it: forms can only send urlencoded,
+    multipart or text/plain, so a JSON body cannot be produced by form
+    submission, and a cross-origin fetch/XHR that sets the header is blocked by
+    CORS preflight. Paired with SESSION_COOKIE_SAMESITE, that is two independent
+    reasons a forged request fails.
+
+    Deliberately NOT credential-gated: this process cannot verify a credential
+    itself (see _fw_credential — verification lives in nemesis-fwd, tied to a
+    privileged op), and VPN control is not a helper operation. Adding one would
+    be new helper surface, not a small fix; scoped out rather than faked with a
+    check this process cannot actually perform.
+    """
     if action not in ("connect", "disconnect"):
         return jsonify({"error": "invalid action"}), 400
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     vpn = get_vpn_status()
     provider = (vpn.get("provider") or "").lower()
     try:
@@ -10865,7 +10887,12 @@ def dashboard():
             var btn = event.target;
             btn.disabled = true;
             btn.textContent = action === "connect" ? "Connecting…" : "Disconnecting…";
-            fetch("/api/vpn/" + action, {{cache: "no-store"}})
+            fetch("/api/vpn/" + action, {{
+                method: "POST",
+                cache: "no-store",
+                headers: {{"Content-Type": "application/json"}},
+                body: "{{}}"
+            }})
                 .then(r => r.json())
                 .then(function(d) {{
                     if (d.error) {{
