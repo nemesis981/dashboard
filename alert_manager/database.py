@@ -399,6 +399,58 @@ def record_auth_failure(username, source, action=None, lockout_tier=None,
         return False
 
 
+def init_recovery_codes_table():
+    """Canonical DDL for the core `recovery_codes` table (single-use backup codes).
+
+    Core-owned and unprefixed, alongside `users` / `login_events` / `audit_log`
+    (ADR 0001: modules own prefixed tables, core owns the unprefixed ones).
+
+    A code is valid only while `used_at IS NULL AND superseded_at IS NULL`. Two
+    separate columns rather than one status field because they are two genuinely
+    different events and the difference matters when reading the trail later:
+
+      used_at        this specific code was spent. Per-code, single use.
+      superseded_at  the whole batch was replaced by regenerating. Not the
+                     operator's doing, code by code — a batch-level event.
+
+    Rows are superseded, never deleted. Deleting would invalidate the codes just
+    as effectively but would erase the evidence that a batch ever existed, and
+    "were recovery codes regenerated, and when?" is exactly the question asked
+    after a suspected compromise. Retention costs one bcrypt hash per row.
+
+    `created_actor` is the ADR 0006 actor seam — NULL today (nothing calls
+    set_actor yet), present so that attributing "who issued this batch" in a
+    multi-user tier is a write to an existing column rather than a migration.
+
+    NOTE: nemesis-fwd is deliberately granted NO access to this table. It
+    verifies the admin password for privileged ops; letting it also consume
+    recovery codes would turn the break-glass credential into a routine one.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS recovery_codes (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                code_hash     TEXT NOT NULL,
+                batch_id      TEXT NOT NULL,
+                created_at    TEXT NOT NULL,
+                created_actor TEXT,
+                used_at       TEXT,
+                used_ip       TEXT,
+                superseded_at TEXT
+            )
+        """)
+        # Lookup is always "the live codes for this user", so the index carries
+        # the validity predicate rather than just user_id.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_recovery_codes_live "
+                  "ON recovery_codes(user_id, used_at, superseded_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_enrollment_tokens_table():
     """Canonical DDL for the core `enrollment_tokens` table.
 
