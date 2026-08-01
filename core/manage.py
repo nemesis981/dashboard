@@ -85,9 +85,16 @@ def reset_password(username: str):
         print(f"No such user: {username}")
         sys.exit(1)
     pw = _choose_password()
+    # password_changed_at moves WITH the hash. This is the documented lockout
+    # recovery path: without the stamp, an operator who resets here would still
+    # carry the OLD change date, and the 30-day expiry check would declare the
+    # password they just set already expired — the recovery path failing at
+    # exactly the moment it is needed.
+    now = datetime.now().isoformat(timespec="seconds")
     conn.execute(
-        "UPDATE users SET password_hash=?, failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE id=?",
-        (_hash(pw), row["id"]),
+        "UPDATE users SET password_hash=?, password_changed_at=?, failed_attempts=0, "
+        "lockout_until=NULL, lockout_tier=0 WHERE id=?",
+        (_hash(pw), now, row["id"]),
     )
     conn.commit()
     print(f"Password reset for '{username}'. Lockout cleared. You can now log in with the new password.")
@@ -101,10 +108,13 @@ def create_user(username: str, display_name: str):
         sys.exit(1)
     pw = passphrase.generate()
     now = datetime.now().isoformat(timespec="seconds")
+    # Stamped at creation, not left NULL — the expiry check reads NULL as
+    # "due for a change", which would mark a brand-new account expired on sight.
+    # Same fix as dashboard._create_user().
     conn.execute(
-        "INSERT INTO users(username, display_name, password_hash, role, is_active, created_at) "
-        "VALUES(?,?,?,?,1,?)",
-        (username, display_name, _hash(pw), "admin", now),
+        "INSERT INTO users(username, display_name, password_hash, role, is_active, "
+        "created_at, password_changed_at) VALUES(?,?,?,?,1,?,?)",
+        (username, display_name, _hash(pw), "admin", now, now),
     )
     conn.commit()
     print(f"Created user '{username}' ({display_name}), role=admin.")
