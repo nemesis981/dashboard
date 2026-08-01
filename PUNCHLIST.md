@@ -1332,3 +1332,19 @@ unrelated reason.
   existing privileged-helper pattern used elsewhere for exactly this kind of
   needs-a-privilege-the-hardened-service-doesn't-have problem), or a different mechanism
   entirely (systemd timer owned by a different unit, etc.).
+
+### [SMALL] Stale NOPASSWD sudoers rules reference the pre-relocation dashboard path
+
+Reported by Window 1, 2026-08-01. Not independently re-checked in this session — Window 2
+does not have read access to `/etc/sudoers.d/` (root-only, mode 0440) to confirm directly, so
+this is recorded as reported rather than verified against the live files.
+
+- [ ] **One or more `/etc/sudoers.d/` entries still grant `NOPASSWD` against the
+  pre-`/opt`-relocation `/home/<user>/dashboard/...` path**, not the current
+  `/opt/nemesis/...` path. Same category as the "three unrelated temporary sudoers grants"
+  already open in `docs/handoff/HANDOFF.md` §6, and the same shape as PUNCHLIST's existing
+  literal-`/home/<user>/dashboard/...`-path findings (systemd units + `vpn-dns-guard.service`,
+  above). Inert rather than actively dangerous — a rule referencing a path that no longer
+  exists cannot be exercised — but it's leftover attack surface from the 2026-07-27 `/opt`
+  relocation that should be cleaned up in the same pass as those other stale-path items rather
+  than tracked separately. Not urgent.
