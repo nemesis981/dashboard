@@ -136,12 +136,41 @@ def unlock(username: str):
         sys.exit(1)
 
 
+_MUTATING = {"reset-password", "create-user", "unlock"}
+
+
+def _require_root(cmd):
+    """Mutating commands are root-only. Read-only ones are not.
+
+    WHAT THIS IS: the documented last-resort recovery path, held to the same bar
+    as ADR 0019's console-recovery precedent. Root already implies total control
+    of this machine, so requiring it grants an attacker nothing they did not
+    already have, while removing the casual path in which anyone who happens to
+    be able to reach the database file can silently take over the admin account.
+
+    WHAT THIS IS NOT: a security boundary against a compromised dashboard. The
+    dashboard runs as `nemesis-dash`, whose PRIMARY group is `nemesis-db`, and
+    `alerts.db` is group-writable — so that process can rewrite `users` directly
+    with plain SQL and never touch this script. Closing THAT would mean moving
+    credential writes behind `nemesis-fwd` (or off this database entirely), which
+    is real architectural work, not a guard clause. Stating it here so this check
+    is not later mistaken for the thing that makes the admin account safe from an
+    application compromise. It does not.
+    """
+    if os.geteuid() != 0:
+        print(f"'{cmd}' changes account credentials and must be run as root:\n"
+              f"  sudo python3 /opt/nemesis/core/manage.py {cmd} ...")
+        sys.exit(1)
+
+
 def main():
     args = sys.argv[1:]
     if not args:
         print(USAGE)
         sys.exit(1)
     cmd = args[0]
+    if cmd in _MUTATING:
+        _require_root(cmd)
     if cmd == "list-users" and len(args) == 1:
         list_users()
     elif cmd == "reset-password" and len(args) == 2:
