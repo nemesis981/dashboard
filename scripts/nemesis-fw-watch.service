@@ -1,0 +1,76 @@
+[Unit]
+# ADR 0019 — out-of-band netfilter change detection.
+#
+# HARD PREREQUISITE for Increment 4. A table with real DROP authority that any
+# direct nft/iptables command can silently edit is a way to defeat enforcement
+# while the audit trail shows nothing happened.
+Description=Nemesis enforcement-table watcher (ADR 0019)
+Documentation=file:///opt/nemesis/docs/architecture/0019-deterministic-enforcement-point.md
+# Ordered AFTER the boot unit so the watcher never starts against a table that
+# does not exist yet and fire a spurious enforcement-loss alert every boot.
+After=nemesis-fw-enforce.service ufw.service
+Wants=nemesis-fw-enforce.service
+
+# These belong in [Unit], NOT [Service]. systemd silently IGNORES them in
+# [Service] ("Unknown key ... ignoring") — caught by systemd-analyze verify
+# 2026-08-01. Placed wrongly, the crash-loop protection below would look present
+# and do nothing, which is the worst kind of security control.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/nemesis/alert_manager/nemesis_fw_watch.py
+Environment=PYTHONPATH=/opt/nemesis/alert_manager
+EnvironmentFile=-/etc/nemesis.env
+
+# "Stop the watcher, then edit" must not be a silent bypass. Three layers,
+# because each defeats a different move:
+#   Restart=always     a killed watcher returns in seconds and RE-VERIFIES state
+#                      on startup, so anything done while it was down is caught.
+#   StartLimit*        repeated crash-looping trips a visible failed state
+#                      instead of hiding in a restart loop.
+#   heartbeat file     the watcher touches watch.heartbeat every 60s; the
+#                      existing watchdog service alerts if it goes stale. This
+#                      is the layer that catches "stopped AND told not to
+#                      restart", which the first two miss entirely.
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+# Reads the ruleset and applies re-renders, so CAP_NET_ADMIN is genuinely
+# required — this cannot run as an unprivileged service user the way dashboard
+# does. Everything else is dropped: same hardening posture as the other units,
+# designed in rather than retrofitted.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+# Required BECAUSE of the capability set above, not despite it. Dropping
+# everything except CAP_NET_ADMIN also drops CAP_DAC_OVERRIDE, so this process
+# — even running as root — is subject to ordinary permission checks.
+# /var/lib/nemesis is nemesis-dash:nemesis-db 2770, and root is neither the
+# owner nor in that group, so without this the service cannot even traverse into
+# fw-lkg. Caught on the VM 2026-08-01: the watcher crashed on startup with
+# EACCES. The supplementary group is the narrow fix; restoring CAP_DAC_OVERRIDE
+# would hand back the ability to bypass every file permission on the system.
+SupplementaryGroups=nemesis-db
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nemesis /run
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

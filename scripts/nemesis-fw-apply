@@ -46,6 +46,34 @@ snapshot() {
     fi
 }
 
+record_baseline() {
+    # The expected-state hash nemesis-fw-watch compares against. Without a
+    # baseline recorded HERE — at the moment we legitimately change the table —
+    # the watcher has nothing to distinguish our own writes from someone else's,
+    # and every legitimate apply would look like tampering.
+    #
+    # Counters are stripped before hashing. They change with every packet, so
+    # hashing the raw dump would mismatch continuously and the watcher would
+    # alert forever. What is being fingerprinted is the rule STRUCTURE.
+    local why="${1:-apply}"
+    mkdir -p "$LKG_DIR"; chmod 0700 "$LKG_DIR"
+    if have_table; then
+        local h
+        h=$(nft list table $TABLE 2>/dev/null \
+            | sed -E 's/counter packets [0-9]+ bytes [0-9]+/counter/' \
+            | sha256sum | awk '{print $1}')
+        printf '%s\n' "$h" > "$LKG_DIR/expected.sha256"
+        printf '{"ts":"%s","recorded_by":"nemesis-fw-apply","reason":"%s"}\n' \
+            "$(date '+%Y-%m-%dT%H:%M:%S')" "$why" > "$LKG_DIR/expected.meta"
+        echo "  ✓ baseline recorded for the watcher (${h:0:16}...)"
+    else
+        # Table absent is a legitimate state (nothing enforced). Record it as
+        # such rather than leaving a stale hash that would look like deletion.
+        : > "$LKG_DIR/expected.sha256"
+        echo "  ✓ baseline cleared — table absent is the recorded state"
+    fi
+}
+
 write_revert_script() {
     cat > "$LKG_DIR/revert.sh" <<'EOF'
 #!/bin/bash
@@ -114,6 +142,11 @@ cmd_confirm() {
     if systemctl is-active --quiet "$UNIT.timer"; then
         systemctl stop "$UNIT.timer"
         echo "  ✓ revert cancelled — applied ruleset kept"
+        # Baseline is recorded on CONFIRM, not on apply. Between apply and
+        # confirm the ruleset is provisional — it may still auto-revert — and
+        # baselining a state that is about to disappear would make the watcher
+        # report the revert as tampering.
+        record_baseline "operator confirmed"
         logger -t nemesis-fw "operator confirmed nemesis_enforce ruleset; revert cancelled"
     else
         echo "  (no revert pending — nothing to confirm)"
