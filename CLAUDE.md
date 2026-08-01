@@ -580,12 +580,11 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
 ### Route-level security audit (standing practice, added 2026-08-01)
 **After any change that touches `dashboard.py`, its routes, or its templates** — and before,
 if the change is large enough that pre-checking makes sense — run a route-level security
-audit in the style of the `reauth-gap-and-active-bugs-audit-2026-07-29.md` /
-`dashboard-audit-worklist-2026-08-01.md` private-mirror audits (the pass that found three
-live bugs: `db_action`'s unguarded GET, `api_backup_schedule`'s shell injection, and
-`api_vpn_action`'s unguarded GET). This does not wait to be asked for — it's a standing
-trigger on the change shape, the same way Rule 8's leak-scan triggers on "about to commit,"
-not on request.
+audit in the style of the private-mirror audits that previously found three live bugs:
+`db_action`'s unguarded GET, `api_backup_schedule`'s shell injection, and
+`api_vpn_action`'s unguarded GET (all since fixed). This does not wait to be asked for — it's
+a standing trigger on the change shape, the same way Rule 8's leak-scan triggers on "about to
+commit," not on request.
 
 **Scope, every time it runs:**
 - **Every route that mutates state:** does it require the correct credential where one is
