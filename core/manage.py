@@ -47,6 +47,86 @@ def _hash(pw: str) -> str:
     return bcrypt.hashpw(pw.encode(), bcrypt.gensalt()).decode()
 
 
+def _actor() -> str:
+    """Who ran this CLI, in a form that cannot be mistaken for a dashboard user.
+
+    `audit_log.user` holds a DASHBOARD username in every row written so far —
+    both the dashboard and nemesis-fwd record the identity they authenticated.
+    This script authenticates nobody: it is gated on root, and the operating
+    system has already decided who the caller is. Writing a bare system username
+    into that column would put two namespaces in one field, so a system account
+    sharing a name with a dashboard account would read as that dashboard user
+    having done it.
+
+    Hence the prefix — `cli:paul`, never `paul`. Same reasoning as
+    database.record_auth_failure's 'local-socket' sentinel: deliberately
+    distinguishable from what the other path writes into the same column.
+
+    SUDO_USER names the human who ran `sudo`. A direct root shell leaves no such
+    record, so that case is reported honestly as `cli:root` rather than guessed at.
+    """
+    return "cli:" + (os.environ.get("SUDO_USER") or "root")
+
+
+def _audit(action: str, target: str):
+    """Append ONE row to `audit_log` for a credential mutation. NEVER raises.
+
+    WHY THIS EXISTS. Until now the three mutating commands in this file changed
+    credentials and left no queryable record anywhere — the most privileged path
+    in the system was the only unaudited one, while the dashboard's far less
+    privileged actions (`password_change`, `recovery_codes_generated`) have been
+    audited all along. Confirmed live 2026-07-31, when the operator's own lockout
+    recoveries left no trail behind them.
+
+    BEST-EFFORT, AFTER THE FACT, and deliberately so. This is the documented SSH
+    escape hatch — the path used precisely when the dashboard is unreachable. If
+    the audit insert fails the operator must still end up unlocked, so the
+    credential change commits FIRST and a failure here costs evidence rather than
+    the recovery itself. Same stance and same reasoning as
+    database.record_auth_failure. It is not silent, though: the failure prints,
+    because this is an interactive CLI and a lost audit row on the recovery path
+    is worth seeing at the moment it happens.
+
+    COLUMN CHOICES, so they are not later read as arbitrary:
+      ts       `datetime.now().isoformat()` — matches dashboard `_audit()`, the
+               writer this most resembles (an account action, same family as
+               `password_change`). Local time, like every other auth-adjacent
+               table. NOTE: `audit_log` already holds two ts FORMATS from its two
+               existing writers; this deliberately adds no third.
+      action   prefixed `cli_` so the escape hatch stays distinguishable from the
+               same action taken through the dashboard. They are not equivalent
+               events and must never aggregate as one.
+      rule_id  the TARGET username. The table has no dedicated target column, and
+               the dashboard already uses rule_id this way for non-alert actions
+               (`agent_approve` writes a device_id). Distinct from the nemesis_fwd
+               mistake the DDL comment records — that put a request_id here, a
+               value which has its own column.
+      ip       NULL. In this table `ip` is the TARGET ADDRESS of a firewall
+               action, not the client's; a credential change has no address.
+      user     see _actor().
+
+    Raw sqlite3, like the rest of this file: init_audit_log_table() is documented
+    as running on a raw connection precisely so any process may call it with no
+    Data Manager grant. This CLI is not a loaded module, so the modules_loader
+    restriction does not apply to it.
+    """
+    try:
+        database.init_audit_log_table()
+        conn = sqlite3.connect(database.DB_PATH, timeout=5.0)
+        try:
+            conn.execute(
+                "INSERT INTO audit_log (ts, rule_id, ip, action, user) VALUES (?,?,?,?,?)",
+                (datetime.now().isoformat(), target, None, action, _actor()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"WARNING: audit_log write failed for {action}/{target}: {e}", file=sys.stderr)
+        print("         The credential change itself SUCCEEDED — only its audit "
+              "record was lost.", file=sys.stderr)
+
+
 def list_users():
     database.init_users_table()
     rows = _conn().execute(
@@ -98,6 +178,7 @@ def reset_password(username: str):
         (_hash(pw), now, row["id"]),
     )
     conn.commit()
+    _audit("cli_reset_password", username)
     print(f"Password reset for '{username}'. Lockout cleared. You can now log in with the new password.")
 
 
@@ -118,6 +199,7 @@ def create_user(username: str, display_name: str):
         (username, display_name, _hash(pw), "admin", now, now),
     )
     conn.commit()
+    _audit("cli_create_user", username)
     print(f"Created user '{username}' ({display_name}), role=admin.")
     print(f"  Passphrase: {pw}")
     print("  Save this now — it is stored only as a bcrypt hash, never in plaintext.")
@@ -131,6 +213,10 @@ def unlock(username: str):
     )
     conn.commit()
     if cur.rowcount:
+        # Inside the rowcount branch on purpose: `unlock` on a nonexistent user
+        # changes nothing, and an audit row for a no-op would be a false record
+        # of a credential action that never occurred.
+        _audit("cli_unlock", username)
         print(f"Unlocked '{username}' (failed_attempts=0, lockout cleared).")
     else:
         print(f"No such user: {username}")
