@@ -6226,7 +6226,7 @@ def firewall_db():
                 <td style="color:#ccc;text-align:right">{times_seen}</td>
                 <td style="color:#ccc">{last_seen}</td>
                 <td onclick="event.stopPropagation()">
-                    <select onchange="changeAction({aid}, this.value)">
+                    <select data-prev="{a[7]}" onchange="changeAction({aid}, this)">
                         <option {"selected" if a[7]=="pending" else ""}>pending</option>
                         <option {"selected" if a[7]=="ignore" else ""}>ignore</option>
                         <option {"selected" if a[7]=="block" else ""}>block</option>
@@ -6263,9 +6263,40 @@ def firewall_db():
             return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
         }}
 
-        function changeAction(id, action) {{
-            fetch("/api/db-action/" + id + "/" + action)
-                .then(r => r.json()).then(d => console.log(d));
+        function changeAction(id, sel) {{
+            var action = sel.value;
+            var prev = sel.getAttribute("data-prev") || "pending";
+            function send(pw) {{
+                return fetch("/api/db-action/" + id + "/" + action, {{
+                    method: "POST",
+                    headers: {{"Content-Type": "application/json"}},
+                    body: JSON.stringify(pw ? {{password: pw}} : {{}})
+                }})
+                    .then(function(r) {{ return r.json(); }})
+                    .then(function(d) {{
+                        if (d && d.error) {{
+                            /* Nothing changed server-side — do not leave the
+                               select showing a state the database does not hold. */
+                            if (window.fwHandleError) fwHandleError(d, d.error);
+                            else alert(d.error);
+                            sel.value = prev;
+                            return;
+                        }}
+                        sel.setAttribute("data-prev", action);
+                    }})
+                    .catch(function(e) {{ alert("Error: " + e); sel.value = prev; }});
+            }}
+            /* 'block' applies a real ufw rule through nemesis-fwd, so it needs
+               the admin credential — same prompt every other privileged action
+               uses. Cancelling must revert the select rather than imply a block. */
+            if (action === "block") {{
+                fwPrompt("block this address").then(function(pw) {{
+                    if (!pw) {{ sel.value = prev; return; }}
+                    send(pw);
+                }});
+            }} else {{
+                send(null);
+            }}
         }}
 
         // Apply tier-appropriate tooltip text to rule name cells.
@@ -6509,8 +6540,44 @@ def firewall_db():
     except Exception as e:
         return str(e)
 
-@app.route("/api/db-action/<int:alert_id>/<action>")
+#: The only values this endpoint may write. Exactly the options the UI's select
+#: offers — an allowlist rather than free text, so `action` cannot become an
+#: arbitrary string in both `alerts` and `audit_log`.
+_ALERT_ACTIONS = {"pending", "ignore", "block", "monitor"}
+
+
+@app.route("/api/db-action/<int:alert_id>/<action>", methods=["POST"])
 def db_action(alert_id, action):
+    """Set an alert's action. POST-only, allowlisted, and credential-gated.
+
+    This used to be a bare GET that took any string and wrote it straight into
+    `alerts.action` and `audit_log`. Two problems, one of which the surrounding
+    page already documents:
+
+      1. A state-changing write reachable by URL is CSRF-shaped — an <img> tag
+         was enough. The Unblock control ~40 lines above is a LINK rather than an
+         action for exactly this reason ("a privileged firewall change must never
+         be triggerable by following a URL"). The select beside it did not follow
+         the same rule.
+      2. Writing action='block' here recorded a block while applying no firewall
+         rule at all. The audit trail then asserted a protection that did not
+         exist — worse than no record, because it reads as evidence.
+
+    So `block` now goes through the SAME path as its sibling set_action(): the
+    real ufw rule, via nemesis-fwd, with the admin credential the helper itself
+    verifies. If the rule cannot be applied, nothing is recorded as blocked.
+
+    The firewall call happens BEFORE any write transaction is opened here, and
+    the read connection is closed first — same ordering, and the same reason, as
+    set_action(): nemesis-fwd writes its own audit row into this database, and
+    holding a transaction across the helper call made that write hit
+    SQLITE_BUSY, silently losing the helper-side audit record.
+
+    Non-block actions need no credential, matching set_action() exactly — they
+    change a label, not the firewall.
+    """
+    if action not in _ALERT_ACTIONS:
+        return jsonify({"error": "invalid action"}), 400
     try:
         conn = _dm_conn()   # §9 batch 4 (db_action)
         c = conn.cursor()
@@ -6518,6 +6585,16 @@ def db_action(alert_id, action):
         row = c.fetchone()
         rule_id = row[0] if row else None
         src_ip = row[1] if row else None
+        conn.close()                      # closed BEFORE the helper call
+
+        if action == "block" and src_ip:
+            try:
+                ufw_deny_append(src_ip, _actor(), _fw_session_id(), _fw_credential())
+            except FirewallError as exc:
+                return _fw_error_response(exc)
+
+        conn = _dm_conn()
+        c = conn.cursor()
         c.execute("UPDATE alerts SET action=? WHERE id=?", (action, alert_id))
         conn.commit()
         conn.close()
