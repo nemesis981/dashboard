@@ -1265,9 +1265,16 @@ decision — recorded here so it isn't lost.
 ### [SMALL] Out-of-band credential changes leave no audit trail
 Found 2026-07-31 during a live operator lockout, while closing out the recovery-code work.
 
-- [ ] **`core/manage.py` writes ZERO `audit_log` rows** (`grep -cE "audit_log|_audit\(|login_events"`
-  returns 0). `reset-password`, `create-user` and `unlock` all mutate credentials or lockout
-  state and record nothing anywhere. The same is true of a direct SQL edit.
+- [x] **DONE 2026-08-01 (Window 1; uncommitted, held for operator review as of this entry).**
+  `core/manage.py` added `_actor()`/`_audit()` helpers and wired them into `reset_password`,
+  `create_user`, and `unlock` — each now inserts an `audit_log` row (`cli_reset_password` /
+  `cli_create_user` / `cli_unlock`) attributed via `SUDO_USER` (prefixed `cli:` so it can never
+  be mistaken for a dashboard username in the same column), best-effort/non-blocking so a
+  failed audit write can never cost the operator the credential recovery itself. Originally
+  reported below (verbatim, kept for context): `core/manage.py` wrote ZERO `audit_log` rows
+  (`grep -cE "audit_log|_audit\(|login_events"` returned 0). `reset-password`, `create-user`
+  and `unlock` all mutated credentials or lockout state and recorded nothing anywhere. The same
+  was true of a direct SQL edit.
 
   **Why it matters more than it looks.** Everything the dashboard does is now attributed:
   `password_change`, `login_recovery_code_used`, `recovery_codes_generated`, plus
@@ -1279,12 +1286,6 @@ Found 2026-07-31 during a live operator lockout, while closing out the recovery-
   Confirmed live: two lockout clears performed during the 2026-07-31 incident produced no
   audit rows at all. Their only trace is the session worklog, which is not a security record.
 
-  Fix is small — `manage.py` already imports `database`; it needs an insert into `audit_log`
-  with `action` (`cli_reset_password` / `cli_unlock` / `cli_create_user`) and the invoking
-  identity. Note the Rule-11 documented exception applies: `audit_log` has no free-text
-  column, so `user` should carry the real invoking account (`SUDO_USER` where present, else
-  the euid's name) rather than a label.
-
 - [ ] **Don't run `manage.py` as root while the WAL sidecars are absent.** `alerts.db` is
   currently checkpointed with no `-wal`/`-shm` present. A root process opening the database
   would create them **root-owned**, after which `nemesis-dash` could no longer write and the
@@ -1292,3 +1293,24 @@ Found 2026-07-31 during a live operator lockout, while closing out the recovery-
   prefer the recovery-code path, or chown the sidecars afterwards. This is an unintended
   consequence of the root-only guard added the same evening — the guard is right, the
   interaction was not foreseen.
+
+### [SMALL] Two follow-ups flagged by Window 1 during the recovery-code-email build (2026-08-01)
+
+- [ ] **Migrate the existing lockout-tier email onto `_notify_email_async`.** `dashboard.py`
+  gained `_notify_email_async()` (a daemon-thread wrapper around the existing, blocking
+  `_notify_email()`) as part of the recovery-code-consumption alert (commit `66715af`). The
+  existing lockout-tier notification at `dashboard.py:512` (inside `_register_credential_failure`)
+  still calls the blocking `_notify_email()` directly, so it can still stall a login/change-
+  password/idle-unlock response for up to 30s on an SMTP hang. Deliberately NOT folded into the
+  recovery-code-email commit — a behavior change to a working path belongs in its own commit,
+  per Window 1's note in `_notify_email_async`'s docstring. Small, mechanical: swap the one call
+  site, verify the lockout email still sends (real SMTP test or timing check, not assumed).
+
+- [ ] **Testability gap: `_SECRET_KEY_PATH` resolves against `nemesis_paths.DATA_DIR` (the
+  constant), not `data_dir()` (the function).** Flagged by Window 1 while working the
+  idle-lock/recovery-email auth code. Because it reads the module-level constant rather than
+  calling the function, it ignores a `NEMESIS_DB_PATH` override — meaning a test harness or
+  throwaway-DB verification run that sets `NEMESIS_DB_PATH` to redirect the database still has
+  the Flask secret key resolve against the real `DATA_DIR`, not the overridden one. Worth
+  checking whether other `_HERE`/`nemesis_paths`-adjacent constants in `dashboard.py` have the
+  same constant-vs-function mismatch — this may not be the only site.
