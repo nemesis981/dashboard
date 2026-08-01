@@ -2,10 +2,12 @@
 
 - **Status:** In progress. Increments 1–2 (priority placement, lockout failsafe)
   **built and proven live**. Increment 3 (derived observe-only ruleset) **built and
-  registering real traffic**; its one remaining proof — a counter-agreement
-  comparison against ufw's own counters — **not yet started** as of 2026-07-31.
-  Increment 4 (cutover to real enforcement authority) **not started**, gated on
-  Increment 3. Design decided 2026-07-29 from measured evidence; code landed
+  registering real traffic**, but its counter-agreement proof was **attempted twice
+  on 2026-08-01 and remains UNPROVEN** — both attempts were inconclusive, not
+  passing or failing (see "Status / next" for why). Increment 4 (cutover to real
+  enforcement authority) **not started**, gated on Increment 3's proof AND, as of
+  2026-08-01, on the netlink out-of-band-change watcher as a hard prerequisite, not
+  a follow-up. Design decided 2026-07-29 from measured evidence; code landed
   2026-07-30 (`19d9b5c`, `nemesis-fw-apply` + `nemesis-fw-render`, pushed to
   `origin/main`). See "Status / next" below for the full breakdown.
 - **Date:** 2026-07-29
@@ -109,15 +111,16 @@ private writeup referenced above.
 **Urgency downgraded 2026-07-30** (see addendum) — this is about priority, not about
 whether the work exists. It does: `nemesis-fw-apply` and `nemesis-fw-render`
 (`19d9b5c`, 2026-07-30, pushed) implement the table and its failsafe. Per-increment
-state, as of 2026-07-31:
+state, as of 2026-08-01:
 
 | Increment | Status |
 |---|---|
 | 1 — priority placement | **Proven.** Table registers at the intended priority, ahead of every other chain observed on this host, verified live. |
 | 2 — lockout failsafe | **Proven.** Apply-then-confirm with auto-revert; the failsafe has been watched firing unattended, not just written. |
-| 3 — derived observe-only rules | **Built and registering real traffic**, but the one thing this increment exists to prove — that the table's observe-only verdicts agree with ufw's actual DROP/ACCEPT decisions over real traffic, measured via both sides' counters in a single command — has **not yet been run**. Not "in progress": no attempt is underway as of this writing. |
-| 4 — cutover to real enforcement authority | **Not started.** Explicitly gated on Increment 3's agreement comparison — cutover before that measurement would mean trusting the table's verdicts before anyone has checked they match reality. |
+| 3 — derived observe-only rules | **Built and registering real traffic, but UNPROVEN — attempted twice on 2026-08-01, both inconclusive rather than pass or fail.** Attempt 1: zero per-IP blocks occurred during the measurement window, so there was nothing for the table's counters to agree or disagree with. Attempt 2: a real block existed, but the target sent zero packets against it — both sides read 0, which is not the same thing as agreement; a comparison needs actual traffic on both sides to mean anything. The counter-agreement proof this increment exists to deliver has still not actually been run against a case with real traffic on both sides. |
+| 4 — cutover to real enforcement authority | **Not started.** Gated on Increment 3's agreement comparison actually succeeding — cutover before that would mean trusting the table's verdicts before anyone has checked they match reality. **As of 2026-08-01, also gated on the netlink out-of-band-change watcher as a hard prerequisite, not a follow-up item.** The watcher unifies two jobs on one `nft` monitor stream rather than building them separately: distinguishing "ufw's own rules changed, so the derived table needs a re-render" from "the enforcement table itself changed unexpectedly" — the second case must alert, not silently self-repair, since a silent auto-repair on a table carrying real DROP authority would hide exactly the kind of tampering or drift an operator most needs to see. |
 
-Sequenced after this ADR: finish Increment 3's proof, cut over (Increment 4), then the
-relay core, then the inbound reverse relay. See the private writeup for the full
+Sequenced after this ADR: finish Increment 3's proof (a real, non-degenerate
+counter-agreement measurement), build the netlink watcher, cut over (Increment 4), then
+the relay core, then the inbound reverse relay. See the private writeup for the full
 evidence base, the specific design, and open questions.
