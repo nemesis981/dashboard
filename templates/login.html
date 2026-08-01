@@ -36,8 +36,11 @@
       <input type="password" id="password" name="password" autocomplete="current-password">
       <button type="submit">Log In</button>
     </form>
+    <p class="login-hint" style="margin-top:16px">
+      <a href="/login/recovery" style="color:#00d4ff;text-decoration:none">Use a recovery code instead</a>
+    </p>
     <p class="login-hint">
-      Forgot your password? Access your Nemesis box via SSH and run:<br>
+      No recovery codes either? Access your Nemesis box via SSH and run:<br>
       <code>sudo python3 /opt/nemesis/core/manage.py reset-password &lt;username&gt;</code><br>
       Requires root &mdash; it changes account credentials.
     </p>
