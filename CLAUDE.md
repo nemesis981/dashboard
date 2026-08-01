@@ -477,13 +477,15 @@ at `~/work/nemesis-internal/handoff/`, `~/work/nemesis-internal/briefing/`, and
   output is not exempt" clause) — no extra sanitization step needed for the copy itself.
 - The mirror directory follows whatever version-control state `~/work/nemesis-internal`
   already has — copying files here does not by itself commit them there.
-- **Why this exists (added 2026-08-01):** `~/work/nemesis-internal` is what chat-Claude can
-  actually read as rendered pages — `/opt/nemesis` itself sits behind filesystem restrictions
-  chat-Claude can't reach directly, which otherwise forces pasting doc content into chat by
-  hand. The mirror is what makes handoff/briefing/audit docs consumable there without a
-  copy-paste round-trip.
+- **Why this exists (added 2026-08-01):** direct chat attachments from `/opt/nemesis`
+  intermittently arrive as 0-byte files — a known issue, likely browser/snap sandboxing or a
+  stale-handle race, worked around by staging copies under `$HOME` first. Files under
+  `~/work/nemesis-internal/` are reachable and upload cleanly, which is why the mirror
+  pattern exists at all and why it's worth extending to any directory the operator reads from
+  day to day — not just handoff/briefing.
 - Audits mirroring added 2026-08-01, prompted by that session's roadmap-state-audit refresh;
-  brought under the same standing rule as handoff/briefing rather than left as a one-off ask.
+  brought under the same standing rule as handoff/briefing (permanent, not a one-time copy) so
+  future sessions mirror automatically without being asked.
 
 ---
 
