@@ -46,7 +46,26 @@
   }
 
   // Fire immediately on load, then every 30s.
+  //
+  // The interval is wrapped so its fetch is marked as a BACKGROUND poll and does
+  // not count as human presence. Without this the header widget alone — present
+  // on the dashboard page and firing every 30s — keeps the session alive
+  // indefinitely and idle-lock can never trigger there. See
+  // static/nemesis-activity.js.
+  //
+  // The first paint below is deliberately NOT wrapped: a page load IS a human
+  // arriving, and should refresh the clock.
+  //
+  // Guarded rather than assuming nemPoll exists, so this file stays usable on a
+  // page without the shim — but it warns instead of degrading silently, because
+  // a silent fallback is exactly how this defect went unnoticed the first time.
   if (document.readyState !== 'loading') poll();
   else document.addEventListener('DOMContentLoaded', poll);
-  setInterval(poll, 30000);
+  setInterval((window.nemPoll || function (fn) {
+    if (window.console && console.warn) {
+      console.warn('[header-status] window.nemPoll missing — this poll will ' +
+                   'count as user activity and can defeat idle-lock');
+    }
+    return fn;
+  })(poll), 30000);
 })();

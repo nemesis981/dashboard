@@ -440,7 +440,17 @@ def _card_js() -> str:
       .catch(function() { if (msg) { msg.style.color = '#ff4444'; msg.textContent = 'save failed'; } });
   };
 
-  setInterval(window._diagRefresh, 15000);
+  // Marked as a BACKGROUND poll so it does not read as human presence.
+  // This card renders into the main dashboard page, and at 15s it is shorter
+  // than any sane idle timeout — unwrapped, this single loop is enough on its
+  // own to stop that page ever idle-locking. See static/nemesis-activity.js.
+  setInterval((window.nemPoll || function (fn) {
+    if (window.console && console.warn) {
+      console.warn('[diagnostics] window.nemPoll missing — this poll will ' +
+                   'count as user activity and can defeat idle-lock');
+    }
+    return fn;
+  })(window._diagRefresh), 15000);
 })();
 """
 
