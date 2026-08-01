@@ -96,7 +96,7 @@ sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 import database          # module handle: canonical DDL owner (init_audit_log_table)
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
-                      init_enrollment_tokens_table)
+                      init_enrollment_tokens_table, init_recovery_codes_table)
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append,
@@ -115,6 +115,7 @@ init_alerts_db()
 hw_monitor.init_db()
 init_users_table()
 init_login_events_table()
+init_recovery_codes_table()
 init_enrollment_tokens_table()
 # Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
 # device reads in the routes. Canonical DDL in database.init_devices_table();
@@ -304,7 +305,7 @@ _LOCKOUT_TIERS = [
     (10, 60, "CRITICAL", True),
 ]
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
-_AUTH_EXEMPT   = {"setup", "login", "logout", "api_passphrase_generate", "static",
+_AUTH_EXEMPT   = {"setup", "login", "login_recovery", "logout", "api_passphrase_generate", "static",
                   "install_windows_download", "install_windows_exe", "install_windows_zip",
                   "api_health"}
 
@@ -314,10 +315,147 @@ def _hash_password(pw: str) -> str:
 
 
 def _check_password(pw: str, pw_hash: str) -> bool:
+    """Verify a password, tolerating whitespace a paste may have carried in.
+
+    RAW IS TRIED FIRST, and that order is not cosmetic. Some accounts already
+    have padding baked into their hash from before passwords were normalised on
+    the way in; checking raw first means those keep working exactly as they did.
+    Only if raw fails do we retry the stripped form, which rescues the far more
+    common case: a clean stored password and a paste that dragged in a trailing
+    newline from a password manager or text file.
+
+    Stripping the input FIRST would have inverted this into a regression —
+    a padded stored hash would stop matching its own correct password.
+
+    The equivalence this admits is trivial (a password and its whitespace
+    variants), and it costs one extra bcrypt (~157ms) only on an attempt that
+    contained whitespace and already failed.
+    """
     try:
-        return bcrypt.checkpw(pw.encode(), (pw_hash or "").encode())
-    except Exception:
+        if bcrypt.checkpw((pw or "").encode(), (pw_hash or "").encode()):
+            return True
+        stripped = (pw or "").strip()
+        if stripped and stripped != pw:
+            return bcrypt.checkpw(stripped.encode(), (pw_hash or "").encode())
         return False
+    except (ValueError, TypeError):
+        return False
+
+# ── Recovery codes ────────────────────────────────────────────────────────────
+# Ambiguous glyphs removed: no 0/O, no 1/I/L. These codes get written down on
+# paper and typed back months later under stress, which is exactly the condition
+# in which "was that a one or an ell?" turns a valid code into a failed attempt
+# that also burns a slice of the lockout budget.
+_RECOVERY_ALPHABET   = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
+_RECOVERY_GROUPS     = 4
+_RECOVERY_GROUP_LEN  = 4
+_RECOVERY_BATCH_SIZE = 10
+
+
+def _generate_recovery_code() -> str:
+    """One code, grouped for transcription: XXXX-XXXX-XXXX-XXXX.
+
+    16 chars from a 31-symbol alphabet is ~79 bits. Far past brute force, but the
+    real defence is that attempts are rate-limited on the shared lockout budget —
+    the entropy is what makes an OFFLINE guess against a stolen hash pointless.
+    """
+    pick = "".join(secrets.choice(_RECOVERY_ALPHABET)
+                   for _ in range(_RECOVERY_GROUPS * _RECOVERY_GROUP_LEN))
+    return "-".join(pick[i:i + _RECOVERY_GROUP_LEN]
+                    for i in range(0, len(pick), _RECOVERY_GROUP_LEN))
+
+
+def _normalize_recovery_code(submitted: str) -> str:
+    """Accept what a human types; compare what the machine stored.
+
+    Dashes, spaces and case are presentation, not secret. Someone reading a code
+    off paper may add spaces, drop dashes, or use lowercase, and none of that
+    should be the difference between recovering an account and not.
+    """
+    return "".join(ch for ch in (submitted or "").upper() if ch.isalnum())
+
+
+def _recovery_code_storage_form(code: str) -> bytes:
+    """Hash the NORMALIZED form so display formatting can change without
+    invalidating every code already printed and stored in a drawer."""
+    return _normalize_recovery_code(code).encode()
+
+
+def generate_recovery_batch(user_id: int, actor=None):
+    """Issue a fresh batch, invalidating any previous one. Returns plaintext codes.
+
+    This is the ONLY moment the plaintext exists — the caller must display it,
+    because it cannot be recovered afterwards. Only bcrypt hashes are stored.
+
+    Supersede-then-insert runs in ONE transaction, deliberately. The failure this
+    prevents is the dangerous ordering: if superseding committed and the insert
+    then failed, the operator would be left with ZERO valid codes and no warning
+    — strictly worse than the old batch they were replacing. Either the swap
+    happens whole or the previous batch stays live.
+    """
+    codes = [_generate_recovery_code() for _ in range(_RECOVERY_BATCH_SIZE)]
+    now      = datetime.now().isoformat(timespec="seconds")
+    batch_id = secrets.token_hex(8)
+    hashes   = [bcrypt.hashpw(_recovery_code_storage_form(c), bcrypt.gensalt()).decode()
+                for c in codes]                     # ~1.6s; done before the txn opens
+    conn = _users_conn()
+    try:
+        with conn:                                   # commit on success, rollback on raise
+            conn.execute(
+                "UPDATE recovery_codes SET superseded_at=? "
+                "WHERE user_id=? AND used_at IS NULL AND superseded_at IS NULL",
+                (now, user_id))
+            conn.executemany(
+                "INSERT INTO recovery_codes(user_id, code_hash, batch_id, created_at, "
+                "created_actor) VALUES(?,?,?,?,?)",
+                [(user_id, h, batch_id, now, actor) for h in hashes])
+    finally:
+        conn.close()
+    return codes
+
+
+def recovery_codes_remaining(user_id: int) -> int:
+    conn = _users_conn()
+    try:
+        return conn.execute(
+            "SELECT count(*) FROM recovery_codes WHERE user_id=? "
+            "AND used_at IS NULL AND superseded_at IS NULL", (user_id,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def consume_recovery_code(user_id: int, submitted: str, ip=None) -> bool:
+    """Verify and SPEND a code. True only if it was live and now is not.
+
+    Single use is enforced by the UPDATE's own WHERE clause, not by a
+    check-then-write: the row is only marked if it is still unspent at the
+    moment of writing, so two simultaneous submissions of the same code cannot
+    both succeed (`cur.rowcount` decides the winner). Guessing at concurrency
+    here would be a real bug — the dashboard already runs multiple writers.
+    """
+    normalized = _recovery_code_storage_form(submitted)
+    if not normalized:
+        return False
+    conn = _users_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, code_hash FROM recovery_codes WHERE user_id=? "
+            "AND used_at IS NULL AND superseded_at IS NULL ORDER BY id", (user_id,)).fetchall()
+        for r in rows:
+            try:
+                if not bcrypt.checkpw(normalized, r["code_hash"].encode()):
+                    continue
+            except (ValueError, TypeError):
+                continue                              # corrupt hash: skip, never crash recovery
+            cur = conn.execute(
+                "UPDATE recovery_codes SET used_at=?, used_ip=? "
+                "WHERE id=? AND used_at IS NULL AND superseded_at IS NULL",
+                (datetime.now().isoformat(timespec="seconds"), ip, r["id"]))
+            conn.commit()
+            return cur.rowcount == 1
+        return False
+    finally:
+        conn.close()
 
 
 def _register_credential_failure(row, username, ip, ua,
@@ -382,11 +520,19 @@ def _register_credential_failure(row, username, ip, ua,
 
 
 def _set_password(user_id: int, new_password: str):
-    """THE single place a password is changed. Returns (ok, reason).
+    """The single place a password is changed IN THE DASHBOARD. Returns (ok, reason).
 
-    Every path that sets a password — the authenticated change form, and later
-    the recovery-code flow — goes through here, so policy cannot drift between
-    them. A second setter is how one path ends up skipping validation.
+    Every in-app path — the authenticated change form, the recovery-code flow —
+    goes through here, so policy cannot drift between them. A second setter is
+    how one path ends up skipping validation.
+
+    NOT the only writer in the repo, and the comment says so deliberately rather
+    than asserting a tidier invariant than actually holds: `core/manage.py`
+    (reset-password / create-user) is a separate root-only process that must keep
+    working when the dashboard does not, so it writes the same columns directly.
+    Both were audited on 2026-07-31 and BOTH were missing `password_changed_at` —
+    which is exactly the drift this docstring exists to warn about. If a third
+    writer ever appears, fold it in here or fix it there; do not leave it silent.
 
     Three things happen together, deliberately in one statement:
 
@@ -404,7 +550,11 @@ def _set_password(user_id: int, new_password: str):
     Validation is applied here rather than trusted from the caller — the same
     reasoning as the helper validating write_env server-side.
     """
-    ok, reason = passphrase.validate(new_password or "")
+    # Normalise BEFORE validating, so the value that is checked is byte-for-byte
+    # the value that gets hashed. Validating the raw form and hashing a different
+    # one is how a password passes the policy and then cannot be typed back in.
+    new_password = (new_password or "").strip()
+    ok, reason = passphrase.validate(new_password)
     if not ok:
         return False, reason
     conn = _users_conn()
@@ -412,7 +562,8 @@ def _set_password(user_id: int, new_password: str):
         now = datetime.now().isoformat(timespec="seconds")
         conn.execute(
             "UPDATE users SET password_hash=?, password_changed_at=?, "
-            "failed_attempts=0, lockout_until=NULL, lockout_tier=0 WHERE id=?",
+            "failed_attempts=0, lockout_until=NULL, lockout_tier=0, "
+            "recovery_grace_until=NULL WHERE id=?",
             (_hash_password(new_password), now, user_id),
         )
         conn.commit()
@@ -622,6 +773,16 @@ def _enforce_setup_and_auth():
             nxt = request.full_path if request.query_string else request.path
         return redirect(url_for("login", next=nxt) if nxt else url_for("login"))
 
+    # Authenticated but the password is past its maximum age: confine the session
+    # to changing it. NOT a rejection — they are logged in and stay logged in.
+    if ep not in _EXPIRED_ALLOWED:
+        try:
+            if _password_expired(_load_user_row("id", current_user.id)):
+                return redirect(url_for("change_password"))
+        except Exception:
+            # A failure to evaluate the policy must not take the dashboard down.
+            auth_log.exception("auth: password-expiry check failed")
+
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
 @app.route("/api/passphrase/generate")
@@ -639,8 +800,8 @@ def setup():
 
     username     = (request.form.get("username") or "").strip().lower()
     display_name = (request.form.get("display_name") or "").strip()
-    password     = request.form.get("password") or ""
-    confirm      = request.form.get("confirm_password") or ""
+    password     = (request.form.get("password") or "").strip()
+    confirm      = (request.form.get("confirm_password") or "").strip()
 
     errors = []
     if not _USERNAME_RE.match(username):
@@ -663,7 +824,27 @@ def setup():
     row = _load_user_row("id", uid)
     if row:
         login_user(User(row))
-    return redirect(url_for("dashboard"))
+
+    # Ordering is deliberate: account -> batch -> display, never the reverse.
+    # Generating first and creating the account afterwards would mean a failure
+    # here costs the operator the account they just set up. This way the account
+    # always survives, and a missing batch is recoverable — regenerating issues a
+    # fresh one and retires whatever came before, so a half-finished batch cannot
+    # leave anything stale behind.
+    try:
+        codes = generate_recovery_batch(uid)
+    except Exception:
+        auth_log.exception("auth: recovery-code generation failed at setup for uid=%s", uid)
+        _audit("recovery_codes_generate_failed", ip=request.remote_addr or "unknown")
+        # Do NOT block the operator: they have a working account and can issue a
+        # set from Settings. Silently redirecting would hide it, so say it plainly.
+        return render_template("recovery_codes.html", codes=[], first_run=True,
+                               generated_at="—", error=(
+                                   "Your account was created, but recovery codes could not be "
+                                   "generated. You can issue a set from Settings -> Recovery Codes."))
+    _audit("recovery_codes_generated", ip=request.remote_addr or "unknown")
+    return render_template("recovery_codes.html", codes=codes, first_run=True,
+                           generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
 @app.route("/login", methods=["GET", "POST"])
@@ -671,7 +852,9 @@ def login():
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
     if request.method == "GET":
-        return render_template("login.html", next=_safe_next(request.args.get("next")))
+        return render_template("login.html", next=_safe_next(request.args.get("next")),
+                               notice=("Password changed. Sign in with your new password."
+                                       if request.args.get("changed") else None))
 
     username = (request.form.get("username") or "").strip().lower()
     password = request.form.get("password") or ""
@@ -762,14 +945,23 @@ def change_password():
         logout_user()
         return redirect(url_for("login"))
 
+    recovery = _recovery_grace_active(row)
     if request.method == "GET":
-        return render_template("change_password.html", username=row["username"])
+        return render_template("change_password.html", username=row["username"],
+                               recovery=recovery,
+                               expired=_password_expired(row),
+                               age_days=_password_age_days(row),
+                               remaining_codes=(recovery_codes_remaining(row["id"])
+                                                if recovery else None))
 
     ip  = request.remote_addr or "unknown"   # same derivation as login()
     ua  = request.headers.get("User-Agent", "")
     cur = request.form.get("current_password") or ""
-    new = request.form.get("new_password") or ""
-    cfm = request.form.get("confirm_password") or ""
+    # Stripped here too: otherwise "do these match?" could disagree with what is
+    # actually stored, and the mismatch error would name a difference the user
+    # cannot see.
+    new = (request.form.get("new_password") or "").strip()
+    cfm = (request.form.get("confirm_password") or "").strip()
 
     # An account already locked out cannot change its way out of the lockout.
     if row["lockout_until"]:
@@ -780,7 +972,12 @@ def change_password():
         except (TypeError, ValueError):
             pass
 
-    if not _check_password(cur, row["password_hash"]):
+    # A session that just signed in with a recovery code is exempt from the
+    # current-password requirement — demonstrably it does not have one. The code
+    # itself was the proof of control, and it was single-use and already spent.
+    # The exemption is time-boxed (see _RECOVERY_GRACE_SECONDS) so a session
+    # stolen later in the day does not inherit it.
+    if not recovery and not _check_password(cur, row["password_hash"]):
         locked, mins, _t = _register_credential_failure(
             row, row["username"], ip, ua,
             reason="bad_current_password", source="password-change",
@@ -794,23 +991,281 @@ def change_password():
 
     if new != cfm:
         return render_template("change_password.html", username=row["username"],
+                               recovery=recovery,
+                               remaining_codes=(recovery_codes_remaining(row["id"])
+                                                if recovery else None),
                                error="New passwords do not match.")
-    if new == cur:
+    if not recovery and new == cur:
         return render_template("change_password.html", username=row["username"],
                                error="New password must be different from the current one.")
+    if recovery and _check_password(new, row["password_hash"]):
+        # Recovery gives no `cur` to compare against, so compare against the hash:
+        # re-setting the forgotten password would leave them exactly as stuck.
+        return render_template("change_password.html", username=row["username"],
+                               recovery=True,
+                               remaining_codes=recovery_codes_remaining(row["id"]),
+                               error="New password must be different from your current one.")
 
     ok, reason = _set_password(row["id"], new)
     if not ok:
         return render_template("change_password.html", username=row["username"],
+                               recovery=recovery,
+                               remaining_codes=(recovery_codes_remaining(row["id"])
+                                                if recovery else None),
                                error=reason or "Password does not meet requirements.")
 
     # audit_log, not login_events: login_events records attempts to AUTHENTICATE.
     # A completed password change is an administrative action on the account, and
     # belongs with the other attributed state changes.
+    session.pop("pw_recovery_at", None)   # consumed; not left open for the session
     _audit("password_change", ip=ip)
-    auth_log.info("auth: password changed for %s from %s", row["username"], ip)
-    return render_template("change_password.html", username=row["username"],
-                           success="Password changed.")
+    auth_log.info("auth: password changed for %s from %s%s", row["username"], ip,
+                  " (via recovery code)" if recovery else "")
+    # End the session and send them to the login screen.
+    #
+    # Re-rendering the form here was the bug: the page came back looking almost
+    # unchanged (banner aside), which reads as "nothing happened" — worst of all
+    # on the recovery path, where the person has just clawed their way back in
+    # and is the least oriented user in the system.
+    #
+    # Re-authenticating is the deliberate choice over bouncing to the dashboard.
+    # It makes the operator TYPE the new password once, immediately, while the
+    # tab that generated it is still open — so a typo, a mangled paste, or a
+    # password manager that saved the old value surfaces now rather than at the
+    # next login when the old one is gone for good. It also drops the pre-change
+    # session rather than carrying it forward.
+    logout_user()
+    return redirect(url_for("login", changed=1))
+
+
+@app.route("/account/recovery-codes", methods=["GET", "POST"])
+@login_required
+def recovery_codes_page():
+    """Show how many codes remain, and issue a fresh set.
+
+    Regenerating requires the current password for the same reason changing it
+    does: a hijacked session that could silently rotate the recovery codes would
+    strip the real owner of their way back in, quietly, with the account still
+    looking normal. It is also throttled on the shared lockout budget, so this
+    form cannot be used as a password oracle either.
+
+    The remaining COUNT is shown, never the codes — they exist in plaintext only
+    on the page that issued them.
+    """
+    row = _load_user_row("id", current_user.id)
+    if not row:
+        logout_user()
+        return redirect(url_for("login"))
+
+    remaining = recovery_codes_remaining(row["id"])
+    if request.method == "GET":
+        return render_template("recovery_codes_manage.html",
+                               username=row["username"], remaining=remaining)
+
+    ip  = request.remote_addr or "unknown"
+    ua  = request.headers.get("User-Agent", "")
+    cur = request.form.get("current_password") or ""
+
+    if row["lockout_until"]:
+        try:
+            if datetime.fromisoformat(row["lockout_until"]) > datetime.now():
+                return render_template("recovery_codes_manage.html",
+                                       username=row["username"], remaining=remaining,
+                                       error="Account is locked out. Try again later.")
+        except (TypeError, ValueError):
+            pass
+
+    if not _check_password(cur, row["password_hash"]):
+        locked, mins, _t = _register_credential_failure(
+            row, row["username"], ip, ua,
+            reason="bad_password", source="recovery-codes", action="regenerate")
+        _audit("recovery_codes_regenerate_denied", ip=ip)
+        msg = (f"Too many failed attempts. Account locked for {mins} minutes."
+               if locked else "Password is incorrect.")
+        return render_template("recovery_codes_manage.html", username=row["username"],
+                               remaining=remaining, error=msg)
+
+    try:
+        codes = generate_recovery_batch(row["id"])
+    except Exception:
+        auth_log.exception("auth: recovery-code regeneration failed for uid=%s", row["id"])
+        _audit("recovery_codes_generate_failed", ip=ip)
+        return render_template("recovery_codes_manage.html", username=row["username"],
+                               remaining=remaining,
+                               error="Could not issue a new set. Your existing codes are unchanged.")
+
+    _audit("recovery_codes_generated", ip=ip)
+    auth_log.info("auth: recovery codes regenerated for %s from %s", row["username"], ip)
+    return render_template("recovery_codes.html", codes=codes, first_run=False,
+                           generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+
+# How long a recovery-code sign-in may set a new password without supplying the
+# old one. Bounded deliberately: the exemption exists because someone who used a
+# code demonstrably does NOT have the password, but leaving it open for the life
+# of the session would mean a session stolen hours later inherits the exemption.
+_RECOVERY_GRACE_SECONDS = 15 * 60
+
+
+# Password age policy. Expiry NEVER rejects the credential — see _password_expired.
+_PASSWORD_MAX_AGE_DAYS = 30
+_PASSWORD_WARN_DAYS    = 7
+# Endpoints still reachable while a password is expired. Deliberately tiny: enough
+# to change the password (and to leave), nothing else.
+_EXPIRED_ALLOWED = {"change_password", "logout", "login", "setup", "static",
+                    "api_passphrase_generate", "api_health"}
+
+
+def _password_age_days(row):
+    """Days since the password was last set, or None if unknowable."""
+    if not row:
+        return None
+    changed = row["password_changed_at"] if "password_changed_at" in row.keys() else None
+    if not changed:
+        return None
+    try:
+        return (datetime.now() - datetime.fromisoformat(changed)).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _password_expired(row):
+    """True when the password is past its maximum age.
+
+    An expired password STILL AUTHENTICATES. Expiry restricts the session to
+    changing the password; it never refuses the login. That distinction is the
+    whole safety property: a policy that rejected the credential would mean
+    "expired -> must use a recovery code -> none left -> locked out of your own
+    firewall", turning a hygiene rule into a lockout mechanism. Nothing here may
+    ever become a reason someone cannot get in.
+
+    Unknown age (NULL) counts as expired. Both writers now stamp the column, so
+    this should only ever be a pre-migration row — and prompting for a change is
+    the safe response to "we do not know how old this password is", precisely
+    because the prompt cannot lock anyone out.
+    """
+    age = _password_age_days(row)
+    if age is None:
+        return bool(row) and not (row["password_changed_at"]
+                                  if "password_changed_at" in row.keys() else None)
+    return age >= _PASSWORD_MAX_AGE_DAYS
+
+
+def _password_expiry_warning(row):
+    """Days remaining if inside the warning window, else None."""
+    age = _password_age_days(row)
+    if age is None:
+        return None
+    left = _PASSWORD_MAX_AGE_DAYS - age
+    return left if 0 < left <= _PASSWORD_WARN_DAYS else None
+
+
+def _recovery_grace_active(row):
+    """True only if BOTH the session and the database still say the window is open.
+
+    Two checks, and both earn their place:
+
+      session flag  proves THIS session is the one that used the code, so another
+                    session belonging to the same user does not inherit the
+                    exemption just because a window happens to be open.
+      users.recovery_grace_until  is the AUTHORITY on whether the window is still
+                    open at all. Flask sessions are client-side signed cookies, so
+                    clearing a session key cannot invalidate a cookie already
+                    issued — a captured cookie could otherwise be replayed to set
+                    a password without the old one, defeating the very protection
+                    `change_password` requires the current password to provide.
+                    Clearing the column closes every outstanding cookie at once.
+
+    Session-only would be replayable; DB-only would be over-broad. Neither alone.
+    """
+    if not session.get("pw_recovery_at"):
+        return False
+    until = row["recovery_grace_until"] if row else None
+    if not until:
+        return False
+    try:
+        return datetime.now() < datetime.fromisoformat(until)
+    except (TypeError, ValueError):
+        return False
+
+
+@app.route("/login/recovery", methods=["GET", "POST"])
+def login_recovery():
+    """Sign in with a single-use recovery code instead of the password.
+
+    This is the break-glass path, so it is held to the SAME limits as the front
+    door rather than looser ones: it shares the failed-attempt budget, and an
+    active lockout blocks it outright. A recovery path exempt from the lockout
+    would not be a recovery path — it would be a way around the lockout, and an
+    attacker would simply use it instead of the password form.
+
+    The refusal is stated honestly ("locked out, try again in N minutes") rather
+    than shown as a generic failure. A silent refusal here trains the real
+    operator to keep burning codes against a door that cannot open.
+    """
+    if current_user.is_authenticated:
+        return redirect(url_for("dashboard"))
+    if request.method == "GET":
+        return render_template("login_recovery.html")
+
+    username = (request.form.get("username") or "").strip().lower()
+    code     = request.form.get("recovery_code") or ""
+    ip       = request.remote_addr or "unknown"
+    ua       = request.headers.get("User-Agent", "")
+    row      = _load_user_row("username", username)
+
+    if row and row["lockout_until"]:
+        try:
+            until = datetime.fromisoformat(row["lockout_until"])
+            if datetime.now() < until:
+                mins = int((until - datetime.now()).total_seconds() // 60) + 1
+                _log_login_event(username, ip, False, "locked_out", row["lockout_tier"], ua,
+                                 source="recovery-code", action="login")
+                return render_template("login_recovery.html", error=(
+                    f"Account is locked for another {mins} minute(s). Recovery codes are "
+                    f"blocked during a lockout — wait it out, then try again. Your code "
+                    f"has NOT been used."))
+        except (TypeError, ValueError):
+            pass
+
+    # Unknown user: same generic wording as a wrong code, so this form cannot be
+    # used to discover which usernames exist.
+    if not row or not row["is_active"]:
+        _log_login_event(username, ip, False, "unknown_user", None, ua,
+                         source="recovery-code", action="login")
+        return render_template("login_recovery.html",
+                               error="That username and recovery code do not match.")
+
+    if not consume_recovery_code(row["id"], code, ip=ip):
+        locked, mins, _t = _register_credential_failure(
+            row, username, ip, ua,
+            reason="bad_recovery_code", source="recovery-code", action="login")
+        if locked:
+            return render_template("login_recovery.html", error=(
+                f"Too many failed attempts. Account locked for {mins} minutes."))
+        return render_template("login_recovery.html",
+                               error="That username and recovery code do not match.")
+
+    # Success — the code is now spent and cannot be replayed.
+    conn = _users_conn()
+    try:
+        conn.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL, lockout_tier=0, "
+                     "last_login=?, recovery_grace_until=? WHERE id=?",
+                     (datetime.now().isoformat(timespec="seconds"),
+                      (datetime.now() + timedelta(seconds=_RECOVERY_GRACE_SECONDS))
+                      .isoformat(timespec="seconds"),
+                      row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    _log_login_event(username, ip, True, None, None, ua,
+                     session_id=session.get("_id"), source="recovery-code", action="login")
+    login_user(User(row))
+    session["pw_recovery_at"] = datetime.now().isoformat(timespec="seconds")
+    _audit("login_recovery_code_used", ip=ip)
+    auth_log.info("auth: %s signed in with a recovery code from %s (%d left)",
+                  username, ip, recovery_codes_remaining(row["id"]))
+    return redirect(url_for("change_password"))
 
 
 @app.route("/logout")
@@ -3804,7 +4259,7 @@ def settings_page():
                 <h3>&#x26A0; Uninstall Nemesis Firewall</h3>
                 <p>This will permanently remove Nemesis Firewall from this system.
                    All services will be stopped and configuration will be deleted.</p>
-                <p class="safe-note">&#x2713; Your ~/dashboard directory and data will NOT be deleted.</p>
+                <p class="safe-note">&#x2713; Your /opt/nemesis directory and data will NOT be deleted.</p>
                 <div class="uninstall-yes-row">
                     <label for="uninstallYesInput">Type <strong>YES</strong> to confirm:</label>
                     <input id="uninstallYesInput" class="uninstall-yes-input"
