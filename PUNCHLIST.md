@@ -1314,3 +1314,21 @@ Found 2026-07-31 during a live operator lockout, while closing out the recovery-
   the Flask secret key resolve against the real `DATA_DIR`, not the overridden one. Worth
   checking whether other `_HERE`/`nemesis_paths`-adjacent constants in `dashboard.py` have the
   same constant-vs-function mismatch — this may not be the only site.
+
+### [SMALL] Backup-schedule feature is non-functional on production, independent of the injection fix
+
+Found 2026-08-01 by Window 1 while verifying the `api_backup_schedule` shell-injection fix
+(crontab-interpolation commit). Separate from that fix — the injection was real and is now
+closed, but the feature it belongs to doesn't currently work at all on the live box, for an
+unrelated reason.
+
+- [ ] **`nemesis-dash` cannot write a crontab.** The service runs under
+  `NoNewPrivileges=yes` (Phase 3 hardening, 2026-07-31), and `crontab` invocation from that
+  context has no crontab access — so every scheduled-backup save silently fails to actually
+  install anything on the running system, regardless of whether the cron-line content itself
+  is now safe. The UI presumably still reports success (not independently confirmed here — no
+  claim either way about the response path, just that the crontab write itself doesn't take).
+  Needs its own investigation: whether to route the crontab write through `nemesis-fwd` (the
+  existing privileged-helper pattern used elsewhere for exactly this kind of
+  needs-a-privilege-the-hardened-service-doesn't-have problem), or a different mechanism
+  entirely (systemd timer owned by a different unit, etc.).
