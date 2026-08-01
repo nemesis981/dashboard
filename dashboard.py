@@ -436,6 +436,13 @@ def consume_recovery_code(user_id: int, submitted: str, ip=None) -> bool:
     normalized = _recovery_code_storage_form(submitted)
     if not normalized:
         return False
+    # `spent` rather than an early return from inside the loop: the alert below
+    # must run with this connection already CLOSED. Building it needs two more
+    # reads, and opening a second connection while this write connection is
+    # still open is a self-inflicted lock contention on the recovery path — the
+    # one path that has to work when everything else has failed. Same winner,
+    # same short-circuit on first match; only the exit point moved.
+    spent = False
     conn = _users_conn()
     try:
         rows = conn.execute(
@@ -452,10 +459,87 @@ def consume_recovery_code(user_id: int, submitted: str, ip=None) -> bool:
                 "WHERE id=? AND used_at IS NULL AND superseded_at IS NULL",
                 (datetime.now().isoformat(timespec="seconds"), ip, r["id"]))
             conn.commit()
-            return cur.rowcount == 1
-        return False
+            spent = cur.rowcount == 1
+            break
     finally:
         conn.close()
+    if spent:
+        _alert_recovery_code_used(user_id, ip)
+    return spent
+
+
+def _alert_recovery_code_used(user_id: int, ip=None):
+    """Email the operator that a single-use recovery code was just spent.
+
+    WHY THIS EVENT EARNS AN EMAIL WHEN OTHERS DO NOT. Routine events — sign-ins,
+    and the idle-lock that lands next — fire constantly, and alerting on them
+    would train the operator to ignore Nemesis mail, which is the same
+    alert-fatigue trap the watchdog's HIGH/CRITICAL tiering exists to avoid. A
+    recovery code is the opposite shape: rare, and asymmetric in what it means.
+    It says someone authenticated WITHOUT the password. That is either the
+    legitimate operator recovering from a lockout — who already knows and can
+    ignore one mail — or someone who obtained a code, who must be caught. The
+    cost of a false positive is one ignorable email; the cost of a miss is a
+    silent account takeover.
+
+    LIVES INSIDE consume_recovery_code() rather than at the route, deliberately.
+    "Every successful consumption alerts" is then a structural property of
+    spending a code, not a promise each future caller has to remember to keep.
+
+    FIRES ON CONSUMPTION, not on completed login — and that is the intended
+    reading. A code that has been burned is worth knowing about even if whatever
+    followed it did not finish; the secret is spent either way.
+
+    CONTEXT IS CAPTURED HERE, IN THE REQUEST THREAD. `request` is thread-local
+    and `datetime.now()` would drift to whenever the worker happens to run, so
+    both are read now and passed by value. The send itself is off-thread.
+
+    CARRIES NO SECRET. Not the code, not its hash, not the password. Only who,
+    when, from where, and how many codes remain — enough to judge whether it was
+    you, and useless to anyone who intercepts the mail.
+    """
+    try:
+        try:
+            ua = request.headers.get("User-Agent", "")[:120] or "(not reported)"
+        except Exception:
+            ua = "(no request context)"
+        row = _load_user_row("id", user_id)
+        username  = row["username"] if row else f"user id {user_id}"
+        remaining = recovery_codes_remaining(user_id)
+        when      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        subject = f"[Nemesis] HIGH: recovery code used for '{username}'"
+        body = (
+            "A single-use recovery code was accepted for the Nemesis dashboard.\n"
+            "This means someone signed in WITHOUT the account password.\n"
+            "\n"
+            f"  Account:       {username}\n"
+            f"  When:          {when} (server local time)\n"
+            f"  Source IP:     {ip or 'unknown'}\n"
+            f"  Browser/agent: {ua}\n"
+            f"  Codes left:    {remaining} of {_RECOVERY_BATCH_SIZE}\n"
+            "\n"
+            "IF THIS WAS YOU, recovering from a lockout: no action needed. You were\n"
+            "sent to the change-password page, and the code just used can never be\n"
+            "reused by anyone.\n"
+            "\n"
+            "IF THIS WAS NOT YOU, treat the account as compromised:\n"
+            "  1. Change the password immediately.\n"
+            "  2. Regenerate the recovery codes — this invalidates every code still\n"
+            "     outstanding, including any the other party may hold.\n"
+            "  3. Review recent sign-in activity on the dashboard.\n"
+            "\n"
+            "If you cannot reach the dashboard at all, the SSH recovery CLI on the\n"
+            "Nemesis host still works:\n"
+            f"  sudo python3 /opt/nemesis/core/manage.py reset-password {username}\n"
+            "\n"
+            "Nemesis sends this every time a recovery code is used. It does not email\n"
+            "routine sign-ins, so this message always means something worth reading.\n"
+        )
+        _notify_email_async(subject, body)
+    except Exception:
+        # Never let alerting affect the unlock that just succeeded.
+        auth_log.exception("auth: recovery-code alert failed")
 
 
 def _register_credential_failure(row, username, ip, ua,
@@ -686,6 +770,30 @@ def _notify_email(subject, body):
         email_utils.send_email(subject, body)
     except Exception:
         auth_log.exception("auth: email notify failed")
+
+
+def _notify_email_async(subject, body):
+    """Send an alert email WITHOUT holding the request open.
+
+    `_notify_email` is best-effort but BLOCKING: email_utils.send_email uses a
+    30-second SMTP timeout, so calling it inline on an auth path can stall the
+    response for half a minute — and on the recovery-code path that lands at
+    precisely the moment an operator is locked out and in a hurry.
+
+    Daemon thread, so it can never hold up interpreter shutdown, and it inherits
+    _notify_email's swallow-everything contract: a mail problem must never
+    become an authentication outcome. Even the thread START is guarded — a
+    failure to spawn must not propagate into the caller either.
+
+    NOT retrofitted onto the existing lockout-tier caller (~:512) here. That is
+    a behaviour change to a working path and belongs in its own commit; captured
+    for Window 2 rather than folded in.
+    """
+    try:
+        threading.Thread(target=_notify_email, args=(subject, body),
+                         name="nemesis-alert-mail", daemon=True).start()
+    except Exception:
+        auth_log.exception("auth: could not start alert-mail thread")
 
 
 def _auth_threat_level() -> str:
