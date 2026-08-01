@@ -881,6 +881,29 @@ def _enforce_setup_and_auth():
             nxt = request.full_path if request.query_string else request.path
         return redirect(url_for("login", next=nxt) if nxt else url_for("login"))
 
+    # Walk-away protection. Runs BEFORE the expiry check below, deliberately:
+    # presence has to be proven before anything else is allowed, including
+    # changing a password. Both policies confine, so if a session is locked AND
+    # expired the order decides which one wins — and "prove a human is here"
+    # must win, or an unattended session could be used to set a new password.
+    if ep not in _IDLE_LOCK_ALLOWED:
+        try:
+            state = _session_lock_state()
+            if state:
+                return _locked_response(state)
+            # Only human traffic refreshes the clock — see _is_background_poll.
+            # Write-coalesced (see _touch_interval) so the signed cookie is not
+            # re-sent on every response.
+            if not _is_background_poll():
+                last = session.get(_SESSION_LAST_SEEN) or 0
+                if (time.time() - last) >= _touch_interval():
+                    session[_SESSION_LAST_SEEN] = time.time()
+        except Exception:
+            # Same stance as the expiry check below, and for the same reason: a
+            # bug in this policy must never take the dashboard down — and here it
+            # must never lock the operator out of their own dashboard either.
+            auth_log.exception("auth: idle-lock check failed")
+
     # Authenticated but the password is past its maximum age: confine the session
     # to changing it. NOT a rejection — they are logged in and stay logged in.
     if ep not in _EXPIRED_ALLOWED:
@@ -932,6 +955,7 @@ def setup():
     row = _load_user_row("id", uid)
     if row:
         login_user(User(row))
+        _stamp_session_start()
 
     # Ordering is deliberate: account -> batch -> display, never the reverse.
     # Generating first and creating the account afterwards would mean a failure
@@ -960,9 +984,16 @@ def login():
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
     if request.method == "GET":
+        notice = None
+        if request.args.get("changed"):
+            notice = "Password changed. Sign in with your new password."
+        elif request.args.get("timeout"):
+            # Reached the absolute session cap. Worded as an expected policy
+            # outcome, not a failure — nothing went wrong and nothing was lost.
+            notice = ("Your session reached its maximum length and was signed out. "
+                      "Sign in again to continue.")
         return render_template("login.html", next=_safe_next(request.args.get("next")),
-                               notice=("Password changed. Sign in with your new password."
-                                       if request.args.get("changed") else None))
+                               notice=notice)
 
     username = (request.form.get("username") or "").strip().lower()
     password = request.form.get("password") or ""
@@ -1008,6 +1039,7 @@ def login():
         conn.close()
         _log_login_event(username, ip, True, None, None, ua, session_id=session.get("_id"))
         login_user(User(row))
+        _stamp_session_start()
         if prior_ip:
             _log_login_event(username, ip, True, "concurrent_session_detected", None, ua)
             _open_security_ticket(
@@ -1220,8 +1252,158 @@ _PASSWORD_MAX_AGE_DAYS = 30
 _PASSWORD_WARN_DAYS    = 7
 # Endpoints still reachable while a password is expired. Deliberately tiny: enough
 # to change the password (and to leave), nothing else.
+# `unlock` is here because idle-lock is evaluated BEFORE expiry: a session that is
+# both locked and expired must be able to reach /unlock, or the two policies
+# redirect at each other forever.
 _EXPIRED_ALLOWED = {"change_password", "logout", "login", "setup", "static",
-                    "api_passphrase_generate", "api_health"}
+                    "api_passphrase_generate", "api_health", "account_unlock"}
+
+
+# ── Idle-lock / walk-away protection ─────────────────────────────────────────
+#
+# Two independent limits:
+#
+#   idle      no human interaction for N minutes -> LOCK. Confines the session to
+#             /account/unlock; the session itself survives, so nothing in
+#             progress is lost.
+#   absolute  the session has simply existed too long -> FULL LOGOUT. Re-auth
+#             starts a genuinely new session with a fresh clock. Confining and
+#             unlocking here instead would make the cap meaningless, since every
+#             unlock would extend the very thing the cap is meant to bound.
+#
+# NEITHER CAN BE CONFIGURED OFF (operator decision 2026-08-01). The requirement
+# is explicit — no live authenticated session sits open unattended — and a
+# silent "0 disables it" would let that requirement be switched off without the
+# decision ever being visible. A value below the minimum falls back to the
+# default rather than disabling. Backing this out is a git revert plus a restart.
+#
+# Session state lives in Flask's SIGNED cookie: it cannot be forged without the
+# server key, and a replayed older cookie only ever carries an OLDER
+# last_activity, which locks sooner rather than later. What this does NOT cover
+# is written up in known-limitations/, not here.
+def _env_int(name, default, minimum=1):
+    """Read an int from the environment, falling back to `default`.
+
+    Deliberately total: malformed, empty, or below-minimum values yield the
+    default rather than raising. Read at import, so an exception here would stop
+    the dashboard from starting at all — a typo in nemesis.env must not be able
+    to do that, and must not be able to disable a control either.
+    """
+    try:
+        raw = (os.environ.get(name) or "").strip()
+        value = int(raw) if raw else int(default)
+    except (TypeError, ValueError):
+        return int(default)
+    return value if value >= minimum else int(default)
+
+
+#: Minutes of no human interaction before the session locks.
+_IDLE_TIMEOUT_SECONDS = _env_int("IDLE_LOCK_MINUTES", 15) * 60
+#: Hard ceiling on total session age regardless of activity.
+_SESSION_MAX_SECONDS  = _env_int("SESSION_MAX_HOURS", 8) * 3600
+
+#: Endpoints reachable while LOCKED. Smaller than _EXPIRED_ALLOWED on purpose: a
+#: locked session has not proven a human is present, so it may only prove that
+#: (/account/unlock) or leave (/logout). `change_password` is deliberately ABSENT
+#: — someone who walks up to an unattended session must not be able to set a new
+#: password from it. `login`/`setup` are absent too: they bounce an already
+#: authenticated session onward, which is pointless here.
+_IDLE_LOCK_ALLOWED = {"account_unlock", "logout", "static", "api_health"}
+
+_SESSION_LOGIN_AT   = "login_at"
+_SESSION_LAST_SEEN  = "last_activity"
+#: Set once per lock so the audit row is written once, not on every blocked request.
+_SESSION_LOCK_LOGGED = "idle_lock_logged"
+
+
+def _stamp_session_start():
+    """Mark a session as freshly authenticated. Call wherever login_user() is."""
+    now = time.time()
+    session[_SESSION_LOGIN_AT] = now
+    session[_SESSION_LAST_SEEN] = now
+    session.pop(_SESSION_LOCK_LOGGED, None)
+
+
+def _session_lock_state():
+    """'expired' (log out), 'locked' (confine to unlock), or None (carry on).
+
+    MISSING STAMPS FAIL CLOSED — an unstampable session is treated as locked,
+    not as one starting now. Same posture as _password_expired(), where an
+    unknown password age counts as expired: a control that cannot evaluate its
+    own precondition must not conclude "fine". The cost is that sessions open
+    across the deploy lock once and unlock normally; the alternative is that
+    anything which loses its stamps silently becomes exempt.
+    """
+    now = time.time()
+    login_at  = session.get(_SESSION_LOGIN_AT)
+    last_seen = session.get(_SESSION_LAST_SEEN)
+    if not isinstance(last_seen, (int, float)) or not isinstance(login_at, (int, float)):
+        return "locked"
+    if (now - login_at) >= _SESSION_MAX_SECONDS:
+        return "expired"
+    if (now - last_seen) >= _IDLE_TIMEOUT_SECONDS:
+        return "locked"
+    return None
+
+
+def _touch_interval():
+    """How often `last_activity` is actually rewritten into the cookie.
+
+    Coalesced so the signed cookie is not re-sent on every single response, but
+    always kept WELL INSIDE the idle window. A fixed interval was wrong: at or
+    above the configured timeout it means an actively-used session never
+    refreshes and locks anyway — invisible at the 15-minute default, and it
+    immediately breaks any shortened timeout (VM demonstrations, tests, or an
+    operator who simply wants a tighter window). Caught by test 4 of the
+    enforcement harness, which is exactly the shortened-timeout scenario.
+    """
+    return max(1, min(30, _IDLE_TIMEOUT_SECONDS // 4))
+
+
+def _is_background_poll():
+    """True when the request came from a background refresh, not a human.
+
+    Set by static/nemesis-activity.js at the setInterval CALL SITE. The absence
+    of the header means activity, so a client that fails to send it can only
+    make itself lock sooner — never keep a walked-away session alive.
+    """
+    return request.headers.get("X-Nemesis-Poll") == "1"
+
+
+def _locked_response(state):
+    """How a locked/expired session is told, in the shape the caller can use.
+
+    API and polling callers get JSON with an explicit flag, not a 302 to an HTML
+    page — a redirect there lands HTML in a .json() parser and surfaces as a
+    confusing parse error instead of "you are locked out".
+
+    The lock transition is audited ONCE per lock, not on every subsequent
+    blocked request: while a page sits locked its pollers keep firing, and an
+    audit row per blocked poll would bury the one event that matters under
+    dozens of duplicates.
+    """
+    wants_json = request.path.startswith("/api/") or _is_background_poll()
+    if state == "expired":
+        logout_user()
+        session.clear()
+        if wants_json:
+            return jsonify({"error": "session_expired", "session_expired": True}), 401
+        return redirect(url_for("login", timeout="1"))
+
+    if not session.get(_SESSION_LOCK_LOGGED):
+        session[_SESSION_LOCK_LOGGED] = True
+        try:
+            _audit("session_idle_locked", ip=request.remote_addr or "unknown")
+        except Exception:
+            auth_log.exception("auth: idle-lock audit row failed")
+
+    if wants_json:
+        return jsonify({"error": "session_locked", "session_locked": True}), 401
+    nxt = None
+    if request.method == "GET":
+        nxt = request.full_path if request.query_string else request.path
+    return redirect(url_for("account_unlock", next=nxt) if nxt
+                    else url_for("account_unlock"))
 
 
 def _password_age_days(row):
@@ -1369,6 +1551,7 @@ def login_recovery():
     _log_login_event(username, ip, True, None, None, ua,
                      session_id=session.get("_id"), source="recovery-code", action="login")
     login_user(User(row))
+    _stamp_session_start()
     session["pw_recovery_at"] = datetime.now().isoformat(timespec="seconds")
     _audit("login_recovery_code_used", ip=ip)
     auth_log.info("auth: %s signed in with a recovery code from %s (%d left)",
@@ -1381,6 +1564,99 @@ def login_recovery():
 def logout():
     logout_user()
     return redirect(url_for("login"))
+
+
+@app.route("/account/unlock", methods=["GET", "POST"])
+@login_required
+def account_unlock():
+    """Re-authenticate an idle-locked session WITHOUT ending it.
+
+    The session is deliberately kept alive. Everything server-side survives, and
+    the browser page is never navigated away from by the client-side overlay, so
+    work in progress is still there afterwards. That is the whole reason this is
+    a confinement rather than a logout.
+
+    PASSWORD ONLY — recovery codes are not accepted here, and that is a security
+    decision rather than an omission. A recovery code exists to recover an
+    account that CANNOT be authenticated; this session is already authenticated
+    and merely needs a human proven present. Accepting one would let whoever
+    walked up burn a single-use code — often the one written down near the
+    machine — to seize a live session. Anyone who genuinely cannot recall the
+    password can sign out and use the full recovery flow, which is unchanged.
+
+    Failures spend the SAME lockout budget as the login form. A confined session
+    that could guess at the password without limit would be an unmetered oracle,
+    which is precisely what _register_credential_failure exists to prevent.
+    """
+    row = _load_user_row("id", current_user.id)
+    if not row:
+        logout_user()
+        session.clear()
+        return redirect(url_for("login"))
+
+    display = row["display_name"] or row["username"]
+    # Carried through the whole flow so an unlock returns the operator to the page
+    # they were actually on, not the dashboard. Validated on the way IN as well as
+    # OUT, so an unsafe value can never survive in the form to the next attempt —
+    # same handling as login's `next`.
+    nxt = _safe_next(request.values.get("next"))
+    if request.method == "GET":
+        return render_template("unlock.html", display_name=display, next=nxt)
+
+    ip = request.remote_addr or "unknown"
+    ua = request.headers.get("User-Agent", "")
+    password = request.form.get("password") or ""
+
+    # An account locked out by other means cannot be unlocked from here either —
+    # otherwise this form would be a way around the lockout it shares a budget with.
+    if row["lockout_until"]:
+        try:
+            until = datetime.fromisoformat(row["lockout_until"])
+            if datetime.now() < until:
+                mins = int((until - datetime.now()).total_seconds() // 60) + 1
+                _log_login_event(row["username"], ip, False, "locked_out",
+                                 row["lockout_tier"], ua,
+                                 source="idle_unlock", action="unlock")
+                return render_template("unlock.html", display_name=display, next=nxt,
+                                       error=f"Account is locked for another {mins} minute(s).")
+        except (TypeError, ValueError):
+            pass
+
+    if not _check_password(password, row["password_hash"]):
+        locked, mins, _tier = _register_credential_failure(
+            row, row["username"], ip, ua,
+            reason="idle_unlock_failed", source="idle_unlock", action="unlock")
+        if locked:
+            # The budget is spent: a session that cannot be unlocked has no
+            # reason to stay confined, so end it rather than strand the browser
+            # on a form that can no longer succeed.
+            logout_user()
+            session.clear()
+            return redirect(url_for("login"))
+        return render_template("unlock.html", display_name=display, next=nxt,
+                               error="Incorrect password.")
+
+    # Success. Refresh ONLY last_activity — NOT login_at. Re-stamping login_at
+    # here would let each unlock extend the absolute cap, so a session unlocked
+    # often enough would never reach it and the cap would mean nothing.
+    session[_SESSION_LAST_SEEN] = time.time()
+    # ...except when there is no login_at at all. Since a missing stamp now fails
+    # CLOSED, a session that reached here without one would re-lock immediately on
+    # the next request and could never be unlocked. setdefault fills the gap
+    # without ever moving an existing value, so the cap is still never extended.
+    session.setdefault(_SESSION_LOGIN_AT, time.time())
+    session.pop(_SESSION_LOCK_LOGGED, None)     # re-arm the once-per-lock audit
+    conn = _users_conn()
+    try:
+        conn.execute("UPDATE users SET failed_attempts=0, lockout_until=NULL, "
+                     "lockout_tier=0 WHERE id=?", (row["id"],))
+        conn.commit()
+    finally:
+        conn.close()
+    _log_login_event(row["username"], ip, True, None, None, ua,
+                     session_id=session.get("_id"), source="idle_unlock", action="unlock")
+    auth_log.info("auth: session unlocked for %s from %s", row["username"], ip)
+    return redirect(nxt or url_for("dashboard"))
 
 modules_loader.init(app, DB_PATH, MODULES_DIR)
 

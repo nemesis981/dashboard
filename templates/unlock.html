@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Session Locked</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:32px 34px; width:92%; max-width:380px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 6px; font-size:1.3em; text-align:center; }
+    .who { text-align:center; color:#8a98b3; font-size:0.86em; margin:0 0 20px; }
+    label { display:block; margin:14px 0 4px; font-size:0.86em; color:#ccd; }
+    input { width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+            color:#eee; padding:9px 11px; border-radius:7px; font-size:0.95em; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    button { width:100%; margin-top:22px; background:#00d4ff; color:#062; border:none;
+             border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
+    .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
+             border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+    .notice { background:#00d4ff1a; border:1px solid #00d4ff; color:#8fe9ff;
+              border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+    .hint { margin-top:20px; font-size:0.72em; color:#6b7689; text-align:center;
+            line-height:1.6; }
+    .hint a { color:#00d4ff; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#128274; Session Locked</h1>
+    <p class="who">Signed in as {{ display_name }}</p>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <div class="notice">
+      Locked after a period of inactivity. Your session is still open &mdash; enter
+      your password to pick up exactly where you left off.
+    </div>
+    <form method="POST" action="/account/unlock">
+      <input type="hidden" name="next" value="{{ next or '' }}">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password"
+             autocomplete="current-password" autofocus>
+      <button type="submit">Unlock</button>
+    </form>
+    <p class="hint">
+      Not you, or finished for now? <a href="/logout">Sign out</a>.
+    </p>
+    <p class="hint">
+      Recovery codes are not accepted here &mdash; they are for signing in when you
+      cannot, not for resuming a session that is already open. If you cannot recall
+      your password, sign out and use a recovery code on the login page.
+    </p>
+  </div>
+</body>
+</html>
