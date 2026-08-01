@@ -7494,6 +7494,9 @@ def scan_page():
 <html>
 <head>
     <title>Nemesis — Device Security Scanner</title>
+    <!-- First script on the page, deliberately: it wraps window.fetch, so any
+         script loaded ahead of it could capture the unwrapped original. -->
+    <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
     <style>
@@ -8163,8 +8166,8 @@ loadFindings();
 loadSchedules();
 loadPendingScans();
 loadScanConditions();
-setInterval(function() {{ loadDevices(); pollActiveScans(); loadPendingScans(); }}, 5000);
-setInterval(loadFindings, 30000);
+setInterval(nemPoll(function() {{ loadDevices(); pollActiveScans(); loadPendingScans(); }}), 5000);
+setInterval(nemPoll(loadFindings), 30000);
 </script>
 </body>
 </html>"""
@@ -8178,6 +8181,8 @@ def hardware_all_page():
 <html>
 <head>
     <title>Nemesis — All Device Hardware</title>
+    <!-- Must precede any other script: it wraps window.fetch. -->
+    <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
     <style>
@@ -8366,7 +8371,7 @@ function escHtml(s) {{
 }})();
 
 loadAllHw();
-setInterval(loadAllHw, 30000);
+setInterval(nemPoll(loadAllHw), 30000);
 </script>
 </body>
 </html>"""
@@ -8472,6 +8477,8 @@ def dashboard():
 <html>
 <head>
     <title>Nemesis Firewall</title>
+    <!-- Must precede any other script: it wraps window.fetch. -->
+    <script src="/static/nemesis-activity.js"></script>
     <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; margin: 0; }}
@@ -9997,7 +10004,7 @@ def dashboard():
         }}
 
         loadHwDevices();
-        setInterval(loadHwDevices, 60000);
+        setInterval(nemPoll(loadHwDevices), 60000);
 
         function openHwModal() {{
             document.getElementById("hwModal").style.display = "block";
@@ -10665,7 +10672,7 @@ def dashboard():
                 }})
                 .catch(e => console.error("refresh failed", e));
         }}
-        setInterval(refreshDashboard, 60000);
+        setInterval(nemPoll(refreshDashboard), 60000);
 
         // Re-apply tier-dependent JS content when the user changes tier from /settings
         // (localStorage storage events fire across tabs).
