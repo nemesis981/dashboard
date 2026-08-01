@@ -623,6 +623,36 @@ commit," not on request.
   trip-critical/time-pressured and audit-first discipline calls for a separate pass rather
   than folding it into the same live session.
 
+### Verification/derivation code must prove its own premise (standing practice, added 2026-08-01)
+**Nine instances in one day, all the same shape.** An empty comparison read as "agree." A
+failed counter lookup silently defaulting to zero and reported as a real measurement. An
+unreadable path reported as merely "absent." A broken cookie decoder. A substring match
+standing in for a real check. A `gawk`-only function silently failing under `mawk`. Different
+languages, different layers (shell, Python, JS, awk), same defect: **an instrument that can
+only produce one answer, reporting that answer as though it measured something.** None of
+these failed loudly — each one dressed a non-measurement up as a legitimate result, and the
+result was trusted because nothing about its shape looked wrong.
+
+This is not specific to firewall/ADR-0019 code — it showed up across dashboard auth code,
+shell harnesses, and JS this same session. Treat it as general to any code in this repo that
+compares, derives, or verifies something, not just network/security-adjacent paths.
+
+**Two rules, both required, neither optional:**
+1. **Any verification/derivation step must prove its own premise against a known-different
+   input before trusting what it reports.** A self-test with a known-good and a known-bad case
+   run on every invocation (not just in a test suite, in the production code path itself) is
+   what catches "this can only ever say ALLOW" before it ships, not after. See
+   `scripts/nemesis-fw-neverblock`'s `CANARIES` self-test for the reference shape: two
+   addresses that MUST classify as protected, two that MUST NOT, checked before the tool
+   vouches for anything real.
+2. **A failed read must surface as an explicit failure state, never as a default value.** A
+   default that "means something" (zero, empty, "absent," `False`) is indistinguishable from a
+   genuine result to whatever reads it next. Fail closed and loud — raise, exit non-zero,
+   return an explicit sentinel the caller cannot mistake for real data — rather than falling
+   back to a value that happens to be a legal answer.
+- **Grep for this shape in every retro/review pass**, alongside the existing #1-recurring-bug
+  check — same category of standing check, different failure class.
+
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
   credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
