@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Recovery Codes</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           padding:24px 12px; box-sizing:border-box; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:30px 32px; width:100%; max-width:560px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 6px; font-size:1.3em; }
+    .lede { color:#ccd; font-size:0.88em; line-height:1.55; margin:0 0 18px; }
+    .warn { background:#ffb01a1a; border:1px solid #ffb01a; color:#ffd98a;
+            border-radius:8px; padding:11px 13px; margin:0 0 18px; font-size:0.85em; line-height:1.5; }
+    .codes { background:#0d0d1e; border:1px solid #2a3450; border-radius:8px;
+             padding:16px; display:grid; grid-template-columns:1fr 1fr; gap:8px 18px; }
+    .codes code { color:#00d4ff; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                  font-size:1.02em; letter-spacing:0.04em; }
+    .used { color:#5a6478; text-decoration:line-through; }
+    .row { display:flex; gap:10px; margin-top:18px; flex-wrap:wrap; }
+    button, .btn { background:#00d4ff; color:#062; border:none; border-radius:8px;
+                   padding:10px 18px; font-size:0.95em; font-weight:bold; cursor:pointer;
+                   text-decoration:none; display:inline-block; }
+    .ghost { background:#30363d; color:#e6edf3; }
+    .note { color:#6b7689; font-size:0.78em; margin-top:16px; line-height:1.6; }
+    .ok { color:#8fe9ff; font-size:0.85em; margin-left:8px; }
+    @media (max-width:520px) { .codes { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#128273; Your Recovery Codes</h1>
+
+    {% if error %}
+    <div class="warn" style="background:#ff444422;border-color:#ff4444;color:#ff9999">
+      {{ error }}
+    </div>
+    {% endif %}
+
+    {% if first_run %}
+    <p class="lede">Your account is created and you&#39;re signed in. Save these codes
+       before you go any further.</p>
+    {% else %}
+    <p class="lede">A new set has been issued. <strong>Any codes from your previous set
+       no longer work</strong>, including ones you never used.</p>
+    {% endif %}
+
+    {% if codes %}
+    <div class="warn">
+      Each code works <strong>once</strong>, and this is the only time they are shown.
+      They are stored hashed &mdash; nobody, including this dashboard, can display them
+      again. If you lose them, issue a new set from Settings.
+      <br><br>
+      Anyone holding one of these can get into your firewall without your password.
+      Treat them like keys: print them, or put them in a password manager. Not in your
+      email, and not on this machine &mdash; if this box is the thing you&#39;re locked
+      out of, a copy stored on it is no help.
+    </div>
+
+    <div class="codes" id="codeList">
+      {% for c in codes %}<code>{{ c }}</code>{% endfor %}
+    </div>
+
+    <div class="row">
+      <button type="button" onclick="copyCodes()">Copy to clipboard</button>
+      <button type="button" class="ghost" onclick="downloadCodes()">Download as .txt</button>
+      <a class="btn ghost" href="/">I&#39;ve saved them &mdash; continue</a>
+      <span class="ok" id="okMsg"></span>
+    </div>
+
+    <p class="note">
+      Generated {{ generated_at }}. {{ codes|length }} codes issued.
+      You can issue a fresh set at any time from Settings &rarr; Recovery Codes;
+      doing so immediately retires this set.
+    </p>
+    {% else %}
+    <div class="row"><a class="btn" href="/">Continue to the dashboard</a></div>
+    {% endif %}
+  </div>
+
+  <script>
+    function codeText() {
+      var out = [];
+      document.querySelectorAll('#codeList code').forEach(function (el) {
+        out.push(el.textContent.trim());
+      });
+      return out.join('\n');
+    }
+    function flash(msg) {
+      var m = document.getElementById('okMsg');
+      m.textContent = msg;
+      setTimeout(function () { m.textContent = ''; }, 2500);
+    }
+    function copyCodes() {
+      var txt = codeText();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(function () { flash('Copied.'); })
+          .catch(function () { flash('Copy failed — select and copy manually.'); });
+      } else {
+        flash('Copy unavailable — select and copy manually.');
+      }
+    }
+    function downloadCodes() {
+      /* Built client-side from what is already on screen: the plaintext never
+         needs a second trip to the server, which would mean holding it somewhere
+         it could be logged or cached. */
+      var blob = new Blob(['Nemesis Firewall recovery codes\n' +
+                           'Generated {{ generated_at }}\n' +
+                           'Each code works once.\n\n' + codeText() + '\n'],
+                          {type: 'text/plain'});
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'nemesis-recovery-codes.txt';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(a.href);
+      flash('Downloaded.');
+    }
+  </script>
+</body>
+</html>

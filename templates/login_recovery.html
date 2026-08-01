@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Use a Recovery Code</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           padding:24px 12px; box-sizing:border-box; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:32px 34px; width:100%; max-width:400px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 6px; font-size:1.3em; text-align:center; }
+    .lede { color:#8a98b3; font-size:0.82em; text-align:center; margin:0 0 20px; line-height:1.5; }
+    label { display:block; margin:14px 0 4px; font-size:0.86em; color:#ccd; }
+    input { width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+            color:#eee; padding:9px 11px; border-radius:7px; font-size:0.95em; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    #recovery_code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                     letter-spacing:0.08em; text-transform:uppercase; }
+    button { width:100%; margin-top:22px; background:#00d4ff; color:#062; border:none;
+             border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
+    .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
+             border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em;
+             line-height:1.5; }
+    .hint { color:#888; font-size:0.78em; margin:6px 0 0; line-height:1.5; }
+    .back { display:block; margin-top:20px; text-align:center; color:#6b7689;
+            font-size:0.8em; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#128273; Use a Recovery Code</h1>
+    <p class="lede">For when you can&#39;t sign in with your password.</p>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <form method="POST" action="/login/recovery">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" autofocus>
+
+      <label for="recovery_code">Recovery code</label>
+      <input type="text" id="recovery_code" name="recovery_code"
+             placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="one-time-code" spellcheck="false">
+      <p class="hint">Dashes, spaces and capitals don&#39;t matter &mdash; type it however
+         you wrote it down. Each code works once, and using one signs you in so you can
+         set a new password.</p>
+
+      <button type="submit">Sign in with code</button>
+    </form>
+
+    <a class="back" href="/login">&larr; Back to normal sign-in</a>
+  </div>
+</body>
+</html>

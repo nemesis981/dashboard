@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Recovery Codes</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+           padding:24px 12px; box-sizing:border-box; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:30px 32px; width:100%; max-width:460px; box-shadow:0 8px 40px #0008; }
+    h1 { color:#00d4ff; margin:0 0 6px; font-size:1.3em; }
+    .who { color:#8a98b3; font-size:0.8em; margin:0 0 18px; }
+    .count { background:#0d0d1e; border:1px solid #2a3450; border-radius:8px;
+             padding:14px 16px; margin:0 0 18px; font-size:0.9em; color:#ccd; }
+    .count strong { color:#00d4ff; font-size:1.25em; }
+    .low { color:#ffd98a; }
+    .none { color:#ff9999; }
+    label { display:block; margin:14px 0 4px; font-size:0.86em; color:#ccd; }
+    input { width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+            color:#eee; padding:9px 11px; border-radius:7px; font-size:0.95em; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    button { width:100%; margin-top:20px; background:#00d4ff; color:#062; border:none;
+             border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
+    .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
+             border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+    .warn { background:#ffb01a1a; border:1px solid #ffb01a; color:#ffd98a;
+            border-radius:8px; padding:11px 13px; margin:16px 0 0; font-size:0.82em; line-height:1.5; }
+    .back { display:block; margin-top:18px; text-align:center; color:#6b7689;
+            font-size:0.8em; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>&#128273; Recovery Codes</h1>
+    <p class="who">Signed in as {{ username }}</p>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+    <div class="count">
+      {% if remaining == 0 %}
+        <strong class="none">0</strong> unused codes remain.
+        You currently have no way back in if you forget your password.
+      {% elif remaining <= 3 %}
+        <strong class="low">{{ remaining }}</strong> unused code{{ 's' if remaining != 1 else '' }}
+        remaining &mdash; running low. Consider issuing a fresh set.
+      {% else %}
+        <strong>{{ remaining }}</strong> unused codes remaining.
+      {% endif %}
+    </div>
+
+    <form method="POST" action="/account/recovery-codes">
+      <label for="current_password">Confirm your password to issue a new set</label>
+      <input type="password" id="current_password" name="current_password"
+             autocomplete="current-password" autofocus>
+      <button type="submit">Issue a new set</button>
+    </form>
+
+    <div class="warn">
+      Issuing a new set <strong>immediately retires every code in your current
+      set</strong>, including ones you have never used. Only do this if you still
+      have access to wherever you keep them, or if you believe they have been seen
+      by someone else.
+    </div>
+
+    <a class="back" href="/">&larr; Back to dashboard</a>
+  </div>
+</body>
+</html>
