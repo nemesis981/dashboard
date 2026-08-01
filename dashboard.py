@@ -3,6 +3,7 @@ import requests
 import subprocess
 import sqlite3
 import json
+import shlex
 import html
 import os
 import re
@@ -7233,11 +7234,39 @@ def api_backup_schedule():
         lines = [ln for ln in existing.splitlines() if cron_marker not in ln]
         if enabled:
             dest_exp = os.path.expanduser(destination)
+            # The destination is operator-supplied and ends up inside a line that
+            # CRON later executes via /bin/sh -c. Writing the crontab is not
+            # itself a shell call, so the danger is deferred, not absent: an
+            # unescaped quote closed the JSON argument and everything after it
+            # ran as this service account, on a schedule, indefinitely.
+            #
+            # Two separate escapes are needed, and quoting alone is not enough:
+            #
+            #   quotes/metacharacters  handled by shlex.quote() below, which is
+            #                          what makes the value a single inert word.
+            #   NEWLINES               shlex.quote() would happily return a
+            #                          quoted string containing a newline — and
+            #                          crontab treats a newline as the end of the
+            #                          entry, so the remainder becomes a NEW cron
+            #                          line. No amount of quoting fixes that,
+            #                          because the injection is into the crontab
+            #                          format rather than into the shell.
+            #
+            # Hence: reject structurally invalid input first, then quote.
+            if any(ch in dest_exp for ch in "\n\r"):
+                return jsonify({"status": "error",
+                                "error": "Destination must not contain line breaks."})
+            if not os.path.isabs(dest_exp):
+                return jsonify({"status": "error",
+                                "error": "Destination must be an absolute path."})
             expr = cron_exprs.get(schedule, "0 3 * * *")
+            # json.dumps builds the payload so the path is escaped as JSON, and
+            # shlex.quote makes the whole argument a single shell word.
+            payload = shlex.quote(json.dumps({"dest_path": dest_exp}))
             lines.append(
                 f'{expr} curl -sf -X POST http://localhost:5000/api/backup/create'
                 f' -H "Content-Type: application/json"'
-                f' -d \'{{"dest_path":"{dest_exp}"}}\''
+                f' -d {payload}'
                 f' >> /tmp/nemesis-backup.log 2>&1 {cron_marker}'
             )
         new_crontab = "\n".join(lines) + ("\n" if lines else "")
