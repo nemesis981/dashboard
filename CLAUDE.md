@@ -460,21 +460,30 @@ row `id` + `request_id` in that session's worklog. Confirmed 2026-07-31 while ve
 `request_id` column; flagged here so it is not re-discovered later as a missed case. Do not
 generalise this exception — every other table has a field to label, and must be labelled.
 
-### 12. Local mirror for handoff/briefing docs
-`docs/handoff/` (`HANDOFF.md`, `supplements/`, `worklog/`) and `docs/briefing/` live inside
-`/opt/nemesis` — not convenient to reach from a `~/work/nemesis-internal` session. **Every
-time either is written or refreshed** (HANDOFF.md overwrite, a new supplement/worklog entry,
-or a new dated briefing — see Rule 9 and Morning Status §7), also copy the current file(s) to
-the mirror at `~/work/nemesis-internal/handoff/` and `~/work/nemesis-internal/briefing/` (same
-relative structure: `handoff/HANDOFF.md`, `handoff/supplements/`, `handoff/worklog/`,
-`briefing/YYYY-MM-DD.md`).
+### 12. Local mirror for handoff/briefing/audits docs
+`docs/handoff/` (`HANDOFF.md`, `supplements/`, `worklog/`), `docs/briefing/`, and
+`docs/audits/` live inside `/opt/nemesis` — not convenient to reach from a
+`~/work/nemesis-internal` session. **Every time any of the three is written or refreshed**
+(HANDOFF.md overwrite, a new supplement/worklog entry, a new dated briefing — see Rule 9 and
+Morning Status §7 — or a new/updated audit doc), also copy the current file(s) to the mirror
+at `~/work/nemesis-internal/handoff/`, `~/work/nemesis-internal/briefing/`, and
+`~/work/nemesis-internal/audits/` (same relative structure: `handoff/HANDOFF.md`,
+`handoff/supplements/`, `handoff/worklog/`, `briefing/YYYY-MM-DD.md`,
+`audits/<topic>-audit-<date>.md`).
 - This is a **copy, not a move** — `/opt/nemesis` stays the source of truth; the mirror is for
   easy local access only, not a second source of truth to keep independently in sync.
-- Content is already Rule-8-clean by the time it lands here (handoff docs and briefings are
-  both placeholder-sanitized before being written at all) — no extra sanitization step needed
-  for the copy itself.
+- Content is already Rule-8-clean by the time it lands here (handoff docs, briefings, and
+  audits are all placeholder-sanitized before being written at all — see Rule 8's "Audit
+  output is not exempt" clause) — no extra sanitization step needed for the copy itself.
 - The mirror directory follows whatever version-control state `~/work/nemesis-internal`
   already has — copying files here does not by itself commit them there.
+- **Why this exists (added 2026-08-01):** `~/work/nemesis-internal` is what chat-Claude can
+  actually read as rendered pages — `/opt/nemesis` itself sits behind filesystem restrictions
+  chat-Claude can't reach directly, which otherwise forces pasting doc content into chat by
+  hand. The mirror is what makes handoff/briefing/audit docs consumable there without a
+  copy-paste round-trip.
+- Audits mirroring added 2026-08-01, prompted by that session's roadmap-state-audit refresh;
+  brought under the same standing rule as handoff/briefing rather than left as a one-off ask.
 
 ---
 
