@@ -245,7 +245,8 @@ def init_users_table():
                 failed_attempts INTEGER NOT NULL DEFAULT 0,
                 lockout_until   TEXT,
                 lockout_tier    INTEGER NOT NULL DEFAULT 0,
-                password_changed_at TEXT
+                password_changed_at TEXT,
+                recovery_grace_until TEXT
             )
         """)
         # Guarded migration: add lockout_tier to users tables created before it
@@ -271,6 +272,19 @@ def init_users_table():
         # which would have to be a fixed timestamp — instantly wrong for every
         # account. NULL is handled by the expiry check as "unknown, treat as due
         # for change" rather than being silently skipped.
+        # recovery_grace_until — the authoritative end of the post-recovery-code
+        # window in which a password may be set WITHOUT supplying the old one.
+        #
+        # It lives in the DB rather than only in the session because Flask sessions
+        # are client-side signed cookies: popping a key does not invalidate a cookie
+        # already handed out, so a captured cookie could be replayed to change the
+        # password after the window was supposedly closed — defeating the exact
+        # protection that requiring the current password provides. A column can be
+        # cleared authoritatively, and every replayed cookie then fails.
+        #
+        # NULL = no window open, which is the correct state for every existing row.
+        if "recovery_grace_until" not in cols:
+            c.execute("ALTER TABLE users ADD COLUMN recovery_grace_until TEXT")
         if "password_changed_at" not in cols:
             c.execute("ALTER TABLE users ADD COLUMN password_changed_at TEXT")
             c.execute("UPDATE users SET password_changed_at = created_at "
