@@ -1372,3 +1372,26 @@ what's known so it isn't rediscovered piecemeal.
   - Scope note from the DoS-resilience ADR: bringing this into `install.sh` is identified as
     "the natural anchor of the later hardening pass," not scheduled standalone — recorded
     here as the durable PUNCHLIST home for Decision B, not as a commitment to build now.
+
+### [SMALL] Dashboard-side ingestion of `degraded.jsonl` into `audit_log`
+
+Flagged by Window 1, 2026-08-01, as a distinct next item during the ADR 0019 netlink-watcher
+build (`nemesis_fw_watch.py`'s `_audit_row()` is a deliberate no-op — see that function's
+docstring for the full account). Designed and approved; deliberately not built as part of
+that commit.
+
+- [ ] **The netlink watcher (and any other privileged, non-dashboard process) must never open
+  `alerts.db` directly.** Measured on the VM 2026-08-01: a privileged process writing
+  `audit_log` as root created root-owned WAL sidecars (`-wal`/`-shm`) and **locked
+  `nemesis-dash` out of writing its own database** ("nemesis-dash CANNOT write: attempt to
+  write a readonly database"). Same hazard already recorded in HANDOFF §6 for
+  `core/manage.py`. The fix pattern already exists in the codebase — `nemesis_fwd.py`'s
+  `signal_degraded()` deliberately writes to a **file** (`degraded.jsonl`), not a DB table,
+  for exactly this reason.
+  - **What's needed:** the dashboard (running as `nemesis-dash`, which owns the DB) reads
+    `degraded.jsonl` and writes the corresponding `audit_log` row itself, as the owning user.
+    This keeps the audit trail intact while keeping every privileged process out of the
+    shared database entirely.
+  - Until this lands, watcher-raised events (tamper, enforcement-loss) are still fully
+    alerted via the other two channels (journal, email) — this is a durability/completeness
+    gap in the audit trail, not a detection gap.
