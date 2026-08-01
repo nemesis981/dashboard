@@ -29,6 +29,7 @@
     <h1>&#128737; Nemesis Firewall</h1>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     <form method="POST" action="/login">
+        <input type="hidden" name="next" value="{{ next or '' }}">
       <label for="username">Username</label>
       <input type="text" id="username" name="username" autocomplete="username" autofocus>
       <label for="password">Password</label>

@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import secrets
+from urllib.parse import urlparse
 import logging
 import threading
 import tarfile
@@ -575,6 +576,29 @@ def _threat_indicator_html() -> str:
     return ""
 
 
+def _safe_next(target):
+    """Return `target` only if it is a same-origin relative path, else None.
+
+    This is the open-redirect guard. `next` arrives from the URL, so it is
+    attacker-controllable: without this check, a link to
+    `/login?next=https://evil.example/` would render OUR login page and then hand
+    the freshly-authenticated operator straight to someone else's site — a
+    credible phish, because every visible detail up to that point is genuine.
+
+    Rejected: absolute URLs, protocol-relative `//host` (scheme-less but still
+    off-site), and backslashes, which some browsers normalise to `/` and which
+    are the classic way to smuggle `//` past a naive startswith check.
+    """
+    if not target or not target.startswith("/") or target.startswith("//"):
+        return None
+    if "\\" in target:
+        return None
+    parsed = urlparse(target)
+    if parsed.scheme or parsed.netloc:
+        return None
+    return target
+
+
 # ── First-run + auth guard (covers dashboard.py AND all module routes) ────────
 @app.before_request
 def _enforce_setup_and_auth():
@@ -588,7 +612,15 @@ def _enforce_setup_and_auth():
         return redirect(url_for("setup"))
     # Otherwise every route requires an authenticated session.
     if not current_user.is_authenticated:
-        return redirect(url_for("login"))
+        # Carry where they were going. Dropping it here is what sent an operator
+        # to the dashboard instead of the page they asked for, with no clue that
+        # a redirect had happened (found live 2026-07-31 via /account/recovery-codes).
+        # Only for GET: replaying a POST as a GET after login would be wrong, and
+        # silently re-submitting one would be worse.
+        nxt = None
+        if request.method == "GET":
+            nxt = request.full_path if request.query_string else request.path
+        return redirect(url_for("login", next=nxt) if nxt else url_for("login"))
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -639,12 +671,15 @@ def login():
     if current_user.is_authenticated:
         return redirect(url_for("dashboard"))
     if request.method == "GET":
-        return render_template("login.html")
+        return render_template("login.html", next=_safe_next(request.args.get("next")))
 
     username = (request.form.get("username") or "").strip().lower()
     password = request.form.get("password") or ""
     ip = request.remote_addr or "unknown"
     ua = request.headers.get("User-Agent", "")
+    # Validated on the way IN, not just on the way out, so an unsafe value can
+    # never be echoed back into the form and survive to the next attempt.
+    nxt = _safe_next(request.form.get("next"))
     row = _load_user_row("username", username)
 
     # Active lockout?
@@ -654,7 +689,7 @@ def login():
             if datetime.now() < until:
                 mins = int((until - datetime.now()).total_seconds() // 60) + 1
                 _log_login_event(username, ip, False, "locked_out", row["lockout_tier"], ua)
-                return render_template("login.html",
+                return render_template("login.html", next=nxt,
                                        error=f"Account locked. Try again in {mins} minute(s).")
         except ValueError:
             pass
@@ -689,22 +724,22 @@ def login():
                 (f"Active session from {prior_ip}, new login from {ip}. Was this you? "
                  f"If not, use core/manage.py to reset your password immediately."),
                 "HIGH")
-        return redirect(url_for("dashboard"))
+        return redirect(nxt or url_for("dashboard"))
 
     # Failure — unknown user (still logged; no row to update)
     if not row:
         _log_login_event(username, ip, False, "unknown_user", None, ua)
-        return render_template("login.html", error="Invalid username or password.")
+        return render_template("login.html", error="Invalid username or password.", next=nxt)
 
     # Failure — known user. The escalation itself lives in
     # _register_credential_failure() because login is no longer the only form
     # that verifies this password; see that function for why the budget is shared.
     locked, mins, _tier = _register_credential_failure(row, username, ip, ua)
     if locked:
-        return render_template("login.html",
+        return render_template("login.html", next=nxt,
                                error=f"Too many failed attempts. Account locked for {mins} minutes.")
     # Never reveal which field was wrong (security best practice).
-    return render_template("login.html", error="Invalid username or password.")
+    return render_template("login.html", error="Invalid username or password.", next=nxt)
 
 
 @app.route("/account/password", methods=["GET", "POST"])
