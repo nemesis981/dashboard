@@ -1,0 +1,131 @@
+#!/usr/bin/env python3
+"""Classify candidate block addresses against firewall.py's REAL never-block set.
+
+ADR 0019 — the never-block guard for nemesis-fw-render. Reads candidate
+addresses on stdin, one per line, in whatever textual form the caller already
+has them. Writes one TAB-separated line per candidate:
+
+    ALLOW\t<verbatim-input>\t-
+    REFUSE\t<verbatim-input>\t<the protected entry it matched>
+
+WHY THIS IS A SEPARATE PROCESS AND NOT A REIMPLEMENTATION. The authority on
+which addresses must never be blocked is firewall.never_block_set() — the same
+function the live chokepoint consults before every block. A second copy of that
+list, in the renderer, would be correct only until one of them changed. There is
+exactly one list, and this shells out to it.
+
+THE INPUT IS ECHOED BACK VERBATIM, DELIBERATELY. The caller keys its lookup on
+the exact string it sent, so the join between renderer and guard is exact by
+construction. This is not incidental: an earlier defect in this project compared
+the same address in two textual forms ("192.0.2.5/32" against "192.0.2.5"), the
+lookup silently missed, and the miss was read as a real measurement of zero.
+Reintroducing that shape inside the guard built to prevent it would be a
+particularly bad joke.
+
+NORMALISATION HAPPENS HERE AND NOWHERE ELSE, in ipaddress, which canonicalises
+IPv6 and handles prefix lengths correctly. The calling shell does no address
+arithmetic at all — no mask stripping, no case folding, no v6 compression. A
+second implementation over there would be a drift surface between two
+representations of the same address, which is the exact failure this guard
+exists to prevent.
+
+EXIT STATUS. 0 only if the protected set was built AND the self-test passed.
+Anything else exits non-zero with a reason on stderr, and the caller must treat
+that as "no verdict may be emitted for any address". An enforcement ruleset
+without a working never-block check is worse than no ruleset.
+"""
+import os
+import sys
+
+# Sibling-package import, resolved from this script's own location rather than a
+# hardcoded prefix, so it stays correct wherever the tree is installed.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "alert_manager"))
+
+# Protected/unprotected pairs the guard MUST be able to tell apart, checked on
+# EVERY run before it vouches for anything. 127.0.0.1 and ::1 are hardcoded in
+# firewall._NEVER_BLOCK_ALWAYS, so they are protected by definition; the other
+# two are reserved documentation ranges (RFC 5737, RFC 3849) that are never a
+# real host address.
+#
+# This exists because a guard that has silently stopped distinguishing protected
+# from unprotected addresses reports "all clear" for everything, which is
+# indistinguishable from working correctly — until it isn't. Every verification
+# defect this project hit on 2026-08-01 had that one shape: an instrument that
+# could only return one answer, reporting that answer as a measurement.
+CANARIES = (("127.0.0.1", "REFUSE"), ("::1", "REFUSE"),
+            ("203.0.113.1", "ALLOW"), ("2001:db8::1", "ALLOW"))
+
+
+def die(msg):
+    sys.stderr.write("nemesis-fw-neverblock: %s\n" % msg)
+    raise SystemExit(2)
+
+
+try:
+    import ipaddress
+    import firewall            # THE authority. Never reimplemented here.
+except Exception as exc:       # noqa: BLE001 — any import failure is fail-closed
+    die("cannot import the authoritative never-block source (%s)" % exc)
+
+try:
+    raw = firewall.never_block_set()
+except Exception as exc:       # noqa: BLE001
+    die("never_block_set() raised (%s)" % exc)
+
+
+def as_net(text):
+    """Any accepted form -> an ip_network: bare address, /32, /128, or CIDR."""
+    t = text.strip().split("%")[0]        # drop a link-local %iface scope
+    return ipaddress.ip_network(t, strict=False) if t else None
+
+
+protected = []
+for entry in raw:
+    try:
+        net = as_net(entry)
+    except ValueError as exc:
+        # Fatal, not skipped. Dropping an unparseable entry silently SHRINKS the
+        # protected set, and a smaller set reads exactly like a set with nothing
+        # to protect. A typo in NEMESIS_NEVER_BLOCK stopping the render is loud
+        # and fixable; a typo silently unprotecting the gateway is neither.
+        die("unparseable never-block entry %r (%s) — refusing to run a partial "
+            "guard" % (entry, exc))
+    if net is not None:
+        protected.append((net, entry))
+
+if not protected:
+    die("never_block_set() produced no usable entries — refusing to vouch for "
+        "any address against an empty protected set")
+
+
+def classify(text):
+    try:
+        net = as_net(text)
+    except ValueError:
+        return ("REFUSE", "unparseable")      # fail-closed on garbage
+    if net is None:
+        return ("REFUSE", "empty")
+    for pnet, entry in protected:
+        # overlaps(), not equality. A ufw rule may carry any prefix length, and
+        # blocking a /24 that CONTAINS the gateway cuts this host off from its
+        # own network just as surely as blocking the gateway's own address.
+        # Equality would wave the /24 straight through.
+        if net.version == pnet.version and net.overlaps(pnet):
+            return ("REFUSE", entry)
+    return ("ALLOW", "-")
+
+
+for _addr, _want in CANARIES:
+    _got = classify(_addr)[0]
+    if _got != _want:
+        die("SELF-TEST FAILED: %s classified %s, expected %s. The guard cannot "
+            "distinguish protected from unprotected addresses, so it must not "
+            "vouch for any of them." % (_addr, _got, _want))
+
+for line in sys.stdin:
+    cand = line.strip()
+    if not cand:
+        continue
+    verdict, why = classify(cand)
+    sys.stdout.write("%s\t%s\t%s\n" % (verdict, cand, why))

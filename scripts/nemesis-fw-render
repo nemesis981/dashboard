@@ -21,6 +21,14 @@
 # wrong. Divergence is the signal; agreement over a real workload is what
 # justifies cutover.
 #
+# NEVER-BLOCK GUARD: every derived address is classified by
+# scripts/nemesis-fw-neverblock, which shells out to firewall.never_block_set() —
+# the SAME list the live chokepoint consults before every block, never a second
+# copy. A protected address stays visible in the table with a counter and a
+# `never-block:refused:` comment, and can never be given a verdict. If the guard
+# cannot run, this script emits NOTHING and exits 3: an enforcement table without
+# a working never-block check is worse than no table.
+#
 #   render        write the derived ruleset to stdout
 #   render -o F   write to file F
 set -u
@@ -39,10 +47,53 @@ mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
     | grep -E '^-A ufw6-user-input -s [0-9a-fA-F:]+/[0-9]+ -j DROP$' \
     | awk '{print $4}')
 
+# ── never-block guard ────────────────────────────────────────────────────────
+# FAIL-CLOSED, and deliberately strict: an enforcement table without a working
+# never-block check is worse than no table, so a guard that cannot run stops the
+# render entirely rather than producing an unguarded ruleset.
+#
+# THIS RUNS BEFORE $OUT IS OPENED. `{ ... } > "$OUT"` truncates on open, so a
+# guard failure discovered after that point would leave a half-written or empty
+# ruleset behind. Refusing here leaves any existing file byte-identical.
+#
+# STRICT EVEN THOUGH TODAY'S OUTPUT HAS NO VERDICTS. The guard's failure modes
+# are worth exercising now, in the regime where a mistake cannot lock anyone out,
+# rather than being discovered at cutover when they can.
+GUARD="$(dirname "$(readlink -f "$0")")/nemesis-fw-neverblock"
+CAND=$(printf '%s\n' "${V4[@]:-}" "${V6[@]:-}" | grep . || true)
+GERR=$(mktemp)
+if ! GOUT=$(printf '%s\n' "$CAND" | grep . | "$GUARD" 2>"$GERR"); then
+    cat "$GERR" >&2
+    rm -f "$GERR"
+    echo "nemesis-fw-render: never-block guard unavailable — REFUSING to emit a" >&2
+    echo "  ruleset at all. $OUT was NOT modified. Fix the guard, then re-render." >&2
+    exit 3
+fi
+rm -f "$GERR"
+
+# The guard must answer for EVERY candidate. A short reply means it stopped
+# part-way, and a partial answer accepted as a complete one is precisely the
+# defect class this change exists to prevent.
+WANT=$(printf '%s\n' "$CAND" | grep -c . || true)
+GOT=$(printf '%s\n' "$GOUT" | grep -c . || true)
+if [ "$WANT" -ne "$GOT" ]; then
+    echo "nemesis-fw-render: guard answered for $GOT of $WANT candidate(s) —" >&2
+    echo "  refusing to emit a partially-guarded ruleset. $OUT not modified." >&2
+    exit 3
+fi
+
+# Keyed on the VERBATIM string the guard echoed back, so the lookup below is
+# exact by construction. Nothing here re-derives or re-formats an address.
+declare -A REFUSED=()
+while IFS=$'\t' read -r _v _addr _why; do
+    [ "$_v" = "REFUSE" ] && REFUSED["$_addr"]="$_why"
+done <<< "$GOUT"
+
 {
 echo "# GENERATED — do not hand-edit. Derived from ufw's live ruleset by"
 echo "# nemesis-fw-render. Observe-only: counters and logs, no verdicts."
 echo "# Derived $( [ ${#V4[@]} -gt 0 ] && echo ${#V4[@]} || echo 0 ) IPv4 and $( [ ${#V6[@]} -gt 0 ] && echo ${#V6[@]} || echo 0 ) IPv6 block(s)."
+echo "# Never-block guard: PASSED. ${#REFUSED[@]} address(es) refused a verdict."
 # ATOMIC REPLACE, not append. `nft -f` on an EXISTING table adds rules rather
 # than replacing them — so without this, every apply duplicates every rule and
 # the derived block list accumulates instead of being regenerated. That breaks
@@ -61,14 +112,29 @@ if [ ${#V4[@]} -eq 0 ] && [ ${#V6[@]} -eq 0 ]; then
 fi
 for a in "${V4[@]:-}"; do
     [ -n "$a" ] || continue
-    # No verdict: counts and logs, then falls through. Log is rate-limited —
-    # an unbounded log rule on a blocked host that keeps retrying is a
-    # self-inflicted disk problem.
-    echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop \" comment \"observe:block:$a\""
+    if [ -n "${REFUSED[$a]:-}" ]; then
+        # VISIBLE, NOT DROPPED. Omitting the address would make this table
+        # disagree with ufw for a reason no operator could see from the table;
+        # including it normally would be the lockout. It stays, counted and
+        # logged, under a comment tag that states exactly why it will never be
+        # given a verdict — so both an operator and nemesis_fw_watch can find it.
+        echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-neverblock refused \" comment \"never-block:refused:$a\""
+        echo "nemesis-fw-render: REFUSED $a — protected (matches ${REFUSED[$a]}). Rule kept for visibility WITHOUT a verdict; it will never be given one." >&2
+    else
+        # No verdict: counts and logs, then falls through. Log is rate-limited —
+        # an unbounded log rule on a blocked host that keeps retrying is a
+        # self-inflicted disk problem.
+        echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop \" comment \"observe:block:$a\""
+    fi
 done
 for a in "${V6[@]:-}"; do
     [ -n "$a" ] || continue
-    echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop6 \" comment \"observe:block6:$a\""
+    if [ -n "${REFUSED[$a]:-}" ]; then
+        echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-neverblock refused6 \" comment \"never-block6:refused:$a\""
+        echo "nemesis-fw-render: REFUSED $a — protected (matches ${REFUSED[$a]}). Rule kept for visibility WITHOUT a verdict; it will never be given one." >&2
+    else
+        echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop6 \" comment \"observe:block6:$a\""
+    fi
 done
 
 cat <<'NFT'
@@ -85,4 +151,4 @@ cat <<'NFT'
 NFT
 } > "$OUT"
 
-[ "$OUT" != "/dev/stdout" ] && echo "  wrote $OUT (${#V4[@]} v4, ${#V6[@]} v6 derived rules)" >&2
+[ "$OUT" != "/dev/stdout" ] && echo "  wrote $OUT (${#V4[@]} v4, ${#V6[@]} v6 derived rules, ${#REFUSED[@]} refused by the never-block guard)" >&2
