@@ -18,6 +18,8 @@
              border-radius:8px; padding:11px; font-size:1em; font-weight:bold; cursor:pointer; }
     .error { background:#ff444422; border:1px solid #ff4444; color:#ff8888;
              border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
+    .notice { background:#00d4ff1a; border:1px solid #00d4ff; color:#8fe9ff;
+              border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:0.85em; }
     .login-hint { margin-top:20px; font-size:0.72em; color:#6b7689; text-align:center;
                   line-height:1.6; }
     .login-hint code { background:#0d0d1e; border:1px solid #2a3450; border-radius:4px;
@@ -28,6 +30,7 @@
   <div class="card">
     <h1>&#128737; Nemesis Firewall</h1>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
     <form method="POST" action="/login">
         <input type="hidden" name="next" value="{{ next or '' }}">
       <label for="username">Username</label>
