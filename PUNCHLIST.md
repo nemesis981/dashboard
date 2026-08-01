@@ -1216,7 +1216,7 @@ Related: `docs/architecture/0019-deterministic-enforcement-point.md`,
 ### [SMALL] Two cosmetic finds from the 2026-07-31 change-password build
 Captured during step 1b (auth work); neither chased, per Rule 7.
 
-- [ ] **`templates/login.html` forgot-password hint points at the pre-`/opt` path.** It tells the
+- [x] **DONE 2026-07-31 (step 5). TWO sites, not one.** `templates/login.html` forgot-password hint pointed at the pre-`/opt` path. It tells the
   user to SSH in and run `python3 ~/dashboard/core/manage.py reset-password <username>`. That path
   has been wrong since the 2026-07-27 relocation — the tree is `/opt/nemesis` now. This is the one
   instruction shown to someone who is *already locked out*, so a stale path here costs more than
@@ -1224,8 +1224,71 @@ Captured during step 1b (auth work); neither chased, per Rule 7.
   re-checking when the root-only `nemesis-admin reset-password` CLI lands (queued step 5 of the
   recovery-codes sequence) — that CLI will likely replace this hint's wording entirely, so fixing
   the path now and the wording again later may be one edit, not two.
+  **Resolved exactly that way:** fixed during step 5 alongside the root-only guard, so the
+  path, the required `sudo`, and the reframing ("No recovery codes either?" — recovery codes
+  now being the first resort) landed as a single edit.
+  **A SECOND stale site turned up in the same sweep** and is also fixed: `dashboard.py`
+  (uninstall panel) told the user "Your ~/dashboard directory and data will NOT be deleted."
+  A repo-wide grep across `*.py`/`*.html` now returns zero `~/dashboard` references.
 
 - [ ] **`tickets` row id 26 has an empty `title`.** Pre-existing, unrelated to the auth work —
   spotted only because a tier-1 lockout test wrote ticket 27 next to it. Not investigated. Worth
   one look to confirm it's a benign old row rather than a write path that can leave a ticket
   untitled (an untitled ticket is effectively invisible in the queue UI).
+
+### [SMALL] `login_events.timestamp` is UTC; every other table is local
+Found 2026-07-31 while testing the recovery-code login flow. Not fixed that night by
+decision — recorded here so it isn't lost.
+
+- [ ] **A 5-hour skew sits between `login_events` and everything else.** `login_events.timestamp`
+  is `DEFAULT (datetime('now'))`, which SQLite evaluates as **UTC**. `users.last_login`,
+  `users.lockout_until`, `users.password_changed_at` and `audit_log.ts` are all written by
+  Python `datetime.now()` — **local**. The same login writes `2026-07-31 22:58:45` to one
+  table and `2026-07-31T17:58:45` to the other.
+
+  **Self-consistent today, which is exactly why it's easy to miss.** Nothing is currently
+  broken: the concurrent-session query compares `timestamp` against SQLite's own
+  `datetime('now','-24 hours')`, so it's UTC-vs-UTC and correct. The trap is that
+  `login_events` exists specifically to feed brute-force, impossible-travel, and
+  concurrent-session detection — and the first person to correlate it against `users` or
+  `audit_log` by time gets a silent 5-hour error, in the direction that makes attacker
+  activity look like it happened in the future.
+
+  Also note the two formats differ (`YYYY-MM-DD HH:MM:SS` with a space vs. ISO `T`), so a
+  naive string comparison between the columns misorders as well as misaligns.
+
+  Fix carefully — changing the DEFAULT does not rewrite existing rows, so any migration has
+  to decide what to do about history (rows written before the change are genuinely UTC).
+  Converting in place is possible but must be one-shot and guarded; the safer route may be
+  a new explicitly-named column alongside, with readers migrated over.
+
+### [SMALL] Out-of-band credential changes leave no audit trail
+Found 2026-07-31 during a live operator lockout, while closing out the recovery-code work.
+
+- [ ] **`core/manage.py` writes ZERO `audit_log` rows** (`grep -cE "audit_log|_audit\(|login_events"`
+  returns 0). `reset-password`, `create-user` and `unlock` all mutate credentials or lockout
+  state and record nothing anywhere. The same is true of a direct SQL edit.
+
+  **Why it matters more than it looks.** Everything the dashboard does is now attributed:
+  `password_change`, `login_recovery_code_used`, `recovery_codes_generated`, plus
+  `login_events` carrying `source`/`action` so even nemesis-fwd's credential checks are
+  recorded. The one path that is *entirely unrecorded* is the most privileged one — root
+  resetting the admin password. "Who reset this password, and when?" is answerable for every
+  route except the route most likely to be asked about after an incident.
+
+  Confirmed live: two lockout clears performed during the 2026-07-31 incident produced no
+  audit rows at all. Their only trace is the session worklog, which is not a security record.
+
+  Fix is small — `manage.py` already imports `database`; it needs an insert into `audit_log`
+  with `action` (`cli_reset_password` / `cli_unlock` / `cli_create_user`) and the invoking
+  identity. Note the Rule-11 documented exception applies: `audit_log` has no free-text
+  column, so `user` should carry the real invoking account (`SUDO_USER` where present, else
+  the euid's name) rather than a label.
+
+- [ ] **Don't run `manage.py` as root while the WAL sidecars are absent.** `alerts.db` is
+  currently checkpointed with no `-wal`/`-shm` present. A root process opening the database
+  would create them **root-owned**, after which `nemesis-dash` could no longer write and the
+  dashboard would fail. Recoverable with a `chown` to `<user>:nemesis-db`, but avoidable:
+  prefer the recovery-code path, or chown the sidecars afterwards. This is an unintended
+  consequence of the root-only guard added the same evening — the guard is right, the
+  interaction was not foreseen.
