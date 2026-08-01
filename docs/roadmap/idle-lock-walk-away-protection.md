@@ -3,6 +3,10 @@
 - **Status:** Design approved 2026-08-01 (operator: 15-min default, no disable switch in v1,
   add an `audit_log` row on the lock transition). Implementation not yet started. Queued
   2026-07-31, designed 2026-08-01.
+- **Addendum 2026-08-01:** the absolute session cap (`SESSION_MAX_HOURS`, default 8h, full
+  logout rather than confine) was approved by the operator mid-session, after this doc's
+  initial draft — not unapproved scope creep during implementation; noted here so the written
+  record matches what was actually authorized.
 - **Size estimate:** 2–3 sessions (one route + one shared JS include + one env var; no schema
   change; the main cost is auditing every page-render function for JS-include coverage).
 - **Related:** [0006-data-manager](../architecture/0006-data-manager.md) (unlock attempts route
