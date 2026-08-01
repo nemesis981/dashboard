@@ -2,14 +2,18 @@
 
 - **Status:** In progress. Increments 1–2 (priority placement, lockout failsafe)
   **built and proven live**. Increment 3 (derived observe-only ruleset) **built and
-  registering real traffic**, but its counter-agreement proof was **attempted twice
-  on 2026-08-01 and remains UNPROVEN** — both attempts were inconclusive, not
-  passing or failing (see "Status / next" for why). Increment 4 (cutover to real
-  enforcement authority) **not started**, gated on Increment 3's proof AND, as of
-  2026-08-01, on the netlink out-of-band-change watcher as a hard prerequisite, not
-  a follow-up. Design decided 2026-07-29 from measured evidence; code landed
-  2026-07-30 (`19d9b5c`, `nemesis-fw-apply` + `nemesis-fw-render`, pushed to
-  `origin/main`). See "Status / next" below for the full breakdown.
+  registering real traffic**, but its counter-agreement proof was **attempted three
+  times on 2026-08-01 and remains UNPROVEN** — all three were inconclusive, not
+  passing or failing, and a fourth attempt was invalid as a measurement rather than
+  a fourth inconclusive result (see "Status / next" for why). **Increment 4 (cutover
+  to real enforcement authority) is now justified by two independent reasons, not
+  one**: the still-unproven counter-agreement question, and a separately-confirmed
+  gap in the current interim block mechanism (full detail kept private per Rule 10 —
+  see the private mirror, not named here). Not started, gated on Increment 3's proof
+  AND, as of 2026-08-01, on the netlink out-of-band-change watcher as a hard
+  prerequisite, not a follow-up. Design decided 2026-07-29 from measured evidence;
+  code landed 2026-07-30 (`19d9b5c`, `nemesis-fw-apply` + `nemesis-fw-render`, pushed
+  to `origin/main`). See "Status / next" below for the full breakdown.
 - **Date:** 2026-07-29
 - **Affects:** `alert_manager/firewall.py` (the access-control chokepoint), `install.sh`,
   ADR 0005's "future firewall engine", the `CLAUDE.md` ad-hoc-`nft` prohibition, Fork B's
@@ -29,8 +33,15 @@
 > unresolved lockout risk — exactly the category Rule 10 keeps out of the public repo pending a
 > disclosure decision, not a feature-gate. Full writeup, including the measured live-system
 > findings, the exact priority values and why each is safe, the rejected-alternatives analysis,
-> and the lockout-failsafe mechanics:
-> `~/work/nemesis-internal/firewall-enforcement-engine/ADR-0019-deterministic-enforcement-point-FULL.md`.
+> and the lockout-failsafe mechanics: kept in the private mirror (not named here).
+>
+> **Addendum (2026-08-01, operator decision):** a second, independently-confirmed gap in the
+> *current interim* block mechanism (i.e. today's `ufw`-based path, not this ADR's own design)
+> is also kept private under the same Rule 10 judgment — it is a specific, currently-live,
+> unresolved weakness in how blocking behaves today, exactly the "described-but-unresolved edge
+> case" shape Rule 10 exists to catch. Its existence and disposition are summarized in "Status /
+> next" below at the same level of abstraction as the rest of this document; the mechanism,
+> reproduction steps, and measured evidence are in the private mirror only.
 
 ---
 
@@ -117,10 +128,11 @@ state, as of 2026-08-01:
 |---|---|
 | 1 — priority placement | **Proven.** Table registers at the intended priority, ahead of every other chain observed on this host, verified live. |
 | 2 — lockout failsafe | **Proven.** Apply-then-confirm with auto-revert; the failsafe has been watched firing unattended, not just written. |
-| 3 — derived observe-only rules | **Built and registering real traffic, but UNPROVEN — attempted twice on 2026-08-01, both inconclusive rather than pass or fail.** Attempt 1: zero per-IP blocks occurred during the measurement window, so there was nothing for the table's counters to agree or disagree with. Attempt 2: a real block existed, but the target sent zero packets against it — both sides read 0, which is not the same thing as agreement; a comparison needs actual traffic on both sides to mean anything. The counter-agreement proof this increment exists to deliver has still not actually been run against a case with real traffic on both sides. |
-| 4 — cutover to real enforcement authority | **Not started.** Gated on Increment 3's agreement comparison actually succeeding — cutover before that would mean trusting the table's verdicts before anyone has checked they match reality. **As of 2026-08-01, also gated on the netlink out-of-band-change watcher as a hard prerequisite, not a follow-up item.** The watcher unifies two jobs on one `nft` monitor stream rather than building them separately: distinguishing "ufw's own rules changed, so the derived table needs a re-render" from "the enforcement table itself changed unexpectedly" — the second case must alert, not silently self-repair, since a silent auto-repair on a table carrying real DROP authority would hide exactly the kind of tampering or drift an operator most needs to see. |
+| 3 — derived observe-only rules | **Built and registering real traffic, but UNPROVEN — attempted three times on 2026-08-01, all inconclusive rather than pass or fail; a fourth attempt was invalid as a measurement, not a fourth inconclusive result.** Attempt (a): the table was not even loaded at the time — it does not survive a reboot and nothing re-applied it (the gap Increment 3's persistence unit, above, now closes going forward). Attempt (b): the table was loaded, but zero per-IP blocks existed during the window, so there was nothing for its counters to agree or disagree with. Attempt (c): a real block was in place, but the target sent zero packets against it — both sides reading 0 is not agreement; a comparison needs actual traffic on both sides to mean anything. A fourth attempt used synthetic traffic to try to force a measurable case, but synthetic traffic does not exercise the same code path a real new inbound connection does, so it could not stand in as a valid measurement either — it does not count as a fourth inconclusive attempt, because it was never capable of answering the question. The counter-agreement proof this increment exists to deliver still has not been run against a valid, real-traffic case. |
+| 4 — cutover to real enforcement authority | **Not started, and now justified by two independent reasons.** (1) Gated on Increment 3's agreement comparison actually succeeding — cutover before that would mean trusting the table's verdicts before anyone has checked they match reality. (2) **As of 2026-08-01, a second, separately-confirmed gap in the current interim block mechanism** (kept private per Rule 10 — see the addendum above; not detailed here) is also structurally closed by Increment 4's design, protocol-agnostically, once it lands. **Also, as of 2026-08-01, gated on the netlink out-of-band-change watcher as a hard prerequisite, not a follow-up item.** The watcher unifies two jobs on one `nft` monitor stream rather than building them separately: distinguishing "ufw's own rules changed, so the derived table needs a re-render" from "the enforcement table itself changed unexpectedly" — the second case must alert, not silently self-repair, since a silent auto-repair on a table carrying real DROP authority would hide exactly the kind of tampering or drift an operator most needs to see. |
 
-Sequenced after this ADR: finish Increment 3's proof (a real, non-degenerate
-counter-agreement measurement), build the netlink watcher, cut over (Increment 4), then
-the relay core, then the inbound reverse relay. See the private writeup for the full
-evidence base, the specific design, and open questions.
+Sequence: netlink watcher (hard prerequisite) → a valid Increment 3 measurement against real,
+organic traffic → cut over (Increment 4), which — per the addendum above — resolves both open
+justifications at once, not just the counter-agreement question. Then the relay core, then the
+inbound reverse relay. See the private mirror for the full evidence base, the specific design,
+and open questions.
