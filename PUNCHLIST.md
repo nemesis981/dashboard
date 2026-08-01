@@ -1348,3 +1348,27 @@ this is recorded as reported rather than verified against the live files.
   exists cannot be exercised — but it's leftover attack surface from the 2026-07-27 `/opt`
   relocation that should be cleaned up in the same pass as those other stale-path items rather
   than tracked separately. Not urgent.
+
+### [PROJECT] Decision B — host-defense layer productization (durable tracking, first flagged 2026-07-31)
+
+"Decision B" has existed as a scoping decision since the 2026-07-31 install-test session
+(`docs/handoff/worklog/2026-07-31-001.md`, Gap 8) but has never had a home in PUNCHLIST or
+`docs/roadmap/` until now — only mentioned inline in that worklog. This entry consolidates
+what's known so it isn't rediscovered piecemeal.
+
+- [ ] **`install.sh` does not ship the host-defense hardening layer to real customer
+  installs — confirmed twice now, two different components, same root cause.**
+  - **fail2ban** (Gap 8, 2026-07-31): the package is never installed by `install.sh`;
+    `deploy_nemesis_fwd.sh`'s `F2B_USER` check warns and never dies, so a fresh install
+    silently runs without the repeat-offender jail at all.
+  - **The 2026-07-29 hardened nginx rate-limiting + fail2ban configuration** (confirmed
+    2026-08-01, during the DoS-resilience scoping pass — see
+    `docs/architecture/0021-dos-resilience-scoping.md`): this reference deployment now has
+    it live, but it exists only as manually-staged config on this one box, not as anything
+    `install.sh` provisions. A fresh customer install today gets none of this protection.
+  - Same shape as the previously-found Gap 6 (a capability that exists on the reference
+    deployment but was never wired into the standard installer) — this is that pattern
+    recurring against a different capability, not a new category of defect.
+  - Scope note from the DoS-resilience ADR: bringing this into `install.sh` is identified as
+    "the natural anchor of the later hardening pass," not scheduled standalone — recorded
+    here as the durable PUNCHLIST home for Decision B, not as a commitment to build now.
