@@ -1393,6 +1393,18 @@ def _is_background_poll():
     return request.headers.get("X-Nemesis-Poll") == "1"
 
 
+def _wants_json():
+    """True when the caller is script, not a browser navigation.
+
+    Used so the unlock flow can answer an in-page overlay with JSON instead of a
+    redirect. The overlay's whole purpose is to never navigate — a 302 would
+    reload the page and discard exactly the unsaved work it exists to protect.
+    """
+    if request.is_json:
+        return True
+    return "application/json" in (request.headers.get("Accept") or "")
+
+
 def _locked_response(state):
     """How a locked/expired session is told, in the shape the caller can use.
 
@@ -1628,7 +1640,10 @@ def account_unlock():
 
     ip = request.remote_addr or "unknown"
     ua = request.headers.get("User-Agent", "")
-    password = request.form.get("password") or ""
+    # Form for the standalone page, JSON for the in-page overlay. Same route and
+    # the same checks either way — only the transport differs.
+    password = (request.form.get("password")
+                or (request.get_json(silent=True) or {}).get("password") or "")
 
     # An account locked out by other means cannot be unlocked from here either —
     # otherwise this form would be a way around the lockout it shares a budget with.
@@ -1640,8 +1655,11 @@ def account_unlock():
                 _log_login_event(row["username"], ip, False, "locked_out",
                                  row["lockout_tier"], ua,
                                  source="idle_unlock", action="unlock")
+                msg = f"Account is locked for another {mins} minute(s)."
+                if _wants_json():
+                    return jsonify({"error": msg, "kind": "locked_out"}), 423
                 return render_template("unlock.html", display_name=display, next=nxt,
-                                       error=f"Account is locked for another {mins} minute(s).")
+                                       error=msg)
         except (TypeError, ValueError):
             pass
 
@@ -1652,10 +1670,18 @@ def account_unlock():
         if locked:
             # The budget is spent: a session that cannot be unlocked has no
             # reason to stay confined, so end it rather than strand the browser
-            # on a form that can no longer succeed.
+            # on a form that can no longer succeed. The overlay is told to give
+            # up and reload, because there is now nothing behind it to return to.
             logout_user()
             session.clear()
+            if _wants_json():
+                return jsonify({"error": f"Too many attempts. Account locked for "
+                                         f"{mins} minute(s).",
+                                "kind": "locked_out", "session_ended": True}), 423
             return redirect(url_for("login"))
+        if _wants_json():
+            return jsonify({"error": "Incorrect password.",
+                            "kind": "credential_denied"}), 401
         return render_template("unlock.html", display_name=display, next=nxt,
                                error="Incorrect password.")
 
@@ -1679,7 +1705,44 @@ def account_unlock():
     _log_login_event(row["username"], ip, True, None, None, ua,
                      session_id=session.get("_id"), source="idle_unlock", action="unlock")
     auth_log.info("auth: session unlocked for %s from %s", row["username"], ip)
+    if _wants_json():
+        return jsonify({"ok": True})
     return redirect(nxt or url_for("dashboard"))
+
+
+@app.route("/api/session/touch", methods=["POST"])
+@login_required
+def api_session_touch():
+    """Heartbeat proving a human is still present. Returns the time left.
+
+    The refresh itself is not done here — _enforce_setup_and_auth() already
+    stamps `last_activity` on any request that is not a background poll, and
+    this endpoint is deliberately not marked as one. So reaching this handler
+    at all IS the refresh; the body just reports the resulting deadline so the
+    client's countdown tracks the server instead of drifting against it.
+
+    NOT in _IDLE_LOCK_ALLOWED, and that is the point: once a session is locked
+    this endpoint is blocked exactly like any other, so a stuck or hostile tab
+    cannot heartbeat its way out of a lock it never proved a human for. Only a
+    successful /account/unlock clears it.
+
+    The client only calls this when real interaction has occurred since the last
+    call — see static/nemesis-idle-lock.js. A timer alone would defeat the
+    feature just as surely as an unmarked poller would.
+    """
+    last = session.get(_SESSION_LAST_SEEN) or time.time()
+    login_at = session.get(_SESSION_LOGIN_AT) or time.time()
+    idle_left = int(_IDLE_TIMEOUT_SECONDS - (time.time() - last))
+    cap_left = int(_SESSION_MAX_SECONDS - (time.time() - login_at))
+    return jsonify({
+        "idle_timeout": _IDLE_TIMEOUT_SECONDS,
+        # Whichever runs out first is what the client should count down to. The
+        # absolute cap ends the session outright, so the overlay must not promise
+        # an unlock that will not work.
+        "expires_in": max(0, min(idle_left, cap_left)),
+        "ends_session": cap_left <= idle_left,
+    })
+
 
 modules_loader.init(app, DB_PATH, MODULES_DIR)
 
@@ -2768,7 +2831,7 @@ def api_health():
     verify the server is reachable before it starts installing. Version is env-driven
     (Rule 8 — no hardcoded box specifics); defaults to the current agent version."""
     return jsonify({"status": "ok",
-                    "version": os.environ.get("NEMESIS_AGENT_VERSION", "1.0.5")})
+                    "version": os.environ.get("NEMESIS_AGENT_VERSION", "1.0.8")})
 
 
 @app.route("/install/windows/<token>")
@@ -4184,6 +4247,7 @@ def settings_page():
     <title>Nemesis — Settings</title>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 700px; margin: 0 auto; }}
@@ -5822,6 +5886,7 @@ def diagnostics_page():
     <title>Nemesis — Diagnostics</title>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 900px; margin: 0 auto; }}
@@ -6265,6 +6330,7 @@ def firewall_db():
     <title>Nemesis - Alert Database</title>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial; background: #1a1a2e; color: #eee; padding: 20px; }}
         h1 {{ color: #00d4ff; }}
@@ -7925,6 +7991,7 @@ def scan_page():
     <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 1400px; margin: 0 auto; }}
@@ -8611,6 +8678,7 @@ def hardware_all_page():
     <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 1200px; margin: 0 auto; }}
@@ -9028,6 +9096,7 @@ def dashboard():
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/nemesis-idle-lock.js"></script>
     {incident_js_html}
     <script>{incident_state_js}</script>
 </head>
