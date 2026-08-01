@@ -1395,3 +1395,22 @@ that commit.
   - Until this lands, watcher-raised events (tamper, enforcement-loss) are still fully
     alerted via the other two channels (journal, email) — this is a durability/completeness
     gap in the audit trail, not a detection gap.
+
+### [SMALL] Absolute session cap not evaluated on the unlock page itself
+
+Flagged by Window 3, 2026-08-01, during the lock-screen health-summary build.
+Pre-existing — not introduced by that commit, just made more visible by it.
+
+- [ ] **`/account/unlock` (`account_unlock`) is in `_IDLE_LOCK_ALLOWED`, so requests to it
+  skip `_enforce_setup_and_auth()`'s walk-away-protection branch entirely** — including the
+  `_session_lock_state()` check that decides between "locked" (confine) and "expired"
+  (`SESSION_MAX_HOURS`, full logout). A session that reaches the unlock page while idle-
+  locked and later crosses the absolute cap while that page sits open (or auto-refreshing,
+  as of the health-summary commit) never gets transitioned to "expired" by visiting or
+  refreshing that page — only navigating to a DIFFERENT route re-triggers the check. Low
+  urgency: the cap still enforces correctly everywhere else, and the practical exposure is
+  bounded to whatever's already on-screen on the one page that was deliberately exempted
+  from the idle-lock gate. Candidate for the standing route-level security audit
+  (CLAUDE.md) rather than a standalone fix — worth checking whether `_session_lock_state()`
+  should be split so the absolute-cap half runs even inside `_IDLE_LOCK_ALLOWED` routes
+  while the idle-lock half stays skipped there.

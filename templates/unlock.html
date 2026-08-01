@@ -24,6 +24,27 @@
     .hint { margin-top:20px; font-size:0.72em; color:#6b7689; text-align:center;
             line-height:1.6; }
     .hint a { color:#00d4ff; text-decoration:none; }
+    /* View-only health summary. Aggregate counts + overall verdict only — no
+       identifiers of any kind reach this screen (see account_unlock's GET branch). */
+    .health { border:1px solid #2a3a5a; border-radius:8px; padding:12px 13px;
+              margin-bottom:14px; background:#0f1a30; }
+    .health-verdict { display:flex; align-items:center; gap:8px; font-size:0.84em;
+                      font-weight:bold; margin-bottom:11px; }
+    .health-verdict .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
+    .health-green .dot { background:#2ecc71; }
+    .health-green .health-verdict { color:#2ecc71; }
+    .health-amber .dot { background:#ffb020; }
+    .health-amber .health-verdict { color:#ffb020; }
+    .health-red .dot { background:#ff4444; }
+    .health-red .health-verdict { color:#ff4444; }
+    .health-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:9px 6px; }
+    .hc { text-align:center; }
+    .hc b { display:block; font-size:1.15em; color:#55617a; line-height:1.35;
+            font-weight:bold; }
+    .hc span { font-size:0.64em; color:#6b7689; text-transform:uppercase;
+               letter-spacing:0.04em; }
+    .hc.on b { color:#ffc966; }
+    .health-note { margin-top:11px; font-size:0.65em; color:#5a6478; text-align:center; }
   </style>
 </head>
 <body>
@@ -35,7 +56,32 @@
       Locked after a period of inactivity. Your session is still open &mdash; enter
       your password to pick up exactly where you left off.
     </div>
-    <form method="POST" action="/account/unlock">
+    {% if health %}
+    <div class="health health-{{ health.status }}">
+      <div class="health-verdict">
+        <span class="dot"></span>
+        {% if health.status == 'red' %}Attention needed
+        {% elif health.status == 'amber' %}Minor issues
+        {% else %}All clear{% endif %}
+      </div>
+      <div class="health-grid">
+        <div class="hc {% if health.counts.critical %}on{% endif %}">
+          <b>{{ health.counts.critical }}</b><span>Critical</span></div>
+        <div class="hc {% if health.counts.high %}on{% endif %}">
+          <b>{{ health.counts.high }}</b><span>High</span></div>
+        <div class="hc {% if health.counts.medium %}on{% endif %}">
+          <b>{{ health.counts.medium }}</b><span>Medium</span></div>
+        <div class="hc {% if health.counts.services_down %}on{% endif %}">
+          <b>{{ health.counts.services_down }}</b><span>Svc Down</span></div>
+        <div class="hc {% if health.counts.open_tickets %}on{% endif %}">
+          <b>{{ health.counts.open_tickets }}</b><span>Tickets</span></div>
+        <div class="hc {% if health.counts.canary_trips %}on{% endif %}">
+          <b>{{ health.counts.canary_trips }}</b><span>Canary</span></div>
+      </div>
+      <div class="health-note">Snapshot from when this screen loaded</div>
+    </div>
+    {% endif %}
+    <form method="POST" action="/account/unlock" id="unlockForm">
       <input type="hidden" name="next" value="{{ next or '' }}">
       <label for="password">Password</label>
       <input type="password" id="password" name="password"
@@ -51,5 +97,59 @@
       your password, sign out and use a recovery code on the login page.
     </p>
   </div>
+  <script>
+    /* Lock-screen auto-refresh — keeps the health summary current without anyone
+     * touching the keyboard, by re-requesting THIS SAME PAGE on a timer.
+     *
+     * NO NEW SERVER SURFACE. /account/unlock is already the one page a locked
+     * session may fetch (_IDLE_LOCK_ALLOWED); the server simply re-renders a
+     * fresh snapshot on each request. Nothing here is a new endpoint, a new
+     * allowlist entry, or a new capability.
+     *
+     * WHY A NAVIGATION AND NOT A FETCH. The obvious alternative — poll
+     * /api/header/status and patch the DOM, exactly as static/header-status.js
+     * does on the dashboard — cannot work here: that endpoint is deliberately
+     * NOT on the locked allowlist and correctly 401s for a locked session.
+     * Re-rendering the one allowed page IS the mechanism.
+     *
+     * WHY THIS CANNOT DEFEAT THE LOCK. _enforce_setup_and_auth() stamps
+     * last_activity only inside its `ep not in _IDLE_LOCK_ALLOWED` branch, so a
+     * request to this page never refreshes the idle clock. Reloading forever
+     * leaves the session exactly as locked as it already was; only a correct
+     * password clears it. That is a property of the server, not of this script —
+     * but it is why this script is safe to exist at all.
+     */
+    (function () {
+      'use strict';
+      /* Matches static/header-status.js's 30s cadence for this SAME data on the
+       * dashboard, so a locked screen is no less current than an unlocked one. */
+      var REFRESH_MS = 30000;
+      var form = document.getElementById('unlockForm');
+      var pw   = document.getElementById('password');
+      var stopped = false;
+
+      /* A submit already in flight must never be interrupted by a navigation. */
+      if (form) { form.addEventListener('submit', function () { stopped = true; }); }
+
+      setInterval(function () {
+        if (stopped) { return; }
+        /* SKIP this cycle rather than cancelling the timer: a refresh would
+         * discard a partially typed password, but clearing the field re-arms
+         * the refresh on the next tick with no further bookkeeping. */
+        if (pw && pw.value.length > 0) { return; }
+        /* Navigate explicitly instead of location.reload(): after a failed
+         * attempt this page was reached by POST, and reload() would re-submit it
+         * ("Confirm Form Resubmission"). Rebuilding the GET URL also carries
+         * `next` forward, which the POST render keeps only in the form field.
+         * The server re-validates it on the way in, so the round trip is safe. */
+        var nextEl = form ? form.querySelector('input[name="next"]') : null;
+        var url = '/account/unlock';
+        if (nextEl && nextEl.value) { url += '?next=' + encodeURIComponent(nextEl.value); }
+        /* replace() not assign(): this fires every 30s and must not pile up
+         * history entries the operator would have to back out through. */
+        window.location.replace(url);
+      }, REFRESH_MS);
+    })();
+  </script>
 </body>
 </html>

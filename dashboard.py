@@ -1636,7 +1636,20 @@ def account_unlock():
     # same handling as login's `next`.
     nxt = _safe_next(request.values.get("next"))
     if request.method == "GET":
-        return render_template("unlock.html", display_name=display, next=nxt)
+        # View-only health summary above the form. _header_status_data() returns
+        # {"status", "counts"} and NOTHING else — no address, identifier, rule
+        # detail, device note, or account/auth state — so nothing sensitive can
+        # reach a screen that has not yet proven a human is present. It is also
+        # exception-safe: every read inside it is individually guarded and it
+        # still returns a well-formed dict if the DB is unreachable, so a failed
+        # summary can never block an unlock.
+        #
+        # GET ONLY, deliberately. The POST error paths below re-render this
+        # template WITHOUT `health`, so submitting wrong passwords cannot be
+        # turned into a way to poll live status on a locked screen. The template
+        # guards on the variable being defined and simply omits the block.
+        return render_template("unlock.html", display_name=display, next=nxt,
+                               health=_header_status_data())
 
     ip = request.remote_addr or "unknown"
     ua = request.headers.get("User-Agent", "")
