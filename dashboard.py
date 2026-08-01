@@ -239,6 +239,28 @@ def _load_secret_key() -> str:
 
 app.secret_key = _load_secret_key()
 
+# Session cookie posture, stated explicitly rather than inherited.
+#
+# SAMESITE="Lax" is the one that matters. Several state-changing endpoints are
+# POST-only, but POST alone does not stop a cross-origin form submission — the
+# browser would still attach the session cookie. Lax withholds it on cross-site
+# POSTs, so a forged request arrives unauthenticated and is rejected by the
+# normal auth gate. Modern browsers default to Lax already; setting it here
+# means the protection is a property of this application rather than of whatever
+# the visitor's browser happens to default to.
+#
+# HTTPONLY=True is Flask's default too — pinned so it cannot be silently lost.
+#
+# SECURE is deliberately NOT set. This dashboard is served over plain HTTP on
+# the LAN (nginx :80, no TLS configured), and Secure=True would stop the browser
+# sending the cookie at all — every login would appear to succeed and then bounce
+# straight back to the login page. It becomes correct the moment TLS is in front
+# of this, and should be set THEN, not now.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = "login"
