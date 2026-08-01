@@ -577,6 +577,53 @@ The dashboard renders HTML/JS from Python f-strings. The most common defect by f
 - **Grep for this in every retro/review pass.** Unescaped quotes and stray newlines are
   the usual culprit when a page mysteriously fails to load.
 
+### Route-level security audit (standing practice, added 2026-08-01)
+**After any change that touches `dashboard.py`, its routes, or its templates** — and before,
+if the change is large enough that pre-checking makes sense — run a route-level security
+audit in the style of the `reauth-gap-and-active-bugs-audit-2026-07-29.md` /
+`dashboard-audit-worklist-2026-08-01.md` private-mirror audits (the pass that found three
+live bugs: `db_action`'s unguarded GET, `api_backup_schedule`'s shell injection, and
+`api_vpn_action`'s unguarded GET). This does not wait to be asked for — it's a standing
+trigger on the change shape, the same way Rule 8's leak-scan triggers on "about to commit,"
+not on request.
+
+**Scope, every time it runs:**
+- **Every route that mutates state:** does it require the correct credential where one is
+  warranted, and does it use POST rather than GET? (`db_action`'s bug was exactly this: a
+  bare GET, no credential check, contradicting its own sibling `set_action()` — GET-as-write
+  is CSRF-triggerable via a plain `<img>` tag under default SameSite=Lax cookies.)
+- **Any value interpolated into a shell command, SQL string, or crontab line** without
+  proper escaping/parameterization. (`api_backup_schedule`'s bug: `dest_exp` interpolated
+  raw into a generated crontab line run via `/bin/sh -c` — no `shlex.quote()`.)
+- **Any new route that duplicates or diverges from an existing sibling route's security
+  posture** — the `db_action`-vs-`set_action()` shape specifically: two routes doing the same
+  conceptual job with different gates is itself the defect signature, independent of whether
+  either individual route looks wrong in isolation.
+- **Cross-check against known-fixed-pattern regressions** so the same bug CLASS doesn't slip
+  back in unnoticed even in a different route: the GET-as-write/CSRF shape and unescaped
+  shell/SQL/crontab interpolation are the two classes with a confirmed history in this
+  codebase (see the private audits above for the full citations) — new code matching either
+  shape is a finding even if it's not literally one of the three named bugs.
+
+**Method (same as the reference audits):**
+- Read-only (Rule 1) — **no fixing or editing during the audit itself.** Findings only; a
+  fix is a separate, explicit follow-up pass.
+- **Direct code citation for every finding** — file:line and the exact snippet, not a
+  paraphrase. ("`dest_exp` interpolated raw... `dashboard.py:7136-7143`", not "the backup
+  path looks unsafe.")
+- **Explicit "not verified / inference" labeling** for anything not directly confirmed
+  against live code — never state an unchecked claim as fact.
+- **Output goes to the private mirror** (`~/work/nemesis-internal/known-limitations/` or
+  `~/work/nemesis-internal/audits/`, dated filename), **not the public repo.** A live,
+  unfixed route-level vulnerability inventory is exactly the "described-but-unresolved edge
+  case" shape Rule 10 already treats as flagged-not-automatic-public — this is the same
+  judgment applied by default to this specific audit type, not a new exception.
+- Whichever window lands the `dashboard.py`/routes/template change is responsible for
+  triggering this — either running it directly (it's read-only, so it doesn't conflict with
+  Window 1's build-window scope) or handing off to Window 2 explicitly if the change was
+  trip-critical/time-pressured and audit-first discipline calls for a separate pass rather
+  than folding it into the same live session.
+
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
   credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
