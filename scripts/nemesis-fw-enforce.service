@@ -1,0 +1,46 @@
+[Unit]
+# ADR 0019 — re-establish the derived enforcement table at boot.
+#
+# WHY THIS EXISTS: the nemesis_enforce table lives only in the kernel's netfilter
+# state. It does not survive a reboot, and nothing re-created it. Measured live
+# 2026-08-01: the table was applied and observing on Jul 30 and Jul 31 (82 kernel
+# log lines), the host rebooted at 08:14:39, and the table was simply gone — along
+# with the counters that were the sole evidence for Increment 3's measurement.
+#
+# While the table is observe-only that is an evidence problem. Once it carries
+# real DROP authority it becomes a correctness problem: enforcement would vanish
+# at every reboot with nothing failing loudly, because an absent table looks
+# exactly like a table that is allowing everything.
+#
+# ORDERING IS THE WHOLE POINT, which is why this is a unit and not a cron entry.
+# The ruleset is DERIVED from ufw's live block list, so it cannot be rendered
+# until ufw has loaded its own rules. Cron cannot express that dependency, and a
+# failed cron job is silent; a failed unit is visible in systemctl and journalctl.
+Description=Nemesis deterministic enforcement table (ADR 0019)
+Documentation=file:///opt/nemesis/docs/architecture/0019-deterministic-enforcement-point.md
+After=ufw.service network-online.target
+Wants=ufw.service
+ConditionPathExists=/opt/nemesis/scripts/nemesis-fw-render
+
+[Service]
+# RE-RENDER, never restore a saved file. The table mirrors what ufw is enforcing
+# at this instant; a stored ruleset goes stale the moment a block is added or an
+# auto-quarantine expires. Proven on 2026-08-01, when the previous day's blocks
+# had expired and the correct derived content was legitimately empty.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c '/opt/nemesis/scripts/nemesis-fw-render render -o /run/nemesis-enforce.nft && /usr/sbin/nft -f /run/nemesis-enforce.nft'
+
+# Deliberately NOT nemesis-fw-apply. That tool arms a 60-second auto-revert and
+# waits for an interactive `confirm` — correct for an operator making a change,
+# wrong at boot, where nobody is present to confirm and the table would revert
+# itself every single time. The failsafe protects a human decision; this is not one.
+
+# Failure here must be visible rather than fatal. A missing table is a degraded
+# observability state today, so the unit reports failure without blocking boot.
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
