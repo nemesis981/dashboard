@@ -347,6 +347,13 @@ _LOCKOUT_TIERS = [
 # Endpoints reachable WITHOUT auth (Part 3 exemptions). 'static' covers assets.
 _AUTH_EXEMPT   = {"setup", "login", "login_recovery", "logout", "api_passphrase_generate", "static",
                   "install_windows_download", "install_windows_exe", "install_windows_zip",
+                  # The pre-warn page is reached by the SAME people as /exe and /zip — end
+                  # users holding an installer link, who have no dashboard account. Gating
+                  # it behind login bounces them to a sign-in page they cannot pass, so it
+                  # must share its siblings' exemption or it silently does nothing. The
+                  # token remains the credential: install_windows_start() still calls
+                  # _valid_installer_token() and 410s without a good one.
+                  "install_windows_start",
                   "api_health"}
 
 
