@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall — Before You Install</title>
+  <style>
+    body { background:#0d0d1e; color:#e8e8ef; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; padding:28px 16px; line-height:1.65; }
+    .wrap { max-width:680px; margin:0 auto; }
+    h1 { color:#00d4ff; font-size:1.45em; margin:0 0 6px; }
+    .sub { color:#8a98b3; margin:0 0 26px; font-size:0.95em; }
+    h2 { font-size:1.05em; margin:30px 0 10px; color:#e8e8ef; }
+    p { margin:11px 0; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:20px 22px; margin-bottom:20px; }
+    .lede { background:#00d4ff14; border-left:3px solid #00d4ff; border-radius:6px;
+            padding:13px 16px; margin-bottom:24px; font-size:0.95em; }
+    /* Mock-ups of the two Windows dialogs. Recreated in CSS rather than shipped as
+       screenshots: a picture of the real dialog is the single most effective part of a
+       forewarning page, but a bitmap of one machine's screen ages badly (Windows restyles
+       these), weighs hundreds of KB, and cannot be read by a screen reader. */
+    .dlg { border-radius:8px; overflow:hidden; margin:14px 0 4px;
+           font-family:Segoe UI,-apple-system,sans-serif; color:#1a1a1a;
+           box-shadow:0 4px 18px #0006; }
+    .dlg .body { background:#f3f3f3; padding:14px 16px; font-size:0.9em; }
+    .dlg .btns { background:#eaeaea; padding:11px 16px; text-align:right; }
+    .dlg .btn { display:inline-block; border:1px solid #b5b5b5; background:#fdfdfd;
+                border-radius:4px; padding:5px 20px; font-size:0.85em; margin-left:7px; }
+    .dlg .btn.def { background:#0067c0; border-color:#0067c0; color:#fff; font-weight:600; }
+    .dlg .btn.act { border:2px solid #00a862; font-weight:700; }
+    .smart .head { background:#0b5ca8; color:#fff; padding:15px 16px; font-weight:700;
+                   font-size:1em; }
+    .uac .head { background:#fdf3d4; padding:15px 16px; font-weight:700; font-size:0.97em;
+                 border-bottom:1px solid #e3d9b4; }
+    .uac .tag { display:block; font-weight:400; font-size:0.78em; color:#555;
+                margin-bottom:5px; }
+    .look { font-size:0.78em; color:#7f8ba3; text-transform:uppercase;
+            letter-spacing:0.05em; margin-top:18px; }
+    .do { background:#0f2a1c; border:1px solid #2ecc7155; border-radius:8px;
+          padding:13px 16px; margin:14px 0; }
+    .do b { color:#2ecc71; }
+    .notmean { background:#1b1b2e; border:1px solid #333a52; border-radius:8px;
+               padding:14px 18px; }
+    .notmean li { margin:7px 0; }
+    .stop { background:#2a1620; border:1px solid #ff444455; border-radius:8px;
+            padding:14px 18px; margin:26px 0; }
+    .stop b { color:#ff7b7b; }
+    .dl { text-align:center; margin:32px 0 10px; }
+    .dl a { display:inline-block; background:#00d4ff; color:#04222b; text-decoration:none;
+            font-weight:700; padding:13px 30px; border-radius:9px; font-size:1em; }
+    .dl .alt { display:block; margin-top:14px; font-size:0.86em; color:#8a98b3; }
+    .dl .alt a { background:none; color:#00d4ff; font-weight:400; padding:0;
+                 text-decoration:underline; font-size:1em; }
+    footer { margin-top:34px; font-size:0.8em; color:#6b7689; text-align:center; }
+    code { background:#0d0d1e; border:1px solid #2a3350; border-radius:4px;
+           padding:1px 6px; font-size:0.88em; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Before you install</h1>
+  <p class="sub">Nemesis Security Agent for Windows</p>
+
+  <div class="lede">
+    Windows will show you <strong>one or two security warnings</strong> during this install.
+    They are expected, and this page shows you exactly what they look like before you
+    meet them — so you can tell a normal prompt from a genuine problem.
+  </div>
+
+  <h2>Why they appear at all</h2>
+  <p>
+    Windows warns about any program it has not seen many times before. Nemesis is
+    self-hosted software installed by a small number of people, so Windows has no
+    widespread history for it and treats it as unfamiliar. That is a statement about
+    <em>how many people have downloaded this file</em> — not about whether it is safe.
+  </p>
+
+  <div class="card">
+    <div class="look">Warning 1 &mdash; may or may not appear</div>
+    <h2 style="margin-top:4px">&ldquo;Windows protected your PC&rdquo;</h2>
+    <div class="dlg smart">
+      <div class="head">Windows protected your PC</div>
+      <div class="body">
+        Microsoft Defender SmartScreen prevented an unrecognized app from starting.
+        Running this app might put your PC at risk.<br><br>
+        <span style="color:#0b5ca8; text-decoration:underline;">More info</span>
+      </div>
+      <div class="btns"><span class="btn def">Don&rsquo;t run</span></div>
+    </div>
+    <p>
+      This one is a full-screen blue box, and at first it looks like there is no way
+      forward — the only button is <strong>Don&rsquo;t run</strong>.
+    </p>
+    <div class="do">
+      <b>What to do:</b> click <strong>More info</strong> (the small link in the middle of
+      the text), which reveals a <strong>Run anyway</strong> button underneath.
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="look">Warning 2 &mdash; will always appear</div>
+    <h2 style="margin-top:4px">&ldquo;Do you want to allow this app&hellip;&rdquo;</h2>
+    <div class="dlg uac">
+      <div class="head">
+        <span class="tag">User Account Control</span>
+        Do you want to allow this app from an unknown publisher to make changes to your
+        device?
+      </div>
+      <div class="body">
+        <strong>NemesisAgent-Setup.exe</strong><br>
+        Publisher: Unknown<br>
+        File origin: Downloaded from the Internet
+      </div>
+      <div class="btns">
+        <span class="btn act">Yes</span><span class="btn def">No</span>
+      </div>
+    </div>
+    <p>
+      This smaller yellow-topped box always appears, because installing the agent
+      genuinely does need administrator permission — it sets up a background service that
+      monitors this device. Note that Windows highlights <strong>No</strong> as the
+      default.
+    </p>
+    <div class="do">
+      <b>What to do:</b> click <strong>Yes</strong> to continue the install.
+    </div>
+  </div>
+
+  <h2>What these warnings do <em>not</em> mean</h2>
+  <div class="notmean">
+    <ul>
+      <li>They do <strong>not</strong> mean a virus was found. Nothing was detected — if
+        Windows had actually found malware, it would say so plainly and remove the file
+        rather than ask you.</li>
+      <li>They do <strong>not</strong> mean the file is damaged or that the download
+        failed.</li>
+      <li>They do <strong>not</strong> mean something is wrong with your computer.</li>
+      <li>&ldquo;Unknown publisher&rdquo; means the file carries no purchased publisher
+        signature yet. It is a statement about paperwork, not about behaviour.</li>
+    </ul>
+  </div>
+
+  <div class="stop">
+    <b>One thing genuinely worth checking first.</b>
+    These prompts exist for a good reason, and we are not asking you to ignore them in
+    general — only to recognise this specific, expected one. Continue only if you reached
+    this page from a link your own administrator gave you. If you found it somewhere else,
+    or you were not expecting to install anything, stop here and ask them first. Never
+    turn off Windows Security, Defender, or SmartScreen to get past a warning — not for
+    this install, and not for any other.
+  </div>
+
+  <div class="dl">
+    <a href="/install/windows/{{ token }}/zip">Download the installer</a>
+    <span class="alt">
+      Your administrator may instead have asked you to use the
+      <a href="/install/windows/{{ token }}/exe">generic installer</a>.
+    </span>
+  </div>
+
+  <footer>
+    Nemesis Firewall &mdash; if anything here does not match what you see on screen,
+    stop and contact {{ support_contact }}.
+  </footer>
+
+</div>
+</body>
+</html>

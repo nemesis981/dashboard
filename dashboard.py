@@ -2974,6 +2974,30 @@ def install_windows_download(token):
         status=410, mimetype="text/plain")
 
 
+@app.route("/install/windows/<token>/start")
+def install_windows_start(token):
+    """PUBLIC (token is the credential): plain-language forewarning of the Windows
+    security prompts, shown BEFORE the download link is handed over.
+
+    WHY THIS PAGE EXISTS OUTSIDE THE INSTALLER. SmartScreen gates the double-click and
+    UAC gates process start, so BOTH fire before a single line of installer_gui.py runs —
+    the installer itself can never forewarn about them. A page on this side of the
+    download is the only place the warning can land before Windows speaks.
+
+    TOKEN IS NOT CONSUMED HERE. _valid_installer_token() is a read-only SELECT and the
+    download routes do not increment `uses` either (consumption happens at enrollment),
+    so landing here first cannot burn a link the user has not used yet.
+
+    ADDITIVE: /exe and /zip keep working exactly as before for any link already handed
+    out. Nothing routes THROUGH this page; it is an alternative entry point."""
+    if not _valid_installer_token(token):
+        return Response("This installer link is invalid, revoked, expired, or already "
+                        "used. Ask your administrator to generate a new one.\n",
+                        status=410, mimetype="text/plain")
+    return render_template("install_prewarn.html", token=token,
+                           support_contact="your administrator")
+
+
 @app.route("/install/windows/<token>/exe")
 def install_windows_exe(token):
     """PUBLIC: redirect to the CI-built Windows .exe (latest GitHub release asset).
