@@ -1414,3 +1414,95 @@ Pre-existing — not introduced by that commit, just made more visible by it.
   (CLAUDE.md) rather than a standalone fix — worth checking whether `_session_lock_state()`
   should be split so the absolute-cap half runs even inside `_IDLE_LOCK_ALLOWED` routes
   while the idle-lock half stays skipped there.
+
+### [SMALL] Guard-unavailable degradation is journal-only — the enforcement table goes silently stale
+
+Found 2026-08-02 by Window 1 while re-measuring check 7 (`rerender()` fail-closed) on the VM.
+Not a fail-closed defect — the refusal behaviour is correct and now proven. This is the
+*observability* half.
+
+- [ ] **When the never-block guard is unavailable, nothing outside the systemd journal records
+  it.** `rerender()` (`alert_manager/nemesis_fw_watch.py:220-222`) checks the render exit code,
+  calls `log.error("fwwatch: render failed: ...")` and `return`s. It does **not** call `alert()`,
+  so there is no `degraded.jsonl` record, no email, and no `audit_log` row. Confirmed on the VM,
+  not inferred: during the check-7 run `degraded.jsonl` captured the tamper alerts
+  (`NEM-FWW-0001`) and **nothing** for the render failure.
+
+  **Consequence.** While the guard is broken the derived table keeps enforcing the last good
+  ruleset but stops tracking ufw — it goes **stale**, silently. Enforcement is still safe (that is
+  the deliberate tradeoff: stale-but-guarded beats fresh-but-unguarded), but an operator has no
+  signal that their firewall changes have stopped propagating to the enforcement table. Fail-closed
+  and silent is still silent.
+
+  **Distinct from the two existing `degraded.jsonl` items above** — those are downstream (nothing
+  *reads* the file; ingesting it into `audit_log`). This one is upstream: the record is never
+  *written*. Building a reader and wiring the ingestion would still leave this event invisible,
+  because nothing emits it. Worth fixing in the same pass as the ingestion item so the channel is
+  end-to-end rather than half-wired.
+
+  Deliberately out of scope for the Increment 4 cutover; captured rather than folded in.
+  Reference: `~/work/nemesis-internal/firewall-enforcement-engine/VM-TEST-PLAN.md` check 2.
+
+### [LOW] Unlabeled test row in live `login_events` (id 83, `harnesstest`)
+
+Found 2026-08-02 by Window 1 while verifying the `login_events` UTC→local migration.
+
+- [ ] **Row id 83, username `harnesstest`** (now `2026-08-01T18:11:03` after the migration) is a
+  leftover from the 2026-08-01 session. It carries no Rule 11 label — no literal `test data`
+  string, no date — so the standard `LIKE '%test data%'` sweep will never find it.
+
+  `login_events` is **not** the documented `audit_log` exception to Rule 11: it has free-text
+  fields (`username`, `failure_reason`) that could have carried the label, so this is a genuine
+  miss rather than an unlabelable table.
+
+  Verified the same day that this is the only such stray in live `login_events` (57 rows total).
+  The `tzwritercheck` row from that session's writer-arity check was deliberately written to a
+  throwaway copy and never entered the live database.
+
+  Not urgent. Delete or relabel at the next cleanup pass.
+
+### [SMALL] Never ship a starter config that duplicates the in-code defaults
+
+Root cause of the 2026-08-02 YARA-exclusion shadowing incident. Not urgent; prevents a repeat.
+
+- [ ] **`/etc/nemesis-yara-exclusions.conf` was created on 2026-06-29 as a "starter config"
+  containing a verbatim copy of the shipped defaults** (AST-compared 2026-08-02: 14 patterns,
+  same order, **zero** operator customisation). Because `_load_exclusions()` correctly prefers
+  the conf file whenever it exists and is non-empty, that starter permanently and silently
+  shadowed the in-code defaults on this box.
+
+  **The consequence, six weeks later:** the 2026-08-02 commit removing `/tmp` and `/var/tmp`
+  from the exclusion list — a deliberate coverage fix, since those are the design's own
+  high-risk dropper-landing paths — was **correct in code and completely inert in production**.
+  Caught by Window 2 during commit review; resolved by removing the conf (snapshot
+  `2026-08-02-1251-pre-yara-exclusions-conf-removal`) and restarting.
+
+  **The override mechanism is not the bug — seeding it with a copy of the defaults is.** It
+  guarantees that every future defaults change is shadowed on every box carrying the starter,
+  and it looks perfectly healthy while doing it.
+
+  - [ ] **Rule to adopt:** never install a config file whose content duplicates shipped
+    defaults. If discoverability is the goal, ship `<name>.conf.example` — a filename the
+    loader does not read — so it documents the mechanism without overriding it.
+  - [ ] Audit whether any other `/etc/nemesis-*` config on this box (or written by `install.sh`)
+    has the same shape: present, unmodified, and shadowing code defaults. (Tracked as its own
+    audit — see the "Config-shadows-code-defaults audit" work below.)
+
+### [SMALL] `_load_exclusions()` should log when it is SHADOWING, not just count + source
+
+Companion to the item above — the detection half of the same failure.
+
+- [ ] **The existing log line is true and useless.** `_load_exclusions()` logs
+  `"%d known-good path exclusions loaded from %s"`. During the entire six weeks the stale conf
+  was shadowing corrected defaults, that line read `14 ... loaded from
+  /etc/nemesis-yara-exclusions.conf` — accurate, and giving no hint that the code's own defaults
+  were being ignored or that they had since changed.
+
+  - [ ] When loading from a conf file, additionally report whether the conf **differs from the
+    in-code defaults**, and how (count delta, or an explicit "identical to defaults — this
+    override is a no-op" note). An override that matches the defaults exactly is almost always
+    an accident, and saying so at load time is what would have surfaced this in June rather
+    than August.
+  - [ ] Same class as the standing "verification/derivation code must prove its own premise"
+    rule: a status line that cannot distinguish a deliberate override from an accidental
+    shadow is reporting a value, not a measurement.
