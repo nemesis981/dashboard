@@ -200,10 +200,50 @@ def _expected_suricata_profile(conn_type, conf):
     return profile_pref
 
 
+def _sign_heartbeat(device_id, body: bytes):
+    """(signed_at, signature) for a heartbeat body, or (None, None) if unavailable.
+
+    Reuses the enrollment keypair — the same key the server already stored and
+    already verifies on /enroll and /api/agent/uninstall. No new key material and
+    no re-enrollment.
+
+    The signature covers "<device_id>|<signed_at>|<sha256(body)>", where the
+    digest is over the EXACT BYTES POSTED. That binds the payload to the
+    signature, so a captured signature cannot be replayed over different metrics
+    — which matters because the server evaluates scan triggers from this body.
+
+    Best-effort by design: if the key is missing or signing fails, the heartbeat
+    is sent UNSIGNED rather than dropped. A server in observe mode accepts and
+    logs it; a server in enforce mode rejects it. Losing telemetry outright would
+    be a worse failure than an unsigned beat during rollout, and the server —
+    not the agent — is where that policy belongs.
+    """
+    try:
+        import hashlib
+        from enrollment import _sign
+        signed_at = datetime.now().isoformat(timespec="seconds")
+        digest = hashlib.sha256(body).hexdigest()
+        return signed_at, _sign(f"{device_id}|{signed_at}|{digest}")
+    except Exception as e:
+        log.warning("could not sign heartbeat (sending unsigned): %s", e)
+        return None, None
+
+
 def _post_payload(conf, payload):
     url = f"http://{conf['nemesis_ip']}:{conf['nemesis_port']}/hw_data"
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        # Serialise ONCE and post the exact bytes we signed. Letting requests
+        # re-serialise via json= would sign one byte-sequence and transmit
+        # another, and the digest would never match.
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode()
+        device_id = payload.get("device_id", "")
+        signed_at, signature = _sign_heartbeat(device_id, body)
+        headers = {"Content-Type": "application/json"}
+        if signed_at and signature:
+            headers["X-Nemesis-Device"] = device_id
+            headers["X-Nemesis-Signed-At"] = signed_at
+            headers["X-Nemesis-Signature"] = signature
+        r = requests.post(url, data=body, headers=headers, timeout=10)
         if r.status_code == 200:
             log.info("Posted payload to %s (device=%s conn=%s)",
                      url, payload.get("device_id"), payload.get("connection_type"))

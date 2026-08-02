@@ -7,6 +7,7 @@ get_recent_samples).
 """
 import json
 import logging
+import hashlib
 import os
 import signal
 import sqlite3
@@ -320,7 +321,15 @@ def init_db():
                           ("hw_is_virtual",       "INTEGER DEFAULT 0"),
                           # ── de-enroll on uninstall (clean-uninstall build spec) ──
                           ("uninstalled_at",      "TEXT"),
-                          ("uninstalled_by",      "TEXT")):   # actor seam (device self / admin)
+                          ("uninstalled_by",      "TEXT"),    # actor seam (device self / admin)
+                          # ── heartbeat auth (ADR 0004 step 3) ──
+                          # Monotonic replay floor: the newest signed_at already
+                          # accepted from this device. Advanced ONLY after a
+                          # signature verifies, so a rejected or forged heartbeat
+                          # cannot raise it and lock out the real agent. Local ISO
+                          # TEXT, so lexical comparison is chronological
+                          # (ADR 0004 step 2).
+                          ("last_signed_at",      "TEXT")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1880,6 +1889,127 @@ def _verify_enroll_signature(public_key_pem, message, signature_b64):
         return False
 
 
+#: Heartbeat authentication mode. ENVIRONMENT ONLY, and deliberately not a
+#: database setting: a switch that can disable authentication must not be
+#: reachable from any API write path. This unit has no EnvironmentFile, so it is
+#: set as an Environment= line in hw-monitor.service.
+#:
+#:   observe (default) — verify when a signature is present; ACCEPT an absent one
+#:                       and log it, so fleet readiness is measurable before
+#:                       enforcement. A PRESENT-but-INVALID signature still fails.
+#:   enforce           — an unsigned heartbeat is rejected.
+_AGENT_AUTH_MODE = os.environ.get("NEMESIS_AGENT_AUTH_MODE", "observe").strip().lower()
+
+#: Clock-skew tolerance for signed_at, seconds either side.
+_AGENT_AUTH_SKEW_S = 300
+
+
+def _agent_public_key(device_id):
+    """Stored enrollment public key for a device, or None."""
+    try:
+        conn = _db_connect()
+        row = conn.execute("SELECT public_key FROM agent_devices WHERE device_id=?",
+                           (device_id,)).fetchone()
+        conn.close()
+        return (row[0] or None) if row else None
+    except Exception:
+        log.exception("agent auth: public-key lookup failed for %s", device_id)
+        return None
+
+
+def _agent_last_signed_at(device_id):
+    """Monotonic floor: the newest signed_at already accepted from this device."""
+    try:
+        conn = _db_connect()
+        row = conn.execute("SELECT last_signed_at FROM agent_devices WHERE device_id=?",
+                           (device_id,)).fetchone()
+        conn.close()
+        return (row[0] or None) if row else None
+    except Exception:
+        log.exception("agent auth: last_signed_at lookup failed for %s", device_id)
+        return None
+
+
+def _agent_record_signed_at(device_id, signed_at):
+    """Advance the monotonic floor. Called ONLY after a signature verifies, so a
+    rejected heartbeat can never raise the floor and lock out the real agent."""
+    try:
+        conn = _db_connect()
+        conn.execute("UPDATE agent_devices SET last_signed_at=? WHERE device_id=?",
+                     (signed_at, device_id))
+        conn.commit()
+        conn.close()
+    except Exception:
+        log.exception("agent auth: could not record signed_at for %s", device_id)
+
+
+def _verify_agent_heartbeat(headers, body, device_id):
+    """(ok, reason) — is this heartbeat authentic?
+
+    WHAT IS SIGNED: "<device_id>|<signed_at>|<sha256(raw body)>". The digest is
+    over the EXACT BYTES RECEIVED, not a re-serialised payload — so the signature
+    binds the body itself and verification cannot be broken by two Python
+    installs disagreeing about key order or float formatting. It also means an
+    attacker who captures a valid signature cannot swap the metrics underneath
+    it, which matters because that body drives scan-trigger evaluation.
+
+    REPLAY is stopped by a per-device monotonic floor rather than a nonce cache:
+    signed_at must be strictly newer than the last accepted value. A tolerance
+    window alone would still permit replay INSIDE the window, and inside that
+    window a replayed heartbeat can re-queue scans.
+
+    NO CONFIDENTIALITY. The listener is plain HTTP. This authenticates the sender
+    and binds the payload; it does NOT encrypt anything, and telemetry remains
+    readable on the wire. Stated here so "authenticated" is never read as
+    "secure channel".
+    """
+    sig = headers.get("X-Nemesis-Signature", "")
+    signed_at = headers.get("X-Nemesis-Signed-At", "")
+    hdr_device = headers.get("X-Nemesis-Device", "")
+
+    if not sig or not signed_at:
+        # ABSENT, not invalid. Tolerated in observe mode only — this is the
+        # compatibility ramp for agents that predate signing, never a bypass.
+        if _AGENT_AUTH_MODE == "enforce":
+            return False, "unsigned heartbeat rejected (enforce mode)"
+        log.warning("agent auth: UNSIGNED heartbeat accepted in observe mode "
+                    "(device=%s) — this will be REJECTED once enforcement is on",
+                    device_id)
+        return True, "unsigned-observe"
+
+    # From here the caller SUPPLIED a signature. Everything below fails closed in
+    # both modes: observe tolerates the absence of a signature, never a bad one.
+    if hdr_device and hdr_device != device_id:
+        return False, "device_id header does not match payload"
+
+    pub = _agent_public_key(device_id)
+    if not pub:
+        # Cannot evaluate. A failed read must not be reported as a pass.
+        return False, "no stored public key for device"
+
+    try:
+        ts = datetime.fromisoformat(signed_at)
+    except Exception:
+        return False, "unparseable signed_at"
+    skew = abs((datetime.now() - ts).total_seconds())
+    if skew > _AGENT_AUTH_SKEW_S:
+        return False, "signed_at outside +/-%ds tolerance (skew=%ds)" % (
+            _AGENT_AUTH_SKEW_S, int(skew))
+
+    floor = _agent_last_signed_at(device_id)
+    if floor and signed_at <= floor:
+        # Local ISO strings compare correctly lexicographically (ADR 0004 step 2).
+        return False, "replay: signed_at %s not newer than %s" % (signed_at, floor)
+
+    digest = hashlib.sha256(body).hexdigest()
+    message = "%s|%s|%s" % (device_id, signed_at, digest)
+    if not _verify_enroll_signature(pub, message, sig):
+        return False, "signature verification failed (or body was modified)"
+
+    _agent_record_signed_at(device_id, signed_at)
+    return True, "verified"
+
+
 _HWID_MOD = None
 
 
@@ -2241,6 +2371,26 @@ def _start_windows_agent_listener():
                     self.end_headers()
                     self.wfile.write(b'{"ok":false,"status":"not_approved"}')
                     return
+                # ── HEARTBEAT AUTHENTICATION (ADR 0004 step 3) ─────────────
+                #
+                # Placed HERE, above _check_and_queue_scan_triggers, because that
+                # call is the reason this gate matters: it evaluates scan triggers
+                # from the request body. Before this, the only checks were a
+                # plaintext `source` string and a device_id lookup, both supplied
+                # by the caller — so unauthenticated input could drive scan
+                # dispatch. Verifying after dispatch would authenticate nothing
+                # that mattered.
+                _auth_ok, _auth_why = _verify_agent_heartbeat(
+                    self.headers, body, payload.get("device_id"))
+                if not _auth_ok:
+                    log.warning("agent auth: REJECTED heartbeat device=%s from=%s: %s",
+                                payload.get("device_id"), remote_ip, _auth_why)
+                    self.send_response(401)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"ok":false,"error":"unauthenticated"}')
+                    return
+
                 metrics = _nemesis_payload_to_metrics(payload)
                 _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
                 _update_agent_device(payload, remote_ip=remote_ip)
