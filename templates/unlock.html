@@ -77,6 +77,24 @@
           <b>{{ health.counts.open_tickets }}</b><span>Tickets</span></div>
         <div class="hc {% if health.counts.findings_open %}on{% endif %}">
           <b>{{ health.counts.findings_open }}</b><span>Findings</span></div>
+        {% if health.hw %}
+        {# Hardware row — same tile markup and classes as the six above, so it
+           inherits the contrast fix rather than introducing a second style.
+           Thresholds highlight only at genuinely notable levels: a tile lit at
+           idle trains the eye to ignore it. 85C is the figure _temp_score()
+           already uses in dashboard.py, not a new number invented here.
+           Every value is guarded on its own — a VM reports CPU and RAM but
+           usually has no thermal sensor, and one absent reading must not blank
+           the other two. `is not none` rather than a truthiness test or the
+           `default` filter, because 0 is a legitimate reading here and both of
+           those would silently rewrite it to a dash. #}
+        <div class="hc {% if health.hw.cpu_percent is not none and health.hw.cpu_percent >= 90 %}on{% endif %}">
+          <b>{% if health.hw.cpu_percent is not none %}{{ health.hw.cpu_percent }}%{% else %}&mdash;{% endif %}</b><span>CPU</span></div>
+        <div class="hc {% if health.hw.ram_percent is not none and health.hw.ram_percent >= 90 %}on{% endif %}">
+          <b>{% if health.hw.ram_percent is not none %}{{ health.hw.ram_percent }}%{% else %}&mdash;{% endif %}</b><span>RAM</span></div>
+        <div class="hc {% if health.hw.cpu_temp is not none and health.hw.cpu_temp >= 85 %}on{% endif %}">
+          <b>{% if health.hw.cpu_temp is not none %}{{ health.hw.cpu_temp }}&deg;{% else %}&mdash;{% endif %}</b><span>CPU Temp</span></div>
+        {% endif %}
       </div>
       <div class="health-note">Snapshot from when this screen loaded</div>
     </div>

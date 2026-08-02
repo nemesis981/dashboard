@@ -108,6 +108,7 @@ import diagnostics as _diag
 import email_utils
 
 import bcrypt
+import psutil
 from flask_login import (LoginManager, UserMixin, login_user, logout_user,
                          login_required, current_user)
 from core import entitlements, passphrase
@@ -2663,6 +2664,7 @@ def _header_status_data() -> dict:
               "open_tickets": 0, "findings_open": 0, "findings_high": 0}
     quar_pending = 0
     diag_verdict = None
+    hw = None
     try:
         conn = _dm_conn()   # §9 batch 2 (_header_status_data)
         c = conn.cursor()
@@ -2714,6 +2716,45 @@ def _header_status_data() -> dict:
             diag_verdict = r[0] if r else None
         except Exception:
             pass
+        # Hardware snapshot for the lock-screen card. DISPLAY-ONLY — see the
+        # note above the return.
+        #
+        # READ THE TABLE, not hw_monitor.get_live_metrics(). That helper spawns
+        # `sensors -u` and `nvidia-smi` on every call: measured 98ms against
+        # 0.4ms for this indexed SELECT, a 245x difference. The lock screen
+        # re-renders itself every 30s and is reachable before anyone has proven
+        # a human is present, so a per-render pair of subprocess spawns is both
+        # slow and an avoidable thing to hand an unattended screen. hw_monitor
+        # already writes this row every SAMPLE_INTERVAL (300s), so the data is
+        # at most five minutes old — exactly the "snapshot" the card says it is.
+        #
+        # device_id='local' pins this to THIS box. Without it the newest row can
+        # belong to a remote agent, and the lock screen would report someone
+        # else's hardware as though it were this machine's.
+        try:
+            r = c.execute(
+                "SELECT cpu_percent, ram_used_gb, cpu_temp FROM hw_metrics "
+                "WHERE device_id='local' ORDER BY timestamp DESC LIMIT 1").fetchone()
+            if r:
+                cpu_pct, ram_gb, cpu_t = r
+                # RAM as a PERCENTAGE, not the stored GB figure. Measured here:
+                # 16.28 GB used reads as alarming alone and is in fact 26% of
+                # 62.25 GB. A bare GB number cannot be read without knowing the
+                # total, which this card has no room for — and it would mean
+                # something different on every install.
+                ram_pct = None
+                if ram_gb is not None:
+                    total_gb = psutil.virtual_memory().total / (1024 ** 3)
+                    if total_gb > 0:
+                        ram_pct = round(100.0 * ram_gb / total_gb)
+                # Each value stays independently None-able: a VM reports CPU and
+                # RAM but usually has no thermal sensor at all, so cpu_temp being
+                # absent must not blank the other two.
+                hw = {"cpu_percent": round(cpu_pct) if cpu_pct is not None else None,
+                      "ram_percent": ram_pct,
+                      "cpu_temp":    round(cpu_t) if cpu_t is not None else None}
+        except Exception:
+            pass
         conn.close()
     except Exception:
         auth_log.exception("header status: db read failed")
@@ -2729,7 +2770,12 @@ def _header_status_data() -> dict:
     amber = bool(counts["medium"] or counts["open_tickets"] or counts["findings_open"]
                  or diag_verdict in ("DEGRADED", "UPSTREAM_FAIL"))
     status = "red" if red else ("amber" if amber else "green")
-    return {"status": status, "counts": counts}
+    # `hw` is DISPLAY-ONLY and deliberately absent from the red/amber decision
+    # above. A hot CPU is a hardware-health matter the hardware card already
+    # owns; folding it in here would make the global header light — present on
+    # every page, not just this one — go red for a reason unrelated to the
+    # security posture that light exists to report.
+    return {"status": status, "counts": counts, "hw": hw}
 
 
 @app.route("/api/header/status")
