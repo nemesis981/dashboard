@@ -704,13 +704,19 @@ than used directly.** Standard test creds apply to all seven — see
 convention above). Bridged NICs use `enp131s0`; isolated NICs use hostonly `vboxnet0`
 (`192.168.56.0/24`).
 
-- **Fresh-clone discipline (standing rule).** Always start testing from a fresh clone of the
-  appropriate Master below, never the Master itself. Always delete that clone once its testing
-  is done, unless more testing on that exact environment/state is likely needed soon — in
-  which case say so explicitly (worklog entry naming the clone and why it's being kept) rather
-  than leaving it to linger unlabeled. **Why:** unlabeled clones/snapshots accumulating
-  indefinitely is exactly what made the full 2026-08-02 VM fleet cleanup necessary in the
-  first place — this rule exists so that cleanup doesn't have to happen again.
+- **Fresh-clone discipline (standing rule).** Never test additionally on a Master itself —
+  always start testing from a fresh clone of the appropriate Master below. Always delete that
+  clone once its testing is done, unless more testing on that exact environment/state is
+  likely needed soon — in which case say so explicitly (worklog entry naming the clone and why
+  it's being kept) rather than leaving it to linger unlabeled. **Why:** unlabeled clones/
+  snapshots accumulating indefinitely is exactly what made the full 2026-08-02 VM fleet cleanup
+  necessary in the first place — this rule exists so that cleanup doesn't have to happen again.
+  **Scope — does NOT include long-term-testing VMs.** This clone-and-delete rule governs the 7
+  Masters above only. It does not apply to any VM explicitly designated for long-term/permanent
+  testing — e.g. the permanent hardware/software gauge VM below — which is used directly, by
+  design, not cloned-and-discarded, because its entire value comes from persisting state and
+  staying current over time (see its maintenance rule below). Those VMs are a deliberate
+  exception, not an oversight of this rule.
 
 **Capability list** — the seven Masters, so picking the right one for a task is a lookup, not
 an investigation:
