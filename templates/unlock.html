@@ -39,12 +39,12 @@
     .health-red .health-verdict { color:#ff4444; }
     .health-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:9px 6px; }
     .hc { text-align:center; }
-    .hc b { display:block; font-size:1.15em; color:#55617a; line-height:1.35;
+    .hc b { display:block; font-size:1.15em; color:#76839f; line-height:1.35;
             font-weight:bold; }
-    .hc span { font-size:0.64em; color:#6b7689; text-transform:uppercase;
+    .hc span { font-size:0.64em; color:#798496; text-transform:uppercase;
                letter-spacing:0.04em; }
     .hc.on b { color:#ffc966; }
-    .health-note { margin-top:11px; font-size:0.65em; color:#5a6478; text-align:center; }
+    .health-note { margin-top:11px; font-size:0.65em; color:#78839a; text-align:center; }
   </style>
 </head>
 <body>
@@ -75,8 +75,8 @@
           <b>{{ health.counts.services_down }}</b><span>Svc Down</span></div>
         <div class="hc {% if health.counts.open_tickets %}on{% endif %}">
           <b>{{ health.counts.open_tickets }}</b><span>Tickets</span></div>
-        <div class="hc {% if health.counts.canary_trips %}on{% endif %}">
-          <b>{{ health.counts.canary_trips }}</b><span>Canary</span></div>
+        <div class="hc {% if health.counts.findings_open %}on{% endif %}">
+          <b>{{ health.counts.findings_open }}</b><span>Findings</span></div>
       </div>
       <div class="health-note">Snapshot from when this screen loaded</div>
     </div>
