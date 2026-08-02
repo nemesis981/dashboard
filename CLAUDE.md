@@ -187,6 +187,23 @@ number.
   (`git log --oneline @{u}..HEAD`) — a push publishes everything pending, not just what
   was just committed. Show the full list to the operator and get explicit confirmation
   before pushing.
+- **Shared-index staging is a DIFFERENT hazard from the above — a distinct failure mode,
+  not the same one under another name.** Push coordination is about publishing more commits
+  than intended; this is about one `git commit` sweeping in more FILES than intended, because
+  `git commit` (with no pathspec) commits the entire index, not just what the current step
+  just staged. Confirmed live 2026-08-02: staging a docs-only file by exact path (the
+  discipline this file already calls for elsewhere), then running a plain `git commit`,
+  still pulled in an unrelated 254-line code change that had been `git add`-ed earlier in the
+  same session and left sitting in the index across the intervening steps. "Stage by path,
+  not `-A`" does not protect against this — the leftover file was already staged by path; the
+  problem was that it stayed staged into a later, unrelated commit. **The actual fix: stage
+  and commit as one atomic step (`git add <path> && git commit ...` back to back, nothing
+  else staged in between), never leave a file staged across a turn boundary or between
+  unrelated commits.** If a mis-composed commit like this happens and is caught before
+  pushing, `git reset --soft HEAD~1` (recovering the exact prior staged state) followed by
+  re-staging only the intended path is the clean fix — confirmed safe in the same incident,
+  verified first that the bad commit had not been pushed and that no one else had pushed or
+  pulled in the interim.
 - **Data Manager (ADR 0006) — loader-enforced, not convention.** All module DB access goes
   through `get_data_manager()` / `data_manager.connect(module)`. This is not a style
   preference: `modules_loader.py` statically refuses to load a module that imports raw
