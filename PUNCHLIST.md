@@ -777,12 +777,17 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   the installer auto-installs Tailscale (`_install_tailscale` → winget/MSI) and joins headlessly
   via `tailscale up --authkey`, but Tailscale's own GUI app auto-starts on first run and shows a
   "Log in" prompt — confusing the operator into thinking they must connect manually (they did).
-  Functional join was the key; the prompt is cosmetic/parallel. ALSO: the installer's first-screen
-  instructional text still says "install Tailscale (tailscale.com/download), log in…" — now STALE
-  (the installer does this itself). Fix direction: suppress/skip the Tailscale GUI launch (or
-  `tailscale up --unattended` / config to prevent the login window surfacing), and update the
-  installer_gui.py first-screen text to reflect auto-onboard. Polish, NOT a blocker — the
-  mechanism works. (installer_gui.py `_install_tailscale` / `steps_text`.)
+  Functional join was the key; the prompt is cosmetic/parallel. Fix direction: suppress/skip the
+  Tailscale GUI launch (or `tailscale up --unattended` / config to prevent the login window
+  surfacing). Polish, NOT a blocker — the mechanism works. (installer_gui.py `_install_tailscale`.)
+  - [x] **Stale first-screen text half — RESOLVED, pre-existing.** The original finding also
+    flagged the installer's first-screen text as stale ("install Tailscale
+    (tailscale.com/download), log in…" shown even though the installer now self-onboards). Traced
+    via `git log`: already fixed 2026-07-01 (`ab00674`) — `_first_screen_text(has_preauth_key,
+    tier)` conditionally shows the correct copy ("no manual setup needed") on the self-onboard
+    path, reserving the manual-install text for the genuine no-preauth-key fallback where it's
+    accurate. This PUNCHLIST bullet was simply never checked off at the time. Re-confirmed on
+    screen 2026-08-02 during the Defender/install investigation — still correct, no regression.
 - [ ] **PL-11 (Doc) — hardware-monitor prompt is PawnIO; install docs must tell users to approve
   it.** Found in the test-2 VM install (screenshot
   `docs/audits/trip-1.0.8-test2-vm-screenshot-2026-07-01.png`): LibreHardwareMonitor 0.9.x pops
