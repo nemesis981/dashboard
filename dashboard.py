@@ -765,11 +765,16 @@ def _log_login_event(username, ip, success, failure_reason=None, lockout_tier=No
     """
     try:
         conn = _users_conn()
+        # `timestamp` supplied explicitly — see the note in database.py's
+        # init_login_events_table(). The column DEFAULT was UTC while every sibling
+        # column is local, and SQLite cannot alter a default in place, so the
+        # writers are what fix it on an existing database.
         conn.execute(
-            "INSERT INTO login_events(username, ip_address, success, failure_reason, "
+            "INSERT INTO login_events(username, timestamp, ip_address, success, failure_reason, "
             "lockout_tier, user_agent, session_id, tailscale_ip, source, action) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (username, ip or "unknown", 1 if success else 0, failure_reason,
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (username, datetime.now().isoformat(timespec="seconds"),
+             ip or "unknown", 1 if success else 0, failure_reason,
              lockout_tier, (user_agent or "")[:300], session_id, tailscale_ip,
              source, action),
         )
@@ -844,9 +849,25 @@ def _auth_threat_level() -> str:
                     tiers.append(int(r["lockout_tier"] or 0))
             except ValueError:
                 pass
+        # Cutoff computed in Python, not by SQLite's datetime('now').
+        #
+        # This is a STRING comparison, so it is only correct when both sides share a
+        # timezone AND a format. It previously worked by coincidence: the column
+        # default was UTC and datetime('now') is UTC.
+        #
+        # THE FORMAT MATTERS MORE THAN THE OFFSET, which is not obvious and was
+        # measured rather than reasoned out. Rows are now ISO 'T'; datetime('now')
+        # emits a space. 'T' is 0x54 and ' ' is 0x20, so against an unchanged
+        # datetime('now') bound the comparison short-circuits TRUE at index 10 for
+        # any row sharing the bound's date — the time digits are never reached. The
+        # window would not have gone blind, it would have gone OVER-INCLUSIVE: a
+        # 14-hour-old event satisfying a 1-hour window, latching this indicator red
+        # on stale data. Deriving the bound exactly as the row is written keeps
+        # timezone and format matched by construction.
         concurrent = conn.execute(
             "SELECT 1 FROM login_events WHERE failure_reason='concurrent_session_detected' "
-            "AND timestamp > datetime('now','-1 hour') LIMIT 1").fetchone()
+            "AND timestamp > ? LIMIT 1",
+            ((datetime.now() - timedelta(hours=1)).isoformat(timespec="seconds"),)).fetchone()
         conn.close()
         if concurrent or any(t >= 2 for t in tiers):
             return "red"
@@ -1056,10 +1077,17 @@ def login():
         prior_ip = None
         try:
             conn = _users_conn()
+            # Same matched-format rule as _auth_threat_level()'s cutoff above. Left
+            # as datetime('now'), this window would accept logins well outside 24
+            # hours — verified against a 30-hour-old row — while still returning a
+            # plausible-looking IP. A wrong answer that looks right is worse here
+            # than no answer: this feeds concurrent-session detection.
             pr = conn.execute(
                 "SELECT ip_address FROM login_events WHERE username=? AND success=1 "
-                "AND ip_address<>? AND timestamp > datetime('now','-24 hours') "
-                "ORDER BY timestamp DESC LIMIT 1", (username, ip)).fetchone()
+                "AND ip_address<>? AND timestamp > ? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (username, ip,
+                 (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds"))).fetchone()
             conn.close()
             prior_ip = pr["ip_address"] if pr else None
         except Exception:

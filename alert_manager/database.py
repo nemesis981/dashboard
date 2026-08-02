@@ -308,7 +308,7 @@ def init_login_events_table():
             CREATE TABLE IF NOT EXISTS login_events (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 username      TEXT NOT NULL,
-                timestamp     TEXT NOT NULL DEFAULT (datetime('now')),
+                timestamp     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now','localtime')),
                 ip_address    TEXT NOT NULL,
                 device_id     TEXT,
                 tailscale_ip  TEXT,
@@ -346,6 +346,39 @@ def init_login_events_table():
             c.execute("ALTER TABLE login_events ADD COLUMN source TEXT NOT NULL DEFAULT 'login'")
         if "action" not in existing:
             c.execute("ALTER TABLE login_events ADD COLUMN action TEXT")
+
+        # Idempotent migration: UTC rows -> local time, matching every sibling table.
+        #
+        # THE DEFECT. Until 2026-08-02 `timestamp` came from the column DEFAULT
+        # `datetime('now')`, which SQLite evaluates as UTC. Every other
+        # auth-adjacent column — users.last_login, users.lockout_until,
+        # users.password_changed_at, audit_log.ts — is written by Python
+        # `datetime.now()`, which is LOCAL. The same login wrote
+        # `2026-08-01 22:58:49` here and `2026-08-01T17:58:49` to users. Confirmed
+        # in live data, not inferred.
+        #
+        # WHY IT WAS WORTH FIXING despite nothing being visibly broken: the two
+        # readers happened to compare against SQLite's own UTC `datetime('now')`,
+        # so the table was self-consistent. But this table exists to feed
+        # brute-force, impossible-travel and concurrent-session detection, and the
+        # first correlation anyone writes against users or audit_log inherits a
+        # 5-hour error — in the direction that makes attacker activity look like it
+        # happened in the future.
+        #
+        # THE FORMAT IS THE MIGRATION GUARD, which is what makes this safe to run
+        # on every startup. Legacy rows are `YYYY-MM-DD HH:MM:SS` (space, UTC); new
+        # rows are `YYYY-MM-DDTHH:MM:SS` (ISO 'T', local). The separator therefore
+        # states which epoch a row belongs to, so the conversion selects exactly the
+        # un-migrated rows and becomes a no-op the moment it has run. No flag, no
+        # version table, and no way to double-convert a row into 10 hours of drift.
+        #
+        # The `-- login_events tz migration` marker is load-bearing for auditability
+        # only; the WHERE clause is what makes it correct.
+        c.execute("""
+            UPDATE login_events                      -- login_events tz migration
+               SET timestamp = strftime('%Y-%m-%dT%H:%M:%S', timestamp, 'localtime')
+             WHERE timestamp LIKE '____-__-__ %'
+        """)
         conn.commit()
     finally:
         conn.close()
@@ -394,11 +427,19 @@ def record_auth_failure(username, source, action=None, lockout_tier=None,
     try:
         conn = sqlite3.connect(DB_PATH, timeout=5.0)
         try:
+            # `timestamp` is supplied EXPLICITLY rather than left to the column
+            # DEFAULT. SQLite cannot alter a column default in place, so on an
+            # already-created database the DEFAULT stays the old UTC expression
+            # forever — passing the value here is what actually fixes the skew on
+            # every existing install, and it puts this table on the same footing as
+            # every sibling (Python-supplied local ISO), instead of being the one
+            # table whose time came from a parallel SQL mechanism.
             conn.execute(
-                "INSERT INTO login_events(username, ip_address, success, "
+                "INSERT INTO login_events(username, timestamp, ip_address, success, "
                 "failure_reason, lockout_tier, source, action) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (username, ip_address or "local-socket", 0, failure_reason,
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (username, datetime.now().isoformat(timespec="seconds"),
+                 ip_address or "local-socket", 0, failure_reason,
                  lockout_tier, source, action),
             )
             conn.commit()
