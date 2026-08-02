@@ -203,7 +203,7 @@ MODULES_DIR = os.path.join(_HERE, "modules")
 # _HERE, which worked only because the service ran as an account that owned the
 # repo. nemesis-dash does not, and ProtectSystem=strict makes /opt read-only to
 # the service regardless, so a schedule save would fail on both counts.
-_BACKUP_CFG_PATH = os.path.join(nemesis_paths.DATA_DIR, "backup_config.json")
+_BACKUP_CFG_PATH = os.path.join(nemesis_paths.data_dir(), "backup_config.json")
 
 # ── Authentication (Flask-Login) ──────────────────────────────────────────────
 auth_log = logging.getLogger("nemesis.auth")
@@ -214,8 +214,24 @@ auth_log = logging.getLogger("nemesis.auth")
 # regenerated — turning a self-healing case into an unrecoverable startup
 # failure exactly when the file is absent. Falls back to the legacy in-tree
 # path if that is where it already lives, so this is safe pre- and post-move.
+#
+# RESOLVED THROUGH data_dir(), NOT THE DATA_DIR CONSTANT — same for
+# _BACKUP_CFG_PATH above, and the two are deliberately kept identical.
+#
+# DATA_DIR is the hardcoded string "/var/lib/nemesis". data_dir() is
+# dirname(db_path()), so it honours $NEMESIS_DB_PATH — the one knob that relocates
+# Nemesis state. Using the constant meant these two files did NOT follow the
+# database when it moved: a harness pointing NEMESIS_DB_PATH at a scratch
+# directory got a scratch database but reached for the REAL /var/lib/nemesis for
+# its secret key and backup config, so a test could read (or create, or chmod)
+# production state while believing it was fully isolated.
+#
+# A NO-OP ON THIS BOX, AND THAT IS THE POINT. dashboard.service sets
+# NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db, so both expressions resolve
+# identically here and the running system sees no change — which is exactly why
+# the divergence survived unnoticed. It only bites off the default path.
 _LEGACY_SECRET_PATH = os.path.join(_HERE, "alert_manager", ".flask_secret")
-_SECRET_KEY_PATH = os.path.join(nemesis_paths.DATA_DIR, ".flask_secret")
+_SECRET_KEY_PATH = os.path.join(nemesis_paths.data_dir(), ".flask_secret")
 if not os.path.exists(_SECRET_KEY_PATH) and os.path.exists(_LEGACY_SECRET_PATH):
     _SECRET_KEY_PATH = _LEGACY_SECRET_PATH
 
