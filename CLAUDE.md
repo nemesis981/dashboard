@@ -189,7 +189,7 @@ number.
 - Read-only audits and doc-writes never share a window with trip-critical code work.
 - One logical change per commit; don't batch unrelated work.
 
-### Private modules — separate version control (Window 1 is git-writer)
+### Private modules — separate version control (Window 1 is git-writer, Window 2 backup)
 Carved-out private modules live OUTSIDE the public repo and are version-controlled
 separately. The first is `~/work/nemesis-internal/l3-tier2-tls-interception/` (the Tier 2
 TLS-interception harness + implementation detail, moved out of the public repo for
@@ -199,6 +199,15 @@ source-visibility). This rule covers it and any future similarly-carved-out priv
   content before committing, Rule-8 scan the staged diff, and push to every one of a private
   module's configured remotes, then verify they all report the same HEAD — same sync-check
   discipline as anything else in this file.
+- **Window 2 is backup git-writer for these private repos when Window 1 is occupied** —
+  a standing arrangement, not a one-off override (operator clarification, 2026-08-02, after
+  Window 2 flagged a `firewall-enforcement-engine` commit as looking out of scope and asked
+  before proceeding — the flag was the right instinct, but the answer is "backup," not
+  "barred"). Same discipline applies regardless of which window does it: verify staged
+  content, Rule-8 scan the diff, push to every configured remote, confirm all remotes report
+  the same HEAD. Worth a quick check the first time in a session that Window 1 is genuinely
+  occupied rather than just being routed around out of convenience — once established, proceed
+  without re-litigating the role boundary each time.
 - **Default remote set for private modules: `local` + `usb` ONLY (operator decision,
   2026-07-29).** `local` is a bare repo on this machine; `usb` is independent physical
   storage. **No GitHub remote by default.** The reason is not secrecy for its own sake — it's
