@@ -616,7 +616,7 @@ def _register_credential_failure(row, username, ip, ua,
              f"(source: {source}). Account locked for {mins} minutes (tier {tnum})."),
             severity)
         if do_email:
-            _notify_email(
+            _notify_email_async(
                 f"[Nemesis] Login lockout tier {tnum} ({severity}) for {username}",
                 f"{fa} failed credential attempts for '{username}' from {ip} "
                 f"(source: {source}). Locked for {mins} minutes.")
@@ -808,9 +808,20 @@ def _notify_email_async(subject, body):
     become an authentication outcome. Even the thread START is guarded — a
     failure to spawn must not propagate into the caller either.
 
-    NOT retrofitted onto the existing lockout-tier caller (~:512) here. That is
-    a behaviour change to a working path and belongs in its own commit; captured
-    for Window 2 rather than folded in.
+    USED BY THE LOCKOUT-TIER CALLER TOO as of 2026-08-02, in its own commit as
+    planned when this wrapper landed. The lockout path has the same shape as the
+    recovery-code one and arguably a worse version of it: it runs on a FAILED
+    credential attempt, so the 30s stall was reachable by anyone who could type
+    a wrong password enough times — an unauthenticated caller could hold a
+    request thread for half a minute, repeatedly. Moving the send off-thread
+    removes that without changing when mail is sent or what it says.
+
+    THE TRADEOFF, STATED: a daemon thread is abandoned at interpreter exit, so a
+    send still in flight during a shutdown is lost. That is deliberate and is
+    the same bargain the recovery-code path already makes — mail is best-effort
+    by contract here (`_notify_email` swallows everything), and losing a
+    notification is strictly better than letting mail latency, or a mail
+    failure, become an authentication outcome.
     """
     try:
         threading.Thread(target=_notify_email, args=(subject, body),
