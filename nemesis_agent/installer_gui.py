@@ -144,12 +144,20 @@ def _resolve_conf_path():
 
 
 def _read_baked_config():
-    """Return (server, token, device_name, support_contact, preauth_key, conf_path) from the
-    resolved nemesis_install.conf (sidecar-next-to-exe preferred). conf_path is retained so
-    the file can be consumed-and-deleted once install begins."""
+    """Return (server, token, device_name, support_contact, preauth_key, poll_interval,
+    l2_enforce, conf_path) from the resolved nemesis_install.conf (sidecar-next-to-exe
+    preferred). conf_path is retained so the file can be consumed-and-deleted once install
+    begins.
+
+    BOTH return paths below must stay the SAME LENGTH as this 8-tuple and as main()'s
+    unpack. The no-conf path is not an edge case — it is the generic-installer flow (see
+    _resolve_conf_path), so an arity slip there ships an exe that dies before drawing a
+    single screen while the conf-present path keeps working and hides it."""
     path = _resolve_conf_path()
     if not path:
-        return "", "", "Windows Device", "your administrator", "", "", ""
+        # 8 values: server, token, device_name, support_contact, preauth_key,
+        # poll_interval, l2_enforce, conf_path — conf_path last, matching the tuple above.
+        return "", "", "Windows Device", "your administrator", "", "", "", ""
     cfg = configparser.ConfigParser()
     cfg.read(path)
     g = lambda k, d="": cfg.get("nemesis", k, fallback=d)
