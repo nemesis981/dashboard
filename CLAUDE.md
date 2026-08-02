@@ -154,6 +154,12 @@ number.
 - Opened situationally, not a standing window like 1 and 2 — for one-off, ad hoc, and
   parallel work that doesn't need a dedicated build or docs/audit session running (e.g.
   a quick investigation alongside whatever Windows 1 and 2 are already doing).
+- **Owns ongoing VM fleet stewardship — a standing responsibility, not just the one-off
+  cleanup/audit pass that established it (2026-08-02).** Every time Window 3 touches the
+  fleet, three obligations apply regardless of what specific task opened the window: keep
+  the living fleet inventory current, fold cleanup into every closeout rather than waiting
+  for another full audit, and keep any server/agent-carrying VM current with production.
+  Full detail and rationale: "VM test fleet" further down this file.
 - **Never commits or pushes — ever.** Same restriction as Window 1: git-write privilege
   stays exclusively with Window 2, no exceptions for Window 3 either.
 - May pick up occasional audits and doc work as overflow **specifically when Window 2 is
@@ -690,3 +696,87 @@ compares, derives, or verifies something, not just network/security-adjacent pat
     write, not just traverse)
   - `/etc/nemesis.env` — environment/secrets, mode `640 root:nemesis`
   - `docs/CUSTOM_TAILSCALE_OAUTH.md` — Tailscale OAuth auth-key minting setup (the four `TAILSCALE_OAUTH_*`/`TAILSCALE_TAG` env vars + installer self-onboard hybrid fallback)
+
+### VM test fleet (VirtualBox Masters, established 2026-08-02)
+Seven baseline "Master" VMs on the build machine, each meant to be **cloned per test rather
+than used directly.** Standard test creds apply to all seven — see
+`~/work/nemesis-private/local-config.md` (never spelled out here, per the local-secrets
+convention above). Bridged NICs use `enp131s0`; isolated NICs use hostonly `vboxnet0`
+(`192.168.56.0/24`).
+
+- **Fresh-clone discipline (standing rule).** Always start testing from a fresh clone of the
+  appropriate Master below, never the Master itself. Always delete that clone once its testing
+  is done, unless more testing on that exact environment/state is likely needed soon — in
+  which case say so explicitly (worklog entry naming the clone and why it's being kept) rather
+  than leaving it to linger unlabeled. **Why:** unlabeled clones/snapshots accumulating
+  indefinitely is exactly what made the full 2026-08-02 VM fleet cleanup necessary in the
+  first place — this rule exists so that cleanup doesn't have to happen again.
+
+**Capability list** — the seven Masters, so picking the right one for a task is a lookup, not
+an investigation:
+
+| VM name | OS | Network | Role |
+|---|---|---|---|
+| `Nemesis Linux Master BRIDGED` | Ubuntu 26.04, bare | bridged | plain Linux client |
+| `Nemesis Windows11 Master BRIDGED` | Windows 11, bare | bridged | plain Windows client |
+| `Nemesis Appliance Master ISOLATED` | Ubuntu 26.04, Nemesis installed + running | isolated | the firewall appliance itself |
+| `Nemesis Linux Master ISOLATED` | Ubuntu 26.04, bare (cloned from the bridged Linux Master) | isolated | plain Linux client |
+| `Nemesis Windows11 Master ISOLATED` | Windows 11, bare | isolated | plain Windows client |
+| `Nemesis Kali Master ISOLATED` | Kali 2026.1 | isolated | attacker/pentest box |
+| `Nemesis Kali Master BRIDGED` | Kali 2026.1 | bridged | attacker/pentest box |
+
+- **Permanent hardware/software gauge VM — PLACEHOLDER, not yet built.** A separate VM from
+  `Nemesis Appliance Master ISOLATED` above, dedicated to representing an accurate, CURRENT
+  hardware/software-requirements baseline rather than a frozen snapshot from whenever it was
+  created. Window 3 is still setting this up. **Fill in its name/OS/network/role in the table
+  above the moment it exists** — don't leave it as a standalone mention once it does; the
+  whole point of the capability list is one lookup table, not two.
+- **Permanent gauge VM maintenance — standing obligation, not optional.** Whenever production
+  Nemesis is updated, the gauge VM MUST be brought up to that same version. Its entire purpose
+  is representing what Nemesis currently requires, not what it required when the VM was
+  created — a stale gauge VM is worse than no gauge VM at all, because it looks authoritative
+  while being wrong. Precedent for exactly this failure mode, found this same cleanup pass:
+  the general-purpose `Nemesis Appliance Master ISOLATED` above was discovered four days
+  behind HEAD, predating the entire ADR 0019 build — tolerable for a plain test client, but
+  the gauge VM must not repeat it, since staying current is the one property its whole purpose
+  depends on. **Resolved 2026-08-02**: that VM was brought current to HEAD (`5e5e020`) and
+  `nemesis-fw-watch`/`nemesis-fw-enforce` installed, with full verification (table creation,
+  correct CAP_NET_ADMIN-only capabilities from `/proc`, a real CONTROL ufw-change test, and
+  reboot persistence) — same rigor as the production deploy script, not just "it started."
+
+**Ongoing fleet stewardship — Window 3's standing responsibility, not one-off cleanup/audit
+tasks.** Window 3 itself is opened situationally (see its role above), but the three
+obligations below apply every time it touches the fleet, not just during a dedicated cleanup
+pass. Rationale for all three: today's two concrete lessons — the Appliance Master found four
+days stale, predating the entire ADR 0019 build, and the general fleet sprawl (unlabeled
+clones/snapshots accumulating for weeks) that made the full 2026-08-02 cleanup necessary in
+the first place.
+
+- **Living fleet inventory.** Extend the capability list above from Masters-only into a
+  fleet-wide inventory covering every VM that currently exists — Masters, any clone kept past
+  its test (per the fresh-clone-discipline exception above), and every entry in "Also present"
+  below. Each gets its reason for existing (role/purpose), not just its name — an unlabeled VM
+  is exactly the state the 2026-08-02 cleanup had to untangle. Update it as VMs are
+  created/retired; it is a living document, not a periodic re-audit.
+- **Fleet cleanup at every closeout.** Don't wait for another full audit — at each closeout,
+  identify any stray clone/snapshot and either delete it or make (and record) a deliberate
+  keep decision, the same per-test choice the fresh-clone-discipline bullet already asks for,
+  now applied as a standing closeout check so strays get caught immediately instead of
+  accumulating.
+- **Keep-current generalizes past the gauge VM.** Any VM in the fleet running a server or
+  agent install — not just the permanent gauge VM above — gets updated to match whenever
+  production Nemesis updates. Same reasoning as the gauge VM's maintenance rule: a VM meant to
+  represent current product behavior is worse than useless if it's silently stale.
+
+**Also present, outside the 7-Master set — do not fold into it without a deliberate decision:**
+- `Nemesis Appliance Spare ISOLATED` — a second appliance-installed isolated Ubuntu box
+  (former `ISOLATED-TESTBASE`), unslotted spare, fate undecided.
+- `Nemesis-firewall Utility CLEANBASE 07.31` — deliberately purged-bare Ubuntu base kept
+  specifically for install-timing measurement. Not a Master; don't clone it expecting a
+  generic Linux box.
+- `Nemesis-firewall W3-TEST 07.29` + `Nemesis-SW WIN11 W3-TEST 07.29` — the live ADR 0019
+  enforcement-engine test rig (see `firewall-enforcement-engine/VM-TEST-PLAN.md`, private
+  mirror). **Off-limits** until that work is confirmed concluded/archived.
+
+Known caveats from the 2026-08-02 cleanup pass are tracked in `PUNCHLIST.md`, not duplicated
+here.
