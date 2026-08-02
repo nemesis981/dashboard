@@ -1650,3 +1650,25 @@ behaves like a real server.
 writable-dir, without weakening `_validate_source_url` for real operator-supplied values.
 Propose the actual refactor as its own reviewed change, not bundled into a fix commit —
 this entry is the proposal, not the implementation.
+
+### [FIX-NOW] Installer tokens cannot be revoked through the product
+
+- [ ] **Installer tokens cannot be revoked through the product — `revoked` is enforced on read
+  but nothing ever writes it.** Found 2026-08-02 while withdrawing a token that had been pasted
+  into a chat transcript during live verification of the pre-warn download page.
+    - [ ] `_valid_installer_token()` (`dashboard.py`) correctly refuses a row with `revoked=1`,
+      so the enforcement half is already right and needs no change.
+    - [ ] But **no route anywhere writes that column.** Grep confirms `revoked` appears only in
+      the SELECT's WHERE clause. Issuance exists (`POST /api/agent/installer/generate`);
+      withdrawal does not.
+    - [ ] The gap is only reachable in one specific state, which is why it went unnoticed: a token
+      that was **issued but never used to enrol**. It has no device and therefore never appears in
+      the device-approval flow, which is the only place anything revocation-shaped lives. A
+      mis-sent or exposed link can currently only be waited out until `expires_at`.
+    - [ ] Fix is small and well-scoped: an authenticated `POST /api/agent/installer/revoke`
+      alongside the existing generate route, plus a revoke control wherever installer links are
+      listed. Same auth posture as generate — this is a state-changing action, so POST with the
+      correct credential, never a GET (standing route-audit shape 1).
+    - [ ] Interim workaround used this time, for the record: direct `UPDATE enrollment_tokens SET
+      revoked=1`, preceded by a USB state snapshot, and verified end-to-end (`/start` and `/zip`
+      both returned 410 afterwards) rather than trusting the flag alone.
