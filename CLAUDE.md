@@ -734,6 +734,18 @@ convention above). Bridged NICs use `enp131s0`; isolated NICs use hostonly `vbox
   design, not cloned-and-discarded, because its entire value comes from persisting state and
   staying current over time (see its maintenance rule below). Those VMs are a deliberate
   exception, not an oversight of this rule.
+- **`KEEP`-named VMs are protected — never deleted or destroyed without explicit operator
+  confirmation, regardless of appearance.** Any VM whose name contains `KEEP` must be treated
+  as protected during any cleanup pass, no matter how stale, unused, or unregistered-looking it
+  appears. **The convention:** when a window clones a Master and determines the clone needs to
+  survive a cleanup pass (checked out, still needed — the exact case the fresh-clone-discipline
+  bullet above already asks to name explicitly), it renames the VM to include `KEEP` in the
+  name **before** the clone could otherwise be mistaken for stale sprawl. **Why:** this replaces
+  relying on any window remembering not to clean up a needed clone — the decision lives on the
+  VM itself, so a later cleanup pass (a different window, or the same window after a context
+  reset) doesn't have to rediscover or guess intent from staleness signals alone. Same spirit as
+  the living fleet inventory below, but survives even if that log is ever out of date or
+  unread — the name is the fail-safe.
 
 **Capability list** — the seven Masters, so picking the right one for a task is a lookup, not
 an investigation:
@@ -785,7 +797,9 @@ the first place.
   identify any stray clone/snapshot and either delete it or make (and record) a deliberate
   keep decision, the same per-test choice the fresh-clone-discipline bullet already asks for,
   now applied as a standing closeout check so strays get caught immediately instead of
-  accumulating.
+  accumulating. **Check the name, not just the log, before deleting anything:** a VM with
+  `KEEP` in its name is protected regardless of how stale it looks (see the `KEEP`-naming
+  convention above) — never delete or destroy one without explicit operator confirmation.
 - **Keep-current generalizes past the gauge VM.** Any VM in the fleet running a server or
   agent install — not just the permanent gauge VM above — gets updated to match whenever
   production Nemesis updates. Same reasoning as the gauge VM's maintenance rule: a VM meant to
