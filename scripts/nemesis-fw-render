@@ -47,6 +47,14 @@ mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
     | grep -E '^-A ufw6-user-input -s [0-9a-fA-F:]+/[0-9]+ -j DROP$' \
     | awk '{print $4}')
 
+# ── enforcement switch (ADR 0019 Increment 4) ────────────────────────────────
+# OFF unless explicitly enabled. Cutover is a separate, deliberate commit that
+# flips this default — so "is this box enforcing?" is answerable from `git log`
+# rather than from invisible runtime state, and rollback is one revert.
+#
+# A refused address NEVER receives a verdict regardless of this switch.
+ENFORCE="${NEMESIS_FW_ENFORCE:-0}"
+
 # ── never-block guard ────────────────────────────────────────────────────────
 # FAIL-CLOSED, and deliberately strict: an enforcement table without a working
 # never-block check is worse than no table, so a guard that cannot run stops the
@@ -91,9 +99,10 @@ done <<< "$GOUT"
 
 {
 echo "# GENERATED — do not hand-edit. Derived from ufw's live ruleset by"
-echo "# nemesis-fw-render. Observe-only: counters and logs, no verdicts."
+echo "# nemesis-fw-render. $( [ "$ENFORCE" = "1" ] && echo "ENFORCING: derived rules are enforced, not observed." || echo "Observe-only: counters and logs, no verdicts." )"
 echo "# Derived $( [ ${#V4[@]} -gt 0 ] && echo ${#V4[@]} || echo 0 ) IPv4 and $( [ ${#V6[@]} -gt 0 ] && echo ${#V6[@]} || echo 0 ) IPv6 block(s)."
 echo "# Never-block guard: PASSED. ${#REFUSED[@]} address(es) refused a verdict."
+echo "# ENFORCING: $( [ "$ENFORCE" = "1" ] && echo "YES — these rules DROP" || echo "no (observe-only, no verdicts)" )"
 # ATOMIC REPLACE, not append. `nft -f` on an EXISTING table adds rules rather
 # than replacing them — so without this, every apply duplicates every rule and
 # the derived block list accumulates instead of being regenerated. That breaks
@@ -120,6 +129,25 @@ for a in "${V4[@]:-}"; do
         # given a verdict — so both an operator and nemesis_fw_watch can find it.
         echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-neverblock refused \" comment \"never-block:refused:$a\""
         echo "nemesis-fw-render: REFUSED $a — protected (matches ${REFUSED[$a]}). Rule kept for visibility WITHOUT a verdict; it will never be given one." >&2
+    elif [ "$ENFORCE" = "1" ]; then
+        # TWO RULES, DELIBERATELY — do not collapse them into one.
+        #
+        # `limit` is a MATCH, not a log modifier: "a rule using this statement
+        # will match until this limit is reached" (nft(8), LIMIT STATEMENT). A
+        # verdict appended after `limit rate 10/minute` is therefore reached only
+        # while under that rate — it would drop ~10 packets a minute and pass
+        # every other packet, which reads as enforcement in the ruleset and is
+        # not enforcement at all.
+        #
+        # So the rate limit stays on the LOGGING rule, which carries no verdict
+        # and falls through, and the drop is its own unconditional rule.
+        # LOG PREFIX CARRIES NO VERDICT WORD, deliberately. Every tool that
+        # counts verdicts reads rule text, and a prefix containing "drop" is
+        # indistinguishable from a real verdict without parsing nft grammar --
+        # it inflated the Increment 4 gate's own count on first run. "blocked"
+        # says the same thing and collides with nothing.
+        echo "        ip saddr $a counter limit rate 10/minute log prefix \"nemesis-enforce blocked \" comment \"enforce:log:$a\""
+        echo "        ip saddr $a counter drop comment \"enforce:block:$a\""
     else
         # No verdict: counts and logs, then falls through. Log is rate-limited —
         # an unbounded log rule on a blocked host that keeps retrying is a
@@ -132,6 +160,10 @@ for a in "${V6[@]:-}"; do
     if [ -n "${REFUSED[$a]:-}" ]; then
         echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-neverblock refused6 \" comment \"never-block6:refused:$a\""
         echo "nemesis-fw-render: REFUSED $a — protected (matches ${REFUSED[$a]}). Rule kept for visibility WITHOUT a verdict; it will never be given one." >&2
+    elif [ "$ENFORCE" = "1" ]; then
+        # Split for the same reason as the v4 loop above — see that comment.
+        echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-enforce blocked6 \" comment \"enforce:log6:$a\""
+        echo "        ip6 saddr $a counter drop comment \"enforce:block6:$a\""
     else
         echo "        ip6 saddr $a counter limit rate 10/minute log prefix \"nemesis-observe would-drop6 \" comment \"observe:block6:$a\""
     fi
