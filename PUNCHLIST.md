@@ -1506,3 +1506,45 @@ Companion to the item above — the detection half of the same failure.
   - [ ] Same class as the standing "verification/derivation code must prove its own premise"
     rule: a status line that cannot distinguish a deliberate override from an accidental
     shadow is reporting a value, not a measurement.
+
+### [PRIORITY — right after M2] Test-seam for the YARA fetch-and-activate path
+
+The 2026-08-02 SSRF guard on `yara_update_source` (`_validate_source_url`,
+`modules/malware_detection/module.py`) is correct and stays as-is — but as a direct
+consequence, `update_yara_rules()`'s full fetch→validate→stage→compile→activate path now has
+**no runnable live-service test**. The guard rejects `https://` to loopback, private, and
+link-local ranges (correctly — that's its entire job), which means the obvious test approach
+— spin up a local test HTTPS server, point the updater at it — is rejected by the very guard
+being exercised. This is a testability gap, not a production defect: nothing here is a
+security hole, but "we can't test it, so it ships untested" should not sit open for long.
+
+**What's still testable today without this fix, so it's not blocking:** `_validate_source_url`
+itself is a pure function and needs no live server — it's already directly unit-testable
+against known public/private/loopback addresses (this is exactly how it was verified during
+M2's review). The gap is specifically the *integration* path downstream of validation: does a
+fetched ruleset actually stage atomically, compile-check against the combined bundled+
+candidate set, activate via `os.replace`, and reload — end to end, against something that
+behaves like a real server.
+
+**Two approaches, not equivalent:**
+
+- **Injectable opener/fetcher (recommended).** Give `_fetch_ruleset` (or the thing it calls)
+  a swappable dependency for the actual network I/O — defaulting to the real
+  `urllib.request`-based fetch, overridable by a test harness with an in-process fake server
+  or a canned response. `_validate_source_url` is untouched and still runs for real inputs;
+  a test exercising the *activation* logic supplies its own opener and never goes near the
+  guard at all, because the two concerns (is this URL safe to fetch / does fetched content
+  activate correctly) are orthogonal and should be tested that way. Cost: a small, real
+  refactor of `_fetch_ruleset`'s signature to accept the dependency.
+- **Off-by-default, API-unsettable override (rejected as primary, worth naming why).** An
+  env-var or similar flag checked inside `_validate_source_url` itself to skip the
+  public/private check in test contexts. Simpler to write, but it puts a bypass branch
+  directly inside the production security function being validated — exactly the kind of
+  seam that can survive an unrelated future refactor and become reachable when it shouldn't
+  be. Rejected for that reason: the injectable-opener approach gets the same test coverage
+  without ever adding a conditional bypass to the guard's own code path.
+
+**Closes:** a live-service round-trip test for activate / reject / rules-landing-in-the-
+writable-dir, without weakening `_validate_source_url` for real operator-supplied values.
+Propose the actual refactor as its own reviewed change, not bundled into a fix commit —
+this entry is the proposal, not the implementation.
