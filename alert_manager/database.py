@@ -203,7 +203,7 @@ def init_scan_tables():
                 file_path       TEXT NOT NULL,
                 threat_name     TEXT NOT NULL,
                 action_taken    TEXT,
-                detected_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                detected_at     TEXT
             )
         """)
         c.execute("""
@@ -212,10 +212,32 @@ def init_scan_tables():
                 device_id       TEXT NOT NULL,
                 schedule_type   TEXT NOT NULL DEFAULT 'weekly',
                 scheduled_time  TEXT,
-                last_run_at     TIMESTAMP,
+                last_run_at     TEXT,
                 enabled         INTEGER DEFAULT 1
             )
         """)
+        # ── ADR 0004 step 2: actor seam + local-ISO timestamps ──────────────
+        #
+        # Same treatment as the three scan_* tables created in hw_monitor — see
+        # the fuller note there. ACTOR is a seam, not live attribution (nothing
+        # calls set_actor() in normal operation yet). The separator IS the
+        # migration guard: legacy rows are space-separated UTC, converted rows
+        # ISO 'T' local, so this selects exactly the un-migrated rows and is a
+        # no-op afterwards.
+        #
+        # scan_threats is converted even though ADR 0004 retires it into
+        # malware_findings at step 4: leaving one UTC column beside converted
+        # neighbours preserves the mixed-convention hazard for however long that
+        # step takes, and the conversion is cheap. It may simply be dropped later.
+        for _tbl in ("scan_threats", "scan_schedules"):
+            _cols = {r[1] for r in c.execute("PRAGMA table_info(%s)" % _tbl).fetchall()}
+            if _cols and "actor" not in _cols:
+                c.execute("ALTER TABLE %s ADD COLUMN actor TEXT" % _tbl)
+        for _tbl, _col in (("scan_threats", "detected_at"),
+                           ("scan_schedules", "last_run_at")):
+            c.execute(
+                "UPDATE {t} SET {c} = strftime('%Y-%m-%dT%H:%M:%S', {c}, 'localtime') "
+                "WHERE {c} LIKE '____-__-__ %'".format(t=_tbl, c=_col))
         conn.commit()
     finally:
         conn.close()

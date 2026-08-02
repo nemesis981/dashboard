@@ -272,8 +272,8 @@ def init_db():
                 progress_pct    INTEGER DEFAULT 0,
                 files_scanned   INTEGER DEFAULT 0,
                 threats_found   INTEGER DEFAULT 0,
-                started_at      TIMESTAMP,
-                completed_at    TIMESTAMP
+                started_at      TEXT,
+                completed_at    TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_scan_jobs_device ON scan_jobs(device_id, started_at)")
@@ -333,9 +333,9 @@ def init_db():
                 trigger_type    TEXT NOT NULL,
                 trigger_detail  TEXT,
                 scan_path       TEXT DEFAULT '/',
-                queued_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                queued_at       TEXT,
                 status          TEXT DEFAULT 'pending',
-                executed_at     TIMESTAMP,
+                executed_at     TEXT,
                 scan_job_id     TEXT
             )
         """)
@@ -356,6 +356,33 @@ def init_db():
                 scan_path       TEXT DEFAULT '/'
             )
         """)
+        # ── ADR 0004 step 2: actor seam + local-ISO timestamps ──────────────
+        #
+        # ACTOR is a nullable seam, NOT live attribution. The Data Manager stamps
+        # current_actor() on every write, but nothing calls set_actor() in normal
+        # operation yet, so this records NULL today. It exists so a future
+        # authenticated caller needs no schema change.
+        #
+        # TIMESTAMPS: these columns were UTC (CURRENT_TIMESTAMP) or unset, while
+        # every auth-adjacent neighbour is local ISO. THE SEPARATOR IS THE
+        # DISCRIMINATOR — legacy rows read 'YYYY-MM-DD HH:MM:SS' (space, UTC),
+        # converted rows 'YYYY-MM-DDTHH:MM:SS' (local) — so this selects exactly
+        # the un-migrated rows and becomes a no-op once run. No flag, no version
+        # table, and no way to double-convert a row into a second offset. Same
+        # shape already proven on login_events.
+        #
+        # Defaults are dropped from the CREATEs above, but SQLite cannot alter a
+        # default in place, so on an already-deployed database the WRITERS
+        # supplying explicit values are what actually fix it.
+        for _tbl in ("scan_jobs", "scan_queue", "scan_conditions"):
+            _cols = {r[1] for r in c.execute("PRAGMA table_info(%s)" % _tbl).fetchall()}
+            if _cols and "actor" not in _cols:
+                c.execute("ALTER TABLE %s ADD COLUMN actor TEXT" % _tbl)
+        for _tbl, _col in (("scan_jobs", "started_at"), ("scan_jobs", "completed_at"),
+                           ("scan_queue", "queued_at"), ("scan_queue", "executed_at")):
+            c.execute(
+                "UPDATE {t} SET {c} = strftime('%Y-%m-%dT%H:%M:%S', {c}, 'localtime') "
+                "WHERE {c} LIKE '____-__-__ %'".format(t=_tbl, c=_col))
         conn.commit()
 
         # Seed default conditions if the table is empty.
@@ -1374,10 +1401,15 @@ def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
             ).fetchone()
             if not existing:
                 conn.execute(
+                    # queued_at supplied explicitly (ADR 0004 step 2). It used to
+                    # come from DEFAULT CURRENT_TIMESTAMP, which is UTC; that
+                    # default is gone, so omitting the column here would now
+                    # write NULL rather than a wrong-but-present time.
                     "INSERT INTO scan_queue "
-                    "(device_id, trigger_type, trigger_detail, scan_path) "
-                    "VALUES (?, ?, ?, ?)",
-                    (device_id, trigger_type, trigger_detail or "", scan_path or "/"),
+                    "(device_id, trigger_type, trigger_detail, scan_path, queued_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (device_id, trigger_type, trigger_detail or "", scan_path or "/",
+                     datetime.now().isoformat(timespec="seconds")),
                 )
                 conn.commit()
                 log.info(

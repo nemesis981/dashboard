@@ -7707,9 +7707,14 @@ def _run_local_clamscan(scan_id, path):
         files_count = row[1] if row else 0
         for file_path, threat_name in threats:
             conn.execute(
-                "INSERT INTO scan_threats (scan_job_id, device_id, file_path, threat_name, action_taken) "
-                "VALUES (?, 'local', ?, ?, 'detected')",
-                (job_id, file_path, threat_name),
+                # detected_at supplied explicitly (ADR 0004 step 2). It used to
+                # come from DEFAULT CURRENT_TIMESTAMP, which is UTC; that default
+                # is gone, so omitting the column would now write NULL.
+                "INSERT INTO scan_threats (scan_job_id, device_id, file_path, threat_name, "
+                "action_taken, detected_at) "
+                "VALUES (?, 'local', ?, ?, 'detected', ?)",
+                (job_id, file_path, threat_name,
+                 datetime.now().isoformat(timespec="seconds")),
             )
         conn.execute(
             "UPDATE scan_jobs SET status=?, threats_found=?, progress_pct=100, completed_at=? "
