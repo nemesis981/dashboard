@@ -74,9 +74,32 @@ LOG_PATH = os.environ.get("VPN_DNS_GUARD_LOG") or os.path.join(
     os.environ.get("LOGS_DIRECTORY", _HERE), "vpn_dns_guard.log")
 # State persists across restarts so we can restore the pre-VPN upstreams even if
 # the service (or the whole box) was restarted while the tunnel was up.
+# STATE LIVES IN THE DATA DIRECTORY, NOT THE REPO TREE.
+#
+# It defaulted to <repo>/alert_manager/vpn_dns_guard.state.json, which this unit
+# CANNOT WRITE: it runs ProtectSystem=strict with ReadWritePaths=/var/lib/nemesis,
+# so /opt is read-only to it. Every save raised
+# `OSError: [Errno 30] Read-only file system` and _save_state swallowed it.
+#
+# Measured before the fix: 5,655 apply cycles since 2026-07-29, 5,655 persist
+# failures — a 100% failure rate over four days, while the log line immediately
+# after each one read "fix applied". The on-disk state stayed
+# {"applied": false, "saved_upstreams": null} with an mtime from 2026-07-06.
+#
+# THE CONSEQUENCE WAS NOT COSMETIC. restore() returns early unless
+# state["applied"] is true, so with the flag permanently false the
+# tunnel-down path was a no-op: on VPN disconnect Pi-hole would keep upstreams
+# that are only reachable THROUGH the tunnel, breaking DNS for every client it
+# serves, with no saved value to roll back to. It also meant the guard re-applied
+# every 20s forever, never recording that it had already succeeded.
+#
+# Same defect class as the YARA rules directory fixed earlier the same day: a
+# writer aimed at the read-only tree, working in a developer checkout and failing
+# on every real install.
+_LEGACY_STATE_PATH = os.path.join(_ROOT, "alert_manager", "vpn_dns_guard.state.json")
 STATE_PATH = os.environ.get(
     "VPN_DNS_GUARD_STATE",
-    os.path.join(_ROOT, "alert_manager", "vpn_dns_guard.state.json"),
+    os.path.join("/var/lib/nemesis", "vpn_dns_guard.state.json"),
 )
 
 CHECK_INTERVAL_SECONDS = int(os.environ.get("VPN_DNS_GUARD_INTERVAL", "20"))
@@ -424,21 +447,48 @@ def verify_upstream_resolves(tries_per_zone=2):
 # --------------------------------------------------------------------------- #
 
 def _load_state():
-    try:
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    except Exception:  # noqa: BLE001
-        return {"applied": False, "saved_upstreams": None, "tunnel_iface": None}
+    """Current state, reading the legacy location once so the move is not a reset.
+
+    The legacy path is read ONLY if the new one is absent. A file at the new path
+    always wins — otherwise a stale copy in the read-only tree would keep
+    overriding real state forever, which is a variant of the bug this move fixes.
+    """
+    for path in (STATE_PATH, _LEGACY_STATE_PATH):
+        try:
+            with open(path) as f:
+                st = json.load(f)
+            if path is _LEGACY_STATE_PATH:
+                log.warning("migrated state from legacy path %s", _LEGACY_STATE_PATH)
+            return st
+        except FileNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001
+            log.exception("state at %s unreadable; treating as absent", path)
+            continue
+    return {"applied": False, "saved_upstreams": None, "tunnel_iface": None}
 
 
-def _save_state(state):
+def _save_state(state) -> bool:
+    """Persist state. Returns True on success, False on failure.
+
+    RETURNS A RESULT RATHER THAN SWALLOWING THE ERROR. This previously logged the
+    exception and returned None, and the caller carried on to log "fix applied" —
+    so four days of 100%-failed writes were reported as successful applies. A
+    failed write that the caller cannot detect is indistinguishable from a
+    successful one, which is the failure shape this codebase keeps rediscovering.
+    """
     try:
         tmp = STATE_PATH + ".tmp"
+        os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
         with open(tmp, "w") as f:
             json.dump(state, f)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, STATE_PATH)
+        return True
     except Exception:  # noqa: BLE001
-        log.exception("could not persist state")
+        log.exception("could not persist state to %s", STATE_PATH)
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -457,11 +507,36 @@ def apply_fix(ph, tunnel, state):
         if verify_upstream_resolves():
             return True
         log.warning("previously-applied fix no longer resolves; re-applying")
-    else:
-        # First time: remember the pre-VPN upstreams so we can restore them later.
-        state["saved_upstreams"] = current
 
     tun_dns = discover_tunnel_dns(tunnel["iface"])
+
+    # BASELINE CAPTURE — deliberately AFTER tunnel-DNS discovery, so the value we
+    # are about to write can be compared against what is already there.
+    #
+    # A BASELINE WE CANNOT VOUCH FOR IS WORSE THAN NONE. If persistence had ever
+    # failed (it failed 5,655 consecutive times before 2026-08-02), `applied`
+    # stays false on disk, so every subsequent cycle re-entered this branch and
+    # re-captured `current` — which by then was the guard's OWN previous write,
+    # not a pre-VPN value. Saving that would make restore() put the tunnel
+    # resolver back on disconnect: precisely the outage it exists to prevent,
+    # performed deliberately and logged as a success.
+    #
+    # So: refuse to record a baseline that equals what we are about to set. Same
+    # rule as the canary planter refusing a baseline it cannot verify — record
+    # nothing rather than record a fiction.
+    if not state.get("applied"):
+        if tun_dns and current == tun_dns:
+            log.error(
+                "REFUSING to baseline upstreams %s: identical to the tunnel resolver "
+                "we are about to apply, so this is our own earlier write, not a "
+                "pre-VPN value. saved_upstreams left unset — restore-on-disconnect "
+                "will NOT be able to roll back until a genuine pre-VPN value is "
+                "supplied (see PUNCHLIST).", current)
+            state["saved_upstreams"] = None
+        else:
+            # First time, and the current value is genuinely not ours: remember it.
+            state["saved_upstreams"] = current
+            log.info("baselined pre-VPN upstreams %s", current)
     if not tun_dns:
         # No tunnel-reachable resolver found. Re-verify with the existing public
         # upstreams (they may already egress via the tunnel); if they fail there is
@@ -471,14 +546,25 @@ def apply_fix(ph, tunnel, state):
         ok = verify_upstream_resolves()
         if ok:
             state.update({"applied": True, "tunnel_iface": tunnel["iface"]})
-            _save_state(state)
+            if not _save_state(state):
+                log.error("marked applied (no tunnel DNS needed) but state did NOT "
+                          "persist — this cycle will repeat indefinitely")
         return ok
 
     ph.set_upstreams(tun_dns)
     if verify_upstream_resolves():
         state.update({"applied": True, "tunnel_iface": tunnel["iface"]})
-        _save_state(state)
-        log.info("fix applied: upstreams now %s (verified resolving)", tun_dns)
+        persisted = _save_state(state)
+        if persisted:
+            log.info("fix applied: upstreams now %s (verified resolving)", tun_dns)
+        else:
+            # Do NOT report a clean apply. The DNS change itself succeeded, but
+            # the record that makes it reversible did not, so restore-on-disconnect
+            # cannot work and the next cycle will re-apply as if it were the first.
+            log.error("fix applied to DNS (upstreams now %s) but state did NOT "
+                      "persist — restore-on-disconnect is NOT armed and this will "
+                      "re-apply every cycle. Fix the state path before relying on "
+                      "tunnel-down recovery.", tun_dns)
         return True
 
     # Verify failed -> roll back to whatever we saved and report.
@@ -497,8 +583,19 @@ def restore(ph, state):
     if saved is not None:
         ph.set_upstreams(saved)
         log.info("restored pre-VPN upstreams %s", saved)
+    else:
+        # Applied, tunnel now down, but no baseline to go back to. Say so loudly:
+        # Pi-hole is left pointing at a resolver that was only reachable THROUGH
+        # the tunnel, so DNS is likely broken for every client it serves. Silence
+        # here would leave an outage with no explanation in the log.
+        log.error("tunnel down and fix was applied, but NO saved upstreams exist — "
+                  "cannot restore. Pi-hole is still pointed at the tunnel resolver "
+                  "and DNS is probably broken for its clients. Set upstreams "
+                  "manually, then supply a genuine pre-VPN value.")
     state.update({"applied": False, "saved_upstreams": None, "tunnel_iface": None})
-    _save_state(state)
+    if not _save_state(state):
+        log.error("restore completed but state did NOT persist — the next cycle "
+                  "may treat the tunnel as still applied")
     return True
 
 
