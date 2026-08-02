@@ -718,7 +718,7 @@ compares, derives, or verifies something, not just network/security-adjacent pat
 Seven baseline "Master" VMs on the build machine, each meant to be **cloned per test rather
 than used directly.** Standard test creds apply to all seven — see
 `~/work/nemesis-private/local-config.md` (never spelled out here, per the local-secrets
-convention above). Bridged NICs use `enp131s0`; isolated NICs use hostonly `vboxnet0`
+convention above). Bridged NICs use the host's LAN interface (`<bridged-iface>`); isolated NICs use hostonly `vboxnet0`
 (`192.168.56.0/24`).
 
 - **Fresh-clone discipline (standing rule).** Never test additionally on a Master itself —
@@ -761,7 +761,7 @@ an investigation:
 | `Nemesis Kali Master BRIDGED` | Kali 2026.1 | bridged | attacker/pentest box |
 
 - **Permanent hardware/software gauge VM — `Nemesis Appliance HW-GAUGE`, built and pruned
-  2026-08-02.** Ubuntu 26.04 Server (headless), bridged (`enp131s0`, `<hw-gauge-ip>`),
+  2026-08-02.** Ubuntu 26.04 Server (headless), bridged (`<bridged-iface>`, `<hw-gauge-ip>`),
   production Nemesis (`ce9696a`) with a deliberate OS-package removal pass applied (833 → 738
   packages; all 13 Nemesis-family services verified healthy after every batch). A separate,
   standing asset from `Nemesis Appliance Master ISOLATED` above — **not a Master**, not

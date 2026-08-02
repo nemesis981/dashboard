@@ -1121,8 +1121,8 @@ Consequences, concretely:
   (`-s 100.64.0.0/10 ! -o tailscale0 -j MASQUERADE`) so it keeps working when PIA returns — but
   "the rule still applies" is not the same as "the killswitch lets the packet out".
 - **L3 Layer 3 measurements taken with PIA off do not transfer to PIA on.** Different egress
-  interface, different TTL, and `tun0`'s MTU was 1441 vs 1500 on `enp131s0`. Any Layer 3 run must
-  record PIA state as a run variable; runs across different states are not comparable.
+  interface, different TTL, and `tun0`'s MTU was 1441 vs 1500 on `<bridged-iface>`. Any Layer 3
+  run must record PIA state as a run variable; runs across different states are not comparable.
 - So Fork B egress **cannot be validated in the configuration the operator actually intends to
   run** until this is resolved. Step 1's validation is deliberately PIA-off, and that limitation
   should be stated in its results rather than discovered later.
