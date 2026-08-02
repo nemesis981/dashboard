@@ -15,8 +15,14 @@
         if (!shape) return;
         var st = d.status || 'green';
         var k = d.counts || {};
+        // `canary_trips` renamed to `findings_open` 2026-08-02 — it always counted
+        // every unreviewed malware finding, not canary trips. Falls back to the old
+        // key so a cached JS bundle against a new server (or the reverse) degrades
+        // to a slightly stale number rather than silently dropping a whole term.
+        var findings = (k.findings_open !== undefined) ? k.findings_open
+                                                       : (k.canary_trips || 0);
         var total = (k.critical || 0) + (k.high || 0) + (k.medium || 0) +
-                    (k.services_down || 0) + (k.open_tickets || 0) + (k.canary_trips || 0);
+                    (k.services_down || 0) + (k.open_tickets || 0) + (findings || 0);
 
         shape.textContent = SHAPE[st] || SHAPE.green;
         if (light) light.style.color = COLOR[st] || COLOR.green;
@@ -32,7 +38,7 @@
           var pro =
             'crit=' + (k.critical || 0) + ' high=' + (k.high || 0) + ' med=' + (k.medium || 0) +
             ' svc_down=' + (k.services_down || 0) + ' open_tickets=' + (k.open_tickets || 0) +
-            ' canary=' + (k.canary_trips || 0);
+            ' findings=' + findings + ' (high/crit=' + (k.findings_high || 0) + ')';
           light.title = (typeof tierText === 'function')
             ? tierText(beginner, intermediate, pro)
             : (total > 0 ? beginner : 'All systems healthy');

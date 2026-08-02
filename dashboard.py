@@ -2660,7 +2660,7 @@ def _header_status_data() -> dict:
     """Aggregate global health into one verdict for the header status light.
     Read-only (no schema changes). RED dominates AMBER dominates GREEN."""
     counts = {"critical": 0, "high": 0, "medium": 0, "services_down": 0,
-              "open_tickets": 0, "canary_trips": 0}
+              "open_tickets": 0, "findings_open": 0, "findings_high": 0}
     quar_pending = 0
     diag_verdict = None
     try:
@@ -2683,8 +2683,22 @@ def _header_status_data() -> dict:
                 "AND LOWER(COALESCE(status,'')) NOT IN ('closed','resolved')").fetchone()[0]
         except Exception:
             pass
+        # RENAMED 2026-08-02: this was `canary_trips`, which is not what it counts.
+        # It counts EVERY unreviewed malware finding regardless of layer — the
+        # canary layer merely happened to be 100% of them, so the misnomer was
+        # invisible. A name that is only accurate by coincidence is a name that
+        # will mislead the first time the coincidence ends.
+        #
+        # Split by severity because the old single bucket also drove the header
+        # light: any unreviewed finding, of any severity, pinned it RED forever.
+        # An unreviewed INFO/LOW finding is a queue to work through, not an active
+        # incident, and a light that is permanently red communicates nothing.
         try:
-            counts["canary_trips"] = c.execute(
+            counts["findings_high"] = c.execute(
+                "SELECT COUNT(*) FROM malware_findings "
+                "WHERE status IN ('new','investigating') "
+                "AND UPPER(COALESCE(severity,'')) IN ('HIGH','CRITICAL')").fetchone()[0]
+            counts["findings_open"] = c.execute(
                 "SELECT COUNT(*) FROM malware_findings WHERE status IN ('new','investigating')"
             ).fetchone()[0]
         except Exception:
@@ -2711,8 +2725,8 @@ def _header_status_data() -> dict:
         pass
 
     red = bool(counts["critical"] or counts["high"] or counts["services_down"]
-               or counts["canary_trips"] or quar_pending or diag_verdict == "LOCAL_FAIL")
-    amber = bool(counts["medium"] or counts["open_tickets"]
+               or counts["findings_high"] or quar_pending or diag_verdict == "LOCAL_FAIL")
+    amber = bool(counts["medium"] or counts["open_tickets"] or counts["findings_open"]
                  or diag_verdict in ("DEGRADED", "UPSTREAM_FAIL"))
     status = "red" if red else ("amber" if amber else "green")
     return {"status": status, "counts": counts}
