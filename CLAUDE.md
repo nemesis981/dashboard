@@ -635,6 +635,15 @@ commit," not on request.
   shell/SQL/crontab interpolation are the two classes with a confirmed history in this
   codebase (see the private audits above for the full citations) — new code matching either
   shape is a finding even if it's not literally one of the three named bugs.
+- **Any new PUBLIC route must be checked against `_AUTH_EXEMPT` explicitly.** A route
+  intended to be reachable without a dashboard login is silently swallowed by the auth
+  gate if its endpoint name is missing from that set — it returns 302-to-login instead
+  of serving, which looks like a working route to every other check. Confirmed live
+  2026-08-02: `install_windows_start` passed compile, template render, and a route audit
+  that verified its token guard matched its siblings, then failed in production because
+  it diverged from those same siblings on the one axis not checked. Verify the endpoint
+  name resolves to a real `@app.route` function too — a typo in `_AUTH_EXEMPT` fails
+  closed and is indistinguishable from omitting the entry.
 
 **Method (same as the reference audits):**
 - Read-only (Rule 1) — **no fixing or editing during the audit itself.** Findings only; a
