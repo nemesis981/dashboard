@@ -760,12 +760,21 @@ an investigation:
 | `Nemesis Kali Master ISOLATED` | Kali 2026.1 | isolated | attacker/pentest box |
 | `Nemesis Kali Master BRIDGED` | Kali 2026.1 | bridged | attacker/pentest box |
 
-- **Permanent hardware/software gauge VM — PLACEHOLDER, not yet built.** A separate VM from
-  `Nemesis Appliance Master ISOLATED` above, dedicated to representing an accurate, CURRENT
-  hardware/software-requirements baseline rather than a frozen snapshot from whenever it was
-  created. Window 3 is still setting this up. **Fill in its name/OS/network/role in the table
-  above the moment it exists** — don't leave it as a standalone mention once it does; the
-  whole point of the capability list is one lookup table, not two.
+- **Permanent hardware/software gauge VM — `Nemesis Appliance HW-GAUGE`, built and pruned
+  2026-08-02.** Ubuntu 26.04 Server (headless), bridged (`enp131s0`, `<hw-gauge-ip>`),
+  production Nemesis (`ce9696a`) with a deliberate OS-package removal pass applied (833 → 738
+  packages; all 13 Nemesis-family services verified healthy after every batch). A separate,
+  standing asset from `Nemesis Appliance Master ISOLATED` above — **not a Master**, not
+  subject to fresh-clone discipline — dedicated to representing an accurate, CURRENT
+  hardware/software-requirements baseline, re-tuned over time as real requirements are
+  discovered rather than treated as a finalized template. **First real headless measurement**
+  against the previously desktop-only/estimated baseline: 1.7GB RAM idle (baseline's own
+  extrapolation was ~1.85GB), 3.5G/25G disk (roughly a third of the unpruned desktop
+  baseline's 11.4–12G), confirming RAM-bound-not-CPU-bound and ClamAV (`clamd`, ~992MB) as the
+  dominant sizing factor, exactly as the existing baseline concluded. Also surfaced a live
+  reproduction of `PUNCHLIST.md`'s Pi-hole unattended-install whiptail-hang bug, worked around
+  without touching `install.sh`. Full build log, removal-batch reasoning, and the
+  footprint-comparison table: private mirror (`vm-fleet/VM-FLEET-LOG.md`).
 - **Permanent gauge VM maintenance — standing obligation, not optional.** Whenever production
   Nemesis is updated, the gauge VM MUST be brought up to that same version. Its entire purpose
   is representing what Nemesis currently requires, not what it required when the VM was
@@ -804,6 +813,23 @@ the first place.
   agent install — not just the permanent gauge VM above — gets updated to match whenever
   production Nemesis updates. Same reasoning as the gauge VM's maintenance rule: a VM meant to
   represent current product behavior is worse than useless if it's silently stale.
+- **Identify a VM by ARP or in-guest data — NEVER by the VirtualBox DHCP leases file.** Before
+  acting on any VM by IP, resolve IP→VM through host ARP (`ip neigh show dev vboxnet0`) or by
+  reading `/sys/class/net/<iface>/address` inside the guest. Do NOT trust
+  `~/.config/VirtualBox/HostInterfaceNetworking-vboxnet0-Dhcpd.leases`: it retains stale
+  entries and the server reassigns addresses, so a MAC→IP pair read from it can name a VM that
+  no longer holds that address. **Confirmed live 2026-08-02**: during the Master-accessibility
+  audit a stale lease pointed at one of Window 1's *actively running* clones instead of the
+  intended Master, and the misidentification surfaced only because the guest's uptime
+  contradicted the reboot cycle just performed on the intended VM. Those commands happened to
+  be read-only, so nothing was damaged — but the identical mistake one step later, during the
+  fix, would have modified another window's live work. **A wrong-VM write is not recoverable by
+  noticing afterwards**, which is why the check belongs before the action, not after.
+  Corollary — **uptime is a cheap sanity check**: if a guest's uptime does not match the
+  power cycle you just performed on it, you are on the wrong VM; stop and re-resolve.
+  This is the same failure class ADR 0019's `VM-TEST-PLAN.md` already names for its own rig
+  ("identify by MAC via `VBoxManage`, never by inferring from open ports") — this bullet
+  generalises it from that one target to the whole fleet.
 
 **Also present, outside the 7-Master set — do not fold into it without a deliberate decision:**
 - `Nemesis Appliance Spare ISOLATED` — a second appliance-installed isolated Ubuntu box
@@ -811,9 +837,11 @@ the first place.
 - `Nemesis-firewall Utility CLEANBASE 07.31` — deliberately purged-bare Ubuntu base kept
   specifically for install-timing measurement. Not a Master; don't clone it expecting a
   generic Linux box.
-- `Nemesis-firewall W3-TEST 07.29` + `Nemesis-SW WIN11 W3-TEST 07.29` — the live ADR 0019
-  enforcement-engine test rig (see `firewall-enforcement-engine/VM-TEST-PLAN.md`, private
-  mirror). **Off-limits** until that work is confirmed concluded/archived.
+**Retired:** `Nemesis-firewall W3-TEST 07.29` + `Nemesis-SW WIN11 W3-TEST 07.29` — the ADR 0019
+enforcement-engine test rig, **deleted 2026-08-02** (full 5-snapshot chain included) once that
+work was confirmed concluded. The permanent measurement record lives in
+`firewall-enforcement-engine/VM-TEST-PLAN.md` (private mirror) — not lost, just no longer a
+running VM. Full retirement reasoning: `vm-fleet/VM-FLEET-LOG.md` (private mirror).
 
 Known caveats from the 2026-08-02 cleanup pass are tracked in `PUNCHLIST.md`, not duplicated
 here.

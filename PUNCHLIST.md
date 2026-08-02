@@ -1415,6 +1415,86 @@ Pre-existing — not introduced by that commit, just made more visible by it.
   should be split so the absolute-cap half runs even inside `_IDLE_LOCK_ALLOWED` routes
   while the idle-lock half stays skipped there.
 
+### [SMALL] Intermittent reboot hang on `boot-efi.mount` — OS/desktop-level, not Nemesis
+
+Flagged by Window 3, 2026-08-02, investigating a reboot hang reported that morning
+(screenshot evidence: `boot-efi.mount/stop` running 1m43s → 6+ min, kernel hung-task
+warnings). Read-only investigation, no fix applied — see that session's findings for full
+detail. **Confirmed NOT caused by last night's (2026-08-01) ADR 0019 Increment 4 work**: the
+identical hang signature reproduced on the *prior* morning's reboot (boot -4,
+2026-07-31 08:06:57 → 08:11:25), hours before `nemesis-fw-watch`/`nemesis-fw-enforce` existed
+as installed units. `nemesis-fw-watch`, `nemesis-fw-enforce`, and `nemesis-fwd` all stop
+cleanly and near-instantly (`Deactivated successfully`, same second as the reboot request)
+in both occurrences — well outside the blocking chain. Other reboots in between unmount
+`boot-efi.mount` in under 2 seconds with no hang, so this is intermittent, not universal.
+
+**Root cause chain (established, not yet fixed):** a long-running Firefox (snap) session's
+apparmor confinement **denies** it the `PrepareForShutdown`/`PrepareForShutdownWithMetadata`
+dbus signals from `logind`, so it never gets a clean-shutdown notice → the GNOME session
+scope's 90s stop-timeout expires and SIGKILLs it → the hard kill triggers an apport coredump
+write for a process that's been running ~24h → that coredump write contends for I/O with
+systemd's own internal `(sd-sync)` helper (confirmed genuine systemd-internal component,
+found in `libsystemd-shared-259.so`; same naming convention as the well-known `(sd-pam)`
+helper) which does a blocking sync/writeback flush before unmounting `/boot/efi` — and
+`/boot/efi` and `/` share the same physical NVMe device, so the backlog stalls the EFI
+partition's unmount specifically. System eventually force-unmounts and completes the reboot
+on its own; no data loss observed, just several extra minutes on shutdown.
+
+**VirtualBox VM teardown checked and ruled out for THIS occurrence** (VM teardown during
+sync is an independently known trigger for this class of stall in general, so it was worth
+excluding explicitly rather than assumed away). Evidence, all from the same boot's journal +
+on-disk VM logs: (1) `virtualbox.service` (the vboxdrv/VBoxNetFlt kernel-module unload)
+completed in under 1 second with no error — would not happen cleanly/instantly if any VM
+process still held `/dev/vboxdrv` open; (2) zero `VBoxHeadless`/`VirtualBoxVM`/`VBoxSVC`
+process references anywhere in the boot's journal at shutdown time; (3) the two
+most-recently-active VM logs (`Nemesis-firewall Master Ubunty 26.04`, `Nemesis-firewall
+W3-TEST 07.29`) both show clean, deliberate `PoweredOff`/`VBoxHeadless: exiting` sequences
+timestamped **hours before** the reboot (~16:37 and ~21:14 on 08-01, vs. the 09:12 08-02
+reboot); (4) the last VM-start kernel event (`vboxdrv: ... VMMR0.r0` / `VBoxNetFlt: attached`)
+in the entire boot was 16:35:37 on 08-01, ~17h before shutdown, with nothing after; (5) no VM
+log file anywhere shows write activity in the 09:00–09:20 08-02 window. This directly
+contradicts a "two VMs running at shutdown" premise floated during the investigation — worth
+noting since it means that recollection doesn't match the journal for *this* reboot. I/O
+contention traces to the Firefox coredump write alone, not VM teardown, not both overlapping.
+
+- [ ] **Low priority, not urgent — host OS/desktop config, not application code.** Candidate
+  fixes (not yet evaluated for tradeoffs):
+  - Adjust the `snap.firefox.firefox` apparmor profile to allow receiving `login1`'s
+    `PrepareForShutdown`/`PrepareForShutdownWithMetadata` dbus signals, so Firefox gets a
+    chance to exit cleanly instead of being hard-killed.
+  - Lower `session-*.scope`'s stop timeout (or otherwise avoid the SIGKILL-into-coredump
+    path) for graphical sessions at shutdown.
+  - Exclude large/long-running browser processes from coredump generation on shutdown
+    specifically (e.g. scoped `core_pattern`/apport handling), since the dump is never
+    useful post-reboot anyway in this scenario.
+
+### [SMALL] VM test fleet — three minor items from the 2026-08-02 cleanup pass
+
+Flagged by Window 3 while consolidating the VirtualBox inventory down to the 7-Master fleet
+(see `CLAUDE.md` → "VM test fleet"). All low priority, none blocking.
+
+- [ ] **`Nemesis Linux Master ISOLATED` — SSH unreachable on the isolated subnet.** Port 22
+  times out (reproducible, not transient); ICMP works fine, so the box itself is up and
+  networked correctly. Most likely a `ufw` rule scoped to this VM's original bridged-LAN
+  subnet (`<bridged-lan-subnet>`) that doesn't match the new hostonly subnet
+  (`192.168.56.0/24`) after the NIC was switched to isolated — not confirmed in-guest
+  (no Guest Additions installed on this VM to inspect safely; SSH itself being the thing
+  that's broken makes it hard to check from inside without a riskier method). Not urgent —
+  revisit only if a future test specifically needs inbound SSH to this box.
+- [ ] **`Nemesis Windows11 Master BRIDGED` and `...ISOLATED` share the identical NetBIOS
+  hostname `NEMESIS-SW-CLEA`.** `...ISOLATED` is a clone of `...BRIDGED`'s lineage and never
+  got a unique hostname. Matches an old NetBIOS name-collision event found in `...BRIDGED`'s
+  event log history (dated 2026-07-02, from before this cleanup). Not a live conflict today
+  since the two sit on separate network segments (bridged vs. isolated), but would collide
+  if both were ever active on the same segment at once. Fix: rename one guest's hostname.
+- [ ] **`Nemesis Windows11 Master BRIDGED` and `...ISOLATED` — password auth not
+  independently verified.** Login was confirmed via SSH key auth (passwordless, already
+  configured) and `test-user` was confirmed in the local Administrators group on both, but
+  the actual password *value* wasn't re-checked against local-config.md's standard test
+  creds — `sshpass` wasn't available on the host at verification time and installing new
+  tooling mid-task felt out of scope. Low risk (key auth already proves the account is
+  usable) but worth a real check before relying on password-based login to either box.
+
 ### [SMALL] Guard-unavailable degradation is journal-only — the enforcement table goes silently stale
 
 Found 2026-08-02 by Window 1 while re-measuring check 7 (`rerender()` fail-closed) on the VM.
