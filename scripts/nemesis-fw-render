@@ -1,6 +1,6 @@
 #!/bin/bash
-# ADR 0019 — Increment 3: render nemesis_enforce rules DERIVED from the
-# authoritative backend, in OBSERVE-ONLY mode.
+# ADR 0019 — Increment 4: render nemesis_enforce rules DERIVED from the
+# authoritative backend, WITH REAL ENFORCEMENT AUTHORITY.
 #
 # SINGLE-AUTHORITY CONSTRAINT (operator, 2026-07-30): the table is DERIVED,
 # never independently populated. Rules are generated from what ufw is ACTUALLY
@@ -9,11 +9,18 @@
 # that justifies cutover would be measuring our own bookkeeping error rather
 # than real agreement.
 #
-# OBSERVE-ONLY BY CONSTRUCTION: every derived rule is `counter log` with NO
-# VERDICT. In nftables a rule without a verdict falls through to the next rule,
-# so these cannot drop, reject, or alter delivery. The chain policy stays
-# `accept`. This table has zero authority and cannot lock anyone out — which is
-# what makes it safe to run alongside the real enforcement path.
+# ENFORCING BY DEFAULT (Increment 4 cutover). Each derived block emits a
+# rate-limited logging rule that falls through, plus an unconditional `drop`.
+# Set NEMESIS_FW_ENFORCE=0 to render the old observe-only form.
+#
+# ADDITIVE: ufw keeps enforcing exactly as before. The behavioural change is not
+# that blocked addresses get blocked — they already were — it is that this
+# closes an established-connection gap in the current interim path: a block
+# that previously only stopped new connections now also ends existing ones.
+#
+# The chain policy stays `accept`, so only addresses ufw is ALREADY blocking can
+# ever be dropped here, and the never-block guard below refuses a verdict for any
+# protected address. Those two constraints are what bound the lockout risk.
 #
 # THE COMPARISON THIS ENABLES: same rules, same traffic, two engines. If the
 # table's counter for an address increments while ufw's DROP counter for the
@@ -53,7 +60,7 @@ mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
 # rather than from invisible runtime state, and rollback is one revert.
 #
 # A refused address NEVER receives a verdict regardless of this switch.
-ENFORCE="${NEMESIS_FW_ENFORCE:-0}"
+ENFORCE="${NEMESIS_FW_ENFORCE:-1}"
 
 # ── never-block guard ────────────────────────────────────────────────────────
 # FAIL-CLOSED, and deliberately strict: an enforcement table without a working
