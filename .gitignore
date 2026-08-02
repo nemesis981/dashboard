@@ -12,6 +12,7 @@ __pycache__/
 .claude/
 alert_manager/quarantine/
 *.state.json
+*.state.json.bak-*
 
 # Flask session secret (generated at runtime — never commit)
 alert_manager/.flask_secret
