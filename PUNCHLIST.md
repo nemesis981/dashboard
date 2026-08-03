@@ -1695,3 +1695,33 @@ this entry is the proposal, not the implementation.
       deterministic and independent of request context), then decide whether a cleartext target
       should be refused rather than warned. Worth doing regardless of the separate TLS decision,
       which is sequenced after ADR 0004 Stage 1.
+
+- [ ] **` ` (narrow no-break space) before KB/MB units in `dashboard.py` silently breaks exact-
+  match edits.** Confirmed live 2026-08-03 while building the storage/retention work: the line
+  `mb < 1 ? Math.round(mb * 1024) + ' KB' : mb.toFixed(1) + ' MB';` in `openBackupModal()` does not
+  contain ASCII spaces before `KB`/`MB` — it contains U+202F. Two separate Edit calls failed with
+  "string not found" against text that was visually identical to the file, and the cause was only
+  found by dumping `repr()` of the raw line.
+    - [ ] Why it matters as an EDITING TRAP, not a display bug: it renders correctly and reads
+      correctly in every normal tool (`grep`, `sed`, `cat`, the Read tool). Nothing about the
+      failure points at the real cause, so the natural next move is to assume the line moved or
+      the file changed underneath you and start re-reading — which finds nothing, because the text
+      really is there. Cost this session was several wasted edit attempts.
+    - [ ] How to recognise it: an exact-match edit failing on a line you can see verbatim in the
+      file. Confirm with `python3 -c "print(repr(open('dashboard.py').readlines()[N]))"` and look
+      for ` ` (or any `\uXXXX`) where a space appears.
+    - [ ] How to work around it: anchor the edit on a neighbouring ASCII-only line, or insert by
+      line number after asserting on a substring that avoids the Unicode.
+    - [ ] Decide separately whether the character should simply be normalised to ASCII across
+      `dashboard.py`. It appears to be deliberate typography (narrow space before a unit), so this
+      is a judgement call, not an obvious cleanup — normalising changes rendered output.
+
+- [ ] **Backup modal still lists a file the backup no longer contains.** The modal's contents list
+  (`dashboard.py`, backup modal HTML) names "Tickets & notes (modules/tickets/tickets.db)", but
+  `_backup_candidates()` retired that entry at ADR 0001 Stage 6 — tickets now live in the shared
+  `alerts.db` and are captured by its entry. The list is stale copy, not a missing backup: the data
+  IS backed up, just not from where the modal claims.
+    - [ ] Why it matters: an operator reading the list to confirm coverage sees a path that no
+      longer exists, which is the kind of detail that erodes trust in the rest of the list.
+    - [ ] Fix is one line of copy in the modal HTML. Do it alongside the next backup-UI change
+      rather than as its own commit.
