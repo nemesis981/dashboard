@@ -33,6 +33,9 @@ sequence).
 """
 
 import re
+import os
+import gzip
+import json
 import time
 import sqlite3
 import logging
@@ -680,7 +683,183 @@ class DataManager:
                     )""")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_dmlog_ts ON {OP_LOG_TABLE}(ts)")
             conn.execute(f"CREATE INDEX IF NOT EXISTS idx_dmlog_mod ON {OP_LOG_TABLE}(module, table_name)")
+            # Coalescing columns (guarded ALTER, ADR 0001 migration pattern).
+            # All NULL on an ordinary per-write row, so every existing reader is
+            # unaffected: a row with op_count IS NULL is exactly what it always
+            # was. A coalesced summary row sets all three.
+            _cols = {r[1] for r in conn.execute(
+                f"PRAGMA table_info({OP_LOG_TABLE})").fetchall()}
+            for _c, _d in (("op_count", "INTEGER"),
+                           ("ts_last", "REAL"),
+                           ("archive_ref", "TEXT")):
+                if _c not in _cols:
+                    conn.execute(f"ALTER TABLE {OP_LOG_TABLE} ADD COLUMN {_c} {_d}")
             conn.commit()
+        finally:
+            conn.close()
+
+    # -- operation-log archival + coalescing (storage/retention piece 5) --
+
+    OP_LOG_ARCHIVE_DAYS = 7
+
+    def _archive_dir(self):
+        return os.path.join(os.path.dirname(self._db_path), "archives")
+
+    @staticmethod
+    def _read_oplog_archive(path):
+        """Return {id: row_dict} from a gzipped-JSONL archive. Raises on any
+        unreadable/malformed file — a failure must never be mistaken for an
+        empty archive, which would look like a successful move of zero rows."""
+        out = {}
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    rec = json.loads(line)
+                    out[rec["id"]] = rec
+        return out
+
+    @classmethod
+    def _verify_oplog_archive(cls, path, expected):
+        """Prove the archive holds EXACTLY `expected` ({id: row_dict}) before a
+        single live row is removed. Compares FIELD BY FIELD, not just ids — an
+        archive with the right ids and wrong contents would otherwise pass.
+        Returns (ok, reason)."""
+        try:
+            got = cls._read_oplog_archive(path)
+        except Exception as e:
+            return (False, f"archive unreadable: {e}")
+        if set(got) != set(expected):
+            return (False, f"id mismatch (missing="
+                           f"{len(set(expected) - set(got))}, "
+                           f"unexpected={len(set(got) - set(expected))})")
+        for k, want in expected.items():
+            if got[k] != want:
+                return (False, f"content mismatch at id={k}")
+        return (True, "ok")
+
+    @classmethod
+    def _selftest_oplog_verifier(cls):
+        """Prove the verifier can FAIL before trusting it to approve a real
+        move. A verifier broken so as to always return True would approve every
+        run and the first symptom would be a silently gutted audit trail."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "canary.jsonl.gz")
+            good = {1: {"id": 1, "module": "m", "ts": 1.0},
+                    2: {"id": 2, "module": "n", "ts": 2.0}}
+            with gzip.open(p, "wt", encoding="utf-8") as fh:
+                for v in good.values():
+                    fh.write(json.dumps(v) + "\n")
+            if not cls._verify_oplog_archive(p, good)[0]:
+                return (False, "known-good archive failed verification")
+            bad = {1: {"id": 1, "module": "m", "ts": 1.0},
+                   2: {"id": 2, "module": "WRONG", "ts": 2.0}}
+            if cls._verify_oplog_archive(p, bad)[0]:
+                return (False, "verifier accepted mismatched CONTENT")
+            if cls._verify_oplog_archive(p, {**good, 3: {"id": 3}})[0]:
+                return (False, "verifier accepted a MISSING row")
+            if cls._verify_oplog_archive(os.path.join(td, "nope.gz"), good)[0]:
+                return (False, "verifier accepted an unreadable file")
+        return (True, "ok")
+
+    def archive_and_coalesce_op_log(self, cutoff_days=None, dry_run=False):
+        """Archive aged automated-writer rows, then replace them with one
+        summary row per (module, table, operation, hour).
+
+        Ordering is the correctness property, exactly as in the hw_monitor
+        top_processes archival: write -> atomic rename -> re-open -> compare
+        field by field -> only then modify the live table. Any failure leaves
+        the log exactly as it was and keeps the archive for inspection.
+
+        Rows with a non-NULL actor are NEVER touched, at any age. Human-
+        attributed writes keep per-row fidelity permanently.
+
+        Nothing is destroyed: every archived row is recoverable in full via the
+        summary row's archive_ref. The count arithmetic that matters most
+        ("N inserts, 1 delete") survives in the live table without opening the
+        archive at all, because op_count and rowcount are summed rather than
+        discarded.
+        """
+        days = self.OP_LOG_ARCHIVE_DAYS if cutoff_days is None else int(cutoff_days)
+        ok, why = self._selftest_oplog_verifier()
+        if not ok:
+            log.error("op-log coalesce ABORTED — verifier self-test failed: %s", why)
+            return {"status": "error", "error": f"verifier self-test failed: {why}"}
+
+        conn = self._raw_connect()
+        conn.row_factory = sqlite3.Row
+        try:
+            cutoff = time.time() - days * 86400
+            rows = conn.execute(
+                f"SELECT * FROM {OP_LOG_TABLE} "
+                "WHERE ts < ? AND actor IS NULL AND op_count IS NULL "
+                "ORDER BY id", (cutoff,)).fetchall()
+            if not rows:
+                return {"status": "ok", "archived": 0, "summary_rows": 0, "file": None}
+
+            expected = {r["id"]: dict(r) for r in rows}
+            if dry_run:
+                buckets = {(r["module"], r["table_name"], r["operation"],
+                            int(r["ts"] // 3600)) for r in rows}
+                return {"status": "ok", "archived": 0, "would_archive": len(rows),
+                        "would_write_summary_rows": len(buckets),
+                        "file": None, "dry_run": True}
+
+            os.makedirs(self._archive_dir(), mode=0o2770, exist_ok=True)
+            try:
+                os.chmod(self._archive_dir(), 0o2770)
+            except OSError as e:
+                log.warning("archives dir chmod failed: %s", e)
+            stamp = time.strftime("%Y-%m-%d-%H%M%S", time.localtime())
+            fname = f"dm_operation_log_{stamp}.jsonl.gz"
+            final = os.path.join(self._archive_dir(), fname)
+            if os.path.exists(final):
+                return {"status": "error", "error": f"archive already exists: {fname}"}
+            tmp = final + ".tmp"
+
+            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+                for r in rows:
+                    fh.write(json.dumps(dict(r)) + "\n")
+            os.replace(tmp, final)
+            try:
+                os.chmod(final, 0o640)
+            except OSError as e:
+                log.warning("archive chmod failed: %s", e)
+
+            ok, why = self._verify_oplog_archive(final, expected)
+            if not ok:
+                log.error("op-log coalesce ABORTED — %s (live rows untouched, "
+                          "archive kept for inspection: %s)", why, final)
+                return {"status": "error", "error": why, "file": fname}
+
+            # Verified. Only now is it safe to modify the live table.
+            buckets = {}
+            for r in rows:
+                key = (r["module"], r["table_name"], r["operation"],
+                       int(r["ts"] // 3600))
+                b = buckets.setdefault(key, {"n": 0, "rc": 0,
+                                             "first": r["ts"], "last": r["ts"]})
+                b["n"] += 1
+                b["rc"] += (r["rowcount"] or 0)
+                b["first"] = min(b["first"], r["ts"])
+                b["last"] = max(b["last"], r["ts"])
+
+            cur = conn.cursor()
+            cur.executemany(f"DELETE FROM {OP_LOG_TABLE} WHERE id=?",
+                            [(i,) for i in expected])
+            cur.executemany(
+                f"INSERT INTO {OP_LOG_TABLE}"
+                "(module, table_name, operation, actor, rowcount, ts,"
+                " op_count, ts_last, archive_ref) "
+                "VALUES(?,?,?,NULL,?,?,?,?,?)",
+                [(k[0], k[1], k[2], v["rc"], v["first"], v["n"], v["last"], fname)
+                 for k, v in buckets.items()])
+            conn.commit()
+            log.info("op-log coalesce: archived %d rows -> %d summary rows (%s)",
+                     len(expected), len(buckets), fname)
+            return {"status": "ok", "archived": len(expected),
+                    "summary_rows": len(buckets), "file": fname}
         finally:
             conn.close()
 
