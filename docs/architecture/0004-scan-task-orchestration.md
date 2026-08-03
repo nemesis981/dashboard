@@ -2,10 +2,11 @@
 
 - **Status:** **BUILD-READY — hinge questions (a)/(b)/(c) resolved** (2026-08-02). Design of
   record for the Scheduler/Execution/Reporting separation and the `scan_*`/`malware_findings`
-  migration. Build not started except **Step 1 of the sequence below (YARA auto-update +
-  cross-platform path exclusions, then its routes/SSRF-guard/rate-limit/UI), all of which
-  landed the same day** this ADR was resolved. See "Status / next" for the full sequence and
-  gating.
+  migration. **Steps 1–3 of the sequence below shipped 2026-08-02** (Step 1: YARA auto-update +
+  cross-platform path exclusions + its routes/SSRF-guard/rate-limit/UI; Step 2: actor seam +
+  local-ISO timestamps on the `scan_*` tables, `8a836de`; Step 3: agent heartbeat
+  authentication, `f331620`) — **Step 4 (the actual Scheduler/Execution/Reporting build) has
+  not started.** See "Status / next" for the full sequence and gating.
 - **Date:** 2026-06-26 (opened) · resolved 2026-08-02
 - **Affects:** scan triggering/dispatch, the malware module, hw_monitor, reporting,
   the agent fleet, the `scan_*` / `malware_*` tables
@@ -261,10 +262,11 @@ bugs already documented in the public repo.
 
 ## Status / next
 
-Direction and all three hinge questions resolved 2026-08-02. Step 1 of the sequence above has
-shipped in full — the auto-update mechanism, the path-exclusion list, and its routes/SSRF-
-guard/rate-limit/UI (M2) — usable on this box today; Steps 2–4 are unbuilt. Next step is
-Step 2 (actor seam + time convention on the `scan_*` tables), then Step 3 (agent heartbeat
-authentication) before Step 4 begins the actual Scheduler/Execution/Reporting build, the
-`scan_threats` → `malware_findings` migration, and generalizing Step 1's distribution channel
-fleet-wide per requirement (b).2 above.
+Direction and all three hinge questions resolved 2026-08-02. Steps 1–3 of the sequence above
+have shipped, all the same day: Step 1 in full — the auto-update mechanism, the path-exclusion
+list, and its routes/SSRF-guard/rate-limit/UI (M2), usable on this box today; Step 2 — actor
+seam + local-ISO time convention on the `scan_*` tables (`8a836de`); Step 3 — agent heartbeat
+authentication (`f331620`), live in `observe` mode per its own commit (not yet `enforce`).
+**Step 4 is unbuilt** — the actual Scheduler/Execution/Reporting build, the `scan_threats` →
+`malware_findings` migration, and generalizing Step 1's distribution channel fleet-wide per
+requirement (b).2 above. That is the next and only remaining step in this sequence.
