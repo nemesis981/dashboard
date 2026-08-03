@@ -90,6 +90,15 @@ Options worth weighing, in rough order of preference:
 Option 1 is the most correct: it distinguishes *"IPv6 is broken"* from *"there is no IPv6
 here"*, which is the actual missing signal.
 
+## The DNS outage this was masking — now investigated separately
+
+The `LOCAL_FAIL` / `dns resolution failed` entry below turned out to be a REAL 23-hour
+outage, written up in `dns-resolution-outage-23h-2026-08-01.md`. It matters to this finding
+directly: for that entire window the operator-facing verdict was ALREADY stuck at `DEGRADED`
+because of the false positive documented here, so a genuine day-long failure occurred inside
+a monitor that had been crying wolf continuously. That is the harm predicted below,
+demonstrated. Fixing this false positive is what makes real findings visible.
+
 ## Also visible in the same retained window — separate, not investigated
 
 Recorded because the evidence ages out of this table within ~48h and would otherwise be lost:
