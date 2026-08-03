@@ -44,6 +44,30 @@ import nemesis_paths  # noqa: E402
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DASHBOARD = "http://127.0.0.1:5000"
 TEST_IP = "203.0.113.99"
+# Correct here, and ONLY because this test monkeypatches enrich_ip below.
+#
+# RFC 5737 addresses (192.0.2.x, 198.51.100.x, 203.0.113.x) are classified
+# PRIVATE by Python: `ipaddress.ip_address("203.0.113.99").is_private` is True.
+# Any code that branches on address scope therefore SKIPS them —
+# `ip_enrichment.enrich_ip()` early-returns for private/loopback/link-local, and
+# anomaly_detection's AbuseIPDB path filters them out of its resolved set.
+#
+# The failure mode is silent and looks like success: a test that never reaches
+# the logic reports zero external lookups, which is indistinguishable from
+# perfect deduplication. (Confirmed the hard way, 2026-08-03.)
+#
+# So: keep RFC 5737 for DB row content, where Rule 11's labelling convention
+# intends it. If a test needs to exercise an is_private branch for real, use
+# TEST_IP_PUBLIC below instead.
+#
+# 192.88.99.x is the deliberate choice over 8.8.8.8/1.1.1.1: it is IANA-reserved
+# and deprecated (RFC 7526, the retired 6to4 relay anycast prefix), so nothing
+# operates it and an accidental real connection goes nowhere — yet Python
+# classifies it as public, so it exercises the code path. Verified 2026-08-03
+# against every documentation/reserved range; the RFC 2544 benchmarking and
+# TEST-NET blocks are all is_private=True, and 100.64.0.0/10 reads as public but
+# is the tailnet range and would be actively misleading here.
+TEST_IP_PUBLIC = "192.88.99.1"
 RULE_IDS = {"confirm": "9999991", "lift": "9999992", "expire": "9999993"}
 
 passed = 0
