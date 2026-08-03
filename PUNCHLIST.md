@@ -1903,13 +1903,22 @@ this entry is the proposal, not the implementation.
   together deliberately.
     - [ ] **1. Agent enrollment over the tailnet is blocked while PIA is up** — the original
       finding, detailed in the sub-entry below.
-    - [ ] **2. IPv6 egress is blackholed, including while PIA is DISCONNECTED.** Suspected in
-      `docs/audits/project-status-2026-06-26.md` ("PIA leaves a `blackhole default` in table
-      `piavpnOnlyrt` even when disconnected; api.anthropic.com is IPv6"), and consistent with
-      what was seen on 2026-08-03: outbound API access to an IPv6-only host dropped for ~10
-      minutes across the PIA teardown, while IPv4 LAN and tailnet traffic kept working. PIA's
-      policy rules (`piavpnrt`, `piavpnOnlyrt`, `piavpnFwdrt`) were confirmed **still installed
-      with the tunnel down**.
+    - [ ] **2. IPv6 egress is blocked while PIA is CONNECTED — corrected 2026-08-03, this entry
+      previously overstated it as blocked while disconnected too.** Directly measured against
+      `diagnostics_connectivity_samples`: `DEGRADED / ipv6 keytest failed` continuously through
+      2026-08-03 15:05:23, then a clean, complete flip to `ALL_OK` at 15:06:29 with **zero**
+      renewed IPv6 failures across the following 10+ minutes of samples (checked minute-by-minute
+      to confirm, not just spot-checked) — the same transition entry #4 below documents in full.
+      There is no supporting data anywhere in that table for a sustained post-disconnect outage.
+      **What IS independently confirmed to survive disconnection: the policy rules themselves,
+      not their effect.** Re-checked live 2026-08-03: `ip rule show` still lists the
+      `piavpnOnlyrt`/`piavpnrt`/`piavpnFwdrt` fwmark rules, and `ip route show table
+      piavpnOnlyrt` still shows `blackhole default`, with no PIA tunnel interface present. So
+      the June 6/26 lead (`docs/audits/project-status-2026-06-26.md`, itself hedged as "may be
+      v6-routing-specific," never a confirmed finding) was right that the blackhole route
+      persists — but persisting in the table is not the same as intercepting live traffic, and
+      the one directly measured transition shows it did not. Do not restate the disconnected
+      claim as settled without a fresh measurement showing an actual post-disconnect failure.
     - [ ] **3. A browser session against the dashboard fails transiently during teardown** —
       reported as "cannot reach server" in the Flask UI's idle-lock. NOT a dashboard fault:
       `dashboard.service` had not restarted (`ActiveEnterTimestamp` unchanged at 11:54:49), so
