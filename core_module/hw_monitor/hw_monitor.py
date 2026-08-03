@@ -5,7 +5,6 @@ Run as a daemon (writes a sample every 5 minutes to the hw_metrics table)
 or import as a module (dashboard.py uses get_live_metrics / init_db /
 get_recent_samples).
 """
-import gzip
 import json
 import logging
 import hashlib
@@ -86,11 +85,7 @@ def _db_connect():
     traffic, not as a finished list. Flip to MODE_ENFORCE only once the journal
     is quiet across a representative period.
     """
-    global _DM
-    if _DM is None:
-        _DM = data_manager.DataManager(DB_PATH)
-        data_manager.set_namespace_mode("hw_monitor", data_manager.MODE_WARN)
-    return _DM.connect("hw_monitor")
+    return _dm().connect("hw_monitor")
 
 
 def _stop(signum, _frame):
@@ -1195,70 +1190,28 @@ def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
         conn.close()
 
 
-ARCHIVE_DIR = os.path.join(os.path.dirname(DB_PATH), "archives")
 TOP_PROC_ARCHIVE_DAYS = 14
 
-
-def _read_archive(path):
-    """Return {id: top_processes} from a gzipped-JSONL archive. Raises on any
-    unreadable/malformed file — callers must not treat a failure as an empty
-    archive, which would look like a successful move of zero rows."""
-    out = {}
-    with gzip.open(path, "rt", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            rec = json.loads(line)
-            out[rec["id"]] = rec["top_processes"]
-    return out
+# Archival primitives (archive_dir/ensure_archive_dir/write_archive/
+# read_archive/verify_archive/selftest_verifier) live on the Data Manager —
+# ONE implementation shared with its dm_operation_log coalescing. This file
+# previously carried a near-identical private copy; a second copy of
+# VERIFICATION logic is the dangerous kind, because a copy that drifts weaker
+# keeps approving moves it should refuse and the failure looks like success.
 
 
-def _verify_archive(path, expected):
-    """Prove the archive holds EXACTLY `expected` ({id: text}) before anything
-    is cleared from the live table.
+def _dm():
+    """The process-wide DataManager, created on first use.
 
-    Returns (ok, reason). Content is compared, not just row count: a file with
-    the right number of rows and the wrong text would otherwise pass.
+    Same lazy construction `_db_connect` performs — factored out so the archival
+    path can reach the shared helpers without opening a connection it does not
+    need.
     """
-    try:
-        got = _read_archive(path)
-    except Exception as e:
-        return (False, f"archive unreadable: {e}")
-    if set(got) != set(expected):
-        missing = len(set(expected) - set(got))
-        extra = len(set(got) - set(expected))
-        return (False, f"id mismatch (missing={missing}, unexpected={extra})")
-    for k, v in expected.items():
-        if got[k] != v:
-            return (False, f"content mismatch at id={k}")
-    return (True, "ok")
-
-
-def _selftest_verifier():
-    """Prove the verifier can FAIL before trusting it to approve a real move.
-
-    Without this, a verifier broken so that it always returns True would sail
-    through every archival run and the first symptom would be silently lost
-    process lists. Mirrors the CANARIES pattern in nemesis-fw-neverblock: a
-    known-good case that MUST pass and known-bad cases that MUST NOT.
-    """
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        p = os.path.join(td, "canary.jsonl.gz")
-        good = {1: "alpha", 2: "beta"}
-        with gzip.open(p, "wt", encoding="utf-8") as fh:
-            for k, v in good.items():
-                fh.write(json.dumps({"id": k, "top_processes": v}) + "\n")
-        if not _verify_archive(p, good)[0]:
-            return (False, "known-good archive failed verification")
-        if _verify_archive(p, {1: "alpha", 2: "WRONG"})[0]:
-            return (False, "verifier accepted mismatched CONTENT")
-        if _verify_archive(p, {1: "alpha", 2: "beta", 3: "gamma"})[0]:
-            return (False, "verifier accepted a MISSING row")
-        if _verify_archive(os.path.join(td, "nope.gz"), good)[0]:
-            return (False, "verifier accepted an unreadable file")
-    return (True, "ok")
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(DB_PATH)
+        data_manager.set_namespace_mode("hw_monitor", data_manager.MODE_WARN)
+    return _DM
 
 
 def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
@@ -1273,7 +1226,7 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
     Archive files themselves are never removed by this or any other code path.
     Permanently destroying archived material is a user-initiated action only.
     """
-    ok, why = _selftest_verifier()
+    ok, why = _dm().selftest_verifier()
     if not ok:
         log.error("top_processes archival ABORTED — verifier self-test failed: %s", why)
         return {"status": "error", "error": f"verifier self-test failed: {why}"}
@@ -1297,47 +1250,18 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
             return {"status": "ok", "archived": 0, "would_archive": len(rows),
                     "bytes": total_bytes, "file": None, "dry_run": True}
 
-        # 0770 + setgid, group-inherited from /var/lib/nemesis (nemesis-db), so
-        # every service account that legitimately needs these can read them and
-        # nobody else can. NOT world-readable: the archived text is `ps aux`
-        # output, which carries full command lines and can expose arguments —
-        # tokens, paths, usernames — to any local account. Set explicitly rather
-        # than left to umask, so the result does not depend on which user
-        # happened to create the directory first.
-        os.makedirs(ARCHIVE_DIR, mode=0o2770, exist_ok=True)
-        # exist_ok=True skips the mode argument on an already-existing directory,
-        # so correcting one that was created wrongly needs an explicit chmod.
-        # Only attempt it when the mode is actually wrong: once the directory is
-        # owned by root (the deliberate convention), a service account cannot
-        # chmod it, and an unconditional attempt logs a warning on EVERY run for
-        # a directory that is already correct. Noise that always fires is noise
-        # nobody reads — and it would mask a real permissions problem.
-        if (os.stat(ARCHIVE_DIR).st_mode & 0o7777) != 0o2770:
-            try:
-                os.chmod(ARCHIVE_DIR, 0o2770)
-            except OSError as e:
-                log.warning("archives dir has wrong mode and chmod failed (%s): %s",
-                            ARCHIVE_DIR, e)
+        adir = _dm().ensure_archive_dir()
         stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         fname = f"hw_anomaly_top_processes_{stamp}.jsonl.gz"
-        final = os.path.join(ARCHIVE_DIR, fname)
+        final = os.path.join(adir, fname)
         if os.path.exists(final):
             return {"status": "error", "error": f"archive already exists: {fname}"}
-        tmp = final + ".tmp"
 
-        # Write to .tmp then atomically rename, so a crash mid-write can never
-        # leave a truncated file sitting at the name the DB will point at.
-        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-            for rid, cap, blob in rows:
-                fh.write(json.dumps({"id": rid, "captured_at": cap,
-                                     "top_processes": blob}) + "\n")
-        os.replace(tmp, final)
-        try:
-            os.chmod(final, 0o640)   # owner rw, group (nemesis-db) r, world none
-        except OSError as e:
-            log.warning("archive chmod failed (%s): %s", final, e)
+        _dm().write_archive(final, ({"id": rid, "captured_at": cap,
+                                     "top_processes": blob}
+                                    for rid, cap, blob in rows))
 
-        ok, why = _verify_archive(final, expected)
+        ok, why = _dm().verify_archive(final, expected, "top_processes")
         if not ok:
             log.error("top_processes archival ABORTED — %s (live data untouched, "
                       "archive kept for inspection: %s)", why, final)

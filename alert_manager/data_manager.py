@@ -698,35 +698,100 @@ class DataManager:
         finally:
             conn.close()
 
-    # -- operation-log archival + coalescing (storage/retention piece 5) --
+    # -- shared archival primitives -------------------------------------------
+    #
+    # ONE implementation, used by every archive-then-modify job in the product:
+    # this class's dm_operation_log coalescing and hw_monitor's top_processes
+    # archival. They previously carried near-identical private copies; a second
+    # copy of VERIFICATION logic is the dangerous kind of duplication, because a
+    # copy that drifts weaker keeps approving moves it should refuse and the
+    # failure looks exactly like success.
+    #
+    # These live on the Data Manager because it is the shared dependency every
+    # caller already imports, and because `archive_dir` derives from the database
+    # location this class owns. Note the honest boundary: ADR 0006 is about
+    # mediating DB ACCESS, and the file-level helpers below touch no connection —
+    # the ADR neither mandates nor forbids their placement here. They are here so
+    # there is exactly one authoritative home, which is the point.
 
     OP_LOG_ARCHIVE_DAYS = 7
 
-    def _archive_dir(self):
+    def archive_dir(self):
+        """Archive directory for this database. Derived from the DB path rather
+        than configured separately, so it always travels with the database."""
         return os.path.join(os.path.dirname(self._db_path), "archives")
 
+    def ensure_archive_dir(self):
+        """Create the archive directory if absent and correct its mode if wrong.
+
+        0770 + setgid, group inherited from the data dir, NOT world-readable:
+        archived payloads can include process listings and audit metadata.
+        `makedirs(exist_ok=True)` silently ignores `mode` for an existing
+        directory, so an explicit chmod is what actually fixes one created
+        wrongly. It is attempted only when the mode is actually wrong — the
+        directory is root-owned by convention, so a service account cannot chmod
+        it, and an unconditional attempt would warn on every single run about a
+        directory that is already correct.
+        """
+        d = self.archive_dir()
+        os.makedirs(d, mode=0o2770, exist_ok=True)
+        if (os.stat(d).st_mode & 0o7777) != 0o2770:
+            try:
+                os.chmod(d, 0o2770)
+            except OSError as e:
+                log.warning("archives dir has wrong mode and chmod failed (%s): %s", d, e)
+        return d
+
     @staticmethod
-    def _read_oplog_archive(path):
-        """Return {id: row_dict} from a gzipped-JSONL archive. Raises on any
-        unreadable/malformed file — a failure must never be mistaken for an
-        empty archive, which would look like a successful move of zero rows."""
+    def write_archive(path, records):
+        """Write `records` (iterable of dicts, each carrying an ``id``) as
+        gzipped JSONL, atomically.
+
+        Writes to ``<path>.tmp`` and renames, so a crash mid-write cannot leave
+        a truncated file sitting at the name a live DB row will point at.
+        """
+        tmp = path + ".tmp"
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            for rec in records:
+                fh.write(json.dumps(rec) + "\n")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o640)   # owner rw, group r, world none
+        except OSError as e:
+            log.warning("archive chmod failed (%s): %s", path, e)
+        return path
+
+    @staticmethod
+    def read_archive(path, value_key=None):
+        """Return ``{id: payload}`` from a gzipped-JSONL archive.
+
+        ``value_key`` selects one field as the payload (hw_monitor archives a
+        single column); omit it to get the whole record (the op-log archives
+        entire rows). Raises on any unreadable or malformed file — a failure
+        must NEVER be mistaken for an empty archive, which would look like a
+        successful move of zero rows.
+        """
         out = {}
         with gzip.open(path, "rt", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if line:
                     rec = json.loads(line)
-                    out[rec["id"]] = rec
+                    out[rec["id"]] = rec if value_key is None else rec[value_key]
         return out
 
     @classmethod
-    def _verify_oplog_archive(cls, path, expected):
-        """Prove the archive holds EXACTLY `expected` ({id: row_dict}) before a
-        single live row is removed. Compares FIELD BY FIELD, not just ids — an
-        archive with the right ids and wrong contents would otherwise pass.
-        Returns (ok, reason)."""
+    def verify_archive(cls, path, expected, value_key=None):
+        """Prove the archive holds EXACTLY `expected` before anything is cleared
+        from the live table. Returns ``(ok, reason)``.
+
+        Compares payloads, not just ids: an archive with the right ids and the
+        wrong contents would sail through an id-only check. The comparison is
+        plain ``!=``, which is why one implementation serves both callers — it
+        works identically for a text column and a whole row dict.
+        """
         try:
-            got = cls._read_oplog_archive(path)
+            got = cls.read_archive(path, value_key)
         except Exception as e:
             return (False, f"archive unreadable: {e}")
         if set(got) != set(expected):
@@ -739,27 +804,43 @@ class DataManager:
         return (True, "ok")
 
     @classmethod
-    def _selftest_oplog_verifier(cls):
-        """Prove the verifier can FAIL before trusting it to approve a real
-        move. A verifier broken so as to always return True would approve every
-        run and the first symptom would be a silently gutted audit trail."""
+    def selftest_verifier(cls):
+        """Prove the verifier can FAIL before trusting it to approve a real move.
+
+        A verifier broken so as to always return True would approve every run and
+        the first symptom would be silently lost data. Exercises BOTH payload
+        shapes — single-field and whole-row — because one implementation now
+        serves both callers, so a canary covering only one shape would leave the
+        other unproven.
+        """
         import tempfile
         with tempfile.TemporaryDirectory() as td:
-            p = os.path.join(td, "canary.jsonl.gz")
-            good = {1: {"id": 1, "module": "m", "ts": 1.0},
-                    2: {"id": 2, "module": "n", "ts": 2.0}}
-            with gzip.open(p, "wt", encoding="utf-8") as fh:
-                for v in good.values():
-                    fh.write(json.dumps(v) + "\n")
-            if not cls._verify_oplog_archive(p, good)[0]:
-                return (False, "known-good archive failed verification")
-            bad = {1: {"id": 1, "module": "m", "ts": 1.0},
-                   2: {"id": 2, "module": "WRONG", "ts": 2.0}}
-            if cls._verify_oplog_archive(p, bad)[0]:
-                return (False, "verifier accepted mismatched CONTENT")
-            if cls._verify_oplog_archive(p, {**good, 3: {"id": 3}})[0]:
-                return (False, "verifier accepted a MISSING row")
-            if cls._verify_oplog_archive(os.path.join(td, "nope.gz"), good)[0]:
+            # single-field payload (hw_monitor's shape)
+            p1 = os.path.join(td, "field.jsonl.gz")
+            cls.write_archive(p1, [{"id": 1, "v": "alpha"}, {"id": 2, "v": "beta"}])
+            good1 = {1: "alpha", 2: "beta"}
+            if not cls.verify_archive(p1, good1, "v")[0]:
+                return (False, "known-good single-field archive failed verification")
+            if cls.verify_archive(p1, {1: "alpha", 2: "WRONG"}, "v")[0]:
+                return (False, "verifier accepted mismatched single-field CONTENT")
+            if cls.verify_archive(p1, {**good1, 3: "gamma"}, "v")[0]:
+                return (False, "verifier accepted a MISSING row (single-field)")
+
+            # whole-row payload (the op-log's shape)
+            p2 = os.path.join(td, "rows.jsonl.gz")
+            rows = [{"id": 1, "module": "m", "ts": 1.0},
+                    {"id": 2, "module": "n", "ts": 2.0}]
+            cls.write_archive(p2, rows)
+            good2 = {r["id"]: r for r in rows}
+            if not cls.verify_archive(p2, good2)[0]:
+                return (False, "known-good whole-row archive failed verification")
+            if cls.verify_archive(p2, {1: rows[0],
+                                       2: {**rows[1], "module": "WRONG"}})[0]:
+                return (False, "verifier accepted mismatched whole-row CONTENT")
+            if cls.verify_archive(p2, {**good2, 3: {"id": 3}})[0]:
+                return (False, "verifier accepted a MISSING row (whole-row)")
+
+            if cls.verify_archive(os.path.join(td, "nope.gz"), good2)[0]:
                 return (False, "verifier accepted an unreadable file")
         return (True, "ok")
 
@@ -782,7 +863,7 @@ class DataManager:
         discarded.
         """
         days = self.OP_LOG_ARCHIVE_DAYS if cutoff_days is None else int(cutoff_days)
-        ok, why = self._selftest_oplog_verifier()
+        ok, why = self.selftest_verifier()
         if not ok:
             log.error("op-log coalesce ABORTED — verifier self-test failed: %s", why)
             return {"status": "error", "error": f"verifier self-test failed: {why}"}
@@ -806,36 +887,16 @@ class DataManager:
                         "would_write_summary_rows": len(buckets),
                         "file": None, "dry_run": True}
 
-            os.makedirs(self._archive_dir(), mode=0o2770, exist_ok=True)
-            # exist_ok=True skips the mode argument on an already-existing
-            # directory, so correcting a wrongly-created one needs an explicit
-            # chmod. Only attempt it when the mode is actually wrong: the
-            # directory is owned by root by convention, so a service account
-            # cannot chmod it, and an unconditional attempt warns on EVERY run
-            # about a directory that is already correct. A warning that always
-            # fires is one nobody reads, and it would mask a real problem.
-            if (os.stat(self._archive_dir()).st_mode & 0o7777) != 0o2770:
-                try:
-                    os.chmod(self._archive_dir(), 0o2770)
-                except OSError as e:
-                    log.warning("archives dir has wrong mode and chmod failed: %s", e)
+            adir = self.ensure_archive_dir()
             stamp = time.strftime("%Y-%m-%d-%H%M%S", time.localtime())
             fname = f"dm_operation_log_{stamp}.jsonl.gz"
-            final = os.path.join(self._archive_dir(), fname)
+            final = os.path.join(adir, fname)
             if os.path.exists(final):
                 return {"status": "error", "error": f"archive already exists: {fname}"}
-            tmp = final + ".tmp"
 
-            with gzip.open(tmp, "wt", encoding="utf-8") as fh:
-                for r in rows:
-                    fh.write(json.dumps(dict(r)) + "\n")
-            os.replace(tmp, final)
-            try:
-                os.chmod(final, 0o640)
-            except OSError as e:
-                log.warning("archive chmod failed: %s", e)
+            self.write_archive(final, (dict(r) for r in rows))
 
-            ok, why = self._verify_oplog_archive(final, expected)
+            ok, why = self.verify_archive(final, expected)
             if not ok:
                 log.error("op-log coalesce ABORTED — %s (live rows untouched, "
                           "archive kept for inspection: %s)", why, final)
