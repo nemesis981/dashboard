@@ -1,5 +1,16 @@
 # Roadmap stub — Windows agent rework, tied to the paused memory-injection module
 
+**SUPERSEDED 2026-08-03 — folded into
+[memory-injection-detection-design.md](memory-injection-detection-design.md), per this
+stub's own original instruction below.** That doc carries this one's three items forward
+unchanged in substance, plus the prerequisites established since (elevation/
+`SeDebugPrivilege`, the JIT false-positive baseline, the signing-timeline trigger) and a
+newly-surfaced architectural tension between the tier-3 password prompt and SYSTEM-level
+memory access. Kept here for history; do not add new content to this file — use the
+superseding doc.
+
+---
+
 **Status:** parked (what + why; do NOT build yet — not for action now). Tracks three
 requirements against the Windows agent (`nemesis_agent/`), captured while scoping the paused
 memory-injection module.
