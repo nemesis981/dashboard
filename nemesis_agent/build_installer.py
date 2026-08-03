@@ -28,13 +28,23 @@ DIST = os.path.join(HERE, "dist")
 SEP = ";" if os.name == "nt" else ":"   # PyInstaller --add-data separator
 UNINSTALLER = "NemesisUninstall.exe"    # shipped in the pack once Phase 3 builds it
 
+# Key-protection backends. enrollment.py and uninstaller_gui.py import keyprotect
+# at module level, so a bundle missing it does not degrade gracefully -- it dies
+# on import, the same shape as the 2026-08-02 arity crash that killed the
+# installer before it drew a single screen. Needed by ALL THREE exes: the agent
+# signs heartbeats, the setup exe enrolls in-process, the uninstaller de-enrolls.
+KEYPROTECT_HIDDEN = [
+    "keyprotect", "keyprotect.base", "keyprotect.password",
+    "keyprotect.legacy", "keyprotect.tpm",
+]
+
 # The persistent agent dynamically imports its platform + collector modules, so
 # they must be frozen in explicitly.
 AGENT_HIDDEN = [
     "requests", "psutil", "watchdog", "plyer", "cryptography", "win_run",
     "platforms.windows", "platforms.linux", "platforms.mac",
     "modules.hardware", "modules.security", "modules.scanner", "modules.suricata_local",
-]
+] + KEYPROTECT_HIDDEN
 
 
 def _bake_config(server, token, device_name):
@@ -112,7 +122,7 @@ def main(argv=None):
     # 1b) Uninstaller exe (manifest-driven, clean-uninstall spec Phase 3). Built before the
     #     setup exe so it can be bundled into the pack. Needs UAC (schtasks/Defender/Tailscale).
     _pyinstaller("uninstaller_gui.py", "NemesisUninstall", windowed=True,
-                 hidden=["requests", "cryptography"], uac=True)
+                 hidden=["requests", "cryptography"] + KEYPROTECT_HIDDEN, uac=True)
     uninstall_exe = os.path.join(DIST, "NemesisUninstall.exe")
     if sys.platform == "win32" and not os.path.exists(uninstall_exe):
         raise SystemExit("NemesisUninstall.exe was not produced")
@@ -123,7 +133,11 @@ def main(argv=None):
         setup_datas.append(f"{agent_exe}{SEP}.")
     # "clamav" (Phase 4) / "lhm" (Phase 5) are bundled if the CI fetch steps
     # produced them; skip-if-absent so the build never depends on those downloads.
-    for sub in ("config.py", "enrollment.py", "modules", "platforms", "clamav", "lhm"):
+    # "keyprotect" ships as DATA, not just a hidden import: installer_gui does
+    # in-process enrollment by importing the extracted enrollment.py at runtime,
+    # and that module imports keyprotect at module level.
+    for sub in ("config.py", "enrollment.py", "keyprotect", "modules", "platforms",
+                "clamav", "lhm"):
         p = os.path.join(HERE, sub)
         if os.path.exists(p):
             setup_datas.append(f"{p}{SEP}{sub if os.path.isdir(p) else '.'}")
@@ -135,7 +149,8 @@ def main(argv=None):
     if args.token:
         setup_datas.append(f"{_bake_config(args.server, args.token, args.device_name)}{SEP}.")
     _pyinstaller("installer_gui.py", "NemesisAgent-Setup", windowed=True,
-                 datas=setup_datas, hidden=["requests", "psutil", "cryptography"],
+                 datas=setup_datas,
+                 hidden=["requests", "psutil", "cryptography"] + KEYPROTECT_HIDDEN,
                  uac=True)   # Phase 2: request UAC elevation (needs admin for schtasks/Defender)
 
     print("Built:", os.path.join(DIST, "NemesisAgent.exe"),

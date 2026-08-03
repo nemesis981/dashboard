@@ -12,11 +12,11 @@ Backward-compatible: an already-reporting device (device_id already in the .conf
 grandfathered ``approved`` server-side) passes straight through without re-enrolling.
 """
 
-import base64
 import json
 import os
 import shutil
 import subprocess
+import threading
 import win_run
 import sys
 import socket
@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 
 import requests
 import psutil
-from cryptography.hazmat.primitives.asymmetric import rsa, padding
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization
 
 import config
+import keyprotect
 
 
 def _key_paths():
@@ -64,12 +65,63 @@ def ensure_keypair():
     return pub_pem
 
 
+#: The backend holding this device's key, cached for the process. Unlocking is
+#: session-scoped, so re-detecting per signature would discard the unlocked key
+#: on every call. Guarded because the agent signs from more than one thread.
+_backend = None
+_backend_lock = threading.Lock()
+
+
+def get_backend():
+    """The key-protection backend holding this device's key, or None.
+
+    Returns None rather than a default-constructed backend: "this device has no
+    key material" is a real answer the caller must handle, and handing back an
+    empty backend would make an unprovisioned device indistinguishable from a
+    provisioned one.
+    """
+    global _backend
+    with _backend_lock:
+        if _backend is None:
+            _backend = keyprotect.detect_backend(config.keys_dir())
+        return _backend
+
+
+def set_backend(backend):
+    """Install an already-unlocked backend for this process.
+
+    The seam the startup unlock flow and the migration path hand their unlocked
+    backend through, so a secret entered once is not re-requested per signature.
+    """
+    global _backend
+    with _backend_lock:
+        _backend = backend
+
+
+def reset_backend():
+    """Drop the cached backend (tests, and after erase/migration)."""
+    global _backend
+    with _backend_lock:
+        _backend = None
+
+
 def _sign(message: str) -> str:
-    priv_path, _ = _key_paths()
-    with open(priv_path, "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
-    return base64.b64encode(
-        key.sign(message.encode(), padding.PKCS1v15(), hashes.SHA256())).decode()
+    """Sign ``message`` with whatever backend holds this device's key.
+
+    Behaviour is UNCHANGED for a tier-4 (unencrypted) device: LegacyBackend
+    loads the plain PEM on demand and needs no secret, so already-deployed
+    agents keep signing exactly as before.
+
+    Once a device is on tier 3, this raises Locked until the startup unlock
+    flow has supplied the password — deliberately fail-closed. That is safe to
+    add now precisely because no device can reach tier 3 yet; provisioning
+    arrives in a later step.
+    """
+    backend = get_backend()
+    if backend is None:
+        raise keyprotect.NotProvisioned(
+            "no key material for this device in %s" % config.keys_dir())
+    return backend.sign(message)
 
 
 def _os_name():

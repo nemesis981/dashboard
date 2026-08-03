@@ -26,10 +26,13 @@ from datetime import datetime, timezone
 import tkinter as tk
 from tkinter import ttk
 
+import keyprotect
+
 APPDATA     = os.environ.get("APPDATA", os.path.expanduser("~"))
 INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
 MANIFEST    = os.path.join(INSTALL_DIR, "install-manifest.json")
 CONF        = os.path.join(INSTALL_DIR, "nemesis_agent.conf")
+KEYS_DIR    = os.path.join(INSTALL_DIR, "keys")
 ARP_KEY     = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\NemesisFirewallAgent"
 START_MENU  = os.path.join(APPDATA, "Microsoft", "Windows", "Start Menu", "Programs", "Nemesis")
 
@@ -56,16 +59,21 @@ def _tailscale_removable(manifest):
         and not ts.get("pre_existing")
 
 
-def _sign_deenroll(private_key_path, device_id, signed_at):
-    """Sign `uninstall|<device_id>|<signed_at>` with the device private key (PKCS1v15/SHA-256).
-    Returns base64 signature. Matches hw_monitor `_verify_enroll_signature`."""
-    import base64
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives import hashes, serialization
-    with open(private_key_path, "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
-    msg = f"uninstall|{device_id}|{signed_at}".encode()
-    return base64.b64encode(key.sign(msg, padding.PKCS1v15(), hashes.SHA256())).decode()
+def _sign_deenroll(keys_dir, device_id, signed_at):
+    """Sign `uninstall|<device_id>|<signed_at>` via the key-protection backend.
+    Returns base64 signature. Matches hw_monitor `_verify_enroll_signature`.
+
+    Routed through keyprotect rather than opening private.pem directly. That
+    direct load was a SECOND signing implementation, independent of
+    enrollment._sign — it would have gone on passing password=None after tier 3
+    encrypts the key, so de-enrollment would fail SILENTLY and leave devices
+    approved server-side forever. Two routes doing one job with different
+    assumptions is the defect signature, not the individual line.
+    """
+    backend = keyprotect.detect_backend(keys_dir)
+    if backend is None:
+        raise keyprotect.NotProvisioned("no key material in %s" % keys_dir)
+    return backend.sign("uninstall|%s|%s" % (device_id, signed_at))
 
 
 def _read_conf(path=CONF):
@@ -80,6 +88,12 @@ def _read_conf(path=CONF):
 
 
 class UninstallerApp:
+    #: Why de-enrollment failed, if it did: "key_unusable" | "unreachable" |
+    #: "rejected" | None. Recorded here rather than inferred from a bare False —
+    #: uninstall proceeds either way (operator decision, 2026-08-03), but the
+    #: user-facing warning should eventually be able to say which happened.
+    deenroll_failure = None
+
     def __init__(self, root):
         self.root = root
         self.manifest = _load_manifest()
@@ -162,18 +176,28 @@ class UninstallerApp:
         did  = self.conf.get("device_id")
         if not (ip and did):
             return False
-        priv = self.conf.get("private_key_path") or os.path.join(INSTALL_DIR, "keys", "private.pem")
-        pub_path = os.path.join(INSTALL_DIR, "keys", "public.pem")
+        pub_path = os.path.join(KEYS_DIR, "public.pem")
         try:
             pub = open(pub_path, encoding="utf-8").read() if os.path.exists(pub_path) else ""
             signed_at = datetime.now(timezone.utc).isoformat()
-            sig = _sign_deenroll(priv, did, signed_at)
+            sig = _sign_deenroll(KEYS_DIR, did, signed_at)
             body = {"source": "nemesis_agent", "device_id": did, "public_key": pub,
                     "signed_at": signed_at, "signature": sig}
             r = requests.post(f"http://{ip}:{port}/api/agent/uninstall",
                               json=body, timeout=8)
-            return r.status_code == 200
+            if r.status_code != 200:
+                self.deenroll_failure = "rejected"
+                return False
+            return True
+        except keyprotect.KeyProtectError:
+            # Distinct from "server unreachable": the key exists but cannot be
+            # used (locked, or damaged). Recorded rather than collapsed into a
+            # bare False so the warning can eventually say WHICH happened —
+            # a failed read must not be reported as an ordinary negative.
+            self.deenroll_failure = "key_unusable"
+            return False
         except Exception:
+            self.deenroll_failure = "unreachable"
             return False
 
     def _leave_tailnet(self):
