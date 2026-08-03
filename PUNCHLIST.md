@@ -1781,6 +1781,14 @@ this entry is the proposal, not the implementation.
       squeezed in mid-build (operator direction, 2026-08-03). Piece 4 was already deployed
       and run against live data before piece 5 existed; refactoring verified archival code
       while more of it was still being written is the wrong order.
+    - [ ] **SCOPE BOUND — a small contained fix, NOT a cleanup pass (operator direction,
+      2026-08-03).** This is one duplication, in two named files, with one shared
+      implementation as the outcome. It is explicitly NOT a broader audit of shared logic,
+      NOT a survey of other possible duplications, and NOT a repeat of the multi-day
+      core_module untangling. "Route it through core_module/Data Manager properly" is a
+      constraint on WHERE the single implementation lands — it is not licence to expand the
+      work into a structural review. If the fix starts growing beyond these two files and
+      their verification suites, stop and re-scope with the operator rather than continuing.
     - [ ] Do NOT do this without re-running both pieces' verification suites afterwards,
       including the three injected-failure abort tests for each. The whole point of the
       helpers is that they fail correctly; a refactor that is only proved to succeed
