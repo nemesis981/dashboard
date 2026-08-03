@@ -1297,7 +1297,18 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
             return {"status": "ok", "archived": 0, "would_archive": len(rows),
                     "bytes": total_bytes, "file": None, "dry_run": True}
 
-        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        # 0770 + setgid, group-inherited from /var/lib/nemesis (nemesis-db), so
+        # every service account that legitimately needs these can read them and
+        # nobody else can. NOT world-readable: the archived text is `ps aux`
+        # output, which carries full command lines and can expose arguments —
+        # tokens, paths, usernames — to any local account. Set explicitly rather
+        # than left to umask, so the result does not depend on which user
+        # happened to create the directory first.
+        os.makedirs(ARCHIVE_DIR, mode=0o2770, exist_ok=True)
+        try:
+            os.chmod(ARCHIVE_DIR, 0o2770)   # exist_ok=True skips mode on an existing dir
+        except OSError as e:
+            log.warning("archives dir chmod failed (%s): %s", ARCHIVE_DIR, e)
         stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         fname = f"hw_anomaly_top_processes_{stamp}.jsonl.gz"
         final = os.path.join(ARCHIVE_DIR, fname)
@@ -1312,6 +1323,10 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
                 fh.write(json.dumps({"id": rid, "captured_at": cap,
                                      "top_processes": blob}) + "\n")
         os.replace(tmp, final)
+        try:
+            os.chmod(final, 0o640)   # owner rw, group (nemesis-db) r, world none
+        except OSError as e:
+            log.warning("archive chmod failed (%s): %s", final, e)
 
         ok, why = _verify_archive(final, expected)
         if not ok:
