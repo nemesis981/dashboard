@@ -136,8 +136,8 @@ def main(argv=None):
     # "keyprotect" ships as DATA, not just a hidden import: installer_gui does
     # in-process enrollment by importing the extracted enrollment.py at runtime,
     # and that module imports keyprotect at module level.
-    for sub in ("config.py", "enrollment.py", "keyprotect", "modules", "platforms",
-                "clamav", "lhm"):
+    for sub in ("config.py", "enrollment.py", "secret_prompt.py", "keyprotect",
+                "modules", "platforms", "clamav", "lhm"):
         p = os.path.join(HERE, sub)
         if os.path.exists(p):
             setup_datas.append(f"{p}{SEP}{sub if os.path.isdir(p) else '.'}")

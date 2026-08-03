@@ -105,6 +105,39 @@ def reset_backend():
         _backend = None
 
 
+def ensure_provisioned(secret: str = None) -> str:
+    """Make sure this device has protected key material. Returns the public PEM.
+
+    Three paths, in order:
+
+    1. Already provisioned -> return the existing public key. Never re-provisions,
+       so calling this twice cannot silently mint a second identity.
+    2. ``secret`` supplied -> provision through the strongest available backend.
+       The private key is encrypted from the moment it exists; the PKCS8 DER is
+       held in memory and never written to disk in that form.
+    3. Neither -> the LEGACY unencrypted path (ensure_keypair).
+
+    Path 3 is transitional and deliberately narrow. Linux and macOS agents run
+    directly with no installer GUI to collect a secret, so removing it now would
+    break them outright rather than protecting them. It is retired once startup
+    provisioning lands for those platforms. It warns loudly rather than failing
+    quietly, because an unencrypted key is exactly the defect this work closes.
+    """
+    backend = get_backend()
+    if backend is not None:
+        return backend.public_key_pem()
+
+    if secret:
+        chosen = keyprotect.preferred_backend(config.keys_dir())
+        pub_pem = chosen.provision(secret)
+        set_backend(chosen)
+        return pub_pem
+
+    print("WARNING: provisioning an UNENCRYPTED key (no device secret supplied). "
+          "This is the legacy path and offers no protection at rest.")
+    return ensure_keypair()
+
+
 def _sign(message: str) -> str:
     """Sign ``message`` with whatever backend holds this device's key.
 
@@ -286,7 +319,7 @@ def enroll(conf=None):
     conf = conf or config.load()
     if not conf.get("nemesis_ip"):
         return None, None
-    public_key = ensure_keypair()
+    public_key = ensure_provisioned()
     # Scan-before-trust: scan this device BEFORE asking to be enrolled.
     scan = pre_enrollment_scan()
     device_name = conf.get("device_name") or socket.gethostname()

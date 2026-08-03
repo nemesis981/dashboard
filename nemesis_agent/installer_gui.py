@@ -231,6 +231,10 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
 
 
 class InstallerApp:
+    #: Device secret collected by start() on the main thread. None until then;
+    #: _enroll() treats None as a hard error rather than a legacy fallback.
+    device_secret = None
+
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
                  preauth_key="", conf_path="", poll_interval="", l2_enforce=""):
         self.root = root
@@ -369,10 +373,43 @@ class InstallerApp:
         except Exception:
             return ("?", "")
 
+    def _ensure_bundled_path(self):
+        """Put the baked-in agent source on sys.path (idempotent)."""
+        d = _bundled_dir()
+        if d not in sys.path:
+            sys.path.insert(0, d)
+
+    def _prompt_device_secret(self):
+        """Collect the device secret. Returns the secret, or None if cancelled.
+
+        MUST run on the Tk main thread — which is why it is called from start()
+        (a button callback) and NOT from _enroll(), which runs on the worker
+        thread spawned below. tkinter is not thread-safe, so a dialog raised
+        from that worker would be a race, not a prompt.
+
+        An import failure here is FATAL by design: it means the bundle is
+        missing keyprotect/secret_prompt, and the only alternative would be
+        silently installing an agent with an unprotected key.
+        """
+        self._ensure_bundled_path()
+        import keyprotect                # noqa: E402  (bundled into the setup exe)
+        import secret_prompt             # noqa: E402
+        kind = keyprotect.preferred_backend(
+            os.path.join(INSTALL_DIR, "keys")).secret_kind()
+        return secret_prompt.prompt_secret(
+            self.root, kind=kind, mode=secret_prompt.CREATE)
+
     def start(self):
         if self.entries:
             self.server = self.entries["server"].get().strip() or self.server
             self.token = self.entries["token"].get().strip() or self.token
+        # Collected BEFORE anything is disabled or spawned, so cancelling leaves
+        # the installer exactly as it was and writes no key material at all.
+        secret = self._prompt_device_secret()
+        if secret is None:
+            self.set_status("Install cancelled — a device password is required.")
+            return
+        self.device_secret = secret
         self.tier = self.tier_var.get()          # lock the messaging tier for this run
         for rb in getattr(self, "_tier_radios", []):
             rb.config(state="disabled")
@@ -833,12 +870,24 @@ class InstallerApp:
         token was minted with auto-approve opted in (default is manual approval).
         Uses the agent source bundled INTO the setup exe; writes keys + device_id
         into %APPDATA%\\Nemesis so the frozen agent picks them up on first run."""
-        sys.path.insert(0, _bundled_dir())
+        self._ensure_bundled_path()
         import config as agent_config       # noqa: E402  (bundled into the setup exe)
         import enrollment                   # noqa: E402
         agent_config.CONF_PATH = os.path.join(INSTALL_DIR, "nemesis_agent.conf")
         conf = agent_config.load()
-        enrollment.ensure_keypair()         # keys -> %APPDATA%\Nemesis\keys
+        # Provision ENCRYPTED from the outset: the private key never exists on
+        # disk unprotected, not even for the moment between creation and a later
+        # wrap. self.device_secret was collected on the main thread in start().
+        #
+        # Guarded, NOT defaulted. ensure_provisioned(None) is a legal call that
+        # falls back to the legacy unencrypted path -- correct for a headless
+        # Linux agent, silently wrong here. A missing secret on this path is a
+        # bug, and must fail loudly rather than quietly installing an
+        # unprotected key that looks like a successful install.
+        if not self.device_secret:
+            raise RuntimeError(
+                "internal error: no device password was collected before enrollment")
+        enrollment.ensure_provisioned(self.device_secret)   # -> %APPDATA%\Nemesis\keys
         self._ilog("enroll: POST to server (keypair ready, pre-enrollment scan running)")
         device_id, _status = enrollment.enroll(conf)   # token + pre-enrollment scan
         self._ilog("enroll: device_id=%s status=%s" % (
