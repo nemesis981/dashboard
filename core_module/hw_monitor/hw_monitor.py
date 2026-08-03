@@ -1257,7 +1257,7 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
         if os.path.exists(final):
             return {"status": "error", "error": f"archive already exists: {fname}"}
 
-        _dm().write_archive(final, ({"id": rid, "captured_at": cap,
+        _dm().write_archive_manifested(final, ({"id": rid, "captured_at": cap,
                                      "top_processes": blob}
                                     for rid, cap, blob in rows))
 

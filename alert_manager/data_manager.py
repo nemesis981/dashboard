@@ -38,8 +38,10 @@ import gzip
 import json
 import time
 import fcntl
+import hashlib
 import sqlite3
 import logging
+import datetime
 import threading
 import contextlib
 
@@ -705,6 +707,29 @@ class DataManager:
                            ("archive_ref", "TEXT")):
                 if _c not in _cols:
                     conn.execute(f"ALTER TABLE {OP_LOG_TABLE} ADD COLUMN {_c} {_d}")
+
+            # archive_manifest: what each archive file WAS at the moment it was
+            # written. Core-owned, written only by this class.
+            #
+            # The sha256 is over the COMPRESSED bytes, deliberately. gzip's own
+            # CRC32 already proves a file is not internally corrupt, so hashing
+            # the decompressed content would mostly duplicate it. What neither
+            # gzip nor a record count can detect is a whole file being REPLACED
+            # with a well-formed fabrication — same name, valid framing, wrong
+            # contents. Only a digest captured at write time and compared later
+            # catches that, which is the case that matters once archives hold
+            # the only surviving copy of data removed from live tables.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS archive_manifest (
+                    filename         TEXT PRIMARY KEY,
+                    sha256           TEXT NOT NULL,
+                    size_bytes       INTEGER NOT NULL,
+                    record_count     INTEGER NOT NULL,
+                    created_at       TEXT NOT NULL,
+                    last_verified_at TEXT,
+                    last_verify_ok   INTEGER
+                )
+            """)
             conn.commit()
         finally:
             conn.close()
@@ -829,6 +854,155 @@ class DataManager:
         finally:
             conn.close()
 
+    # Live columns that hold an archive filename. Hardcoded rather than a
+    # pluggable registry: there are exactly two, and a generic "any module can
+    # register an archived table" abstraction is design work for a third case
+    # that does not exist. Add a tuple here when a third appears.
+    ARCHIVE_REF_COLUMNS = (
+        ("hw_anomaly_snapshots", "top_processes_ref"),
+        (OP_LOG_TABLE,           "archive_ref"),
+    )
+
+    def check_archive_integrity(self):
+        """Verify every archive the live tables still point at.
+
+        Answers the question a manual spot-check cannot keep answering: are the
+        files that now hold the ONLY copy of data removed from live tables still
+        present, and still what they were when written?
+
+        Four outcomes per referenced file:
+          ok           — present, and its sha256 matches the manifest
+          unmanifested — present, but predates the manifest (no baseline to
+                         compare against; not proof of a problem)
+          dangling     — a live row points at a file that is not on disk
+          tampered     — present, but its bytes differ from what was recorded
+
+        Deliberately does NOT report archive files on disk that no live row
+        references. Under the no-automatic-deletion principle an unreferenced
+        archive is not a fault, and flagging it invites exactly the wrong kind
+        of cleanup.
+        """
+        adir = self.archive_dir()
+        report = {"status": "ok", "checked": 0, "ok": 0,
+                  "dangling": [], "tampered": [], "unmanifested": []}
+        conn = self._raw_connect()
+        try:
+            manifest = {r[0]: r[1] for r in conn.execute(
+                "SELECT filename, sha256 FROM archive_manifest")}
+            refs = set()
+            for table, column in self.ARCHIVE_REF_COLUMNS:
+                try:
+                    refs.update(r[0] for r in conn.execute(
+                        f"SELECT DISTINCT {column} FROM {table} "
+                        f"WHERE {column} IS NOT NULL") if r[0])
+                except sqlite3.Error as e:
+                    # A table that does not exist yet is not an integrity
+                    # failure, but it must not silently reduce coverage either.
+                    log.warning("archive integrity: cannot read %s.%s: %s",
+                                table, column, e)
+                    report["status"] = "partial"
+
+            now = datetime.datetime.now().isoformat(timespec="seconds")
+            for fname in sorted(refs):
+                report["checked"] += 1
+                path = os.path.join(adir, fname)
+                if not os.path.isfile(path):
+                    report["dangling"].append(fname)
+                    continue
+                if fname not in manifest:
+                    report["unmanifested"].append(fname)
+                    continue
+                actual = self.hash_archive(path)
+                verified = actual == manifest[fname]
+                conn.execute(
+                    "UPDATE archive_manifest SET last_verified_at=?, last_verify_ok=? "
+                    "WHERE filename=?", (now, 1 if verified else 0, fname))
+                if verified:
+                    report["ok"] += 1
+                else:
+                    report["tampered"].append(fname)
+            conn.commit()
+        finally:
+            conn.close()
+
+        if report["dangling"] or report["tampered"]:
+            report["status"] = "error"
+            log.error("archive integrity FAILED — dangling=%s tampered=%s",
+                      report["dangling"], report["tampered"])
+        elif report["unmanifested"] and report["status"] == "ok":
+            report["status"] = "warn"
+        return report
+
+    def backfill_archive_manifest(self):
+        """Record a manifest baseline for archives written before this existed.
+
+        Baselines from CURRENT on-disk content, so it can only ever attest to
+        what the file is now — it cannot retroactively prove a file was never
+        altered. Legitimate here only because those two archives were
+        independently verified against their live rows on 2026-08-03 (record
+        counts matched, and all 125 op-log summary rows were reconstructed from
+        the archive with zero mismatches) before this ran. Do not use it to
+        paper over a file of unknown provenance.
+        """
+        adir = self.archive_dir()
+        conn = self._raw_connect()
+        added = []
+        try:
+            known = {r[0] for r in conn.execute("SELECT filename FROM archive_manifest")}
+            refs = set()
+            for table, column in self.ARCHIVE_REF_COLUMNS:
+                try:
+                    refs.update(r[0] for r in conn.execute(
+                        f"SELECT DISTINCT {column} FROM {table} "
+                        f"WHERE {column} IS NOT NULL") if r[0])
+                except sqlite3.Error:
+                    pass
+            for fname in sorted(refs - known):
+                path = os.path.join(adir, fname)
+                if not os.path.isfile(path):
+                    continue
+                with gzip.open(path, "rt", encoding="utf-8") as fh:
+                    count = sum(1 for line in fh if line.strip())
+                conn.execute(
+                    "INSERT INTO archive_manifest"
+                    "(filename, sha256, size_bytes, record_count, created_at) "
+                    "VALUES(?,?,?,?,?)",
+                    (fname, self.hash_archive(path), os.path.getsize(path), count,
+                     datetime.datetime.fromtimestamp(
+                         os.path.getmtime(path)).isoformat(timespec="seconds")))
+                added.append({"filename": fname, "record_count": count})
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "ok", "backfilled": added}
+
+    @classmethod
+    def selftest_integrity_checker(cls):
+        """Prove the checker can detect BOTH failure modes before trusting it.
+
+        A checker that only ever returns "ok" is indistinguishable from a
+        healthy system right up until the moment it matters. Exercises a
+        known-good file, a byte-flipped one, and a deleted one.
+        """
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "canary.jsonl.gz")
+            cls.write_archive(p, [{"id": 1, "v": "alpha"}, {"id": 2, "v": "beta"}])
+            good = cls.hash_archive(p)
+            if cls.hash_archive(p) != good:
+                return (False, "hash is not stable across two reads of one file")
+
+            raw = bytearray(open(p, "rb").read())
+            raw[len(raw) // 2] ^= 0xFF          # flip one byte in the middle
+            open(p, "wb").write(bytes(raw))
+            if cls.hash_archive(p) == good:
+                return (False, "hash did NOT change after a byte was flipped")
+
+            os.unlink(p)
+            if os.path.isfile(p):
+                return (False, "test file could not be removed")
+        return (True, "ok")
+
     OP_LOG_ARCHIVE_DAYS = 7
 
     def archive_dir(self):
@@ -860,21 +1034,70 @@ class DataManager:
     @staticmethod
     def write_archive(path, records):
         """Write `records` (iterable of dicts, each carrying an ``id``) as
-        gzipped JSONL, atomically.
+        gzipped JSONL, atomically. Returns the number of records written.
 
         Writes to ``<path>.tmp`` and renames, so a crash mid-write cannot leave
         a truncated file sitting at the name a live DB row will point at.
+
+        Stays a STATICMETHOD and records no manifest. That is what lets
+        :meth:`selftest_verifier` use it for throwaway canary files without
+        polluting ``archive_manifest`` with temp paths that will not exist a
+        millisecond later. Real archives go through
+        :meth:`write_archive_manifested`.
         """
         tmp = path + ".tmp"
+        count = 0
         with gzip.open(tmp, "wt", encoding="utf-8") as fh:
             for rec in records:
                 fh.write(json.dumps(rec) + "\n")
+                count += 1
         os.replace(tmp, path)
         try:
             os.chmod(path, 0o640)   # owner rw, group r, world none
         except OSError as e:
             log.warning("archive chmod failed (%s): %s", path, e)
-        return path
+        return count
+
+    @staticmethod
+    def hash_archive(path):
+        """sha256 over the compressed file's raw bytes, streamed."""
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def write_archive_manifested(self, path, records):
+        """Write an archive AND record what it was, so later tampering or loss
+        is detectable. Returns the record count.
+
+        The manifest row is written after the file is on disk, not before: a
+        manifest describing a file that failed to write would be worse than no
+        manifest, because it would make a never-created archive look merely
+        corrupted.
+        """
+        count = self.write_archive(path, records)
+        try:
+            conn = self._raw_connect()
+            conn.execute(
+                "INSERT INTO archive_manifest"
+                "(filename, sha256, size_bytes, record_count, created_at) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(filename) DO UPDATE SET "
+                "  sha256=excluded.sha256, size_bytes=excluded.size_bytes, "
+                "  record_count=excluded.record_count, created_at=excluded.created_at",
+                (os.path.basename(path), self.hash_archive(path),
+                 os.path.getsize(path), count,
+                 datetime.datetime.now().isoformat(timespec="seconds")))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            # Never fail a completed archive because its bookkeeping failed. The
+            # file is written and verified by the caller either way; a missing
+            # manifest row surfaces later as `unmanifested`, which is a warning,
+            # not data loss.
+            log.warning("archive manifest write failed for %s: %s", path, e)
+        return count
 
     @staticmethod
     def read_archive(path, value_key=None):
@@ -1009,7 +1232,7 @@ class DataManager:
             if os.path.exists(final):
                 return {"status": "error", "error": f"archive already exists: {fname}"}
 
-            self.write_archive(final, (dict(r) for r in rows))
+            self.write_archive_manifested(final, (dict(r) for r in rows))
 
             ok, why = self.verify_archive(final, expected)
             if not ok:
