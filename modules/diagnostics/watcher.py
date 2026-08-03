@@ -328,11 +328,37 @@ def _write_log(cfg: dict, verbose: bool, ts: datetime, summary: str, raw_lines):
 
 
 def _rotate_if_needed(path: str, cfg: dict):
+    """Rotate the flat log once it exceeds the configured size.
+
+    The destination name is RESERVED with O_EXCL before the rename, rather than
+    handed straight to os.rename. Two callers can reach this at once — the
+    diagnostics-watcher daemon loop and a manual `run_once` hand-run both call
+    _write_log — and the name carries only one-second granularity. os.rename
+    silently REPLACES an existing destination on POSIX, so two rotations in the
+    same second destroyed one of the two rotated logs outright.
+
+    O_EXCL makes the name claim atomic: whoever loses gets FileExistsError and
+    takes the next suffix, so no rotation is ever discarded. The rename then
+    replaces the caller's own empty placeholder, which is safe by construction.
+    """
     try:
         max_bytes = int(cfg["log_max_mb"]) * 1024 * 1024
-        if os.path.exists(path) and os.path.getsize(path) >= max_bytes:
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-            os.rename(path, os.path.join(os.path.dirname(path), f"connectivity-{stamp}.log"))
+        if not (os.path.exists(path) and os.path.getsize(path) >= max_bytes):
+            return
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        directory = os.path.dirname(path)
+        for attempt in range(100):
+            suffix = "" if attempt == 0 else f".{attempt}"
+            dest = os.path.join(directory, f"connectivity-{stamp}{suffix}.log")
+            try:
+                fd = os.open(dest, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o640)
+            except FileExistsError:
+                continue          # someone else took this name; try the next
+            os.close(fd)
+            os.rename(path, dest)
+            return
+        log.warning("watcher: could not reserve a rotation name for %s after "
+                    "100 attempts — leaving the log unrotated", path)
     except Exception:
         log.exception("watcher: rotation check failed for %s", path)
 

@@ -813,11 +813,34 @@ def _update_recurrence(conn, target: str, score: float,
                   rec["id"]))
             return
 
+    # Reset an absent or expired tracker. ON CONFLICT DO UPDATE rather than
+    # INSERT OR REPLACE: OR REPLACE is a DELETE followed by an INSERT, so it
+    # discards the row and issues a NEW autoincrement id (verified: id 1 -> 2).
+    # Nothing foreign-keys this id today, so that was harmless in practice —
+    # but "delete the row and make another" is the wrong verb for "reset the
+    # counters", and it is the shape that turns into data loss the moment a
+    # second caller or a weaker enclosing guard appears.
+    #
+    # NOTE this is hardening, not a live race fix. The read-then-write above is
+    # currently safe for a reason worth writing down so it is not assumed to be
+    # luck: the ONLY caller reaches this function immediately after winning
+    # `INSERT INTO anomaly_incidents ... ON CONFLICT DO NOTHING` on the same
+    # connection, so it both holds the write lock already and is the sole
+    # detection permitted to proceed for that target. If that enclosing claim is
+    # ever removed or this gains another caller, this function must be wrapped
+    # in dm.transaction() — the read-modify-write here has no protection of its
+    # own.
     conn.execute("""
-        INSERT OR REPLACE INTO anomaly_recurrence
+        INSERT INTO anomaly_recurrence
             (offending_target, first_seen, last_seen,
              recurrence_count, max_score, incident_ids)
         VALUES (?,?,?,0,?,?)
+        ON CONFLICT(offending_target) DO UPDATE SET
+            first_seen=excluded.first_seen,
+            last_seen=excluded.last_seen,
+            recurrence_count=0,
+            max_score=excluded.max_score,
+            incident_ids=excluded.incident_ids
     """, (target, now, now, score, json.dumps([inc_id])))
 
 
