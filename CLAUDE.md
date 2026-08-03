@@ -126,33 +126,67 @@ number.
 - **Does NOT commit or push — ever.** When a change is ready, STOP and report it as
   ready-to-commit; hand off to Window 2, which performs the actual git write.
 - Does NOT author ADRs, roadmap entries, `docs/handoff/` artifacts, or build specs —
-  that's Window 2. (Narrow exception: the evening context-handoff note below — it is not
+  that's Window 2. (Narrow exception: the code-window context handoff below — it is not
   a `docs/handoff/` artifact and lives outside the public repo entirely.)
 - Does NOT run the morning briefing or roadmap-vs-state audit — that's Window 2.
 - Code work takes priority: never let a read-only audit or doc request preempt
   trip-critical or scheduled code work in this window.
-- **Evening context handoff — own document, separate from Window 2's closeout (standing
-  rule, added 2026-08-03).** When the operator tells Window 1 to close out for the
-  night, write a dated cold-start note to
-  `~/work/nemesis-internal/handoff/YYYY-MM-DD-window1-evening-handoff.md` (new dated
-  file every evening, never overwritten — same append-not-overwrite reasoning as Window
-  2's supplements, Rule 9). This is IN ADDITION TO, not instead of, Window 2's Rule 9
-  discipline (`docs/handoff/HANDOFF.md`/supplements/worklog) — that covers project state
-  for anyone; this is Window 1's own working-context note for the next Window 1 session
-  specifically. Not a git-write (Window 1 has no git-write privilege for the public repo
-  regardless, and this file lives entirely outside it, in the private mirror only).
-  **Write it for a cold start — assume the reader has this document and nothing else.**
-  Reference shape (see the most recent file in that directory for a full worked
-  example): a role/identity reminder up top; broken-instruments/gotchas found this
-  session (the exact wrong-assumption traps that cost time, per the standing
-  "verification code must prove its own premise" practice); production state backed by
-  real verification evidence, not assertions; committed-vs-held work; prioritized open
-  items; any deferred/parked decisions worth flagging explicitly so they aren't silently
-  re-litigated; environment/access mechanics that are easy to lose (test creds, VM
-  state, tool quirks, workarounds); leftover/cleanup state (test data, temp rules,
-  snapshots); items still owed to Window 2; and deliberately tracked risks — framed as
-  accepted tradeoffs, not oversights, so they read as decisions on a second read, not
-  gaps.
+- **Code-window context handoff — own document, separate from Window 2's closeout
+  (standing rule, added 2026-08-03, generalized + revised 2026-08-03).** Applies to
+  Window 1 always, and to Window 3 whenever it is on a code-writing task. Maintain ONE
+  cold-start note per window per day at
+  `~/work/nemesis-internal/handoff/YYYY-MM-DD-window<N>-handoff.md` (`<N>` = this
+  window's number) — created on first write of the day, then EDITED (not replaced
+  wholesale, not blindly appended to) on every later write that same day. A new day
+  starts a new file; nothing is lost from a prior day's editing, because
+  `~/work/nemesis-internal` is itself a git repo (`local`+`usb` remotes) — every edit
+  is a real commit with real history, even though the file on disk always shows only
+  the current, useful state.
+  **Why this replaces a separate supplement, not just duplicates one (Window 3's
+  observation, 2026-08-03):** if this file is genuinely kept current throughout the
+  day, a separate end-of-day distillation is redundant work describing the same
+  ground twice. One well-maintained file beats one growing file plus one summary of
+  it.
+  **Written periodically throughout the session — at minimum after each significant
+  milestone (a build/fix reaching ready-to-hand-off, a major finding, a verification
+  pass completed) — specifically to survive a mid-session context compaction that a
+  closeout-only write would not.** A compaction can happen at any point, not only at
+  the end of a session, so the defense has to be continuous.
+  **At explicit closeout specifically: read the file back and EDIT it down** —
+  remove or stub whatever describes now-completed, already-shipped work that a cold
+  reader would not need reconstructed in full (a one-line "shipped, see commit X" is
+  enough where a paragraph of build narrative used to be needed mid-task). The point
+  of the edit pass is that the file stays directly useful as a cold-start document
+  going forward, not an ever-growing accumulation of everything that ever happened —
+  the git history in the private repo is where the full account still lives if it's
+  ever needed.
+  This is IN ADDITION TO, not instead of, Window 2's Rule 9 discipline
+  (`docs/handoff/HANDOFF.md`/supplements/worklog) — that covers project state for
+  anyone; this is the code window's own working-context note for reconstructing
+  itself, specifically.
+  **May be committed and pushed by the window that owns it, directly** — Window 1 or
+  Window 3 may commit+push their own handoff file to `~/work/nemesis-internal`'s
+  `local`+`usb` remotes themselves (same privilege already established for other
+  private-module work), following the SAME discipline as everywhere else in this
+  file: stage the handoff file by its exact path, verify nothing from another
+  window's unrelated in-progress work in that same repo got swept in, Rule-8-scan the
+  diff, push to both remotes, confirm both report the same HEAD. This is narrower
+  than general private-module git-write — it covers only this window's own handoff
+  file, not other content in that repo.
+  **Write it for a cold start — assume the reader has this document and nothing
+  else.** Reference shape (see the most recent file in that directory for a full
+  worked example): a role/identity reminder up top; broken-instruments/gotchas found
+  this session (the exact wrong-assumption traps that cost time, per the standing
+  "verification code must prove its own premise" practice); production state backed
+  by real verification evidence, not assertions; committed-vs-held work; prioritized
+  open items; any deferred/parked decisions worth flagging explicitly so they aren't
+  silently re-litigated; environment/access mechanics that are easy to lose (test
+  creds, VM state, tool quirks, workarounds); leftover/cleanup state (test data, temp
+  rules, snapshots); items still owed to Window 2; and deliberately tracked risks —
+  framed as accepted tradeoffs, not oversights, so they read as decisions on a second
+  read, not gaps. Each new write should assume the reader may have ONLY this file (the
+  most recent one), not the whole series — recap enough of the still-relevant prior
+  state that a cold read of just the latest file is self-sufficient.
 
 ### Window 2 — DOCS/AUDIT window (role: Sonnet — currently Sonnet 5) — sole git-writer
 - **Expected model: Sonnet** (currently `claude-sonnet-5` — bump this string when
@@ -203,6 +237,12 @@ number.
   Sonnet 5" — then wait for the operator to switch (`/model opus[1m]` / `/model
   claude-sonnet-5`) or explicitly say to proceed anyway, rather than silently doing
   code-writing work on Sonnet or docs work on Opus.
+- **Code-window context handoff applies here too, whenever Window 3 is on a
+  code-writing task.** Same rule as Window 1's (see that section) — one file per day
+  at `~/work/nemesis-internal/handoff/YYYY-MM-DD-window3-handoff.md`, edited
+  periodically through the session and pruned down at closeout, not just written once.
+  Does not apply during Window 3's docs/audit-mode tasks — that falls under the "hand
+  off to Window 2" pattern instead, per the bullet above.
 
 ### Both windows (shared discipline)
 - Commit-first, then push (performed in Window 2). HOLD the push for operator review on
@@ -328,13 +368,20 @@ task.
 not per-window, so it repeats this check before every task rather than once at session
 start. See the Window 3 section above for the task-classification detail.
 
-**Window 1 additionally reads its evening handoff as part of this same first action.**
+**Window 1 additionally reads its own context handoff as part of this same first
+action** — always, every session start or restatement, not just after closeout.
 Once identity is confirmed (fresh session or a mid-session re-statement), before
 starting any task, check `~/work/nemesis-internal/handoff/` for the most recent
-`*-window1-evening-handoff.md` (newest date wins, same lexical-sort resolution used
-elsewhere in this file) and read it — see "Evening context handoff" under Window 1
-above. If none exists yet, say so and proceed; that just means it's the first evening
-it will exist, not an error.
+`*-window1-handoff.md` (newest date wins — one file per day, so this is just
+"today's, or if none yet, the latest prior day's") and read it — see "Code-window
+context handoff" under Window 1 above. If none exists yet, say so and proceed;
+that just means it's the first one that will exist, not an error.
+
+**Window 3 does the same, but only when the task just classified is a code-writing
+one** (per its per-task model check above) — check for the most recent
+`*-window3-handoff.md` before starting that task specifically, same resolution.
+Not required before a docs/audit-mode task, since this handoff exists to protect
+code-session context, not Window 3's overflow doc work.
 
 ---
 
