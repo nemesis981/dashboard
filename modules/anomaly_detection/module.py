@@ -1070,7 +1070,11 @@ def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -
     now = time.time()
     conn = _conn()
     try:
-        # Dedup: skip if reported within ABUSEIPDB_DEDUP_HOURS
+        # Fast-path dedup skip. ADVISORY ONLY — it avoids the DNS work when the
+        # answer is obviously "already reported", but it does not decide: this
+        # read and the marker write below are separated by a DNS resolve and N
+        # external HTTP POSTs, so two detections could both pass it. The
+        # authoritative decision is the atomic claim further down.
         row = conn.execute(
             "SELECT reported_at FROM anomaly_abuseipdb_dedup WHERE offending_target=?",
             (domain,)
@@ -1111,17 +1115,38 @@ def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -
             f"this domain on a home network firewall."
         )
 
+        # Atomic claim — this, not the read above, is what decides. The UPDATE
+        # fires only when the stored timestamp is genuinely older than the dedup
+        # window, so exactly one caller can win it; rowcount says whether that
+        # was us. Same shape as the canary cooldown claim and hw_monitor's
+        # enrollment-token claim.
+        #
+        # Placed HERE rather than at the top of the function deliberately: it
+        # comes after the cheap local checks (DNS resolve, public-IP filter) so
+        # a domain that fails to resolve does not consume a 24h dedup window for
+        # a report that was never going to be sent. It comes BEFORE the POSTs,
+        # because those are the side effect being deduplicated -- filing
+        # duplicate abuse reports against a third party is the harm here, and
+        # nothing can un-send them afterwards.
+        claimed = conn.execute(
+            "INSERT INTO anomaly_abuseipdb_dedup(offending_target, reported_at) "
+            "VALUES(?,?) "
+            "ON CONFLICT(offending_target) DO UPDATE SET reported_at=excluded.reported_at "
+            "WHERE excluded.reported_at - anomaly_abuseipdb_dedup.reported_at >= ?",
+            (domain, now, ABUSEIPDB_DEDUP_HOURS * 3600)
+        ).rowcount == 1
+        conn.commit()
+        if not claimed:
+            log.info("anomaly_detection: AbuseIPDB report for %s already claimed by a "
+                     "concurrent detection — skipping", domain)
+            return
+
         reported_any = False
         for ip in public_ips:
             if _submit_abuseipdb_report(api_key, ip, comment):
                 reported_any = True
 
         if reported_any:
-            conn.execute(
-                "INSERT OR REPLACE INTO anomaly_abuseipdb_dedup"
-                "(offending_target, reported_at) VALUES(?,?)",
-                (domain, now)
-            )
             conn.execute(
                 "UPDATE anomaly_incidents SET abuseipdb_reported=1 WHERE id=?",
                 (inc_id,)

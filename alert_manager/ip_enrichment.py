@@ -8,7 +8,25 @@ from urllib.error import URLError, HTTPError
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
+import data_manager
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
+
+# How long a losing caller waits for the in-flight lookup before giving up and
+# fetching itself. Sized for two sequential HTTP calls plus slack; erring long
+# costs a caller some latency, erring short costs metered API quota.
+_ENRICH_LOCK_WAIT_S = 20.0
+
+_DM = None
+
+
+def _dm():
+    """Lazy DataManager, used only for job_lock (no DB access goes through it
+    here — this module predates the Data Manager and still reads/writes its own
+    table directly)."""
+    global _DM
+    if _DM is None:
+        _DM = data_manager.DataManager(DB_PATH)
+    return _DM
 CACHE_TTL_HOURS = 24
 
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY")
@@ -189,6 +207,31 @@ def enrich_ip(ip_address):
     if cached is not None:
         return cached
 
+    # Cross-process single-flight. A cache miss here costs two external API
+    # calls against metered quota (ipinfo + AbuseIPDB), and enrich_ip is called
+    # from BOTH the dashboard and alert_watcher — separate processes — so an
+    # in-process lock would not help. Whoever wins the lock fetches; the losers
+    # wait, then re-read the cache and return the winner's result instead of
+    # burning quota on the same lookup.
+    #
+    # Fail OPEN on either error path: enrichment arriving late is better than
+    # enrichment missing, and one duplicate lookup is cheaper than a blank
+    # result on an alert someone is looking at right now.
+    try:
+        with _dm().job_lock(f"enrich_{ip_address}", timeout=_ENRICH_LOCK_WAIT_S):
+            cached = _get_cached(ip_address)     # re-check under the lock
+            if cached is not None:
+                return cached
+            return _enrich_uncached(ip_address)
+    except data_manager.JobLockBusy:
+        return _enrich_uncached(ip_address)
+    except Exception:
+        return _enrich_uncached(ip_address)
+
+
+def _enrich_uncached(ip_address):
+    """Fetch from the external services and cache. Assumes the cache was just
+    checked and missed."""
     ipinfo_data = _fetch_ipinfo(ip_address)
     abuse_data = _fetch_abuseipdb(ip_address)
 
