@@ -5073,6 +5073,7 @@ def settings_page():
                     <li>Configuration &amp; API keys <span class="file-hint">(/etc/nemesis.env)</span></li>
                 </ul>
                 <p class="backup-size-text">Estimated size: <strong id="backupSizeDisplay">&mdash;</strong></p>
+                <p class="backup-size-text">Free at destination: <strong id="backupFreeDisplay">&mdash;</strong></p>
                 <p class="tier-text"
                    data-beginner="&#x1F4A1; Tip: choose a USB drive or cloud folder (e.g. ~/Dropbox/) so the backup survives if this machine is wiped or fails."
                    data-intermediate="Recommended: a removable drive or cloud-synced path."
@@ -5621,6 +5622,48 @@ def settings_page():
         }}
 
         // --- Backup modal ---
+        function renderBackupMedia(media) {{
+            var el = document.getElementById('backupFreeDisplay');
+            // No row for this destination, or a null reading: say so plainly.
+            // A zero here would read as a full drive, which is a different and
+            // far more alarming claim than "we have never looked".
+            if (!media || media.free_bytes === null || media.free_bytes === undefined) {{
+                el.textContent = 'never checked';
+                el.style.color = '#8a8f98';
+                return;
+            }}
+            var gb = media.free_bytes / (1024 * 1024 * 1024);
+            // The age is not decoration. ADR 0018 keeps the backup medium
+            // unmounted except during a write, so every reading is historical by
+            // the time anyone reads it. A bare number would be taken as current,
+            // so the figure never renders without its age attached.
+            var age = ' (age unknown)';
+            if (media.checked_at) {{
+                var ms = Date.now() - new Date(media.checked_at).getTime();
+                if (!isNaN(ms)) {{
+                    var days = Math.floor(ms / 86400000);
+                    if (days < 1) {{
+                        var hours = Math.floor(ms / 3600000);
+                        age = hours < 1 ? ' (checked just now)'
+                                        : ' (checked ' + hours + 'h ago)';
+                    }} else {{
+                        age = ' (as of ' + days + ' day' + (days === 1 ? '' : 's') + ' ago)';
+                    }}
+                }}
+            }}
+            el.textContent = gb.toFixed(1) + ' GB free' + age;
+            el.style.color = '';
+        }}
+
+        function refreshBackupMedia() {{
+            var destEl = document.getElementById('backupDestPath');
+            var dest = destEl ? destEl.value : '';
+            fetch('/api/backup/size?dest=' + encodeURIComponent(dest))
+                .then(function(r) {{ return r.json(); }})
+                .then(function(data) {{ renderBackupMedia(data.media); }})
+                .catch(function() {{ renderBackupMedia(null); }});
+        }}
+
         function openBackupModal() {{
             var overlay = document.getElementById('backupOverlay');
             document.getElementById('backupLoadingDiv').style.display = 'block';
@@ -5635,10 +5678,12 @@ def settings_page():
                         mb < 1 ? Math.round(mb * 1024) + ' KB' : mb.toFixed(1) + ' MB';
                     document.getElementById('backupLoadingDiv').style.display = 'none';
                     document.getElementById('backupContentDiv').style.display = 'block';
+                    renderBackupMedia(data.media);
                     if (typeof applyTierText === 'function') applyTierText();
                 }})
                 .catch(function() {{
                     document.getElementById('backupSizeDisplay').textContent = '(unknown)';
+                    renderBackupMedia(null);
                     document.getElementById('backupLoadingDiv').style.display = 'none';
                     document.getElementById('backupContentDiv').style.display = 'block';
                 }});
@@ -7628,7 +7673,69 @@ def api_backup_size():
     total = sum(
         os.path.getsize(src) for src, _ in _backup_candidates() if os.path.isfile(src)
     )
-    return jsonify({"size_mb": round(total / (1024 * 1024), 2)})
+    # Last-known free space for the destination the operator is actually looking
+    # at. `media` is null when that destination has never been backed up to —
+    # the caller renders "never checked", never a zero.
+    dest = (request.args.get("dest") or _default_backup_dir()).strip()
+    return jsonify({
+        "size_mb": round(total / (1024 * 1024), 2),
+        "dest": os.path.expanduser(dest),
+        "media": _read_backup_media_status(os.path.expanduser(dest)),
+    })
+
+
+def _record_backup_media_status(dest, actor=None):
+    """Record free space at `dest`. Only meaningful while the medium is mounted.
+
+    A FAILED reading is deliberately not written. Overwriting a real (if old)
+    number with nulls would destroy the only figure the card has, and "we looked
+    and could not tell" is not more informative than "here is what it was last
+    time, and when". Returns (free, total) or None.
+    """
+    try:
+        usage = shutil.disk_usage(dest)
+    except OSError as e:
+        app.logger.warning("backup media: cannot stat %s: %s", dest, e)
+        return None
+    try:
+        conn = _dm_conn()
+        conn.execute(
+            "INSERT INTO backup_media_status(path, free_bytes, total_bytes, checked_at, actor) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(path) DO UPDATE SET free_bytes=excluded.free_bytes, "
+            "total_bytes=excluded.total_bytes, checked_at=excluded.checked_at, "
+            "actor=excluded.actor",
+            (dest, usage.free, usage.total,
+             datetime.now().isoformat(timespec="seconds"), actor),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        # Never fail a completed backup because the bookkeeping write failed.
+        app.logger.warning("backup media: status write failed for %s: %s", dest, e)
+    return (usage.free, usage.total)
+
+
+def _read_backup_media_status(dest):
+    """Last-known reading for `dest`, or None if it has never been checked.
+
+    Returns None rather than zeros on an absent row or a failed read. Zero free
+    bytes is a legal-looking value that reads as a full disk; the caller must be
+    able to tell "never measured" apart from "measured, and it is full".
+    """
+    try:
+        conn = _dm_conn()
+        row = conn.execute(
+            "SELECT free_bytes, total_bytes, checked_at FROM backup_media_status "
+            "WHERE path=?", (dest,)
+        ).fetchone()
+        conn.close()
+    except Exception as e:
+        app.logger.warning("backup media: status read failed for %s: %s", dest, e)
+        return None
+    if not row:
+        return None
+    return {"free_bytes": row[0], "total_bytes": row[1], "checked_at": row[2]}
 
 
 @app.route("/api/backup/create", methods=["POST"])
@@ -7641,6 +7748,28 @@ def api_backup_create():
     except OSError as e:
         return jsonify({"status": "error", "error": f"Cannot create directory: {e}"})
 
+    # Destination free-space pre-check. Without it, a full destination surfaces
+    # only as a generic exception AFTER a partial archive has been written.
+    #
+    # `need` is the UNCOMPRESSED total, so this deliberately over-estimates — the
+    # gzip archive is typically a fraction of it. Refusing a backup that might
+    # just have fit is the safe direction to be wrong in: the alternative is
+    # failing mid-write and leaving a truncated archive that looks like a backup.
+    # The message states the requirement so the operator can act on it.
+    need = sum(os.path.getsize(src) for src, _ in _backup_candidates()
+               if os.path.isfile(src))
+    try:
+        avail = shutil.disk_usage(dest).free
+    except OSError:
+        avail = None   # cannot tell — proceed and let the write surface the truth
+    if avail is not None and avail < need:
+        return jsonify({
+            "status": "error",
+            "error": (f"Not enough free space at destination: needs up to "
+                      f"{need // (1024 * 1024)} MB uncompressed, "
+                      f"{avail // (1024 * 1024)} MB free."),
+        })
+
     ts = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     archive_path = os.path.join(dest, f"nemesis-backup-{ts}.tar.gz")
 
@@ -7651,6 +7780,11 @@ def api_backup_create():
                     tar.add(src, arcname=arcname)
         os.chmod(archive_path, 0o600)
         size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+        # The medium is provably mounted right now — this is the ONLY moment a
+        # reading can be taken (ADR 0018 keeps it unmounted otherwise). Taken
+        # AFTER the write so the recorded figure reflects the space remaining
+        # once this archive is on disk.
+        _record_backup_media_status(dest)
         return jsonify({"status": "ok", "path": archive_path, "size_mb": round(size_mb, 2)})
     except Exception as e:
         return jsonify({"status": "error", "error": str(e)})

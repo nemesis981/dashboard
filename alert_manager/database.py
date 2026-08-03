@@ -568,6 +568,30 @@ def init_enrollment_tokens_table():
         # NULL => the agent uses its own 300s default.
         if "poll_interval" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN poll_interval INTEGER")
+
+        # backup_media_status: last-known free space per backup destination.
+        #
+        # Why a cache rather than a live poll: ADR 0018 specifies the backup
+        # medium is mounted only for the brief window needed to write a
+        # snapshot and unmounted the rest of the time — an unmounted drive is
+        # unreachable to a compromised host. So free space is only observable
+        # DURING a backup, and every reading is historical by the time anyone
+        # looks at it. checked_at is therefore not decoration: a reading with
+        # no age attached would be read as current and is worse than none.
+        #
+        # Local-ISO TEXT, supplied by the writer rather than a column DEFAULT —
+        # ADR 0004's decided time convention. A DEFAULT cannot be altered in
+        # place on an existing install, so writer-side values are what actually
+        # fix already-deployed databases.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS backup_media_status (
+                path        TEXT PRIMARY KEY,
+                free_bytes  INTEGER,
+                total_bytes INTEGER,
+                checked_at  TEXT NOT NULL,
+                actor       TEXT
+            )
+        """)
         conn.commit()
     finally:
         conn.close()

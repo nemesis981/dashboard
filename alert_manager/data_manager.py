@@ -193,6 +193,11 @@ NAMESPACES = {
             # both surfaces, which is the documented intent of nemesis_fwd's
             # grant. The overlap is the design, not a conflict.
             "users",
+            # SOLE writer. Last-known free space per backup destination, written
+            # only from api_backup_create() — the one moment the medium is
+            # provably mounted (ADR 0018 keeps it unmounted otherwise). No other
+            # component observes the backup medium, so no sharing is expected.
+            "backup_media_status",
         ),
         # COLUMN GRANT. hw_monitor owns agent_devices rows (it INSERTs them at
         # enrollment); dashboard never inserts, and only UPDATEs these four for
