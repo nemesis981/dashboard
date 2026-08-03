@@ -402,6 +402,34 @@ def init_db():
             c.execute(
                 "UPDATE {t} SET {c} = strftime('%Y-%m-%dT%H:%M:%S', {c}, 'localtime') "
                 "WHERE {c} LIKE '____-__-__ %'".format(t=_tbl, c=_col))
+
+        # scan_tasks: the Scheduler's outbound work queue (ADR 0004 Stage 1).
+        #
+        # A separate table rather than more columns on scan_queue: that table's
+        # shape is scan-specific (scan_path, scan_job_id) while a task is broader —
+        # notify, update_rules, and later memory-inspect. Overloading it would make
+        # every non-scan task carry meaningless scan columns.
+        #
+        # actor + local-ISO timestamps from the start, per ADR 0004's cross-cutting
+        # requirements. Adding those seams later means rewriting a table that by
+        # then has live rows in it.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS scan_tasks (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id      TEXT NOT NULL UNIQUE,
+                device_id    TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                params_json  TEXT,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                created_at   TEXT,
+                dispatched_at TEXT,
+                expires_at   TEXT,
+                dispatch_count INTEGER NOT NULL DEFAULT 0,
+                actor        TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_scan_tasks_device "
+                  "ON scan_tasks(device_id, status)")
         conn.commit()
 
         # Seed default conditions if the table is empty.
@@ -1686,6 +1714,86 @@ def _persist_known_set(device_id, column, values):
         log.debug("_persist_known_set failed: %s", e)
 
 
+#: Cap on tasks carried by a single heartbeat response. A device that has
+#: accumulated a backlog gets it drained across several beats rather than one
+#: unbounded response — an agent that chokes on a huge body would then fail to
+#: heartbeat at all, turning a queue problem into an outage.
+MAX_TASKS_PER_BEAT = 5
+
+
+def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None):
+    """Queue one task for a device. Returns its task_id.
+
+    Queuing is deliberately separate from signing: a row here is an intent, and
+    the envelope is only built (and signed) at the moment it is actually handed
+    to the device, so `expires_at` is measured from delivery rather than from
+    whenever an operator happened to click.
+    """
+    import uuid
+    task_id = str(uuid.uuid4())
+    conn = _db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO scan_tasks (task_id, device_id, action, params_json, "
+            "status, created_at, actor) VALUES (?,?,?,?,'pending',?,?)",
+            (task_id, device_id, action, json.dumps(params or {}),
+             datetime.now().isoformat(timespec="seconds"), actor))
+        conn.commit()
+    finally:
+        conn.close()
+    return task_id
+
+
+def _tasks_for_response(device_id):
+    """Signed envelopes for this device's pending tasks, oldest first.
+
+    Returns [] on ANY failure — a broken task path must never stop a heartbeat
+    from being answered. Telemetry ingest is the primary job of this endpoint;
+    tasking rides along and must not be able to take it down.
+    """
+    try:
+        import server_keys
+        if not server_keys.have_server_keypair():
+            return []
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT task_id, action, params_json FROM scan_tasks "
+                "WHERE device_id=? AND status='pending' ORDER BY id LIMIT ?",
+                (device_id, MAX_TASKS_PER_BEAT)).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            return []
+
+        envelopes, now = [], datetime.now()
+        for task_id, action, params_json in rows:
+            try:
+                params = json.loads(params_json or "{}")
+            except Exception:
+                params = {}
+            envelopes.append(server_keys.build_task(
+                device_id, action, params, task_id=task_id, now=now))
+
+        conn = _db_connect()
+        try:
+            for env in envelopes:
+                conn.execute(
+                    "UPDATE scan_tasks SET status='dispatched', dispatched_at=?, "
+                    "expires_at=?, dispatch_count=dispatch_count+1 WHERE task_id=?",
+                    (now.isoformat(timespec="seconds"), env["expires_at"],
+                     env["task_id"]))
+            conn.commit()
+        finally:
+            conn.close()
+        log.info("dispatched %d task(s) to device=%s via heartbeat response",
+                 len(envelopes), device_id)
+        return envelopes
+    except Exception as exc:
+        log.error("could not build tasks for device=%s: %s", device_id, exc)
+        return []
+
+
 def _dispatch_pending_scans(device_id, agent_ip):
     """Send the oldest pending queued scan to the agent right now.
 
@@ -2562,10 +2670,23 @@ def _start_windows_agent_listener():
                     device_id, metrics.get("cpu_temp"),
                     metrics.get("gpu_temp"), payload.get("connection_type"),
                 )
+                # Tasks ride the heartbeat RESPONSE (ADR 0004 Stage 1). Built only
+                # after the auth + approval gates above, so an unauthenticated or
+                # unapproved device receives none.
+                #
+                # Safe for every deployed agent: none of them read this body.
+                # nemesis_agent checks `r.status_code == 200` and nothing else
+                # (agent.py `_post_payload`), and the legacy windows_agent does not
+                # read it at all — so extra fields are inert to anything already in
+                # the field, and the server can emit tasks before any agent
+                # understands them.
+                _resp = {"ok": True,
+                         "server_time": datetime.now().isoformat(timespec="seconds"),
+                         "tasks": _tasks_for_response(device_id)}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(b'{"ok":true}')
+                self.wfile.write(json.dumps(_resp).encode())
             except Exception as e:
                 log.exception("agent listener: failed to store sample: %s", e)
                 self.send_response(500)

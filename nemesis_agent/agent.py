@@ -375,6 +375,89 @@ def _sign_heartbeat(device_id, body: bytes):
         return None, None
 
 
+#: Set once, at startup, by _arm_task_channel(). None means tasks are refused —
+#: no anchor pinned, or the verifier failed its own self-test. Deliberately not a
+#: bool: the pinned key IS the capability, so there is nothing to get out of sync.
+_task_anchor = None
+
+
+def _arm_task_channel(device_id):
+    """Decide, once, whether this device may execute server-sent tasks.
+
+    Refusing costs nothing: no agent executes remote tasks today, so an agent that
+    declines them behaves exactly as the whole fleet already does. That is why
+    there is no observe mode on this direction — unlike heartbeat auth, failing
+    closed here drops nothing.
+    """
+    global _task_anchor
+    try:
+        import enrollment
+        import tasks as task_mod
+        anchor = enrollment.pinned_server_key()
+        if anchor is None:
+            log.warning("no pinned server key — server-sent tasks will be REFUSED")
+            return
+        # Prove the verifier can tell good from bad before trusting it with real
+        # tasks. A verifier that always accepts, or always rejects, is invisible
+        # in production; both look like "the server isn't sending anything".
+        task_mod.self_test(anchor, device_id)
+        _task_anchor = anchor
+        log.info("task channel armed (server key pinned, verifier self-test passed)")
+    except Exception as exc:
+        log.error("task channel DISABLED: %s", exc)
+
+
+def _handle_response_tasks(response, device_id):
+    """Verify and run any tasks carried by the heartbeat response.
+
+    Execution routes into the SAME `_CommandHandler._dispatch` the loopback
+    listener already uses, rather than a second implementation — the new surface
+    here is the transport, not the actions.
+
+    Wrapped whole: a malformed response, or a task that misbehaves, must never
+    break the heartbeat loop. Telemetry is this loop's primary job.
+    """
+    if _task_anchor is None:
+        return
+    try:
+        body = response.json()
+    except Exception:
+        return                      # not JSON, or an older server — nothing to do
+    if not isinstance(body, dict):
+        return
+    envelopes = body.get("tasks") or []
+    if not envelopes:
+        return
+
+    import tasks as task_mod
+    for env in envelopes:
+        try:
+            verified = task_mod.verify_task(env, device_id, _task_anchor)
+        except task_mod.TaskRejected as exc:
+            # Refusals are expected traffic, not errors — a replayed or expired
+            # task is the protection working. Logged with its typed reason so a
+            # rejection is never mistaken for "nothing arrived".
+            log.warning("task refused (%s): %s", getattr(exc, "reason", "?"), exc)
+            continue
+        # CLAIM before executing — one atomic operation, not a check followed by
+        # a record. Two concurrent deliveries of the same task cannot both win the
+        # claim however they interleave, and a crash after claiming means
+        # redelivery is skipped rather than run twice. At-least-once delivery with
+        # idempotent execution is the honest contract for a poll channel.
+        if not task_mod.claim_task(verified["task_id"], verified["expires_at"]):
+            log.warning("task refused (replayed): %s already claimed",
+                        verified["task_id"])
+            continue
+        try:
+            result = _CommandHandler._dispatch(None, verified["action"],
+                                               verified.get("params") or {})
+            log.info("task %s (%s) executed: %s",
+                     verified["task_id"][:8], verified["action"], result)
+        except Exception as exc:
+            log.error("task %s (%s) failed: %s",
+                      verified["task_id"][:8], verified["action"], exc)
+
+
 def _post_payload(conf, payload):
     url = f"http://{conf['nemesis_ip']}:{conf['nemesis_port']}/hw_data"
     try:
@@ -393,6 +476,7 @@ def _post_payload(conf, payload):
         if r.status_code == 200:
             log.info("Posted payload to %s (device=%s conn=%s)",
                      url, payload.get("device_id"), payload.get("connection_type"))
+            _handle_response_tasks(r, payload.get("device_id", ""))
         else:
             log.warning("Nemesis returned %d: %s", r.status_code, r.text[:200])
     except requests.exceptions.ConnectionError:
@@ -620,6 +704,10 @@ def main():
         log.error("Device not approved — agent will not report. Exiting.")
         return
     _conf = config.load()
+
+    # Decide once whether server-sent tasks may run (ADR 0004 Stage 1). After
+    # enrollment, so approved_id is the device identity tasks are bound to.
+    _arm_task_channel(approved_id)
 
     _load_platform_module()
 

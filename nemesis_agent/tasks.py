@@ -36,7 +36,25 @@ import config
 #: perfectly current.
 CLOCK_SKEW_S = 300
 
-SEEN_TASKS_NAME = "seen_tasks.json"
+#: Directory of per-task claim markers. A DIRECTORY, not one JSON file, and the
+#: reason is atomicity rather than taste.
+#:
+#: The obvious implementation — read a JSON map, test membership, write it back —
+#: is a check-then-act pair over shared state, and it races two ways: two
+#: deliveries can both pass the membership test before either writes (the same
+#: task executes twice), and two writers can both read-modify-write so one entry
+#: is silently lost (that task executes again later). Flagged by Window 2 as the
+#: same class fixed five times elsewhere in this codebase on 2026-08-03.
+#:
+#: Not theoretical for this agent: multiple NemesisAgent.exe processes were
+#: observed co-existing on one machine during Tier C testing, and they share this
+#: directory.
+#:
+#: `os.open(..., O_CREAT | O_EXCL)` is atomic on both POSIX and Windows, so
+#: creating the marker IS the claim — there is no window between deciding and
+#: recording. flock/fcntl were not used because they are not portable to the
+#: Windows agent, which is the primary target.
+CLAIMS_DIR_NAME = "task_claims"
 
 
 # ── typed outcomes ────────────────────────────────────────────────────────
@@ -81,59 +99,89 @@ def _canonical_bytes(envelope: dict) -> bytes:
 
 
 # ── replay store ──────────────────────────────────────────────────────────
-def _seen_path() -> str:
-    return os.path.join(os.path.dirname(config.CONF_PATH), SEEN_TASKS_NAME)
+def _claims_dir() -> str:
+    return os.path.join(os.path.dirname(config.CONF_PATH), CLAIMS_DIR_NAME)
 
 
-def _load_seen() -> dict:
-    try:
-        with open(_seen_path(), "r", encoding="utf-8") as fh:
-            data = json.load(fh)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        # A damaged or absent store must not be read as "nothing seen" silently
-        # forever, but it also must not stop the agent. Starting empty means at
-        # worst one task could re-execute; refusing to run at all would be worse.
-        return {}
+def _safe_name(task_id: str) -> str:
+    # task_id is a server-generated uuid4, but it arrives over the network, so it
+    # is never pasted into a path unsanitised — a crafted id containing separators
+    # would otherwise write outside the directory it is meant to stay in.
+    return "".join(ch for ch in str(task_id) if ch.isalnum() or ch in "-_")[:80]
 
 
-def _save_seen(seen: dict) -> None:
-    tmp = _seen_path() + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(seen, fh)
-        os.replace(tmp, _seen_path())
-    except Exception:
-        pass
+def _marker_path(task_id: str) -> str:
+    return os.path.join(_claims_dir(), _safe_name(task_id) + ".json")
 
 
-def _prune(seen: dict, now: datetime) -> dict:
-    """Drop entries whose task has expired.
+def prune_claims(now=None) -> int:
+    """Delete markers for tasks that have expired. Returns how many were removed.
 
-    Pruned by EXPIRY, never by count. A count-capped ring can evict a task_id
-    that is still inside its validity window, which silently reintroduces the
-    duplicate execution this store exists to prevent — and it would do so only
-    under load, which is exactly when it is hardest to notice.
+    Pruned by EXPIRY, never by count. A count-capped store can evict a task_id
+    still inside its validity window, silently reintroducing the duplicate
+    execution it exists to prevent — and only under load, which is when it is
+    hardest to notice.
     """
-    out = {}
-    for tid, exp in seen.items():
-        try:
-            if datetime.fromisoformat(exp) > now:
-                out[tid] = exp
-        except Exception:
-            continue
-    return out
-
-
-def mark_seen(task_id: str, expires_at: str, now=None) -> None:
     now = now or datetime.now()
-    seen = _prune(_load_seen(), now)
-    seen[task_id] = expires_at
-    _save_seen(seen)
+    removed = 0
+    try:
+        for name in os.listdir(_claims_dir()):
+            path = os.path.join(_claims_dir(), name)
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    exp = json.load(fh).get("expires_at", "")
+                if datetime.fromisoformat(exp) <= now:
+                    os.remove(path)
+                    removed += 1
+            except Exception:
+                # An unreadable marker is still a claim. Leaving it costs one
+                # stale file; deleting it could let a task run twice.
+                continue
+    except FileNotFoundError:
+        pass
+    return removed
 
 
-def already_seen(task_id: str, now=None) -> bool:
-    return task_id in _prune(_load_seen(), now or datetime.now())
+def claim_task(task_id: str, expires_at: str, now=None) -> bool:
+    """Atomically claim a task. True if THIS caller won it, False if already claimed.
+
+    One operation, not a check followed by an act: `O_CREAT | O_EXCL` either
+    creates the marker or fails with EEXIST, and the kernel arbitrates. Two
+    concurrent deliveries of the same task therefore cannot both win, however
+    they interleave.
+
+    Returns False on any unexpected error — failing closed here means a task is
+    skipped, which is recoverable by redelivery; failing open would execute it
+    twice, which may not be.
+    """
+    now = now or datetime.now()
+    try:
+        os.makedirs(_claims_dir(), exist_ok=True)
+        prune_claims(now)
+        fd = os.open(_marker_path(task_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"task_id": task_id, "expires_at": expires_at,
+                       "claimed_at": now.isoformat(timespec="seconds")}, fh)
+    except Exception:
+        # The marker exists, so the claim stands even if the body failed to
+        # write; prune_claims() treats an unreadable marker as still-claimed.
+        pass
+    return True
+
+
+def already_claimed(task_id: str, now=None) -> bool:
+    """Diagnostic only — NEVER gate execution on this.
+
+    It is a read, so anything branching on it reintroduces the check-then-act
+    race that `claim_task()` exists to remove. Use it for logging and tests.
+    """
+    prune_claims(now)
+    return os.path.exists(_marker_path(task_id))
 
 
 # ── verification ──────────────────────────────────────────────────────────
@@ -182,9 +230,11 @@ def verify_task(envelope: dict, device_id: str, pinned_key, now=None) -> dict:
     if (issued - now).total_seconds() > CLOCK_SKEW_S:
         raise Expired("task issued_at is too far in the future (%s)" % envelope["issued_at"])
 
-    if already_seen(envelope["task_id"], now):
-        raise Replayed("task %s has already been seen" % envelope["task_id"])
-
+    # Replay is NOT checked here, deliberately. A read-then-decide here plus a
+    # record later is exactly the check-then-act pair that races; the caller
+    # instead calls claim_task(), which decides and records in one atomic step.
+    # Keeping the read out of this function means there is no second, tempting
+    # place to gate execution on.
     return envelope
 
 

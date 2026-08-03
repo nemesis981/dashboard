@@ -115,21 +115,46 @@ def main():
                   reason(lambda b=broken: tasks.verify_task(b, DEV, pub, now=now)),
                   "malformed")
 
-        # ── replay ──────────────────────────────────────────────────────
-        print("\nreplay protection")
+        # ── replay: an ATOMIC claim, not check-then-act ─────────────────
+        print("\nreplay protection (atomic claim)")
         fresh = server_keys.build_task(DEV, "scan", now=now)
-        tasks.verify_task(dict(fresh), DEV, pub, now=now)
-        check("CONTROL not yet marked -> still accepted a second time",
+        check("CONTROL verify_task no longer decides replay",
               reason(lambda: tasks.verify_task(dict(fresh), DEV, pub, now=now)),
               "ACCEPTED")
-        tasks.mark_seen(fresh["task_id"], fresh["expires_at"], now=now)
-        check("CONTROL once marked, a replay is rejected",
-              reason(lambda: tasks.verify_task(dict(fresh), DEV, pub, now=now)),
-              "replayed")
-        check("the store persists (survives a restart)",
-              tasks.already_seen(fresh["task_id"], now), True)
-        check("CONTROL pruned by EXPIRY, not count — gone once expired",
-              tasks.already_seen(fresh["task_id"], now + timedelta(days=2)), False)
+        check("POSITIVE first claim wins",
+              tasks.claim_task(fresh["task_id"], fresh["expires_at"], now), True)
+        check("CONTROL second claim loses",
+              tasks.claim_task(fresh["task_id"], fresh["expires_at"], now), False)
+        check("the claim persists (survives a restart)",
+              tasks.already_claimed(fresh["task_id"], now), True)
+        check("CONTROL pruned by EXPIRY, not count",
+              tasks.already_claimed(fresh["task_id"], now + timedelta(days=2)), False)
+
+        # The race this replaced: N threads claiming the SAME task concurrently
+        # must yield exactly one winner. A read-then-write store passes a serial
+        # test and fails this one.
+        import threading
+        contended = server_keys.build_task(DEV, "scan", now=now)
+        wins = []
+        lock = threading.Lock()
+
+        def race():
+            got = tasks.claim_task(contended["task_id"], contended["expires_at"], now)
+            with lock:
+                wins.append(got)
+
+        threads = [threading.Thread(target=race) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        check("CONTROL 12 concurrent claims -> exactly ONE winner",
+              sum(1 for w in wins if w), 1)
+        check("CONTROL ...and all 12 returned an answer", len(wins), 12)
+
+        check("CONTROL a crafted task_id cannot escape the claims dir",
+              os.path.dirname(tasks._marker_path("../../etc/passwd")),
+              tasks._claims_dir())
 
         # ── the self-test itself must be able to fail ───────────────────
         print("\nstartup self-test (and its own failure modes)")
