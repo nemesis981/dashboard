@@ -2006,6 +2006,16 @@ def _verify_agent_heartbeat(headers, body, device_id):
     and binds the payload; it does NOT encrypt anything, and telemetry remains
     readable on the wire. Stated here so "authenticated" is never read as
     "secure channel".
+
+    WHETHER THAT MATTERS DEPENDS ON THE TARGET ADDRESS, which is a deployment
+    property rather than a property of this code. An agent configured with a
+    tailnet address reaches the server inside WireGuard, so the cleartext above
+    never crosses a shared network; one configured with a LAN address does not.
+    Which of those an agent gets is decided by the host baked into its installer
+    (dashboard.py `_nemesis_tailnet_host`), so NEMESIS_TAILNET_ADDR should be set
+    on any deployment that has a tailnet -- otherwise the target is inherited from
+    whatever URL fetched the installer, and the choice is made silently.
+    Cleartext targets are now flagged to the operator when a link is generated.
     """
     sig = headers.get("X-Nemesis-Signature", "")
     signed_at = headers.get("X-Nemesis-Signed-At", "")
