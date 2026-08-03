@@ -449,39 +449,55 @@ def _note_failed_attempt(username, op=None):
     else, so every error is logged and swallowed.
     """
     try:
-        with _db() as conn:
-            row = conn.execute(
-                "SELECT id, failed_attempts, lockout_tier FROM users WHERE username=?",
-                (username,)).fetchone()
-        if row is None:
-            return
-        fa = int(row["failed_attempts"] or 0) + 1
-        tier = int(row["lockout_tier"] or 0)
-
-        # Highest tier newly crossed by this attempt (mirrors dashboard: keep the
-        # highest, and never re-trigger a tier already applied).
-        triggered = None
-        for idx, (threshold, minutes) in enumerate(_LOCKOUT_TIERS, start=1):
-            if fa >= threshold and tier < idx:
-                triggered = (idx, minutes)
-
         guard = _dm().connect("nemesis_fwd")
         try:
+            # Increment IN THE DATABASE and read back the post-increment value.
+            #
+            # This previously read failed_attempts on one connection, closed it,
+            # computed fa = value + 1 in Python, and wrote that absolute number
+            # on a second connection. Two concurrent failures both read N and
+            # both wrote N+1, so the budget advanced by one instead of two — a
+            # throttle that under-counts is a throttle an attacker gets extra
+            # attempts against, and this counter is deliberately SHARED with
+            # dashboard's login and change-password forms, so the losses
+            # compound across surfaces.
+            #
+            # `failed_attempts = failed_attempts + 1` cannot lose an increment:
+            # the database serializes the writes and each one applies to
+            # whatever the previous left behind. RETURNING gives us the value
+            # our own increment produced, which is what the tier decision must
+            # be based on.
+            r = guard.execute(
+                "UPDATE users SET failed_attempts = COALESCE(failed_attempts, 0) + 1 "
+                "WHERE username=? RETURNING id, failed_attempts, lockout_tier",
+                (username,)).fetchone()
+            guard.commit()
+            if r is None:
+                return
+            uid, fa, tier = r[0], int(r[1] or 0), int(r[2] or 0)
+
+            # Highest tier newly crossed by this attempt (mirrors dashboard: keep
+            # the highest, and never re-trigger a tier already applied).
+            triggered = None
+            for idx, (threshold, minutes) in enumerate(_LOCKOUT_TIERS, start=1):
+                if fa >= threshold and tier < idx:
+                    triggered = (idx, minutes)
+
             if triggered:
                 tnum, minutes = triggered
                 from datetime import datetime, timedelta
                 lock_until = (datetime.now() + timedelta(minutes=minutes)).isoformat(
                     timespec="seconds")
+                # `AND lockout_tier < ?` so a concurrent failure that already
+                # applied a HIGHER tier is never walked backwards into a shorter
+                # lockout by this one.
                 guard.execute(
-                    "UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? "
-                    "WHERE id=?", (fa, lock_until, tnum, row["id"]))
+                    "UPDATE users SET lockout_until=?, lockout_tier=? "
+                    "WHERE id=? AND COALESCE(lockout_tier, 0) < ?",
+                    (lock_until, tnum, uid, tnum))
                 guard.commit()
                 log.warning("fwd: account %r locked out (tier %d, %d min) after "
                             "%d failed attempts", username, tnum, minutes, fa)
-            else:
-                guard.execute(
-                    "UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
-                guard.commit()
         finally:
             guard.close()
 

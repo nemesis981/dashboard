@@ -608,23 +608,45 @@ def _register_credential_failure(row, username, ip, ua,
     Returns (locked, minutes, tier). Callers render their own message — this
     decides consequences, not presentation.
     """
-    fa   = int(row["failed_attempts"] or 0) + 1
-    tier = int(row["lockout_tier"] or 0)
-    triggered = None
-    for idx, (thr, mins, severity, do_email) in enumerate(_LOCKOUT_TIERS, start=1):
-        if fa >= thr and tier < idx:
-            triggered = (idx, mins, severity, do_email)   # keep the highest crossed tier
-
     conn = _users_conn()
     try:
+        # Increment IN THE DATABASE and read back the post-increment value.
+        #
+        # `row` was read by the CALLER, before a bcrypt verify that takes ~100ms,
+        # so computing fa = row[...] + 1 here and writing that absolute number
+        # lost increments under concurrency: two failed attempts both read N and
+        # both wrote N+1, advancing the budget by one instead of two. Flask is
+        # threaded, so two POSTs is all it takes. A throttle that under-counts
+        # gives an attacker extra attempts, and this budget is SHARED with the
+        # change-password form and with nemesis_fwd by design (see the docstring
+        # above), so the losses compound across all three surfaces.
+        #
+        # failed_attempts = failed_attempts + 1 cannot lose an increment: the
+        # database serializes the writes and each applies to whatever the last
+        # one left. RETURNING gives the value OUR increment produced, which is
+        # what the tier decision has to be based on.
+        r = conn.execute(
+            "UPDATE users SET failed_attempts = COALESCE(failed_attempts, 0) + 1 "
+            "WHERE id=? RETURNING failed_attempts, lockout_tier",
+            (row["id"],)).fetchone()
+        conn.commit()
+        fa   = int(r[0] or 0) if r else int(row["failed_attempts"] or 0) + 1
+        tier = int(r[1] or 0) if r else int(row["lockout_tier"] or 0)
+
+        triggered = None
+        for idx, (thr, mins, severity, do_email) in enumerate(_LOCKOUT_TIERS, start=1):
+            if fa >= thr and tier < idx:
+                triggered = (idx, mins, severity, do_email)   # keep the highest crossed tier
+
         if triggered:
             tnum, mins, severity, do_email = triggered
             lock_until = (datetime.now() + timedelta(minutes=mins)).isoformat(timespec="seconds")
-            conn.execute("UPDATE users SET failed_attempts=?, lockout_until=?, lockout_tier=? "
-                         "WHERE id=?", (fa, lock_until, tnum, row["id"]))
-        else:
-            conn.execute("UPDATE users SET failed_attempts=? WHERE id=?", (fa, row["id"]))
-        conn.commit()
+            # `COALESCE(lockout_tier,0) < ?` so a concurrent failure that already
+            # applied a HIGHER tier is not walked backwards into a shorter lockout.
+            conn.execute("UPDATE users SET lockout_until=?, lockout_tier=? "
+                         "WHERE id=? AND COALESCE(lockout_tier, 0) < ?",
+                         (lock_until, tnum, row["id"], tnum))
+            conn.commit()
     finally:
         conn.close()
 
