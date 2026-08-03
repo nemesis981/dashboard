@@ -128,6 +128,68 @@ def public_key_b64() -> str:
         serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
 
 
+def _canonical_bytes(envelope: dict) -> bytes:
+    """The exact bytes a task signature covers: the envelope minus `signature`,
+    serialised deterministically.
+
+    Identical to the convention the agent's heartbeat already uses
+    (`agent.py::_post_payload` -> `json.dumps(separators=(",", ":"), sort_keys=True)`).
+    Deliberately the SAME rule rather than a second, near-identical one: two
+    canonicalisations that differ only in whitespace or key order produce
+    signatures that verify in testing and fail in the field, and the difference is
+    invisible in a diff.
+    """
+    import json
+    return json.dumps({k: v for k, v in envelope.items() if k != "signature"},
+                      separators=(",", ":"), sort_keys=True).encode()
+
+
+def sign_task(envelope: dict) -> str:
+    """Base64 PKCS1v15/SHA256 signature over the canonical envelope.
+
+    Only hw_monitor can call this — it is the sole holder of the private key.
+    Raises rather than returning a falsy value if the key is unavailable: an
+    unsigned task must never leave the server, and a caller that mistook "" for a
+    signature would ship exactly that.
+    """
+    import hashlib
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    with open(private_path(), "rb") as fh:
+        key = serialization.load_pem_private_key(fh.read(), password=None)
+    digest = hashlib.sha256(_canonical_bytes(envelope)).hexdigest().encode()
+    return base64.b64encode(
+        key.sign(digest, padding.PKCS1v15(), hashes.SHA256())).decode()
+
+
+def build_task(device_id: str, action: str, params: dict = None,
+               ttl_seconds: int = 1800, task_id: str = None,
+               now=None) -> dict:
+    """A complete, signed task envelope addressed to one device.
+
+    `device_id` is inside the signed material on purpose — without it an envelope
+    captured from one machine could be replayed at another, and every agent shares
+    the same server anchor. `expires_at` bounds how long a captured envelope stays
+    useful at all.
+    """
+    import uuid
+    from datetime import datetime, timedelta
+
+    now = now or datetime.now()
+    env = {
+        "task_id": task_id or str(uuid.uuid4()),
+        "device_id": device_id,
+        "action": action,
+        "params": params or {},
+        "issued_at": now.isoformat(timespec="seconds"),
+        "expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat(timespec="seconds"),
+    }
+    env["signature"] = sign_task(env)
+    return env
+
+
 def have_server_keypair() -> bool:
     """True only if BOTH halves exist. A half-written pair is not usable, and
     reporting it as present would send a caller down a path that fails later
