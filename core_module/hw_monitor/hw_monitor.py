@@ -1305,10 +1305,19 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
         # than left to umask, so the result does not depend on which user
         # happened to create the directory first.
         os.makedirs(ARCHIVE_DIR, mode=0o2770, exist_ok=True)
-        try:
-            os.chmod(ARCHIVE_DIR, 0o2770)   # exist_ok=True skips mode on an existing dir
-        except OSError as e:
-            log.warning("archives dir chmod failed (%s): %s", ARCHIVE_DIR, e)
+        # exist_ok=True skips the mode argument on an already-existing directory,
+        # so correcting one that was created wrongly needs an explicit chmod.
+        # Only attempt it when the mode is actually wrong: once the directory is
+        # owned by root (the deliberate convention), a service account cannot
+        # chmod it, and an unconditional attempt logs a warning on EVERY run for
+        # a directory that is already correct. Noise that always fires is noise
+        # nobody reads — and it would mask a real permissions problem.
+        if (os.stat(ARCHIVE_DIR).st_mode & 0o7777) != 0o2770:
+            try:
+                os.chmod(ARCHIVE_DIR, 0o2770)
+            except OSError as e:
+                log.warning("archives dir has wrong mode and chmod failed (%s): %s",
+                            ARCHIVE_DIR, e)
         stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
         fname = f"hw_anomaly_top_processes_{stamp}.jsonl.gz"
         final = os.path.join(ARCHIVE_DIR, fname)

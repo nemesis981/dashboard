@@ -807,10 +807,18 @@ class DataManager:
                         "file": None, "dry_run": True}
 
             os.makedirs(self._archive_dir(), mode=0o2770, exist_ok=True)
-            try:
-                os.chmod(self._archive_dir(), 0o2770)
-            except OSError as e:
-                log.warning("archives dir chmod failed: %s", e)
+            # exist_ok=True skips the mode argument on an already-existing
+            # directory, so correcting a wrongly-created one needs an explicit
+            # chmod. Only attempt it when the mode is actually wrong: the
+            # directory is owned by root by convention, so a service account
+            # cannot chmod it, and an unconditional attempt warns on EVERY run
+            # about a directory that is already correct. A warning that always
+            # fires is one nobody reads, and it would mask a real problem.
+            if (os.stat(self._archive_dir()).st_mode & 0o7777) != 0o2770:
+                try:
+                    os.chmod(self._archive_dir(), 0o2770)
+                except OSError as e:
+                    log.warning("archives dir has wrong mode and chmod failed: %s", e)
             stamp = time.strftime("%Y-%m-%d-%H%M%S", time.localtime())
             fname = f"dm_operation_log_{stamp}.jsonl.gz"
             final = os.path.join(self._archive_dir(), fname)
