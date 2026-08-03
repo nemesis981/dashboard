@@ -1793,3 +1793,39 @@ this entry is the proposal, not the implementation.
       including the three injected-failure abort tests for each. The whole point of the
       helpers is that they fail correctly; a refactor that is only proved to succeed
       correctly has not been tested.
+
+- [ ] **Concurrent runs of the same archival job double-process — no single-run guard exists at
+  any level.** Found by Window 3 while auditing the archive/coalesce consolidation (the
+  `alert_manager/data_manager.py` + `core_module/hw_monitor/hw_monitor.py` merge). Pre-existing
+  in both copies before the merge; the merge did not introduce it and does not fix it — it just
+  means there is now one place to fix it instead of two.
+    - [ ] **Same-second filename collision.** Both jobs derive their archive filename from a
+      `%Y-%m-%d-%H%M%S` timestamp. Two concurrent runs of the *same* job compute the identical
+      name, both pass the `os.path.exists()` guard (neither sees the other yet), and both write
+      to the same `<name>.tmp` — one run's write silently clobbers the other's.
+    - [ ] **The success report can be wrong, not just the file.** Measured directly in an
+      isolated two-thread test against the same `.tmp` path: thread A reported success while
+      thread B's content was what actually landed on disk. A caller can be told its archival
+      run succeeded when its own data was the one discarded.
+    - [ ] **SELECT and DELETE are not in one transaction.** Both concurrent runs of the same job
+      select the same candidate rows, both archive them, both insert summary rows — producing
+      duplicate summary buckets. Measured: 3 duplicate summary buckets from one deliberate
+      concurrent double-invocation.
+    - [ ] **No data is lost in any of the three failure modes** — rows are archived before any
+      live-table modification, and SQLite keeps the database itself internally consistent
+      throughout. The damage is duplicate summary rows and a misleading success return, not
+      destroyed data.
+    - [ ] **Exposure today is low, not zero: both jobs are currently manual-invoke-only**, so
+      triggering this requires deliberately invoking the same job twice within the same second.
+      **It becomes a real, live hazard the moment either job is scheduled** (cron/timer-driven),
+      which is exactly the decision currently parked for both. Fix this before scheduling
+      either, not after.
+    - [ ] **Recommended fix:** a single-run guard — an `O_EXCL` lockfile or a `PRAGMA`-level
+      advisory lock — so a second concurrent run of the same job fails fast instead of
+      double-processing.
+    - [ ] **Scope the fix at the Data Manager level, not per-job.** Now that the archive/verify
+      primitives have exactly one home (the consolidation above), the guard belongs there too —
+      a lock keyed per archival job (e.g. by the target table/filename prefix), not a bespoke
+      lockfile reinvented separately in each of the two current callers. Matches the broader
+      audit Window 3 is now running across the Data Manager, rather than a fix scoped to just
+      the two jobs it happened to be found in.
