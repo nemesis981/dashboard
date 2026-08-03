@@ -2822,6 +2822,36 @@ def api_agent_reject(device_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/agent/<device_id>/revoke", methods=["POST"])
+def api_agent_revoke(device_id):
+    """Owner action (auth-gated): withdraw an ALREADY-APPROVED device.
+
+    Deliberately a separate route from /reject rather than a reuse of it.
+    "Rejected" means an enrollment request was denied; "revoked" means a device
+    that WAS trusted has been withdrawn. Collapsing the two destroys that
+    distinction in the audit trail, which is the one place it matters most.
+
+    Security posture is identical to its siblings by design -- POST-only,
+    auth-gated (absent from _AUTH_EXEMPT), parameterized SQL, audited. The
+    route-audit defect signature is sibling routes whose posture DIVERGES, not
+    sibling routes existing; same guard, different semantics is correct.
+
+    No server-side enforcement change is needed: hw_monitor's _agent_approved()
+    tests == "approved", so any other status stops that device's heartbeats
+    within one poll interval.
+    """
+    try:
+        conn = _dm_conn()   # §9 batch 4 (api_agent_revoke)
+        conn.execute("UPDATE agent_devices SET enrollment_status='revoked' "
+                     "WHERE device_id=?", (device_id,))
+        conn.commit()
+        conn.close()
+        _audit(action="agent_revoke", rule_id=device_id)
+        return jsonify({"ok": True, "status": "revoked"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Windows installer generator (token-based auto-approve enrollment) ─────────
 def _nemesis_tailnet_host() -> str:
     """Bare host to bake into a generated installer as the agent's server target.
@@ -3070,6 +3100,11 @@ def _render_agent_devices_html() -> str:
                 '<p style="color:#888">No device data available.</p></div>')
     pending  = [r for r in rows if (r["enrollment_status"] or "") in ("pending", "pending_with_findings")]
     enrolled = [r for r in rows if (r["enrollment_status"] or "") == "approved"]
+    # Revoked devices need their own list or they vanish from the UI entirely --
+    # matching neither 'pending' nor 'approved' -- which would make revocation
+    # irreversible through the product. That is the same dead end this control
+    # exists to remove, just moved one step along.
+    revoked  = [r for r in rows if (r["enrollment_status"] or "") == "revoked"]
     h = ['<div class="card" id="section-devices-enroll" style="margin-bottom:16px">'
          '<h2>&#128421; Devices</h2>',
          # ── Windows installer generator ──
@@ -3170,6 +3205,7 @@ def _render_agent_devices_html() -> str:
     if not enrolled:
         h.append('<p style="color:#888;font-size:0.86em">No enrolled devices yet.</p>')
     for r in enrolled:
+        did = html.escape(r["device_id"], quote=True)
         lhm = ('&#9989; sensors' if r["lhm_available"]
                else '&#9888; no LHM (temps/fans need LibreHardwareMonitor)')
         lt = (r["link_type"] or "").lower()
@@ -3187,7 +3223,28 @@ def _render_agent_devices_html() -> str:
             f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
             f'<span style="color:#888">{net_label}</span> &middot; '
             f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span> &middot; '
-            f'<span style="color:#888">{lhm}</span>{wifi_note}</div>')
+            f'<span style="color:#888">{lhm}</span>{wifi_note}<br>'
+            f'<button onclick="agentRevoke(\'{did}\')" style="background:#ff444422;color:#ff6666;'
+            'border:1px solid #ff4444;border-radius:6px;padding:4px 12px;cursor:pointer;'
+            'margin-top:6px;font-size:0.92em">Revoke</button>'
+            '</div>')
+    if revoked:
+        h.append('<h3 style="color:#ff6666;font-size:0.95em;margin-top:14px">Revoked devices</h3>')
+        h.append('<p style="color:#888;font-size:0.8em;margin:0 0 6px">'
+                 'These devices are blocked from reporting. Re-approving restores '
+                 'access using the key they already hold.</p>')
+        for r in revoked:
+            did = html.escape(r["device_id"], quote=True)
+            h.append(
+                '<div style="background:#0d0d1e;border:1px solid #ff444444;border-radius:8px;'
+                'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
+                f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+                f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
+                f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span><br>'
+                f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
+                'border:1px solid #00ff88;border-radius:6px;padding:4px 12px;cursor:pointer;'
+                'margin-top:6px;font-size:0.92em">Re-approve</button>'
+                '</div>')
     h.append('</div>')
     return "".join(h)
 

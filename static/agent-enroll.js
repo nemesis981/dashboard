@@ -10,6 +10,16 @@ function agentReject(id) {
     .then(function () { location.reload(); })
     .catch(function () { alert('Reject failed — try again.'); });
 }
+/* Withdraw an already-approved device. Distinct from reject (which denies a
+   pending enrollment) so the audit trail keeps the two apart. The device stops
+   reporting within one heartbeat interval; its key material is unchanged, so a
+   re-approve restores access without re-enrolling. */
+function agentRevoke(id) {
+  if (!confirm('Revoke this device? It will stop reporting until re-approved.')) return;
+  fetch('/api/agent/' + encodeURIComponent(id) + '/revoke', { method: 'POST' })
+    .then(function () { location.reload(); })
+    .catch(function () { alert('Revoke failed — try again.'); });
+}
 /* Robust clipboard copy: navigator.clipboard needs HTTPS/localhost, so on plain-HTTP
    LAN access fall back to a hidden textarea + execCommand (FIX: copy button worked
    only in secure contexts before). */
