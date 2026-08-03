@@ -7119,7 +7119,8 @@ def api_hw_history():
         col = None
     else:
         valid_cols = {"cpu_temp", "ambient_temp", "nvme_temp", "gpu_temp",
-                      "cpu_percent", "ram_used_gb", "gpu_fan_percent", "gpu_power_watts"}
+                      "cpu_percent", "ram_used_gb", "gpu_fan_percent", "gpu_power_watts",
+                      "disk_pct_used"}
         col = sensor if sensor in valid_cols else "cpu_temp"
 
     try:
@@ -9270,6 +9271,31 @@ def dashboard():
         if hw_ram_total_gb is not None and hw_ram_used_gb is not None
         else None
     )
+    hw_disk_pct = hw_live.get("disk_pct_used")
+    hw_disk_free_gb = hw_live.get("disk_free_gb")
+    # An absent or failed capacity reading renders as "unknown" — deliberately
+    # distinct from both a healthy disk and a full one.
+    #
+    # Note classify_pct(None) returns "error", not "unknown", and that is not an
+    # inconsistency: the diagnostics check must never let a failed read report as
+    # healthy, so it errs. The card has a different job — a human reading it needs
+    # "we do not know" rather than a red 90%+ implying a real measurement that was
+    # never taken. Both refuse to claim health; they differ in what they claim
+    # instead. NULL is legitimate here for remote-agent rows (agent-side disk
+    # reporting is deliberately out of scope) as well as for a genuine read failure.
+    if hw_disk_pct is None:
+        hw_disk_value = "unknown"
+        hw_disk_style = 'style="color:#8a8f98"'
+        hw_disk_sub = "no reading"
+    else:
+        _disk_color = {"ok": "", "warn": "#ffaa00", "error": "#ff4444"}[
+            _diag.disk_space.classify_pct(hw_disk_pct)
+        ]
+        hw_disk_value = f"{hw_disk_pct}%"
+        hw_disk_style = f'style="color:{_disk_color}"' if _disk_color else ""
+        hw_disk_sub = (
+            f"{hw_disk_free_gb} GB free" if hw_disk_free_gb is not None else ""
+        )
     hw_fans_js = json.dumps(hw_fans)
     hw_cpu_pct_js = "null" if hw_cpu_pct is None else str(hw_cpu_pct)
     fan_status_js = json.dumps(hw_live.get("fan_status", {}))
@@ -9584,6 +9610,11 @@ def dashboard():
                     <div class="hw-label"><span class="tier-text" data-beginner="RAM / Memory Used" data-intermediate="RAM Used" data-pro="RAM %">RAM Used</span></div>
                     <div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div>
                     <div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div>
+                </div>
+                <div class="hw-stat hw-clickable" onclick="openSensorPopup('disk_pct_used')" title="Click for sensor history">
+                    <div class="hw-label"><span class="tier-text" data-beginner="Disk Space Used" data-intermediate="Disk Used" data-pro="Disk %">Disk Used</span></div>
+                    <div class="hw-value" id="hwDiskPct" {hw_disk_style}>{hw_disk_value}</div>
+                    <div class="hw-label" id="hwDiskFree" style="margin-top:3px;font-size:0.85em">{hw_disk_sub}</div>
                 </div>
                 <div class="hw-stat hw-clickable" onclick="openSensorPopup('gpu_fan_percent')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="GPU Fan Speed" data-intermediate="GPU Fan" data-pro="GPU Fan %">GPU Fan</span></div>

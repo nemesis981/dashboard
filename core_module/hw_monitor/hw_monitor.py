@@ -769,6 +769,7 @@ def get_live_metrics():
             "fans": [], "cpu_percent": None, "ram_used_gb": None,
             "ram_total_gb": None, "ram_percent": None,
             "gpu_temp": None, "gpu_fan_percent": None, "gpu_power_watts": None,
+            "disk_total_gb": None, "disk_free_gb": None, "disk_pct_used": None,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "fan_status": get_fan_status(),
         }
@@ -786,6 +787,12 @@ def get_live_metrics():
     metrics["gpu_temp"] = gpu_temp
     metrics["gpu_fan_percent"] = gpu_fan
     metrics["gpu_power_watts"] = gpu_power
+    # Same helper the 300s sampler uses, so the card and the stored history can
+    # never disagree about what the disk looks like. Returns Nones on a failed
+    # read; the card renders that as "unknown", never as a number.
+    (metrics["disk_total_gb"],
+     metrics["disk_free_gb"],
+     metrics["disk_pct_used"]) = _collect_disk_capacity()
     metrics["timestamp"] = datetime.now().isoformat(timespec="seconds")
     metrics["fan_status"] = get_fan_status()
     return metrics
