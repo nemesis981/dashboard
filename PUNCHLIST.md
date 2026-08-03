@@ -1761,11 +1761,26 @@ this entry is the proposal, not the implementation.
       approving moves it should refuse, and nothing about that failure is visible — it
       looks like a successful archival. That is the same class of defect the standing
       "verification code must prove its own premise" practice exists to catch.
-    - [ ] Shape of the fix: promote the generic helpers into `data_manager.py` (or a small
-      shared module) and have `hw_monitor` import them — it already imports `data_manager`,
-      so no new dependency edge is created. The two differ only in payload shape
-      (`{id: text}` vs `{id: row_dict}`), which a single implementation handles by
-      comparing whatever it is given.
+    - [ ] **The fix must respect the core_module / Data Manager architecture — it is NOT a
+      casual two-file merge (operator direction, 2026-08-03).** A full day was spent
+      untangling processes into `core_module/` and forcing DB access through the Data
+      Manager specifically so shared logic like this has ONE authoritative home. A "quick
+      dedup" that picks whichever file is more convenient, or that introduces a third
+      free-floating helper module alongside the two existing copies, recreates exactly the
+      problem it claims to solve — now with three implementations instead of two. Whatever
+      the consolidation does, it routes through the established structure rather than
+      around it.
+    - [ ] Shape of the fix (subject to the constraint above): the archival helpers are DB
+      lifecycle operations on tables the Data Manager already mediates, so the Data Manager
+      is the architecturally correct owner — `hw_monitor` already imports `data_manager`, so
+      no new dependency edge is created. The two copies differ only in payload shape
+      (`{id: text}` vs `{id: row_dict}`), which one implementation handles by comparing
+      whatever it is given. Confirm this against ADR 0006 before building, rather than
+      treating this bullet as the decision.
+    - [ ] Sequencing: do this AFTER the storage/retention pieces are fully done, not
+      squeezed in mid-build (operator direction, 2026-08-03). Piece 4 was already deployed
+      and run against live data before piece 5 existed; refactoring verified archival code
+      while more of it was still being written is the wrong order.
     - [ ] Do NOT do this without re-running both pieces' verification suites afterwards,
       including the three injected-failure abort tests for each. The whole point of the
       helpers is that they fail correctly; a refactor that is only proved to succeed
