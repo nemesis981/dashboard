@@ -26,15 +26,21 @@ parallel mechanism:
 ## Why
 
 `dm_operation_log` (ADR 0006's operation-logging table, `alert_manager/data_manager.py:45`)
-logs every mediated write across all 7 DB-using modules. Automated writers (scheduled
-scans, heartbeats, background pollers) dominate its write volume but each individual row
-carries low marginal value once the pattern is established; human-actor writes are rarer
-but each one matters for accountability (this is exactly the actor-attribution seam ADR
-0006 already stamps on every write — see CLAUDE.md's Data Manager section, "actor
-mechanism is live but currently unwired"). A flat retention cap would either truncate
-human-actor history too aggressively or let automated-writer volume balloon
-unconstrained — a real policy needs to treat the two differently, not average across
-them.
+logs every mediated write across all 10 DB-using modules (measured live 2026-08-03:
+`ai_engine`, `anomaly_detection`, `community_queue`, `dashboard`, `diagnostics`,
+`hw_monitor`, `malware_detection`, `nemesis_fwd`, `tickets`, `watchdog`). Automated
+writers (scheduled scans, heartbeats, background pollers) dominate its write volume but
+each individual row carries low marginal value once the pattern is established;
+human-actor writes are rarer but each one matters for accountability (this is exactly the
+actor-attribution seam ADR 0006 already stamps on every write — see CLAUDE.md's Data
+Manager section, "actor mechanism is live but currently unwired"). A flat retention cap
+would either truncate human-actor history too aggressively or let automated-writer volume
+balloon unconstrained — a real policy needs to treat the two differently, not average
+across them. Measured live 2026-08-03: `malware_canary_files` alone generated 52,610
+logged updates against a table that holds 4 actual rows of state — the clearest single
+example of why per-row fidelity on automated writers isn't earning its storage cost. See
+[[storage-monitoring-retention-supplement-2026-08-03]] for the full measured baseline
+(table sizes, growth rates) this design was checked against.
 
 Building a new export/archive mechanism when the tar.gz backup path
 (`api_backup_create`) already does integrity-checked, permission-correct
