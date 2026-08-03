@@ -235,6 +235,11 @@ class InstallerApp:
     #: _enroll() treats None as a hard error rather than a legacy fallback.
     device_secret = None
 
+    #: True once _probe_preinstall_state() has captured provenance. Guards against
+    #: the Retry button re-probing AFTER an earlier attempt already installed the
+    #: very software whose origin is being determined. See that method's docstring.
+    _provenance_probed = False
+
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
                  preauth_key="", conf_path="", poll_interval="", l2_enforce=""):
         self.root = root
@@ -925,9 +930,38 @@ class InstallerApp:
     # ── clean-uninstall spec: provenance manifest + ARP + Start Menu (Phase 1) ──────
     def _probe_preinstall_state(self):
         """Capture provenance BEFORE any install action — whether Tailscale AND PawnIO already
-        existed, so the uninstaller never removes a user's pre-existing shared software."""
+        existed, so the uninstaller never removes a user's pre-existing shared software.
+
+        Runs ONCE per installer process. `_run()` is re-entered from the top by the Retry
+        button, so a plain re-probe here answers the wrong question on the second attempt:
+        if attempt 1 got as far as installing Tailscale (the pre-auth self-onboard path
+        does) and then failed later — a server-reachability failure, say — attempt 2 would
+        see Tailscale present and record it as the USER's. The uninstaller honours that and
+        never offers to remove it, so uninstalling Nemesis silently leaves behind software
+        Nemesis installed, plus a live node in the operator's tailnet.
+
+        Confirmed live 2026-08-03: after one retry the manifest read
+        `{"pre_existing": true, "installed_by_nemesis": false, "removal": "never"}` for
+        Tailscale on a VM that had none before the install began. PawnIO is exposed
+        identically, for the same reason.
+
+        The cache is deliberately per-PROCESS, not persisted to disk. "Was it there before
+        this run?" is the honest scope of the claim — a user who relaunches the installer
+        tomorrow may genuinely have installed Tailscale themselves in between, and a
+        remembered answer would then refuse to remove something Nemesis DID install. That
+        leaves one gap this fix does not close: a crash or manual close after installing
+        Tailscale, followed by a relaunch, still re-probes fresh. Closing that needs the
+        manifest written incrementally at the moment each component is installed, rather
+        than derived at the end from a probe taken at the start — tracked separately.
+        """
+        if self._provenance_probed:
+            self._ilog("provenance: reusing first-attempt probe (retry) "
+                       "tailscale_pre_existing=%s pawnio_pre_existing=%s"
+                       % (self._ts_pre_existing, self._pawnio_pre_existing))
+            return
         self._ts_pre_existing = self._tailscale_installed()
         self._pawnio_pre_existing = self._pawnio_present()
+        self._provenance_probed = True
 
     def _pawnio_present(self):
         """Is PawnIO (LHM's shared kernel driver) already installed? Probe the install dir +
