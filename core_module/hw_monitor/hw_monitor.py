@@ -120,7 +120,10 @@ def init_db():
                 net_out_mb REAL,
                 gpu_temp INTEGER,
                 gpu_fan_percent INTEGER,
-                gpu_power_watts REAL
+                gpu_power_watts REAL,
+                disk_total_gb REAL,
+                disk_free_gb REAL,
+                disk_pct_used REAL
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_hw_metrics_ts ON hw_metrics(timestamp)")
@@ -132,7 +135,10 @@ def init_db():
                           ("fan4_rpm", "INTEGER"),
                           ("fans_json", "TEXT"),
                           ("is_anomalous", "INTEGER DEFAULT 0"),
-                          ("device_id", "TEXT DEFAULT 'local'")):
+                          ("device_id", "TEXT DEFAULT 'local'"),
+                          ("disk_total_gb", "REAL"),
+                          ("disk_free_gb", "REAL"),
+                          ("disk_pct_used", "REAL")):
             if col not in existing:
                 c.execute(f"ALTER TABLE hw_metrics ADD COLUMN {col} {decl}")
         conn.commit()
@@ -785,6 +791,31 @@ def get_live_metrics():
     return metrics
 
 
+def _collect_disk_capacity(path=None):
+    """Free/used capacity of the filesystem holding the DB.
+
+    That filesystem — not `/` — is the one whose exhaustion actually stops
+    Nemesis writing, so it is what gets sampled. Returns
+    ``(total_gb, free_gb, pct_used)``, or three ``None``s if the read fails.
+
+    A failed read must NOT come back as a number: `0.0` free is a legal-looking
+    measurement that reads as a full disk, and would trip a low-disk warning
+    that measured nothing. NULL is the only value the reader cannot mistake for
+    a real reading.
+    """
+    target = path or os.path.dirname(DB_PATH)
+    try:
+        usage = psutil.disk_usage(target)
+    except (OSError, ValueError) as e:
+        log.warning("disk capacity read failed for %s: %s", target, e)
+        return (None, None, None)
+    return (
+        round(usage.total / (1024 ** 3), 2),
+        round(usage.free / (1024 ** 3), 2),
+        round(usage.percent, 1),
+    )
+
+
 def _collect_sample_with_deltas():
     """Build a full sample row including disk/net deltas vs the last reading."""
     now_mono = time.monotonic()
@@ -817,6 +848,10 @@ def _collect_sample_with_deltas():
     else:
         sample["net_in_mb"] = None
         sample["net_out_mb"] = None
+
+    (sample["disk_total_gb"],
+     sample["disk_free_gb"],
+     sample["disk_pct_used"]) = _collect_disk_capacity()
 
     sample["elapsed_s"] = round(elapsed, 1)
 
@@ -856,14 +891,22 @@ def insert_sample(s):
     conn = _db_connect()
     try:
         c = conn.cursor()
+        # disk_total_gb/disk_free_gb/disk_pct_used are LOCAL-APPLIANCE capacity.
+        # Remote agent samples arrive here too (the :5001 heartbeat handler calls
+        # this same function) and legitimately carry none of them — agent-side
+        # disk reporting is deliberately out of scope. `.get()` yields NULL for
+        # those rows, which is the honest value: it must not be confused with a
+        # real 0, and must never be back-filled from the server's own disk.
         c.execute(
             """INSERT INTO hw_metrics
             (timestamp, cpu_temp, ambient_temp, nvme_temp,
              fans_json,
              cpu_percent, ram_used_gb,
              disk_read_mb, disk_write_mb, net_in_mb, net_out_mb,
-             gpu_temp, gpu_fan_percent, gpu_power_watts, is_anomalous, device_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+             gpu_temp, gpu_fan_percent, gpu_power_watts,
+             disk_total_gb, disk_free_gb, disk_pct_used,
+             is_anomalous, device_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
             (
                 s["timestamp"], s.get("cpu_temp"), s.get("ambient_temp"),
                 s.get("nvme_temp"),
@@ -872,6 +915,7 @@ def insert_sample(s):
                 s.get("disk_read_mb"), s.get("disk_write_mb"),
                 s.get("net_in_mb"), s.get("net_out_mb"),
                 s.get("gpu_temp"), s.get("gpu_fan_percent"), s.get("gpu_power_watts"),
+                s.get("disk_total_gb"), s.get("disk_free_gb"), s.get("disk_pct_used"),
                 device_id,
             ),
         )
