@@ -250,6 +250,65 @@ def _collect_payload(conf):
     }
 
 
+def _migrate_key_material():
+    """Offer to protect an unencrypted signing key. NEVER blocks startup.
+
+    Operator decision 2026-08-03 — migrate-or-continue. Every currently-enrolled
+    device is tier 4, so refusing to start without a password would brick agents
+    for users who have no idea one is now required. Declining therefore keeps the
+    agent running on the unencrypted key and reports `key_protection_tier: none`,
+    which is the honest answer: the fleet view shows exactly which devices are
+    still unprotected rather than the product quietly pretending otherwise.
+
+    Every failure path leaves the existing key untouched and usable — the
+    migration deletes the plaintext copy only after proving the protected one
+    works (see keyprotect/migrate.py).
+    """
+    import enrollment
+    import secret_prompt
+
+    keys_dir = config.keys_dir()
+    try:
+        if not keyprotect.needs_migration(keys_dir):
+            return
+    except Exception as e:
+        log.debug("could not evaluate key migration: %s", e)
+        return
+
+    log.warning("this device's signing key is stored UNENCRYPTED on disk; "
+                "offering to protect it")
+    try:
+        secret = secret_prompt.prompt_secret_auto(
+            kind=keyprotect.SECRET_PASSWORD, mode=secret_prompt.CREATE)
+    except secret_prompt.NoPromptAvailable as e:
+        log.warning("cannot ask for a device password here (%s) — continuing with "
+                    "an UNENCRYPTED key", e)
+        return
+    if secret is None:
+        log.warning("device key protection DECLINED — continuing with an "
+                    "UNENCRYPTED key; this device will report tier 'none'")
+        return
+
+    try:
+        backend, _pub = keyprotect.migrate_legacy(secret, keys_dir)
+    except keyprotect.KeyProtectError as e:
+        log.error("key protection FAILED (%s) — the existing key is untouched, "
+                  "continuing", e)
+        return
+
+    enrollment.set_backend(backend)
+    # The conf pointer now names a file that no longer exists. An actively-false
+    # value is worse than an absent one, so clear it rather than leave it.
+    try:
+        conf = config.load()
+        if conf.get("private_key_path"):
+            conf["private_key_path"] = ""
+            config.save(conf)
+    except Exception as e:
+        log.debug("could not clear private_key_path: %s", e)
+    log.info("device key is now protected (tier=%s)", backend.tier_id)
+
+
 def _key_protection_tier():
     """Reported tier, or 'unknown' if it cannot be determined.
 
@@ -541,6 +600,11 @@ def main():
     if not _unlock_key_material():
         log.error("Device key unavailable — agent will not report. Exiting.")
         return
+
+    # Tier 4 -> tier 3. Placed after the unlock gate so both key-state
+    # transitions happen in one place, and before enrollment because enroll()
+    # signs — better to be on the final backend by then than to switch mid-flight.
+    _migrate_key_material()
 
     # Owner-gated enrollment: block until the owner approves this device in the
     # Nemesis dashboard before starting the /hw_data telemetry loop. Backward-

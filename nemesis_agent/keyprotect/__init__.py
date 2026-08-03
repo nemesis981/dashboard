@@ -14,6 +14,7 @@ from .base import (SECRET_PASSWORD, SECRET_PIN, BackendUnavailable, Corrupt,
                    KeyProtectError, KeyProtectionBackend, Locked, LockedOut,
                    NotProvisioned, NotSupported, WrongSecret)
 from .legacy import LegacyBackend
+from .migrate import MigrationAborted, migrate_legacy, needs_migration
 from .password import PasswordBackend
 from .tpm import TpmBackend
 
@@ -23,6 +24,7 @@ __all__ = [
     "Corrupt", "BackendUnavailable", "NotSupported", "KeyProtectionBackend",
     "PasswordBackend", "LegacyBackend", "TpmBackend",
     "detect_backend", "preferred_backend", "all_backends", "tier_of",
+    "needs_migration", "migrate_legacy", "MigrationAborted",
 ]
 
 #: Strongest first. Selection walks this order.
