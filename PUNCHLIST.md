@@ -1808,9 +1808,27 @@ this entry is the proposal, not the implementation.
       callee drift apart, nothing type-checks the boundary, and it stays invisible until
       something actually runs the path. Worth treating as a pattern rather than two unlucky
       one-offs — the tests that would catch it are exactly the ones nobody runs by default.
-    - [ ] Fix is small: update the call site to the current `handle_line()` signature. Worth
-      checking the rest of the file for the same drift at the same time rather than fixing the
-      one line the traceback happened to reach first.
+    - [ ] **Scoped 2026-08-03 — it is THREE stale sites, not one.** The traceback only reaches
+      the first, so fixing that line alone just moves the same `TypeError` down the file:
+      - `:163` `alert_watcher.handle_line(fake_line(rule_id), blocked_cache)` → `handle_line(line)`
+      - `:296` `alert_watcher.expiry_sweep(blocked_cache)` → `expiry_sweep()`
+      - `:303` `check("blocked_cache pruned", TEST_IP not in blocked_cache)` → asserts behaviour
+        that **no longer exists anywhere**; nothing in `alert_watcher.py` prunes any cache.
+    - [ ] The first two are mechanical. **The third is a judgment call and must not be silently
+      deleted** — dropping the line removes real coverage and leaves the suite quietly weaker.
+      Replace it with an assertion about the behaviour that actually superseded it (blocked-IP
+      state is now internal to the watcher via `load_blocked_ips`/`ufw_insert_top`), or state
+      explicitly in the diff why that coverage is no longer meaningful.
+    - [ ] **The dedupe assumption did NOT drift** — checked. `fake_line` yields a Priority-1 alert
+      with a fresh `rule_id`, so `handle_line` still routes to `process_new_alert()`, which is
+      where `insert_quarantine_row()` now lives. The test's expectation ("watcher created a
+      quarantine") remains correct; only the caller-supplied cache argument is obsolete.
+    - [ ] **Safe to run meanwhile.** Dry-run by default (enrichment, ufw and email are
+      monkeypatched); `--live` additionally requires root. It writes to the real `alerts.db`
+      using `TEST_IP = 203.0.113.99` (RFC 5737) and cleans up after itself. Nobody has been
+      touching the firewall by running it.
+    - [ ] **Origin: `9ffac56`**, the core_module six-daemon relocation — so this rot predates all
+      current work and is not a regression from anything landed on 2026-08-03.
     - [ ] Related nuisance, not a defect: unhandled exceptions in ANY repo test script trigger
       an Apport popup, because they run from `/opt/nemesis` as a normal user. Expect these
       during test work; they are cosmetic.
