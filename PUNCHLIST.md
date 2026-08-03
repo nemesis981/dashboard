@@ -1794,6 +1794,51 @@ this entry is the proposal, not the implementation.
       helpers is that they fail correctly; a refactor that is only proved to succeed
       correctly has not been tested.
 
+- [ ] **`alert_manager/test_quarantine.py` calls `alert_watcher.handle_line()` with the wrong
+  arity — the test drifted, the watcher did not.** Running the script raises
+  `TypeError: handle_line() takes 1 positional argument but 2 were given` at
+  `test_quarantine.py:163`, which passes `(fake_line(rule_id), blocked_cache)`.
+    - [ ] **Surfaced 2026-08-03 as an apparent outage.** Ubuntu's Apport captured the unhandled
+      exception and the desktop crash-notifier fired, which read as "quarantine.py stopped".
+      It is not a service — there is no `quarantine.py` in the repo, no systemd unit by that
+      name, and it is not in the watchdog's monitored list. All Nemesis services were healthy
+      throughout. Cost roughly half an hour to establish that nothing was actually down.
+    - [ ] **Second instance of the same defect class as the 2026-08-02 installer arity crash**
+      (`_read_baked_config()` returning 7 values while `main()` unpacked 8). A caller and a
+      callee drift apart, nothing type-checks the boundary, and it stays invisible until
+      something actually runs the path. Worth treating as a pattern rather than two unlucky
+      one-offs — the tests that would catch it are exactly the ones nobody runs by default.
+    - [ ] Fix is small: update the call site to the current `handle_line()` signature. Worth
+      checking the rest of the file for the same drift at the same time rather than fixing the
+      one line the traceback happened to reach first.
+    - [ ] Related nuisance, not a defect: unhandled exceptions in ANY repo test script trigger
+      an Apport popup, because they run from `/opt/nemesis` as a normal user. Expect these
+      during test work; they are cosmetic.
+
+- [ ] **Watchdog alert emails are being sent but not arriving.** On 2026-07-31 the watchdog
+  correctly detected the dashboard crash-loop within 86s and escalated by email four times
+  (10:55:08, 10:57:15, 10:59:21, 11:05:28 — `[INFO] Sent alert email for dashboard` each time
+  in `/var/log/nemesis/watchdog/watchdog.log`). None of them reached the operator. (A fifth
+  restart attempt at 11:07:28 succeeded — `[INFO] Service 'dashboard' restarted successfully`
+  — so correctly sent no email; verified directly against the log before filing this, not
+  copied from the original count of five.)
+    - [ ] **Detection and escalation are NOT the problem** — both worked exactly as designed.
+      The failure is somewhere between the send call and the inbox.
+    - [ ] **Just as likely an email-host or Proton-side issue as a Nemesis one.** Do not assume
+      the fault is ours: the send path may be fine and the mail silently dropped, filtered, or
+      rejected downstream. Establish which end before changing any code.
+    - [ ] **`Sent alert email` is a weak instrument and should be treated as one.** It proves the
+      send call returned without raising — not that SMTP accepted the message, and certainly not
+      that it was delivered. A log line that cannot distinguish "queued" from "delivered" will
+      report success through a total delivery outage, which is exactly what happened here. Worth
+      capturing the SMTP response code / message-id at minimum.
+    - [ ] **Consequence while unfixed:** every email-only alert path is effectively silent. The
+      watchdog's service-down escalation is the one that matters most, because nothing else
+      notices a dead service — it writes no `alerts` row, so the dashboard shows nothing either.
+    - [ ] **Do this during the email system pass**, not standalone — it belongs with the "full
+      email system review + real email antivirus protection" work already scoped for V2.0
+      Phase B, where the SMTP path is being examined anyway.
+
 - [ ] **Concurrent runs of the same archival job double-process — no single-run guard exists at
   any level.** Found by Window 3 while auditing the archive/coalesce consolidation (the
   `alert_manager/data_manager.py` + `core_module/hw_monitor/hw_monitor.py` merge). Pre-existing
