@@ -7292,7 +7292,8 @@ def api_hw_snapshot_detail(snap_id):
             """SELECT id, sensor_key, reading_value, baseline_avg, deviation,
                       captured_at, top_processes, cpu_pct, ram_mb,
                       net_mb_in, net_mb_out, disk_mb_read, disk_mb_write,
-                      throttle_detected, throttle_freq_mhz, sustained
+                      throttle_detected, throttle_freq_mhz, sustained,
+                      top_processes_ref
                FROM hw_anomaly_snapshots WHERE id=?""",
             (snap_id,),
         ).fetchone()
@@ -7302,7 +7303,8 @@ def api_hw_snapshot_detail(snap_id):
         cols = ("id", "sensor_key", "reading_value", "baseline_avg", "deviation",
                 "captured_at", "top_processes", "cpu_pct", "ram_mb",
                 "net_mb_in", "net_mb_out", "disk_mb_read", "disk_mb_write",
-                "throttle_detected", "throttle_freq_mhz", "sustained")
+                "throttle_detected", "throttle_freq_mhz", "sustained",
+                "top_processes_ref")
         return jsonify(dict(zip(cols, row)))
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -11260,7 +11262,9 @@ def dashboard():
                         '</div>' +
                         (d.top_processes
                             ? '<div style="font-size:0.75em;color:#bbb;margin-bottom:4px">Top processes:</div><pre>' + escapeHtml(d.top_processes.substring(0, 1500)) + '</pre>'
-                            : '') +
+                            : d.top_processes_ref
+                                ? '<div style="font-size:0.75em;color:#bbb;margin-bottom:4px">Top processes:</div><div style="font-size:0.78em;color:#8a8f98">Archived to <code>' + escapeHtml(d.top_processes_ref) + '</code> in the archives directory. The snapshot itself is unchanged; only the process list was moved.</div>'
+                                : '') +
                         '</div>';
                 }}).join("") +
                 (_sensorSnapshots.length > 10 ? '<p style="color:#bbb;font-size:0.8em">Showing first 10 of ' + _sensorSnapshots.length + ' events.</p>' : '');

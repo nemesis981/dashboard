@@ -5,6 +5,7 @@ Run as a daemon (writes a sample every 5 minutes to the hw_metrics table)
 or import as a module (dashboard.py uses get_live_metrics / init_db /
 get_recent_samples).
 """
+import gzip
 import json
 import logging
 import hashlib
@@ -195,7 +196,8 @@ def init_db():
                 gpu_load          REAL,
                 throttle_detected INTEGER DEFAULT 0,
                 throttle_freq_mhz REAL,
-                sustained         INTEGER DEFAULT 0
+                sustained         INTEGER DEFAULT 0,
+                top_processes_ref TEXT
             )
         """)
         c.execute(
@@ -206,6 +208,13 @@ def init_db():
         existing_anom = {row[1] for row in c.execute("PRAGMA table_info(hw_anomaly_snapshots)").fetchall()}
         if "device_id" not in existing_anom:
             c.execute("ALTER TABLE hw_anomaly_snapshots ADD COLUMN device_id TEXT DEFAULT 'local'")
+        # top_processes_ref: archive filename once the blob has been MOVED out
+        # (see archive_old_top_processes). The row itself never leaves the table,
+        # so every numeric field stays searchable; only the process-list text is
+        # one indirection away. NULL + NULL blob means "never captured"; NULL blob
+        # + a ref means "archived, here is where".
+        if "top_processes_ref" not in existing_anom:
+            c.execute("ALTER TABLE hw_anomaly_snapshots ADD COLUMN top_processes_ref TEXT")
 
         # correlation_events: fired when ≥2 sensors are simultaneously anomalous.
         c.execute("""
@@ -1170,7 +1179,8 @@ def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
             f"""SELECT id, sensor_key, reading_value, baseline_avg, deviation,
                        captured_at, top_processes, cpu_pct, ram_mb,
                        net_mb_in, net_mb_out, disk_mb_read, disk_mb_write,
-                       throttle_detected, throttle_freq_mhz, sustained
+                       throttle_detected, throttle_freq_mhz, sustained,
+                       top_processes_ref
                 FROM hw_anomaly_snapshots {where}
                 ORDER BY captured_at DESC LIMIT ?""",
             params,
@@ -1178,8 +1188,149 @@ def get_anomaly_snapshots(sensor_key=None, since_ts=None, limit=200):
         cols = ("id", "sensor_key", "reading_value", "baseline_avg", "deviation",
                 "captured_at", "top_processes", "cpu_pct", "ram_mb",
                 "net_mb_in", "net_mb_out", "disk_mb_read", "disk_mb_write",
-                "throttle_detected", "throttle_freq_mhz", "sustained")
+                "throttle_detected", "throttle_freq_mhz", "sustained",
+                "top_processes_ref")
         return [dict(zip(cols, r)) for r in rows]
+    finally:
+        conn.close()
+
+
+ARCHIVE_DIR = os.path.join(os.path.dirname(DB_PATH), "archives")
+TOP_PROC_ARCHIVE_DAYS = 14
+
+
+def _read_archive(path):
+    """Return {id: top_processes} from a gzipped-JSONL archive. Raises on any
+    unreadable/malformed file — callers must not treat a failure as an empty
+    archive, which would look like a successful move of zero rows."""
+    out = {}
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            out[rec["id"]] = rec["top_processes"]
+    return out
+
+
+def _verify_archive(path, expected):
+    """Prove the archive holds EXACTLY `expected` ({id: text}) before anything
+    is cleared from the live table.
+
+    Returns (ok, reason). Content is compared, not just row count: a file with
+    the right number of rows and the wrong text would otherwise pass.
+    """
+    try:
+        got = _read_archive(path)
+    except Exception as e:
+        return (False, f"archive unreadable: {e}")
+    if set(got) != set(expected):
+        missing = len(set(expected) - set(got))
+        extra = len(set(got) - set(expected))
+        return (False, f"id mismatch (missing={missing}, unexpected={extra})")
+    for k, v in expected.items():
+        if got[k] != v:
+            return (False, f"content mismatch at id={k}")
+    return (True, "ok")
+
+
+def _selftest_verifier():
+    """Prove the verifier can FAIL before trusting it to approve a real move.
+
+    Without this, a verifier broken so that it always returns True would sail
+    through every archival run and the first symptom would be silently lost
+    process lists. Mirrors the CANARIES pattern in nemesis-fw-neverblock: a
+    known-good case that MUST pass and known-bad cases that MUST NOT.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "canary.jsonl.gz")
+        good = {1: "alpha", 2: "beta"}
+        with gzip.open(p, "wt", encoding="utf-8") as fh:
+            for k, v in good.items():
+                fh.write(json.dumps({"id": k, "top_processes": v}) + "\n")
+        if not _verify_archive(p, good)[0]:
+            return (False, "known-good archive failed verification")
+        if _verify_archive(p, {1: "alpha", 2: "WRONG"})[0]:
+            return (False, "verifier accepted mismatched CONTENT")
+        if _verify_archive(p, {1: "alpha", 2: "beta", 3: "gamma"})[0]:
+            return (False, "verifier accepted a MISSING row")
+        if _verify_archive(os.path.join(td, "nope.gz"), good)[0]:
+            return (False, "verifier accepted an unreadable file")
+    return (True, "ok")
+
+
+def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
+    """MOVE aged `top_processes` blobs into a verified archive file.
+
+    This is a move, never a delete. Ordering is the correctness property: the
+    archive is written, re-opened, and compared row-by-row against the live
+    values BEFORE a single column is cleared. Any failure leaves the live data
+    exactly as it was — a partial or unreadable archive must never be treated
+    as a successful move.
+
+    Archive files themselves are never removed by this or any other code path.
+    Permanently destroying archived material is a user-initiated action only.
+    """
+    ok, why = _selftest_verifier()
+    if not ok:
+        log.error("top_processes archival ABORTED — verifier self-test failed: %s", why)
+        return {"status": "error", "error": f"verifier self-test failed: {why}"}
+
+    conn = _db_connect()
+    try:
+        cutoff = f"-{int(cutoff_days)} days"
+        rows = conn.execute(
+            "SELECT id, captured_at, top_processes FROM hw_anomaly_snapshots "
+            "WHERE captured_at < datetime('now','localtime',?) "
+            "  AND top_processes IS NOT NULL AND top_processes != '' "
+            "  AND top_processes_ref IS NULL",
+            (cutoff,),
+        ).fetchall()
+        if not rows:
+            return {"status": "ok", "archived": 0, "bytes": 0, "file": None}
+
+        expected = {r[0]: r[2] for r in rows}
+        total_bytes = sum(len(r[2]) for r in rows)
+        if dry_run:
+            return {"status": "ok", "archived": 0, "would_archive": len(rows),
+                    "bytes": total_bytes, "file": None, "dry_run": True}
+
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+        fname = f"hw_anomaly_top_processes_{stamp}.jsonl.gz"
+        final = os.path.join(ARCHIVE_DIR, fname)
+        if os.path.exists(final):
+            return {"status": "error", "error": f"archive already exists: {fname}"}
+        tmp = final + ".tmp"
+
+        # Write to .tmp then atomically rename, so a crash mid-write can never
+        # leave a truncated file sitting at the name the DB will point at.
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            for rid, cap, blob in rows:
+                fh.write(json.dumps({"id": rid, "captured_at": cap,
+                                     "top_processes": blob}) + "\n")
+        os.replace(tmp, final)
+
+        ok, why = _verify_archive(final, expected)
+        if not ok:
+            log.error("top_processes archival ABORTED — %s (live data untouched, "
+                      "archive kept for inspection: %s)", why, final)
+            return {"status": "error", "error": why, "file": fname}
+
+        # Verified. Only now is it safe to clear the live column.
+        cur = conn.cursor()
+        cur.executemany(
+            "UPDATE hw_anomaly_snapshots SET top_processes=NULL, top_processes_ref=? "
+            "WHERE id=?",
+            [(fname, rid) for rid in expected],
+        )
+        conn.commit()
+        log.info("top_processes archival: moved %d rows (%.1f MB) to %s",
+                 len(expected), total_bytes / 1048576.0, fname)
+        return {"status": "ok", "archived": len(expected),
+                "bytes": total_bytes, "file": fname}
     finally:
         conn.close()
 
