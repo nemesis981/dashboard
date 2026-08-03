@@ -1672,3 +1672,26 @@ this entry is the proposal, not the implementation.
     - [ ] Interim workaround used this time, for the record: direct `UPDATE enrollment_tokens SET
       revoked=1`, preceded by a USB state snapshot, and verified end-to-end (`/start` and `/zip`
       both returned 410 afterwards) rather than trusting the flag alone.
+
+- [ ] **Installer target address is inherited, not chosen — transport security decided by whichever
+  URL fetched the installer.** `_nemesis_tailnet_host()` (`dashboard.py`) prefers
+  `NEMESIS_TAILNET_ADDR`, then `NEMESIS_SERVER_IP`, then falls back to the host of whatever request
+  fetched the installer. With neither env var set, two installers generated minutes apart can bake
+  different server addresses — and therefore different transport security — with nothing anywhere
+  recording which a device got.
+    - [ ] Why it matters: Nemesis terminates TLS nowhere (the single enabled nginx site is
+      `listen 80`, no `ssl_certificate`; no `ssl_context`/`wrap_socket` in any Python). A
+      non-tailnet target therefore means the installer download — which carries a one-time
+      enrollment token and a live Tailscale pre-auth key — and every later heartbeat cross the
+      network in clear. A tailnet target rides WireGuard and none of that is exposed.
+    - [ ] **Currently latent, not active** (verified 2026-08-03): `NEMESIS_PUBLIC_URL` is set on
+      this box and resolves inside `100.64.0.0/10`, so links and agents already ride the tailnet.
+      Unset it, or point it at a LAN address, and everything silently drops to cleartext.
+    - [ ] **Warned-on, not prevented** (2026-08-03): cleartext and unclassifiable targets now raise
+      an operator-facing warning when a link is generated, plus a server-side log line. The
+      fallback was deliberately kept rather than made fatal — a LAN-only deployment with no tailnet
+      is a supported configuration, so refusing outright would break legitimate installs.
+    - [ ] Fix: set `NEMESIS_TAILNET_ADDR` on every deployment that has a tailnet (makes the target
+      deterministic and independent of request context), then decide whether a cleartext target
+      should be refused rather than warned. Worth doing regardless of the separate TLS decision,
+      which is sequenced after ADR 0004 Stage 1.
