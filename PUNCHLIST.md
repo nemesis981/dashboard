@@ -1725,3 +1725,22 @@ this entry is the proposal, not the implementation.
       longer exists, which is the kind of detail that erodes trust in the rest of the list.
     - [ ] Fix is one line of copy in the modal HTML. Do it alongside the next backup-UI change
       rather than as its own commit.
+
+- [ ] **The frozen agent's log is written into the PyInstaller temp dir and vanishes when it
+  exits.** `agent.py` sets `_HERE = os.path.dirname(os.path.abspath(__file__))` and logs to
+  `_HERE/nemesis_agent.log`. Under a PyInstaller one-file build `__file__` resolves inside the
+  `_MEIPASS` extraction directory, so the log lands there and is removed with it on exit.
+    - [ ] **Confirmed live 2026-08-03** on a frozen `NemesisAgent.exe` (CI run for `74d68b6`):
+      the log was found at `%TEMP%\_MEI<nnnnn>\nemesis_agent.log`, containing the expected
+      `Nemesis Agent starting (platform=Windows)` line — in a directory that only exists while
+      the process is alive.
+    - [ ] Why it matters: an agent that fails on a remote or trip machine leaves no diagnostic
+      behind, which is exactly the case the log exists for. A crash is the scenario where the
+      evidence is most needed and least likely to survive.
+    - [ ] Pre-existing — not introduced by the tier-3 key-protection work; that work just made
+      it visible, because the startup gate and migration prompt are the first things anyone
+      would want to read the log to debug.
+    - [ ] Fix is small: resolve the log path the way `config.py` already resolves its own state
+      (`%APPDATA%\Nemesis` when frozen, alongside the source otherwise) rather than from
+      `__file__`. `installer_gui.py` already does the right thing and writes its install log to
+      `%APPDATA%\Nemesis`, so there is a working pattern in-tree to copy.
