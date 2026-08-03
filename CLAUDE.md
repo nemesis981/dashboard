@@ -151,7 +151,12 @@ number.
   milestone (a build/fix reaching ready-to-hand-off, a major finding, a verification
   pass completed) — specifically to survive a mid-session context compaction that a
   closeout-only write would not.** A compaction can happen at any point, not only at
-  the end of a session, so the defense has to be continuous.
+  the end of a session, so the defense has to be continuous. The same continuous
+  writing is what makes this useful against a lost connection or an unrequested
+  reboot too — either one can end a session with no closeout at all, not just a
+  compacted one, and a file that is at most one milestone stale is what a cold
+  restart actually needs to pick back up, not a document that only ever existed in
+  a context that is now gone.
   **At explicit closeout specifically: read the file back and EDIT it down** —
   remove or stub whatever describes now-completed, already-shipped work that a cold
   reader would not need reconstructed in full (a one-line "shipped, see commit X" is
