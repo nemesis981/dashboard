@@ -780,31 +780,35 @@ install phase (BLOCKED). Items below; the High/architectural ones must GRADUATE 
   Functional join was the key; the prompt is cosmetic/parallel. Fix direction: suppress/skip the
   Tailscale GUI launch (or `tailscale up --unattended` / config to prevent the login window
   surfacing). Polish, NOT a blocker — the mechanism works. (installer_gui.py `_install_tailscale`.)
-  - [ ] **Stale first-screen text half — REOPENED 2026-08-02, prior closeout was wrong.**
-    Window 2's earlier closeout (same date, same session) incorrectly marked this resolved.
-    Window 1 has now directly watched the stale "Before you start: install Tailscale
-    (tailscale.com/download), sign in…" copy render on screen from a current build, at
-    `installer_gui.py:99,105,110` (the three tier variants of `_first_screen_text`'s no-key
-    branch) — live in current HEAD, not a stale artifact.
-
-    What the earlier closeout got right: `_first_screen_text(has_preauth_key, tier)`'s gating
-    logic itself traces correctly end-to-end in the source as of this reopening —
-    `_read_baked_config()`'s `preauth_key` is unpacked in the right position in `main()`,
-    passed positionally into `InstallerApp.__init__` matching its signature, stored as
-    `self.preauth_key`, and `_render_instructions()` (called both on init and on tier-switch)
-    correctly branches on `bool(self.preauth_key)`. The no-key fallback path
-    (`_ensure_tailscale()`) also genuinely does not auto-install Tailscale, so the manual-copy
-    text is accurate content *for that specific path*.
-
-    What's still unresolved: given the gating traces correctly in static source, Window 1's
-    live observation means either (a) the specific build/scenario tested genuinely had no
-    preauth key by design — in which case the copy itself, not the gating, is what needs
-    reconsidering (e.g. distinguishing "you must install Tailscale yourself" from "you must
-    sign in yourself" more precisely, since the two are not equivalent), or (b) something in
-    the build/packaging path diverges from this source file in a way static reading alone
-    won't surface. Root cause not yet pinned down — do not assume the fix is a one-line copy
-    edit until (a) vs (b) is resolved. Text fix deferred to a follow-up commit per the
-    reopening instruction, not attempted here.
+  - [x] **Stale first-screen text half — CLOSED AGAIN 2026-08-03. The 2026-08-02 reopening was
+    itself a misreading, not a bug.** Full history, so a third reopening doesn't repeat either
+    mistake:
+    1. Original closeout (2026-08-02, Window 2): marked resolved.
+    2. Reopened same day (Window 1): watched the manual "Before you start: install Tailscale…"
+       copy render live at `installer_gui.py:99,105,110` and read that as evidence the gating
+       was broken.
+    3. **Re-verified 2026-08-03, both halves of the question now closed:**
+       - **Gating logic** — already established correct in the 08-02 reopening and reconfirmed
+         here: `_read_baked_config()`'s `preauth_key` unpacks in the right position, flows
+         positionally into `InstallerApp.__init__`, is stored as `self.preauth_key`, and
+         `_render_instructions()` branches on `bool(self.preauth_key)` correctly.
+       - **The copy itself** — the actual open question from the 08-02 reopening — is also
+         correct. `_first_screen_text`'s own docstring states the manual-Tailscale text is
+         shown "ONLY on the no-key fallback path," and `_ensure_tailscale()`
+         (`installer_gui.py:529-560`) confirms directly: on `state == "not_installed"` it tells
+         the user to install Tailscale manually and click Retry — it never calls any
+         auto-install path. A no-key build has no self-onboard mechanism to auto-install
+         Tailscale with, so telling that user to install it themselves is the ONLY correct
+         copy, not stale content.
+    4. **Root cause of the reopening itself: option (a) from the 08-02 entry — the tested
+       build/scenario genuinely had no preauth key by design.** There was no divergence between
+       source and the running build (option (b), the alternative the 08-02 entry left open) —
+       watching correct no-key copy render during a no-key install looked like a stale-text bug
+       from the outside, but the code was doing exactly what it should for that input.
+    - [ ] Follow-on, not part of this closure: the 08-02 entry's copy-precision idea (distinguish
+      "install Tailscale yourself" from "sign in yourself" more precisely) is a genuine, small
+      wording improvement independent of there being a bug — worth doing opportunistically, not
+      blocking.
 - [ ] **PL-11 (Doc) — hardware-monitor prompt is PawnIO; install docs must tell users to approve
   it.** Found in the test-2 VM install (screenshot
   `docs/audits/trip-1.0.8-test2-vm-screenshot-2026-07-01.png`): LibreHardwareMonitor 0.9.x pops
