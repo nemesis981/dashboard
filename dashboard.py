@@ -3155,6 +3155,73 @@ def install_windows_zip(token):
         "Content-Disposition": f'attachment; filename="NemesisAgent-Setup-{token[:8]}.zip"'})
 
 
+#: How long without a check-in before the explanatory note appears. Deliberately
+#: generous — 6x the agent's 300s default — because the server does not store each
+#: device's poll_interval, so a tighter bound would call a slow-polling device
+#: "silent" when it is merely early.
+_AGENT_STALE_AFTER_S = 30 * 60
+
+#: Tolerance for an agent clock running ahead of the server's. `agent_last_seen`
+#: comes from the AGENT's clock (payload["timestamp"]), and unlike the heartbeat
+#: signature's signed_at it is not skew-checked, so a future value is possible.
+_AGENT_CLOCK_SKEW_S = 300
+
+
+def _agent_checkin_state(last_seen, now=None):
+    """(label, note) describing an agent's check-in state.
+
+    Deliberately never returns "online" or "offline". The server cannot tell a
+    powered-off device from one off the network from one waiting at its unlock
+    prompt — distinguishing them would need an unauthenticated "I'm locked"
+    beacon, which an attacker could forge just as easily and which would add a
+    new unauthenticated ingress to the listener Stage 1 exists to authenticate.
+    So this states what is known and names what is not.
+
+    Every failure mode gets its own explicit label rather than falling through to
+    something that reads as healthy: a missing timestamp, an unparseable one, and
+    one from a disagreeing clock are three different situations, and none of them
+    is "reporting normally".
+    """
+    raw = str(last_seen or "").strip()
+    if not raw or raw == "-":
+        return ("has never checked in",
+                "This device enrolled but has never reported. It may not have "
+                "finished installing, or it may be waiting for its device password.")
+    try:
+        seen = datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        # An unreadable timestamp is NOT evidence of freshness. Say so.
+        return ("check-in time unreadable (%s)" % raw,
+                "Nemesis could not read this device's last check-in time, so its "
+                "status is unknown.")
+
+    now = now or datetime.now()
+    age = (now - seen).total_seconds()
+    if age < -_AGENT_CLOCK_SKEW_S:
+        return ("check-in time is in the future (%s)" % raw,
+                "This device's clock disagrees with the server's, so its "
+                "check-in time cannot be trusted as a freshness signal.")
+    if age < _AGENT_STALE_AFTER_S:
+        return ("last check-in %s" % _human_age(age), "")
+    return ("no check-in since %s" % raw,
+            "This device may be powered off, off the network, or waiting for its "
+            "device password after a restart. Nemesis cannot tell these apart. If "
+            "you think it may be lost or stolen, revoke it.")
+
+
+def _human_age(seconds):
+    """Coarse age for display. Never negative — a small negative age is clock
+    jitter, not the future, and rendering '-3s ago' would look like a bug."""
+    s = max(0, int(seconds))
+    if s < 90:
+        return "just now" if s < 15 else "%ds ago" % s
+    if s < 5400:
+        return "%dm ago" % (s // 60)
+    if s < 172800:
+        return "%dh ago" % (s // 3600)
+    return "%dd ago" % (s // 86400)
+
+
 def _render_agent_devices_html() -> str:
     """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
     try:
@@ -3287,14 +3354,25 @@ def _render_agent_devices_html() -> str:
         net_label = (link_label + " &middot; " + conn_label) if link_label else conn_label
         wifi_note = ('<br><span style="color:#ffcc00;font-size:0.8em">'
                      '&#9888; WiFi — Suricata coverage via Mode 2 (v2)</span>') if lt == "wifi" else ""
+        # No online/offline badge, deliberately: a binary indicator would assert a
+        # determination the server cannot make. The Revoke control sits directly
+        # below the note because "I can't tell whether this is stolen" is exactly
+        # the situation revoke exists for.
+        _ck_label, _ck_note = _agent_checkin_state(r["agent_last_seen"])
+        checkin_label = html.escape(_ck_label)
+        checkin_note = (
+            '<div style="background:#ffcc0018;border:1px solid #ffcc0055;color:#ddb857;'
+            'border-radius:6px;padding:6px 10px;margin:6px 0;font-size:0.82em">'
+            + html.escape(_ck_note) + '</div>') if _ck_note else ""
         h.append(
             '<div style="background:#0d0d1e;border:1px solid #222;border-radius:8px;'
             'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
             f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
             f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
             f'<span style="color:#888">{net_label}</span> &middot; '
-            f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span> &middot; '
+            f'<span style="color:#888">{checkin_label}</span> &middot; '
             f'<span style="color:#888">{lhm}</span>{wifi_note}<br>'
+            f'{checkin_note}'
             f'<button onclick="agentRevoke(\'{did}\')" style="background:#ff444422;color:#ff6666;'
             'border:1px solid #ff4444;border-radius:6px;padding:4px 12px;cursor:pointer;'
             'margin-top:6px;font-size:0.92em">Revoke</button>'
