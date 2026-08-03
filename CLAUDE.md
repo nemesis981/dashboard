@@ -523,6 +523,15 @@ sweep will never find it. For `audit_log` only, the durable marker is: use an RF
 row `id` + `request_id` in that session's worklog. Confirmed 2026-07-31 while verifying the
 `request_id` column; flagged here so it is not re-discovered later as a missed case. Do not
 generalise this exception — every other table has a field to label, and must be labelled.
+**Caveat (2026-08-03): RFC 5737 is correct for this labelling use only.** It is the wrong
+choice for exercising `is_private`-branching code — Python's `ipaddress` classifies all
+three TEST-NET blocks (RFC 5737) as `is_private=True`, so code that early-returns or
+filters on address privacy silently skips them, and a test built that way can look like it
+passed while never reaching the logic under test. That is a separate, code-path concern
+from this rule's DB-row-labelling use; see `alert_manager/test_quarantine.py`'s
+`TEST_IP_PUBLIC` convention (`192.88.99.x` — IANA-reserved/deprecated, so it goes nowhere,
+but reads as public) for the pattern to use instead when a test needs an address Python
+will actually treat as public.
 
 ### 12. Local mirror for handoff/briefing/audits docs
 `docs/handoff/` (`HANDOFF.md`, `supplements/`, `worklog/`), `docs/briefing/`, and
