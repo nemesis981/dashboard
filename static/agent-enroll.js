@@ -74,8 +74,19 @@ function genWindowsInstaller() {
       if (d.preauth_warning) {
         keyNote = ' ⚠ ' + d.preauth_warning;
       }
+      /* Transport verdict for this specific link. Shown as its own banner rather
+         than appended to keyNote: it is about whether the download and this
+         device's future reporting are encrypted at all, which is a different
+         (and louder) concern than whether a tailnet key was baked in. */
+      var transportNote = '';
+      if (d.transport_warning) {
+        transportNote =
+          '<div style="background:#ff444422;border:1px solid #ff4444;color:#ff9999;' +
+          'border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:0.82em">' +
+          '⚠ ' + d.transport_warning + '</div>';
+      }
       out.style.color = '#ddd';
-      out.innerHTML =
+      out.innerHTML = transportNote +
         '<div style="color:#aaa;font-size:0.82em;margin-bottom:4px">Share this link with your user ' +
         '(self-contained Windows installer; expires ' + when + ').' + keyNote + '</div>' +
         '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +

@@ -16,6 +16,7 @@ import threading
 import tarfile
 import shutil
 import socket
+import ipaddress
 import uuid as _uuid_mod
 from datetime import datetime, timedelta
 
@@ -2853,16 +2854,63 @@ def api_agent_revoke(device_id):
 
 
 # ── Windows installer generator (token-based auto-approve enrollment) ─────────
+#: Tailscale hands out addresses from the CGNAT range. An agent target inside it
+#: reaches the server through WireGuard; anything else is cleartext HTTP on the
+#: wire, because nothing in this product terminates TLS.
+_TAILNET_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _classify_transport(host: str):
+    """(verdict, detail) for an agent-facing host. Never guesses.
+
+    verdict is "tailnet", "cleartext", or "unknown". A hostname cannot be
+    classified without resolving it, and a DNS lookup does not belong in a
+    request path — so it returns "unknown" EXPLICITLY rather than assuming
+    either answer. An unclassifiable host is not evidence of safety.
+    """
+    bare = (host or "").split("://")[-1].split("/")[0].split(":")[0].strip()
+    if not bare:
+        return "unknown", "no host to classify"
+    try:
+        ip = ipaddress.ip_address(bare)
+    except ValueError:
+        return "unknown", "host is a name, not an address — cannot classify without DNS"
+    if ip in _TAILNET_CGNAT:
+        return "tailnet", "inside the Tailscale CGNAT range"
+    if ip.is_loopback:
+        return "tailnet", "loopback — never leaves the machine"
+    return "cleartext", "not a tailnet address — traffic to it is unencrypted"
+
+
 def _nemesis_tailnet_host() -> str:
     """Bare host to bake into a generated installer as the agent's server target.
     Media + enrollment are intended to ride the TAILNET (ADR 0011), so prefer the
     tailnet address: env NEMESIS_TAILNET_ADDR, else NEMESIS_SERVER_IP, else the host
     the dashboard was reached on (Rule-8 safe — no hardcoded box specifics). The agent
-    posts to this host on the hw_monitor port (5001)."""
-    host = (os.environ.get("NEMESIS_TAILNET_ADDR", "").strip()
-            or os.environ.get("NEMESIS_SERVER_IP", "").strip()
-            or (request.host or "127.0.0.1"))
-    return host.split(":")[0]
+    posts to this host on the hw_monitor port (5001).
+
+    The env vars are not merely a convenience. Without one, this falls back to the
+    host of whatever request happened to fetch the installer — so whether an agent
+    talks over WireGuard or in cleartext for its entire life is decided by a URL,
+    silently, with nothing recording which was chosen. Configuring
+    NEMESIS_TAILNET_ADDR makes that a deliberate decision instead of an accident.
+    The fallback is kept because a LAN-only deployment with no tailnet is a
+    supported configuration — but it now says so out loud.
+    """
+    configured = (os.environ.get("NEMESIS_TAILNET_ADDR", "").strip()
+                  or os.environ.get("NEMESIS_SERVER_IP", "").strip())
+    if configured:
+        return configured.split(":")[0]
+
+    host = (request.host or "127.0.0.1").split(":")[0]
+    verdict, detail = _classify_transport(host)
+    if verdict != "tailnet":
+        log.warning(
+            "installer target resolved from the request host and is %s (%s); "
+            "agents built from it will use that address for every heartbeat. "
+            "Set NEMESIS_TAILNET_ADDR to make this deterministic.",
+            verdict, detail)
+    return host
 
 
 def _valid_installer_token(token):
@@ -2977,9 +3025,32 @@ def api_agent_installer_generate():
     base = (os.environ.get("NEMESIS_PUBLIC_URL", "").strip().rstrip("/")
             or (f"http://{tailnet_addr}" if tailnet_addr else "")
             or request.host_url.rstrip("/"))
+    # Transport verdict for THIS link, surfaced to the operator at the one moment
+    # they can still act on it. Nothing in this product terminates TLS, so a
+    # non-tailnet target means the installer download (which carries a live
+    # enrollment token and pre-auth key) and every later heartbeat cross the
+    # network in clear. Previously this was decided silently by whichever URL was
+    # in play, and nothing anywhere recorded the outcome.
+    _t_verdict, _t_detail = _classify_transport(base)
+    transport_warning = ""
+    if _t_verdict == "cleartext":
+        transport_warning = (
+            "This link points at an address that is not on your tailnet, and Nemesis "
+            "does not use HTTPS — the download (which contains a one-time enrollment "
+            "token and Tailscale key) and this device's later reporting will not be "
+            "encrypted. Set NEMESIS_TAILNET_ADDR, or share a tailnet link instead.")
+    elif _t_verdict == "unknown":
+        transport_warning = (
+            "Could not confirm whether this link rides your tailnet, so its traffic "
+            "may not be encrypted. Set NEMESIS_TAILNET_ADDR to a tailnet address to "
+            "make this certain.")
+    if transport_warning:
+        log.warning("installer link transport: %s (%s)", _t_verdict, _t_detail)
     return jsonify({
         "ok": True,
         "token": token,
+        "transport": _t_verdict,
+        "transport_warning": transport_warning,
         "device_name_hint": hint,
         "expires_at": expires,
         "preauth_key_baked": bool(preauth_key),
