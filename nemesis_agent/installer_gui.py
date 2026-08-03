@@ -240,6 +240,11 @@ class InstallerApp:
     #: very software whose origin is being determined. See that method's docstring.
     _provenance_probed = False
 
+    #: Task-signing trust anchor (base64 DER), lifted out of the sidecar conf by
+    #: _consume_conf() before it deletes the file. Empty means this installer had
+    #: no anchor to give, which is honest — the agent then accepts no tasks.
+    server_public_key = ""
+
     def __init__(self, root, server, token, device_name, support_contact="your administrator",
                  preauth_key="", conf_path="", poll_interval="", l2_enforce=""):
         self.root = root
@@ -696,6 +701,17 @@ class InstallerApp:
         plaintext on the user's machine post-install."""
         path = getattr(self, "conf_path", "")
         if path and os.path.isfile(path):
+            # Capture the task-signing trust anchor BEFORE the file is destroyed.
+            # _enroll() runs long after this point, so reading the conf there finds
+            # nothing — and would report "no server key" indistinguishably from a
+            # server that never sent one.
+            try:
+                _cfg = configparser.ConfigParser()
+                _cfg.read(path)
+                self.server_public_key = _cfg.get(
+                    "nemesis", "server_public_key", fallback="")
+            except Exception:
+                self.server_public_key = ""
             try:
                 os.remove(path)
             except Exception:
@@ -893,6 +909,23 @@ class InstallerApp:
             raise RuntimeError(
                 "internal error: no device password was collected before enrollment")
         enrollment.ensure_provisioned(self.device_secret)   # -> %APPDATA%\Nemesis\keys
+
+        # Pin the server's public key (ADR 0004 Stage 1 trust anchor). Read
+        # DIRECTLY from the conf rather than threaded through _read_baked_config()'s
+        # return tuple: that tuple is unpacked positionally in main(), and its own
+        # docstring records why extending it is dangerous — an arity slip on the
+        # no-conf path ships an exe that dies before drawing a screen while the
+        # conf-present path keeps working and hides it (the 2026-08-02 crash).
+        # Reading one extra key here touches no unpack site at all.
+        try:
+            _srv_key = getattr(self, "server_public_key", "")
+            if _srv_key and enrollment.pin_server_key(_srv_key):
+                self._ilog("enroll: pinned server public key (task-signing anchor)")
+            elif not _srv_key:
+                self._ilog("enroll: no server public key in conf -- this device will "
+                           "not accept signed tasks")
+        except Exception as _e:
+            self._ilog("enroll: could not pin server public key: %s" % _e)
         self._ilog("enroll: POST to server (keypair ready, pre-enrollment scan running)")
         device_id, _status = enrollment.enroll(conf)   # token + pre-enrollment scan
         self._ilog("enroll: device_id=%s status=%s" % (

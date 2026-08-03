@@ -12,6 +12,7 @@ Backward-compatible: an already-reporting device (device_id already in the .conf
 grandfathered ``approved`` server-side) passes straight through without re-enrolling.
 """
 
+import base64
 import json
 import os
 import shutil
@@ -103,6 +104,67 @@ def reset_backend():
     global _backend
     with _backend_lock:
         _backend = None
+
+
+SERVER_PUBLIC_NAME = "server_public.pem"
+
+
+def _server_key_path():
+    return os.path.join(config.keys_dir(), SERVER_PUBLIC_NAME)
+
+
+def pin_server_key(b64_der: str) -> bool:
+    """Pin the server's public key, delivered as base64 DER in the install conf.
+
+    This is the trust anchor for server->agent task signing (ADR 0004 Stage 1).
+    Without it an agent cannot tell a real task from one injected by anything able
+    to answer on the server's socket — and the listener is plain HTTP, with local
+    agents talking cleartext over the LAN by design.
+
+    Idempotent and non-destructive: an already-pinned key is never silently
+    replaced. Overwriting on every install would turn a re-run of the installer
+    into a way to re-anchor an agent's trust, which is precisely what pinning
+    exists to prevent. Returns True if a key is in place afterwards.
+    """
+    if not b64_der:
+        return False
+    path = _server_key_path()
+    if os.path.exists(path):
+        return True
+    try:
+        der = base64.b64decode(b64_der)
+        # Parse before writing: a malformed anchor written to disk would fail
+        # later, at task-verification time, far from its cause.
+        serialization.load_der_public_key(der)
+        os.makedirs(config.keys_dir(), exist_ok=True)
+        pem = serialization.load_der_public_key(der).public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo)
+        with open(path, "wb") as fh:
+            fh.write(pem)
+        return True
+    except Exception as exc:
+        print("WARNING: could not pin the server public key (%s); this device "
+              "will not accept signed tasks." % exc)
+        return False
+
+
+def pinned_server_key():
+    """The pinned server public key object, or None if this device has none.
+
+    None is an answer the caller must handle, not a default to fall through:
+    an agent with no anchor must execute NO tasks rather than accept unsigned
+    ones. That fails closed at zero cost, because no agent executes remote tasks
+    today anyway.
+    """
+    path = _server_key_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as fh:
+            return serialization.load_pem_public_key(fh.read())
+    except Exception:
+        return None
 
 
 def ensure_provisioned(secret: str = None) -> str:

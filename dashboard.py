@@ -2966,6 +2966,26 @@ def _render_install_conf(server_host: str, token: str, hint: str,
              "nemesis_port = 5001",
              f"device_name = {safe_hint}",
              f"enrollment_token = {token}"]
+    # Trust anchor for server->agent task signing (ADR 0004 Stage 1). Delivered
+    # HERE, in the token-gated download, rather than over the wire at enrollment:
+    # pinning on first contact is trust-on-first-use, and an attacker who owns the
+    # network at that exact moment can pin their own key. This file already travels
+    # with a credential the operator handed over deliberately, so the anchor arrives
+    # by the same out-of-band path at no extra cost.
+    #
+    # Base64 DER, not PEM: this is INI read by configparser, where a multi-line PEM
+    # needs continuation-line indentation that breaks the moment anyone hand-edits
+    # the sidecar.
+    #
+    # Best-effort by design — a missing key must not break installer generation.
+    # An agent that pins nothing simply executes no tasks, which is exactly what
+    # every agent does today, so the degradation is a no-op rather than a hole.
+    try:
+        import server_keys
+        lines.append(f"server_public_key = {server_keys.public_key_b64()}")
+    except Exception as exc:
+        log.warning("no server public key to bake into the installer conf (%s); "
+                    "agents from this installer will not accept signed tasks", exc)
     if preauth_key:
         lines.append(f"preauth_key = {preauth_key}")
     if poll_interval:

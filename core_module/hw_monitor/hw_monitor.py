@@ -2643,6 +2643,21 @@ def main():
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
 
+    # Server signing keypair (ADR 0004 Stage 1). hw_monitor is the ONLY process
+    # that signs task envelopes, so it is the only one that holds the private
+    # half — the dashboard gets the public key alone. Created here rather than at
+    # deploy time because the data dir is setgid nemesis-db and this process is in
+    # that group, so it needs no root. Best-effort: a failure here must not stop
+    # telemetry ingest, and nothing signs or verifies yet, so an absent keypair is
+    # inert rather than dangerous.
+    try:
+        import server_keys
+        server_keys.ensure_server_keypair()
+        log.info("server signing keypair ready (%s)", server_keys.public_path())
+    except Exception as exc:
+        log.error("could not create the server signing keypair: %s -- task signing "
+                  "will be unavailable until this is resolved", exc)
+
     # Always start the agent listener so remote nemesis_agent devices can POST.
     _start_windows_agent_listener()
 
