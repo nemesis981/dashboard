@@ -37,9 +37,11 @@ import os
 import gzip
 import json
 import time
+import fcntl
 import sqlite3
 import logging
 import threading
+import contextlib
 
 log = logging.getLogger("nemesis.data_manager")
 
@@ -401,6 +403,15 @@ class AccessDenied(DataManagerError):
     """A module attempted to write a table outside its namespace."""
 
 
+class JobLockBusy(DataManagerError):
+    """Another process already holds the named job lock.
+
+    Raised rather than returned so a caller cannot accidentally proceed by
+    ignoring a falsy result — a second concurrent run must stop, not continue
+    unprotected.
+    """
+
+
 # ── statement classification / table extraction ──────────────────────────────
 
 _LEADING_JUNK_RE = re.compile(r"^\s*(?:--[^\n]*\n|/\*.*?\*/\s*)*", re.DOTALL)
@@ -713,6 +724,110 @@ class DataManager:
     # mediating DB ACCESS, and the file-level helpers below touch no connection —
     # the ADR neither mandates nor forbids their placement here. They are here so
     # there is exactly one authoritative home, which is the point.
+
+    # -- concurrency primitives ------------------------------------------------
+    #
+    # Two DIFFERENT hazards, deliberately two different tools. Using the wrong
+    # one gives no protection at all:
+    #
+    #   transaction()  — read-then-act WITHIN one logical DB operation. Takes the
+    #                    write lock BEFORE the read, so a concurrent caller cannot
+    #                    read the same stale state and act on it too. This is the
+    #                    fix for "both SELECT, both INSERT".
+    #
+    #   job_lock()     — a whole job running twice, including its non-DB side
+    #                    effects (files, subprocesses, external API calls). A
+    #                    transaction cannot help there: it cannot roll back a
+    #                    written file, a sent email, or a billed API call.
+    #
+    # Neither existed before 2026-08-03. There was no application-level
+    # serialization anywhere in the product, and SQLite's own locking only
+    # prevents corruption — it does not prevent two callers acting on the same
+    # state they each read a moment earlier.
+
+    def lock_dir(self):
+        """Directory holding job lockfiles, derived from the database location."""
+        return os.path.join(os.path.dirname(self._db_path), "locks")
+
+    @contextlib.contextmanager
+    def job_lock(self, name, timeout=0.0):
+        """Exclusive, cross-process lock for a named job.
+
+        ``with dm.job_lock("oplog_coalesce"): ...`` — raises :class:`JobLockBusy`
+        if another process holds it (immediately, or after ``timeout`` seconds
+        of retrying).
+
+        Uses ``fcntl.flock`` rather than an O_EXCL lockfile or a DB lock row,
+        deliberately: the kernel releases a flock when the holding process dies,
+        so a crash cannot strand a lock that then needs manual clearing. The
+        other two designs both require staleness heuristics, and a staleness
+        heuristic that guesses wrong either blocks a legitimate run forever or
+        silently permits the double-run it exists to prevent.
+
+        The lockfile is never deleted. Unlinking it would let a second process
+        create a fresh inode and lock *that* while the first still holds the
+        old one — both would believe they hold the same lock. An empty file is
+        the cheapest correct thing.
+        """
+        d = self.lock_dir()
+        os.makedirs(d, mode=0o2770, exist_ok=True)
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(name))
+        path = os.path.join(d, f"{safe}.lock")
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o660)
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        try:
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise JobLockBusy(
+                            f"job {name!r} is already running in another process",
+                            kind="job_lock_busy")
+                    time.sleep(0.05)
+            try:
+                os.ftruncate(fd, 0)
+                os.write(fd, f"{os.getpid()} {time.time():.0f}\n".encode())
+            except OSError:
+                pass          # informational only; the lock is the flock, not the content
+            yield
+        finally:
+            os.close(fd)      # releases the flock
+
+    @contextlib.contextmanager
+    def transaction(self, module, enforce=True):
+        """A guarded connection inside an IMMEDIATE transaction.
+
+        ``with dm.transaction("hw_monitor") as conn: ...`` — commits on clean
+        exit, rolls back on any exception.
+
+        ``BEGIN IMMEDIATE`` is the load-bearing part. SQLite's default deferred
+        transaction takes the write lock at the FIRST WRITE, which is already
+        too late: two callers can both complete their reads, both decide from
+        identical stale state, and only then serialize on the write. IMMEDIATE
+        takes it up front, so the second caller waits (up to ``busy_timeout``)
+        and reads the first one's committed result.
+
+        Use this for any read-then-act sequence — check-then-insert,
+        read-modify-write counters, "if not exists" guards. It does NOT help
+        with non-DB side effects; use :meth:`job_lock` for those.
+        """
+        conn = self.connect(module, enforce=enforce)
+        conn.isolation_level = None      # explicit transaction control (lands on _raw)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield conn
+        except BaseException:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        else:
+            conn.execute("COMMIT")
+        finally:
+            conn.close()
 
     OP_LOG_ARCHIVE_DAYS = 7
 
