@@ -60,6 +60,42 @@ design.
 opportunity exists today; any storage recovered by this design comes from the retention
 policy itself, not from reclaiming existing slack space.
 
+## Retention principle — no automatic permanent deletion (operator decision, 2026-08-03)
+
+**If a user ever wants data permanently gone, that must be THEIR explicit action — never
+Nemesis silently discarding it to save space.** The default posture favors increasing storage
+usage over any risk of accidental data loss.
+
+The line this draws:
+
+- **Archival is fine, and automatic.** Moving data into an archive file and replacing the
+  live copy with a reference destroys nothing — everything stays recoverable via
+  `archive_ref`. This is what every piece of this design does.
+- **Permanent destruction must be user-initiated.** Deleting archive files themselves,
+  dropping rows outright, or replacing data with a summary it cannot be reconstructed from,
+  must never happen on a schedule or as a side effect of a space-saving job.
+
+**A derived summary is not a copy.** This is the subtle case, and it is what made the original
+`hw_metrics` rollup plan non-compliant: min/max/avg *looks* like retention but cannot
+reconstruct its inputs. If the original cannot be recovered from what remains, it was deleted,
+whatever the mechanism is called.
+
+**Ordering is the guarantee, not a nicety.** Every archival step must write the archive, verify
+it independently readable and content-matched, and only then clear the live copy. Reverse that
+order, or weaken the verification to "the file exists", and the same code becomes a delete. The
+shipped `archive_old_top_processes()` treats this as a correctness requirement — it self-tests
+its own verifier before trusting it, and three injected failure modes were confirmed to abort
+with live data provably unchanged.
+
+**This is a new policy the product does not yet meet in full.** Pre-existing code already
+deletes permanently and automatically, none of it part of this build:
+`modules/diagnostics/watcher.py:383-392` (row-count cap dropping oldest samples),
+`modules/anomaly_detection/module.py:824-826` (`DELETE FROM anomaly_recurrence` past a cutoff),
+and `modules/diagnostics/watcher.py:340-348` (`os.remove()` on rotated logs past
+`log_retain_days`). `modules/community_queue/module.py:84` and
+`nemesis_agent/reputation_cache.py:59` are unconfirmed and may be legitimate cache clears.
+Reconciling these is tracked separately — deliberately NOT folded into this build.
+
 ## Per-table stub/tombstone design
 
 Explicit per-table answer to "what stays live and searchable vs. what moves to cold
@@ -84,10 +120,20 @@ specific timestamp; people search old tickets and old findings.
   storage grounds at all — only under a deliberate compliance-driven rotation policy, if
   one is ever adopted. Matches [[data-retention-and-archival-policy]]'s Tier A "infinite,
   not capped" decision.
-- **`hw_metrics`** — no stub. Instead: before deleting a day of 288 samples, write one
-  daily rollup row (min/max/avg per metric) to a small companion table. Preserves
-  long-range chart usefulness at ~1/288th the storage; strictly better than a pointer to
-  an archive file nobody will open for a single sensor reading.
+- **`hw_metrics`** — no stub, but **archive-then-summarize, never summarize-then-delete**
+  (corrected 2026-08-03; see the retention principle below). A day of 288 raw samples is
+  first written to a verified archive file, and only then replaced in the live table by a
+  daily rollup row (min/max/avg per metric) carrying an `archive_ref`. Preserves long-range
+  chart usefulness at ~1/288th the live storage while keeping every raw sample recoverable.
+  - **Why the original wording was wrong.** It read "before deleting a day of 288 samples,
+    write one daily rollup row" — but a rollup is a *derived summary, not a copy*. Min/max/avg
+    cannot reconstruct the samples they came from, so that design permanently destroyed the
+    raw data automatically, on a schedule, with no user action and nothing to recover from.
+    That is precisely what the retention principle forbids.
+  - The correction costs almost nothing: `hw_metrics` grows at ~0.28 MB/day, and the
+    `top_processes` archival measured 41–43x gzip compression on comparable text, so retaining
+    every raw sample indefinitely is cheap. This is the "favor storage over any risk of loss"
+    tradeoff taken deliberately.
 - **`hw_anomaly_snapshots`** — partial stub at the column level, not the row level: keep
   the full numeric anomaly row live (`sensor_key`, `captured_at`, `cpu_pct`, `ram_mb`,
   etc. — it's small and feeds baselines), archive only `top_processes`, replaced with an
