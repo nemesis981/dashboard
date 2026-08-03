@@ -1744,3 +1744,29 @@ this entry is the proposal, not the implementation.
       (`%APPDATA%\Nemesis` when frozen, alongside the source otherwise) rather than from
       `__file__`. `installer_gui.py` already does the right thing and writes its install log to
       `%APPDATA%\Nemesis`, so there is a working pattern in-tree to copy.
+
+- [ ] **Archive/verify/self-test helpers are duplicated between `hw_monitor.py` and
+  `data_manager.py`.** The storage/retention build (2026-08-03) shipped the same
+  archive-verify-then-modify machinery twice: `_read_archive`/`_verify_archive`/
+  `_selftest_verifier` in `core_module/hw_monitor/hw_monitor.py` (piece 4,
+  `top_processes`) and `_read_oplog_archive`/`_verify_oplog_archive`/
+  `_selftest_oplog_verifier` in `alert_manager/data_manager.py` (piece 5,
+  `dm_operation_log`). Same ordering, same canary discipline, two copies.
+    - [ ] Why it was left duplicated, deliberately: piece 4 was already committed,
+      deployed, and run against live data by the time piece 5 was written. Refactoring
+      working, verified archival code mid-build to share helpers is real regression risk
+      for no functional gain. The duplication was the safer trade at the time.
+    - [ ] Why it should still be fixed: duplicated VERIFICATION logic is exactly the kind
+      that drifts. If one copy gains a check the other does not, the weaker one keeps
+      approving moves it should refuse, and nothing about that failure is visible — it
+      looks like a successful archival. That is the same class of defect the standing
+      "verification code must prove its own premise" practice exists to catch.
+    - [ ] Shape of the fix: promote the generic helpers into `data_manager.py` (or a small
+      shared module) and have `hw_monitor` import them — it already imports `data_manager`,
+      so no new dependency edge is created. The two differ only in payload shape
+      (`{id: text}` vs `{id: row_dict}`), which a single implementation handles by
+      comparing whatever it is given.
+    - [ ] Do NOT do this without re-running both pieces' verification suites afterwards,
+      including the three injected-failure abort tests for each. The whole point of the
+      helpers is that they fail correctly; a refactor that is only proved to succeed
+      correctly has not been tested.
