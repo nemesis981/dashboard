@@ -3929,6 +3929,12 @@ Alert: {raw_alert}
             max_tokens=500,
             cache_key=f"alert_{rule_id}",
             cache_hours=24,
+            # job_id engages ai_engine's in-flight dedup. The mechanism already
+            # existed but this caller never passed one, so two concurrent
+            # requests for the same uncached rule_id each made — and were each
+            # BILLED FOR — a separate Claude call. Flask is threaded, so that
+            # needed nothing more exotic than a double-click.
+            job_id=f"alert_{rule_id}",
         )
         if not ai_result.get("ok"):
             return jsonify({"error": ai_result.get("reason", "AI unavailable")}), 503
@@ -3946,14 +3952,24 @@ Alert: {raw_alert}
             }
         now = datetime.now().isoformat()
         new_action = "ignore" if analysis.get("risk_level") == "LOW" else "pending"
-        if existing:
-            c.execute("UPDATE alerts SET explanation=?, risk_level=? WHERE rule_id=?",
-                     (analysis["explanation"], analysis["risk_level"], rule_id))
-        else:
+        # Decide from the CURRENT state, not from `existing` — that was read
+        # before a Claude call that takes seconds, so by now another request may
+        # already have inserted this rule_id. `alerts.rule_id` carries no UNIQUE
+        # constraint, so a blind INSERT on the stale branch duplicated the row.
+        #
+        # UPDATE-first tells us whether it exists right now; the INSERT is then
+        # guarded by NOT EXISTS in the same statement, so it cannot duplicate
+        # even if a third writer lands between the two. No schema change and no
+        # transaction held across the API call.
+        c.execute("UPDATE alerts SET explanation=?, risk_level=? WHERE rule_id=?",
+                  (analysis["explanation"], analysis["risk_level"], rule_id))
+        if c.rowcount == 0:
             c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-                (rule_id, raw_alert[:50], "", 1, analysis["explanation"], analysis["risk_level"], new_action, now, now))
+                SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE rule_id = ?)""",
+                (rule_id, raw_alert[:50], "", 1, analysis["explanation"],
+                 analysis["risk_level"], new_action, now, now, rule_id))
         conn.commit()
         conn.close()
         return jsonify({**analysis, "cached": False, "src_ip": src_ip,
@@ -4033,10 +4049,15 @@ def set_action(rule_id, action):
         c.execute("UPDATE alerts SET action=? WHERE rule_id=?", (action, rule_id))
         if c.rowcount == 0:
             now = datetime.now().isoformat()
+            # NOT EXISTS guard: `rowcount == 0` was read a moment ago and
+            # `alerts.rule_id` has no UNIQUE constraint, so two concurrent POSTs
+            # could both see 0 and both insert. Guarding inside the statement
+            # closes that without a schema change.
             c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)""",
-                (rule_id, "", "", 1, "", "UNKNOWN", action, now, now))
+                SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
+                WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE rule_id = ?)""",
+                (rule_id, "", "", 1, "", "UNKNOWN", action, now, now, rule_id))
         conn.commit()
         conn.close()
         _audit(action=action, rule_id=rule_id, ip=(src_ip or None))
@@ -7742,9 +7763,34 @@ def _read_backup_media_status(dest):
 
 @app.route("/api/backup/create", methods=["POST"])
 def api_backup_create():
+    """Create a backup archive. Serialized — only one may run at a time.
+
+    The lock is not defensive tidiness. This route is reachable from the UI
+    button AND from the cron line api_backup_schedule writes, which POSTs to
+    this same endpoint; Flask is threaded, so both can execute at once. The
+    archive name has one-second granularity and `tarfile.open(..., "w:gz")`
+    truncates, so two runs landing in the same second silently overwrote one
+    another's archive — and BOTH returned {"status": "ok"}. A backup you were
+    told succeeded, which no longer exists, is worse than a backup that failed.
+
+    job_lock rather than a transaction: the work here is filesystem I/O, which
+    no database transaction can roll back.
+    """
     data = request.get_json(force=True, silent=True) or {}
     dest_raw = (data.get("dest_path") or _default_backup_dir()).strip()
     dest = os.path.expanduser(dest_raw)
+    try:
+        with _dm().job_lock("backup_create"):
+            return _api_backup_create_locked(dest)
+    except data_manager.JobLockBusy:
+        return jsonify({
+            "status": "error",
+            "error": "A backup is already running. Wait for it to finish and try again.",
+        })
+
+
+def _api_backup_create_locked(dest):
+    """Body of api_backup_create, called with the backup_create job lock held."""
     try:
         os.makedirs(dest, exist_ok=True)
     except OSError as e:
