@@ -1892,3 +1892,68 @@ this entry is the proposal, not the implementation.
       lockfile reinvented separately in each of the two current callers. Matches the broader
       audit Window 3 is now running across the Data Manager, rather than a fix scoped to just
       the two jobs it happened to be found in.
+
+- [ ] **PIA's policy-routing and IPv6 handling cause at least four unrelated-looking failures,
+  and its rules survive disconnection.** Everything below shares one root cause. They were
+  investigated separately and at length before the connection was made, so they are recorded
+  together deliberately.
+    - [ ] **1. Agent enrollment over the tailnet is blocked while PIA is up** — the original
+      finding, detailed in the sub-entry below.
+    - [ ] **2. IPv6 egress is blackholed, including while PIA is DISCONNECTED.** Suspected in
+      `docs/audits/project-status-2026-06-26.md` ("PIA leaves a `blackhole default` in table
+      `piavpnOnlyrt` even when disconnected; api.anthropic.com is IPv6"), and consistent with
+      what was seen on 2026-08-03: outbound API access to an IPv6-only host dropped for ~10
+      minutes across the PIA teardown, while IPv4 LAN and tailnet traffic kept working. PIA's
+      policy rules (`piavpnrt`, `piavpnOnlyrt`, `piavpnFwdrt`) were confirmed **still installed
+      with the tunnel down**.
+    - [ ] **3. A browser session against the dashboard fails transiently during teardown** —
+      reported as "cannot reach server" in the Flask UI's idle-lock. NOT a dashboard fault:
+      `dashboard.service` had not restarted (`ActiveEnterTimestamp` unchanged at 11:54:49), so
+      a page reload was the only fix needed.
+    - [ ] **4. The connectivity watcher reports a false `DEGRADED`** for as long as an
+      IPv6-blocking VPN is connected — see
+      `docs/audits/diagnostics-ipv6-keytest-false-degraded-2026-08-03.md`. That audit shows
+      1,264 consecutive `DEGRADED / ipv6 keytest failed` samples flipping to `ALL_OK` at
+      **15:06 on 2026-08-03, the minute PIA was stopped** — independent confirmation that PIA
+      was the blocker, and a useful timestamped marker for the whole family.
+    - [ ] **"Just turn the VPN off" is NOT a workaround.** Stopping PIA is not a clean no-op:
+      the teardown itself caused #2 and #3. So the choice is not "VPN or enrollment" — both
+      states break something, which is what makes the split-tunnel / allowed-CIDR fix the only
+      real answer rather than a documented instruction to disable the VPN.
+    - [ ] **Cross-reference:** the diagnostics false positive is filed separately (audit above)
+      because it is a diagnostics defect rather than a connectivity one. Keep them linked —
+      investigating either alone will rediscover the same PIA behaviour from scratch.
+
+- [ ] **A VPN on the Nemesis host silently breaks agent enrollment over the tailnet.** Confirmed
+  live 2026-08-03 with PIA (OpenVPN protocol, `allowlan=true`) running on the server: every
+  agent install failed at the reachability check with "Cannot reach your security server.
+  Tailscale is connected but the server is not responding." Stopping PIA fixed it immediately
+  and completely — same VM, same tailnet, same ACL, nothing else changed.
+    - [ ] **Mechanism.** The agent's SYN *does* arrive (`SYN-RECV` observed in the server's socket
+      table), but the SYN-ACK never returns, so the handshake half-opens and the client times
+      out. `ip route get <agent-tailnet-ip>` resolves correctly to `dev tailscale0 table 52`, so
+      this is NOT a routing-table problem — it is PIA's policy rules / killswitch. PIA's
+      `allowlan` covers only the LAN (`<lan-subnet>`); the tailnet is `100.64.0.0/10` and is
+      therefore treated as non-local.
+    - [ ] **Why it is hard to diagnose — three separate instruments lie about it:**
+      - `tailscale ping` SUCCEEDS (1ms pong). It is a control-plane/disco probe and does not
+        traverse the data path, so it proves nothing about whether real traffic flows.
+      - The nginx access log shows NOTHING, because nginx logs *completed* requests; a half-open
+        handshake never reaches the log. Absence there is not absence of traffic.
+      - `ufw` logs no BLOCK, and the tailnet peer shows healthy/online on both sides.
+      The only honest signals are `SYN-RECV` in `ss -tan` and a plain TCP port test.
+    - [ ] **Cost when undiagnosed:** this consumed most of an afternoon and sent the operator to
+      the Tailscale admin console twice to add an ACL grant that was never the problem. The
+      symptom points squarely at tailnet ACLs and nothing on the server logs a thing.
+    - [ ] **Product impact — this is not a lab quirk.** The appliance is expected to run behind a
+      VPN *and* accept agent enrolments over the tailnet. With a VPN active those are currently
+      mutually exclusive, it fails silently with no server-side log, and the user-facing message
+      blames the server or the tailnet. Any customer running a VPN on their Nemesis box hits it.
+    - [ ] **Likely fix (untested):** add the tailnet range to the VPN's allowed/split-tunnel
+      networks rather than disabling the VPN. Needs verifying per-provider — PIA's `allowlan` is
+      LAN-only and there may be no supported way to add an arbitrary CIDR, in which case the
+      answer may be a documented deployment constraint plus a startup check that detects the
+      condition and says so plainly instead of failing silently.
+    - [ ] **Detection is the cheap win even before the fix:** the server can notice that a VPN
+      tunnel is up and that inbound tailnet traffic is half-opening, and surface it. Silent
+      failure is what made this expensive, not the incompatibility itself.
