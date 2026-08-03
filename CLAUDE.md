@@ -125,10 +125,34 @@ number.
   every code change.
 - **Does NOT commit or push — ever.** When a change is ready, STOP and report it as
   ready-to-commit; hand off to Window 2, which performs the actual git write.
-- Does NOT author ADRs, roadmap entries, handoff docs, or build specs — that's Window 2.
+- Does NOT author ADRs, roadmap entries, `docs/handoff/` artifacts, or build specs —
+  that's Window 2. (Narrow exception: the evening context-handoff note below — it is not
+  a `docs/handoff/` artifact and lives outside the public repo entirely.)
 - Does NOT run the morning briefing or roadmap-vs-state audit — that's Window 2.
 - Code work takes priority: never let a read-only audit or doc request preempt
   trip-critical or scheduled code work in this window.
+- **Evening context handoff — own document, separate from Window 2's closeout (standing
+  rule, added 2026-08-03).** When the operator tells Window 1 to close out for the
+  night, write a dated cold-start note to
+  `~/work/nemesis-internal/handoff/YYYY-MM-DD-window1-evening-handoff.md` (new dated
+  file every evening, never overwritten — same append-not-overwrite reasoning as Window
+  2's supplements, Rule 9). This is IN ADDITION TO, not instead of, Window 2's Rule 9
+  discipline (`docs/handoff/HANDOFF.md`/supplements/worklog) — that covers project state
+  for anyone; this is Window 1's own working-context note for the next Window 1 session
+  specifically. Not a git-write (Window 1 has no git-write privilege for the public repo
+  regardless, and this file lives entirely outside it, in the private mirror only).
+  **Write it for a cold start — assume the reader has this document and nothing else.**
+  Reference shape (see the most recent file in that directory for a full worked
+  example): a role/identity reminder up top; broken-instruments/gotchas found this
+  session (the exact wrong-assumption traps that cost time, per the standing
+  "verification code must prove its own premise" practice); production state backed by
+  real verification evidence, not assertions; committed-vs-held work; prioritized open
+  items; any deferred/parked decisions worth flagging explicitly so they aren't silently
+  re-litigated; environment/access mechanics that are easy to lose (test creds, VM
+  state, tool quirks, workarounds); leftover/cleanup state (test data, temp rules,
+  snapshots); items still owed to Window 2; and deliberately tracked risks — framed as
+  accepted tradeoffs, not oversights, so they read as decisions on a second read, not
+  gaps.
 
 ### Window 2 — DOCS/AUDIT window (role: Sonnet — currently Sonnet 5) — sole git-writer
 - **Expected model: Sonnet** (currently `claude-sonnet-5` — bump this string when
@@ -303,6 +327,14 @@ task.
 **Window 3 is the exception to "once per session"** — its expected model is per-task,
 not per-window, so it repeats this check before every task rather than once at session
 start. See the Window 3 section above for the task-classification detail.
+
+**Window 1 additionally reads its evening handoff as part of this same first action.**
+Once identity is confirmed (fresh session or a mid-session re-statement), before
+starting any task, check `~/work/nemesis-internal/handoff/` for the most recent
+`*-window1-evening-handoff.md` (newest date wins, same lexical-sort resolution used
+elsewhere in this file) and read it — see "Evening context handoff" under Window 1
+above. If none exists yet, say so and proceed; that just means it's the first evening
+it will exist, not an error.
 
 ---
 
