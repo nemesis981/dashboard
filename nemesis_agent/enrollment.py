@@ -149,6 +149,61 @@ def pin_server_key(b64_der: str) -> bool:
         return False
 
 
+def server_key_fingerprint():
+    """sha256 of the pinned anchor's DER, or None if nothing is pinned.
+
+    None means "no anchor", which is a real state the caller must handle — not a
+    stand-in for "could not read", which would make a broken pin indistinguishable
+    from an unenrolled device.
+    """
+    import hashlib
+    key = pinned_server_key()
+    if key is None:
+        return None
+    return hashlib.sha256(key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+
+
+def replace_server_key(new_pem: bytes) -> bool:
+    """Replace the pinned anchor. Returns True only if the NEW key is on disk.
+
+    The deliberate opposite of pin_server_key(), which refuses to overwrite. That
+    refusal is right for installs — a re-run of the installer must not be a way to
+    re-anchor an agent — but rotation is the one legitimate reason to replace an
+    anchor, and it is gated by a signature from the key being replaced plus proof
+    of possession of its successor.
+
+    Atomic, and keeps the outgoing key. A truncated anchor is a permanently dead
+    task channel with no way in to fix it, so the write goes to a temp and is
+    os.replace()d, and the previous anchor is kept as .prev for manual recovery.
+    """
+    path = _server_key_path()
+    prev = path + ".prev"
+    tmp = path + ".tmp"
+    try:
+        # Parse before writing — a key that does not load must never reach disk.
+        serialization.load_pem_public_key(new_pem)
+        os.makedirs(config.keys_dir(), exist_ok=True)
+        if os.path.exists(path):
+            with open(path, "rb") as src, open(prev, "wb") as dst:
+                dst.write(src.read())
+        with open(tmp, "wb") as fh:
+            fh.write(new_pem)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        print("WARNING: could not replace the pinned server key (%s)" % exc)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
 def pinned_server_key():
     """The pinned server public key object, or None if this device has none.
 

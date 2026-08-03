@@ -25,10 +25,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
+
+_LOG = logging.getLogger("nemesis_agent")
+
+
+def _log(level, fmt, *args):
+    """Log without importing agent.py (which would be circular)."""
+    getattr(_LOG, level)(fmt, *args)
 
 #: Same tolerance the server applies to heartbeat `signed_at`
 #: (hw_monitor `_AGENT_AUTH_SKEW_S`). Both directions should forgive the same
@@ -55,6 +63,24 @@ CLOCK_SKEW_S = 300
 #: recording. flock/fcntl were not used because they are not portable to the
 #: Windows agent, which is the primary target.
 CLAIMS_DIR_NAME = "task_claims"
+
+#: Result reports awaiting delivery. Same marker-file shape as the claim store,
+#: for the same reason: each report is written independently by whichever process
+#: executed the task, and a shared JSON file would lose reports to the identical
+#: read-modify-write race.
+RESULTS_DIR_NAME = "task_results"
+
+#: Reports carried per heartbeat. Bounds the payload, not the backlog — nothing
+#: is dropped, the remainder simply rides the next beat.
+MAX_RESULTS_PER_BEAT = 10
+
+#: Backstop for a server that never acknowledges. See prune_results().
+RESULT_MAX_AGE_DAYS = 7
+
+#: Truncation for the free-text detail an agent reports. The server truncates
+#: independently — this bound protects the payload, the server's protects the
+#: database, and neither may rely on the other.
+RESULT_DETAIL_MAX = 500
 
 
 # ── typed outcomes ────────────────────────────────────────────────────────
@@ -90,6 +116,14 @@ class Malformed(TaskRejected):
 
 class VerifierBroken(TaskRejected):
     reason = "verifier_self_test_failed"
+
+
+class RotationMalformed(TaskRejected):
+    reason = "rotation_malformed"
+
+
+class BadProofOfPossession(TaskRejected):
+    reason = "bad_proof_of_possession"
 
 
 def _canonical_bytes(envelope: dict) -> bytes:
@@ -184,6 +218,142 @@ def already_claimed(task_id: str, now=None) -> bool:
     return os.path.exists(_marker_path(task_id))
 
 
+# ── result reports (ADR 0004 Stage 1, step 4) ─────────────────────────────
+def _results_dir() -> str:
+    return os.path.join(os.path.dirname(config.CONF_PATH), RESULTS_DIR_NAME)
+
+
+def _result_path(task_id: str) -> str:
+    return os.path.join(_results_dir(), _safe_name(task_id) + ".json")
+
+
+def record_result(task_id: str, ok: bool, detail: str = "",
+                  action: str = "", now=None) -> bool:
+    """Record what happened to a task, for delivery on the next heartbeat.
+
+    ON DISK, not in memory, and written the instant execution returns. A result
+    held in memory is lost to exactly the event most likely to follow a failed
+    task — the agent restarting — so the outcome the operator most needs is the
+    one an in-memory queue reliably drops.
+
+    FIRST RESULT WINS (`O_EXCL`). A task executes at most once, guaranteed by
+    `claim_task()`, so a second report for the same id means something has gone
+    wrong; overwriting would discard the first, genuine outcome in favour of the
+    anomaly. Returns False if a report already existed.
+    """
+    now = now or datetime.now()
+    try:
+        os.makedirs(_results_dir(), exist_ok=True)
+        fd = os.open(_result_path(task_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    except Exception:
+        return False
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump({"task_id": task_id,
+                       "action": action,
+                       "ok": bool(ok),
+                       "detail": str(detail)[:RESULT_DETAIL_MAX],
+                       "recorded_at": now.isoformat(timespec="seconds")}, fh)
+    except Exception:
+        return False
+    return True
+
+
+def pending_results(limit: int = None, now=None) -> list:
+    """Result reports awaiting server acknowledgement, oldest first.
+
+    Oldest first so a backlog drains in the order things actually happened
+    rather than in whatever order the filesystem lists them.
+
+    An unreadable report is SKIPPED and logged, never sent as a partial or
+    defaulted record: a report claiming `ok` because that is the falsy-safe
+    default would be indistinguishable from a task that genuinely succeeded.
+    Age-pruning removes it eventually.
+    """
+    limit = MAX_RESULTS_PER_BEAT if limit is None else limit
+    prune_results(now)
+    out, unreadable = [], 0
+    try:
+        names = sorted(os.listdir(_results_dir()))
+    except FileNotFoundError:
+        return []
+    for name in names:
+        try:
+            with open(os.path.join(_results_dir(), name), "r", encoding="utf-8") as fh:
+                rec = json.load(fh)
+            if not isinstance(rec, dict) or not rec.get("task_id"):
+                raise ValueError("malformed result record")
+            out.append(rec)
+        except Exception:
+            unreadable += 1
+            continue
+    if unreadable:
+        _log("warning", "%d unreadable task-result report(s) skipped", unreadable)
+    out.sort(key=lambda r: r.get("recorded_at") or "")
+    return out[:limit]
+
+
+def ack_results(task_ids) -> int:
+    """Delete the reports the server has confirmed recording. Returns how many.
+
+    Deleting ONLY on acknowledgement is what makes delivery at-least-once: a
+    dropped response resends rather than silently discarding an outcome. The
+    duplicate that produces is harmless — the server's update is keyed on
+    task_id and is idempotent.
+    """
+    removed = 0
+    for tid in (task_ids or []):
+        try:
+            os.remove(_result_path(tid))
+            removed += 1
+        except FileNotFoundError:
+            continue
+        except Exception:
+            continue
+    return removed
+
+
+def prune_results(now=None) -> int:
+    """Drop reports older than RESULT_MAX_AGE_DAYS. Returns how many were removed.
+
+    The backstop for a server that never acknowledges — otherwise a permanently
+    unreachable server grows this directory without bound. Age, not count: a
+    count cap would evict the OLDEST reports, which are precisely the ones that
+    have been failing to deliver longest and are most worth keeping.
+    """
+    now = now or datetime.now()
+    cutoff = now - timedelta(days=RESULT_MAX_AGE_DAYS)
+    removed = 0
+    try:
+        names = os.listdir(_results_dir())
+    except FileNotFoundError:
+        return 0
+    for name in names:
+        path = os.path.join(_results_dir(), name)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                when = datetime.fromisoformat(json.load(fh)["recorded_at"])
+        except Exception:
+            # Undeliverable and unreadable, so it can never be acked away. mtime
+            # is a real measurement rather than a stand-in default, so ageing it
+            # out on that is honest — but it is logged, because a report that
+            # cannot be read is a defect, not routine housekeeping.
+            try:
+                when = datetime.fromtimestamp(os.path.getmtime(path))
+            except Exception:
+                continue
+            _log("warning", "unreadable task-result report %s aged by mtime", name)
+        if when <= cutoff:
+            try:
+                os.remove(path)
+                removed += 1
+            except Exception:
+                continue
+    return removed
+
+
 # ── verification ──────────────────────────────────────────────────────────
 def verify_task(envelope: dict, device_id: str, pinned_key, now=None) -> dict:
     """Return the envelope if it is genuinely for this device, or raise.
@@ -236,6 +406,71 @@ def verify_task(envelope: dict, device_id: str, pinned_key, now=None) -> dict:
     # Keeping the read out of this function means there is no second, tempting
     # place to gate execution on.
     return envelope
+
+
+# ── server key rotation ───────────────────────────────────────────────────
+#: Must match alert_manager/server_keys.ROTATE_ACTION exactly. A mismatch would
+#: not fail loudly — the rotation would simply fall through to the ordinary
+#: dispatcher, which is the single path it must never take.
+ROTATE_ACTION = "rotate_server_key"
+
+
+def verify_rotation(envelope: dict, device_id: str):
+    """Return the new public key object a rotation carries, or raise.
+
+    DELIBERATELY DOES NOT CHECK THE ENVELOPE SIGNATURE. That is `verify_task`'s
+    job and it must already have run; duplicating it here would create a second
+    place where a rotation could be accepted, and the whole safety of this path
+    rests on there being exactly one. Anything calling this without having
+    verified the envelope first is the bug.
+
+    What it DOES check is proof of possession. The envelope signature proves the
+    server AUTHORISED handing out this public key; it proves nothing about
+    whether the server holds the matching private half. A wrong or truncated key
+    pasted into a rotation would be perfectly signed and would permanently brick
+    every device that accepted it — with no key left that can reach them. So the
+    new PRIVATE key must sign "rotate|<device_id>|<task_id>|<new_pub_b64>", and
+    that message is bound to both this device and this task so a PoP cannot be
+    lifted from another rotation.
+    """
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    if not isinstance(envelope, dict):
+        raise RotationMalformed("rotation envelope is not an object")
+    params = envelope.get("params")
+    if not isinstance(params, dict):
+        raise RotationMalformed("rotation has no params")
+    b64 = params.get("new_public_key")
+    pop = params.get("pop")
+    claimed_fp = params.get("new_key_sha256")
+    if not b64 or not pop or not claimed_fp:
+        raise RotationMalformed(
+            "rotation needs new_public_key, pop and new_key_sha256")
+
+    try:
+        der = base64.b64decode(b64)
+        new_pub = serialization.load_der_public_key(der)
+    except Exception as exc:
+        # Parsed BEFORE anything is written. A malformed anchor that reached disk
+        # would fail later, at verification time, far from its cause.
+        raise RotationMalformed("new_public_key does not parse: %s" % exc) from exc
+
+    actual_fp = hashlib.sha256(new_pub.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo)).hexdigest()
+    if actual_fp != claimed_fp:
+        raise RotationMalformed(
+            "new_key_sha256 does not match the key it accompanies")
+
+    message = "rotate|%s|%s|%s" % (device_id, envelope.get("task_id"), b64)
+    try:
+        new_pub.verify(base64.b64decode(pop), message.encode(),
+                       padding.PKCS1v15(), hashes.SHA256())
+    except Exception as exc:
+        raise BadProofOfPossession(
+            "the server did not prove it holds the new private key") from exc
+    return new_pub
 
 
 # ── startup self-test ─────────────────────────────────────────────────────

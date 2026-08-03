@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Rotate the Nemesis server's task-signing key. Two-phase, operator-driven.
+
+    nemesis-rotate-server-key stage      generate the replacement pair
+    nemesis-rotate-server-key status     who has rotated, who has not
+    nemesis-rotate-server-key push       queue rotation tasks (--all | --device ID)
+    nemesis-rotate-server-key cutover    promote the new key to current
+    nemesis-rotate-server-key abort      discard the staged pair
+
+WHY TWO PHASES. A rotation cannot be atomic across a fleet: devices are offline,
+roaming, or asleep, and each one has to be reached individually. Staging lets the
+OLD key keep signing while devices migrate one at a time, so an abandoned
+rotation costs nothing. Cutover is separate, manual, and refuses by default while
+any approved device is still pending — because cutting over early is precisely
+how a device ends up trusting a key the server no longer signs with.
+
+STRAGGLERS ARE RECOVERABLE, NOT STRANDED. Cutover keeps the old private key as
+server_private.prev.pem, and a device still on the old anchor gets its rotation
+task signed with that key. Deleting prev is what would turn "this laptop was
+away for a fortnight" into "reinstall its agent by hand".
+
+Run as the user owning /var/lib/nemesis (the private key is 0600).
+"""
+import argparse
+import os
+import sys
+
+sys.path.insert(0, "/opt/nemesis/alert_manager")
+sys.path.insert(0, "/opt/nemesis/core_module/hw_monitor")
+
+
+def _fail(msg, code=1):
+    print("ERROR: %s" % msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def cmd_stage(args, sk, hw):
+    if not sk.have_server_keypair():
+        _fail("no current server keypair exists yet — start hw-monitor once first")
+    try:
+        res = sk.stage_new_keypair()
+    except RuntimeError as e:
+        _fail(str(e))
+    print("Staged a new server keypair.")
+    print("  current fingerprint : %s" % sk.current_fingerprint())
+    print("  staged  fingerprint : %s" % res["fingerprint"])
+    print("\nThe current key is still signing everything. Nothing has changed for")
+    print("any device yet. Next: `push --all`, then `status`, then `cutover`.")
+
+
+def cmd_status(args, sk, hw):
+    staged = sk.staged_fingerprint()
+    print("current fingerprint : %s" % sk.current_fingerprint())
+    print("staged  fingerprint : %s" % (staged or "(none — no rotation in progress)"))
+    print("previous key kept   : %s" % ("yes" if sk.have_prev_keypair() else "no"))
+    r = hw.rotation_readiness()
+    print("\ntarget              : %s" % r["target_fingerprint"])
+    print("rotated (%d)         : %s" % (len(r["ready"]),
+                                         ", ".join(r["ready"]) or "-"))
+    print("PENDING (%d)         : %s" % (len(r["pending"]),
+                                         ", ".join(r["pending"]) or "-"))
+    if not staged:
+        print("\nNo rotation staged.")
+    elif r["safe_to_cutover"]:
+        print("\nEvery approved device is on the staged key. Cutover is safe.")
+    else:
+        print("\nNOT safe to cut over: the devices above would be stranded on the")
+        print("old key. They are still reachable now; after cutover they are only")
+        print("reachable via the retained previous key.")
+
+
+def cmd_push(args, sk, hw):
+    if not sk.staged_fingerprint():
+        _fail("nothing staged — run `stage` first")
+    if args.device:
+        targets = [args.device]
+    elif args.all:
+        targets = hw.rotation_readiness()["pending"]
+    else:
+        _fail("specify --all or --device <id>")
+    if not targets:
+        print("Nothing to do — every approved device is already on the staged key.")
+        return
+    for d in targets:
+        try:
+            tid = hw.enqueue_rotation(d, actor="cli:rotate-server-key")
+            print("  queued rotation for %s (task %s)" % (d, tid[:8]))
+        except Exception as e:
+            print("  FAILED for %s: %s" % (d, e), file=sys.stderr)
+    print("\nQueued %d rotation task(s). They ride the next heartbeat from each" % len(targets))
+    print("device; offline devices pick theirs up whenever they return.")
+
+
+def cmd_cutover(args, sk, hw):
+    if not sk.staged_fingerprint():
+        _fail("nothing staged to cut over to")
+    r = hw.rotation_readiness()
+    if r["pending"] and not args.force:
+        print("Refusing: %d device(s) have not rotated yet:" % len(r["pending"]))
+        for d in r["pending"]:
+            print("    %s" % d)
+        print("\nCut over now and those devices trust a key the server will stop")
+        print("signing with. They stay recoverable via the retained previous key,")
+        print("but each needs a rotation delivered before it can be tasked again.")
+        print("\nRe-run with --force to proceed anyway.")
+        raise SystemExit(2)
+    res = sk.cutover()
+    print("Cutover complete.")
+    print("  previous : %s  (kept for straggler rescue)" % res["previous_fingerprint"])
+    print("  current  : %s" % res["current_fingerprint"])
+    if r["pending"]:
+        print("\n%d device(s) were stranded by --force and need a rotation pushed:"
+              % len(r["pending"]))
+        for d in r["pending"]:
+            print("    %s" % d)
+
+
+def cmd_abort(args, sk, hw):
+    if not sk.staged_fingerprint():
+        _fail("no staged rotation to abort")
+    fp = sk.staged_fingerprint()
+    if sk.abort_rotation():
+        print("Discarded the staged keypair (%s)." % fp[:16])
+        print("Nothing changed for any device — the current key never stopped signing.")
+    else:
+        _fail("could not remove the staged keypair")
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Rotate the Nemesis server task-signing key (two-phase).")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("stage", help="generate the replacement keypair")
+    sub.add_parser("status", help="show rotation state per device")
+    pp = sub.add_parser("push", help="queue rotation tasks")
+    pp.add_argument("--all", action="store_true", help="every pending device")
+    pp.add_argument("--device", help="a single device_id")
+    pc = sub.add_parser("cutover", help="promote the staged key to current")
+    pc.add_argument("--force", action="store_true",
+                    help="proceed even though devices are pending (they get stranded)")
+    sub.add_parser("abort", help="discard the staged keypair")
+    args = p.parse_args()
+
+    try:
+        import server_keys as sk
+        import hw_monitor as hw
+    except Exception as e:
+        _fail("could not load Nemesis modules: %s" % e)
+
+    {"stage": cmd_stage, "status": cmd_status, "push": cmd_push,
+     "cutover": cmd_cutover, "abort": cmd_abort}[args.cmd](args, sk, hw)
+
+
+if __name__ == "__main__":
+    main()

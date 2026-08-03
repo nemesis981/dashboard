@@ -1970,3 +1970,27 @@ this entry is the proposal, not the implementation.
     - [ ] **Detection is the cheap win even before the fix:** the server can notice that a VPN
       tunnel is up and that inbound tailnet traffic is half-opening, and surface it. Silent
       failure is what made this expensive, not the incompatibility itself.
+
+- [ ] **A signed ruleset update can be rolled BACK to an older-but-genuine ruleset.**
+  Content authenticity is now bound into the signed task envelope (`sha256` + `size` in
+  `params`, verified by the agent before install — ADR 0004 Stage 1). That closes
+  substitution: nobody can make an agent install bytes the server did not attest to.
+  It does NOT close replay of a *previously valid* attestation.
+    - [ ] **The gap.** Every enqueued `update_rules` task is a signed statement that
+      "ruleset with digest D is current". Capture one, and within its TTL it can be
+      re-presented to roll a device back to that older D — genuine bytes, genuine
+      signature, stale content. The practical impact is losing recent detection rules,
+      which is the same silent-blinding outcome the digest work exists to prevent, just
+      reached by a different route.
+    - [ ] **What already bounds it (so this is narrow, not open):** the envelope's
+      `expires_at` limits the window, and the agent's atomic claim store (`task_claims/`)
+      refuses a task_id it has already executed. A replay therefore needs a *different*
+      unexecuted task within its TTL — not an arbitrary rewind to any past ruleset.
+    - [ ] **The fix, deliberately deferred as separate scope:** a monotonic ruleset
+      version carried in the signed params, with the agent refusing any version lower
+      than the one it currently holds. Needs a version counter that survives ruleset
+      regeneration (the digest alone cannot order two rulesets), which is why it is its
+      own design item rather than a follow-on line in the digest commit.
+    - [ ] **Not a regression** — pre-digest, this attack was strictly easier and did not
+      need a captured task at all. Filed as a tracked residual, per the standing practice
+      of naming a bounded weakness rather than letting it read as fully solved.

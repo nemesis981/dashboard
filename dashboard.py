@@ -8478,22 +8478,23 @@ def api_agent_notify():
 @app.route("/api/agent/rules")
 def api_agent_rules():
     """GET /api/agent/rules?profile=office|roaming — serve Suricata rule file to agents."""
+    # Resolution lives in alert_manager/rules_dist.py, shared with the code that
+    # computes the digest bound into a signed update task. Two copies of the
+    # search-path list would drift, and the resulting failure is silent: the
+    # server would attest to one file's digest while serving another, and agents
+    # would refuse every legitimate update with no visible cause.
+    import rules_dist
     profile = request.args.get("profile", "office")
-    if profile not in ("office", "roaming"):
-        return jsonify({"error": "profile must be office or roaming"}), 400
-    rules_paths = [
-        f"/var/lib/suricata/rules/{profile}.rules",
-        f"/var/lib/suricata/rules/suricata.rules",
-        f"/etc/suricata/rules/{profile}.rules",
-    ]
-    for path in rules_paths:
-        if os.path.exists(path):
-            with open(path, "rb") as f:
-                content = f.read()
-            from flask import Response
-            return Response(content, mimetype="text/plain",
-                            headers={"Content-Disposition": f"attachment; filename={profile}.rules"})
-    return jsonify({"error": f"No rules file found for profile={profile}"}), 404
+    try:
+        _path, content = rules_dist.resolve_rules(profile)
+    except rules_dist.RulesUnavailable as exc:
+        if profile not in rules_dist.VALID_PROFILES:
+            return jsonify({"error": "profile must be one of %s"
+                                     % ", ".join(rules_dist.VALID_PROFILES)}), 400
+        return jsonify({"error": str(exc)}), 404
+    return Response(content, mimetype="text/plain",
+                    headers={"Content-Disposition":
+                             f"attachment; filename={profile}.rules"})
 
 
 @app.route("/api/devices/update-friendly-name", methods=["POST"])

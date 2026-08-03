@@ -425,11 +425,25 @@ def init_db():
                 dispatched_at TEXT,
                 expires_at   TEXT,
                 dispatch_count INTEGER NOT NULL DEFAULT 0,
-                actor        TEXT
+                actor        TEXT,
+                -- What the DEVICE REPORTED happened (ADR 0004 Stage 1, step 4).
+                -- These are ATTESTED CLAIMS, not ground truth: status='completed'
+                -- means the agent said it completed, not that the server
+                -- verified it. Anything that later needs certainty (billing,
+                -- compliance, an enforcement decision) must corroborate from
+                -- server-side evidence, never from this column alone.
+                result_ok    INTEGER,
+                result_detail TEXT,
+                reported_at  TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_scan_tasks_device "
                   "ON scan_tasks(device_id, status)")
+        _st_cols = {r[1] for r in c.execute("PRAGMA table_info(scan_tasks)").fetchall()}
+        for _c, _d in (("result_ok", "INTEGER"), ("result_detail", "TEXT"),
+                       ("reported_at", "TEXT")):
+            if _st_cols and _c not in _st_cols:
+                c.execute("ALTER TABLE scan_tasks ADD COLUMN %s %s" % (_c, _d))
         conn.commit()
 
         # Seed default conditions if the table is empty.
@@ -1744,6 +1758,99 @@ def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None):
     return task_id
 
 
+def _device_anchor_fingerprint(device_id):
+    """Which server key this device is on, or None if never rotated.
+
+    Derived from its own completed rotation tasks — NO new column on a live
+    table. The fingerprint stored in a rotation task's params IS the epoch
+    marker: a completed rotation from an earlier epoch carries that epoch's
+    fingerprint and so can never be mistaken for the current one.
+
+    None is a real answer ("still on whatever it was installed with"), not a
+    failure default — the caller distinguishes it from a known fingerprint.
+    """
+    conn = _db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT params_json FROM scan_tasks WHERE device_id=? AND action=? "
+            "AND status='completed' ORDER BY id DESC LIMIT 1",
+            (device_id, server_keys_rotate_action())).fetchall()
+    finally:
+        conn.close()
+    for (params_json,) in rows:
+        try:
+            return json.loads(params_json or "{}").get("new_key_sha256")
+        except Exception:
+            return None
+    return None
+
+
+def server_keys_rotate_action():
+    import server_keys
+    return server_keys.ROTATE_ACTION
+
+
+def enqueue_rotation(device_id, actor=None):
+    """Queue a server-key rotation for one device. Returns task_id.
+
+    The envelope itself is built and signed at DELIVERY (in _tasks_for_response),
+    not here, because which key must sign it depends on which anchor the device
+    is on at that moment — and that can change between queuing and delivery.
+    """
+    import server_keys
+    if not server_keys.staged_fingerprint():
+        raise RuntimeError("no staged keypair — stage a rotation first")
+    return enqueue_task(device_id, server_keys.ROTATE_ACTION, {}, actor=actor)
+
+
+def rotation_readiness():
+    """Per-device rotation state for the operator, plus whether cutover is safe.
+
+    Reports devices that are NOT ready rather than only a count: "3 pending" is
+    not actionable, and cutting over while a device is pending strands it.
+    """
+    import server_keys
+    target = server_keys.staged_fingerprint() or server_keys.current_fingerprint()
+    conn = _db_connect()
+    try:
+        devices = [r[0] for r in conn.execute(
+            "SELECT device_id FROM agent_devices "
+            "WHERE enrollment_status='approved'").fetchall()]
+    finally:
+        conn.close()
+    ready, pending = [], []
+    for d in devices:
+        (ready if _device_anchor_fingerprint(d) == target else pending).append(d)
+    return {"target_fingerprint": target, "ready": ready, "pending": pending,
+            "safe_to_cutover": not pending}
+
+
+def enqueue_rules_update(device_id, profile, rules_url, actor=None):
+    """Queue a ruleset update with the content digest bound in. Returns task_id.
+
+    The digest is computed HERE, at enqueue time, from the same bytes the
+    serving route resolves — so the server attests to specific content, not
+    merely to a URL. `params` is signed as part of the envelope, which makes the
+    signature cover the digest and the digest cover the content.
+
+    RAISES rather than enqueueing an unverifiable task. An update task whose
+    digest could not be computed would be refused by every agent that received
+    it; creating one anyway would turn a server-side misconfiguration into a
+    fleet-wide silent failure discovered only in agent logs.
+
+    TOCTOU is real and deliberately fails closed: if the ruleset changes between
+    enqueue and fetch, the digest will not match and the agent refuses the
+    update. The operator re-issues. The alternative — accepting whatever arrives
+    — is the hole this exists to close.
+    """
+    import rules_dist
+    d = rules_dist.rules_digest(profile)       # raises RulesUnavailable
+    return enqueue_task(device_id, "update_rules",
+                        {"rules_url": rules_url, "profile": d["profile"],
+                         "sha256": d["sha256"], "size": d["size"]},
+                        actor=actor)
+
+
 def _tasks_for_response(device_id):
     """Signed envelopes for this device's pending tasks, oldest first.
 
@@ -1767,13 +1874,30 @@ def _tasks_for_response(device_id):
             return []
 
         envelopes, now = [], datetime.now()
+        # EVERY task is signed with the key this device actually trusts, not just
+        # rotation tasks. During a rotation the server may hold three keys and
+        # devices may be on any of them: one that has already rotated trusts the
+        # staged key before cutover, and one that never rotated still trusts the
+        # previous key after it. Signing everything with the current key leaves
+        # both untaskable for the whole rotation window. Resolved once per
+        # response rather than per task.
+        signer = server_keys.signing_key_for_fingerprint(
+            _device_anchor_fingerprint(device_id))
+        if signer:
+            log.info("device=%s is on a non-current anchor — signing its tasks "
+                     "with %s", device_id, os.path.basename(signer))
         for task_id, action, params_json in rows:
             try:
                 params = json.loads(params_json or "{}")
             except Exception:
                 params = {}
-            envelopes.append(server_keys.build_task(
-                device_id, action, params, task_id=task_id, now=now))
+            if action == server_keys.ROTATE_ACTION:
+                envelopes.append(server_keys.build_rotation_task(
+                    device_id, task_id=task_id, sign_with=signer, now=now))
+            else:
+                envelopes.append(server_keys.build_task(
+                    device_id, action, params, task_id=task_id,
+                    sign_with=signer, now=now))
 
         conn = _db_connect()
         try:
@@ -1792,6 +1916,63 @@ def _tasks_for_response(device_id):
     except Exception as exc:
         log.error("could not build tasks for device=%s: %s", device_id, exc)
         return []
+
+
+#: Reports accepted from one heartbeat. The agent caps what it sends; this caps
+#: what is BELIEVED, independently — a bound enforced only by the sender is not a
+#: bound at all, since the sender is the untrusted party here.
+MAX_RESULTS_PER_BEAT_IN = 20
+
+#: Server-side truncation of agent-supplied free text. Independent of the agent's
+#: own limit for the same reason.
+RESULT_DETAIL_MAX = 500
+
+
+def _record_task_results(device_id, results):
+    """Record what a device REPORTS happened to its tasks. Returns ids to ack.
+
+    ATTESTED, NOT VERIFIED. Everything here is the device's own account of its
+    work; the server confirms only that an authenticated device said it. The
+    heartbeat gate upstream is what makes "which device said it" trustworthy,
+    and that is the whole of the guarantee.
+
+    Two scoping rules do the real work:
+
+    - `device_id` is in the WHERE clause. Without it any enrolled device could
+      close out ANOTHER device's task by guessing a task_id, which would let one
+      compromised machine hide a second machine's failures.
+    - `status='dispatched'` makes the update idempotent, so a redelivered report
+      (the at-least-once contract's normal case) is a no-op rather than a
+      second, conflicting write.
+
+    Ids are acked whether or not a row matched. An unknown, foreign or
+    already-recorded id that went un-acked would be retried by that agent
+    forever; acking costs nothing, because acking is not the same as believing.
+    """
+    acked = []
+    if not isinstance(results, list) or not results:
+        return acked
+    now = datetime.now().isoformat(timespec="seconds")
+    conn = _db_connect()
+    try:
+        for item in results[:MAX_RESULTS_PER_BEAT_IN]:
+            if not isinstance(item, dict):
+                continue
+            tid = item.get("task_id")
+            if not tid or not isinstance(tid, str):
+                continue
+            ok = bool(item.get("ok"))
+            detail = str(item.get("detail") or "")[:RESULT_DETAIL_MAX]
+            conn.execute(
+                "UPDATE scan_tasks SET status=?, result_ok=?, result_detail=?, "
+                "reported_at=? WHERE task_id=? AND device_id=? AND status='dispatched'",
+                ("completed" if ok else "failed", 1 if ok else 0, detail,
+                 now, tid, device_id))
+            acked.append(tid)
+        conn.commit()
+    finally:
+        conn.close()
+    return acked
 
 
 def _dispatch_pending_scans(device_id, agent_ip):
@@ -2680,9 +2861,21 @@ def _start_windows_agent_listener():
                 # read it at all — so extra fields are inert to anything already in
                 # the field, and the server can emit tasks before any agent
                 # understands them.
+                # Results are recorded only for an AUTHENTICATED device, and
+                # scoped to that device's own tasks. Wrapped so a malformed
+                # report array cannot take down telemetry ingest, which is this
+                # endpoint's primary job — same rule _tasks_for_response follows.
+                try:
+                    _acked = _record_task_results(device_id,
+                                                  payload.get("task_results"))
+                except Exception as _e:
+                    log.error("could not record task results for device=%s: %s",
+                              device_id, _e)
+                    _acked = []
                 _resp = {"ok": True,
                          "server_time": datetime.now().isoformat(timespec="seconds"),
-                         "tasks": _tasks_for_response(device_id)}
+                         "tasks": _tasks_for_response(device_id),
+                         "results_ack": _acked}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()

@@ -5,6 +5,7 @@ Run directly: python agent.py
 Starts polling hardware/security data and posting to Nemesis on port 5001.
 Listens for commands on localhost:5002.
 """
+import hmac
 import ipaddress
 import json
 import logging
@@ -247,7 +248,29 @@ def _collect_payload(conf):
         "agent_health":    agent_health,
         "suricata_alerts": suri_alerts,
         "scan_result":     None,
+        # Task outcomes ride the heartbeat REQUEST rather than a dedicated
+        # endpoint. The heartbeat is already signed, replay-floored and bound to
+        # its exact body, so results inherit all of that for free; a second route
+        # would need its own gate with identical requirements, which is the
+        # divergent-sibling shape that produced db_action vs set_action().
+        "task_results":    _pending_task_results(),
     }
+
+
+def _pending_task_results():
+    """Outcomes awaiting delivery, or [] if the store cannot be read.
+
+    [] here is not a defaulted measurement — it is the correct payload for "no
+    reports to send", and a failure to read genuinely means none can be sent
+    this beat. The reports are not lost: they stay on disk, are logged, and ride
+    the next beat.
+    """
+    try:
+        import tasks as task_mod
+        return task_mod.pending_results()
+    except Exception as exc:
+        log.warning("could not read pending task results: %s", exc)
+        return []
 
 
 def _migrate_key_material():
@@ -417,19 +440,37 @@ def _handle_response_tasks(response, device_id):
     Wrapped whole: a malformed response, or a task that misbehaves, must never
     break the heartbeat loop. Telemetry is this loop's primary job.
     """
-    if _task_anchor is None:
-        return
     try:
         body = response.json()
     except Exception:
         return                      # not JSON, or an older server — nothing to do
     if not isinstance(body, dict):
         return
+
+    import tasks as task_mod
+
+    # Acks are processed BEFORE the anchor gate, deliberately: an agent whose
+    # anchor is missing still has to be able to retire reports it already made,
+    # or an outage that costs the anchor leaves a queue that can never drain.
+    #
+    # HONEST LIMITATION, stated rather than hidden: acks are not signed, so
+    # anything able to answer on the socket can make an agent forget a pending
+    # report. It cannot FABRICATE one — reports are only ever created locally by
+    # record_result() — so the worst case is that an outcome never reaches the
+    # server, which surfaces as a task visibly stuck in 'dispatched'. That is a
+    # visible failure, not a silent one, which is why it does not warrant a
+    # second signed channel here.
+    acked = body.get("results_ack") or []
+    if isinstance(acked, list) and acked:
+        n = task_mod.ack_results([a for a in acked if isinstance(a, str)])
+        if n:
+            log.info("server acknowledged %d task result(s)", n)
+
+    if _task_anchor is None:
+        return
     envelopes = body.get("tasks") or []
     if not envelopes:
         return
-
-    import tasks as task_mod
     for env in envelopes:
         try:
             verified = task_mod.verify_task(env, device_id, _task_anchor)
@@ -449,13 +490,94 @@ def _handle_response_tasks(response, device_id):
                         verified["task_id"])
             continue
         try:
-            result = _CommandHandler._dispatch(None, verified["action"],
-                                               verified.get("params") or {})
+            if verified["action"] == task_mod.ROTATE_ACTION:
+                # NEVER routed through _dispatch. The command listener on
+                # 127.0.0.1:5002 is UNAUTHENTICATED, so an action reachable from
+                # the dispatcher is an action any local process can invoke — and
+                # re-anchoring this agent's trust is the last capability that
+                # should be available that way. Handling it here, downstream of
+                # verify_task, means the only path to it runs through a signature
+                # check against the key currently pinned.
+                result = _rotate_server_anchor(verified, device_id)
+            else:
+                result = _CommandHandler._dispatch(None, verified["action"],
+                                                   verified.get("params") or {})
+            # _dispatch signals an unknown action by RETURNING {"error": ...}
+            # rather than raising, so treating "it returned" as success would
+            # report every unrecognised action as completed — the outcome most
+            # worth telling the operator about, recorded as a success.
+            err = result.get("error") if isinstance(result, dict) else None
             log.info("task %s (%s) executed: %s",
                      verified["task_id"][:8], verified["action"], result)
+            task_mod.record_result(verified["task_id"], not err,
+                                   err or json.dumps(result)[:400],
+                                   verified["action"])
         except Exception as exc:
             log.error("task %s (%s) failed: %s",
                       verified["task_id"][:8], verified["action"], exc)
+            task_mod.record_result(verified["task_id"], False, str(exc),
+                                   verified["action"])
+
+
+def _rotate_server_anchor(envelope, device_id):
+    """Replace this device's trust anchor. Called ONLY from the verified path.
+
+    Preconditions the caller has already established, and which this function
+    does not re-check because re-checking would imply it could be called without
+    them: the envelope's signature verified against the CURRENTLY pinned anchor,
+    and the task was atomically claimed so it cannot run twice.
+
+    Ordering, which is the whole safety argument:
+      1. verify proof of possession   — before anything is written
+      2. refuse a no-op rotation      — before anything is written
+      3. write the anchor to disk     — atomic, previous kept as .prev
+      4. RE-READ from disk and re-fingerprint  — verifies what LANDED, not what
+         we meant to write
+      5. only then update the in-memory anchor
+    Memory last, deliberately: a crash between 3 and 5 recovers on restart
+    because the disk is authoritative. The reverse order loses the rotation
+    entirely on the next restart while appearing to have succeeded.
+    """
+    global _task_anchor
+    import enrollment
+    import tasks as task_mod
+    from cryptography.hazmat.primitives import serialization
+
+    try:
+        new_pub = task_mod.verify_rotation(envelope, device_id)
+    except task_mod.TaskRejected as exc:
+        log.error("server key rotation REFUSED (%s): %s",
+                  getattr(exc, "reason", "?"), exc)
+        return {"ok": False, "error": getattr(exc, "reason", "rejected")}
+
+    target_fp = envelope["params"]["new_key_sha256"]
+    current_fp = enrollment.server_key_fingerprint()
+    if current_fp == target_fp:
+        # Not an error worth alarming about, but it must not report success
+        # either: "already on that key" and "just rotated to it" are different
+        # facts and the server's readiness view depends on telling them apart.
+        log.info("server key rotation skipped — already anchored to %s",
+                 target_fp[:16])
+        return {"ok": True, "error": None, "rotated": False,
+                "new_key_sha256": target_fp}
+
+    pem = new_pub.public_bytes(serialization.Encoding.PEM,
+                               serialization.PublicFormat.SubjectPublicKeyInfo)
+    if not enrollment.replace_server_key(pem):
+        log.error("server key rotation FAILED to write the new anchor")
+        return {"ok": False, "error": "anchor_write_failed"}
+
+    landed = enrollment.server_key_fingerprint()
+    if landed != target_fp:
+        log.error("server key rotation post-write mismatch (on disk %s, expected %s)",
+                  (landed or "none")[:16], target_fp[:16])
+        return {"ok": False, "error": "post_write_mismatch"}
+
+    _task_anchor = enrollment.pinned_server_key()
+    log.info("server key rotated: now anchored to %s (was %s)",
+             target_fp[:16], (current_fp or "none")[:16])
+    return {"ok": True, "error": None, "rotated": True,
+            "new_key_sha256": target_fp}
 
 
 def _post_payload(conf, payload):
@@ -584,8 +706,15 @@ class _CommandHandler(BaseHTTPRequestHandler):
             return {"ok": True}
 
         if action == "update_rules":
-            _update_suricata_rules(body.get("rules_url"))
-            return {"ok": True}
+            # The real outcome is RETURNED, not swallowed. The previous
+            # `return {"ok": True}` was unconditional — an instrument that
+            # could only ever report success, so a refused or corrupted
+            # update was indistinguishable from an applied one, both here
+            # and in the task result the server records.
+            return _update_suricata_rules(body.get("rules_url"),
+                                          body.get("sha256"),
+                                          body.get("size"),
+                                          body.get("profile"))
 
         return {"error": f"unknown action: {action}"}
 
@@ -619,20 +748,162 @@ def _send_notification(title, message, severity, suggested_action):
         log.warning("notification failed: %s", e)
 
 
-def _update_suricata_rules(rules_url):
+#: Mirrors alert_manager/rules_dist.MAX_RULES_BYTES. Enforced independently:
+#: a limit applied only by the sender is not a limit, since the sender is the
+#: party this check exists to constrain.
+MAX_RULES_BYTES = 32 * 1024 * 1024
+RULES_CHUNK = 65536
+RULES_TIMEOUT = 30
+
+
+def _update_suricata_rules(rules_url, expected_sha256=None, expected_size=None,
+                           profile=None):
+    """Install a ruleset ONLY if its bytes match the digest the server signed.
+
+    Returns {"ok": bool, "error": <reason|None>, ...} — never None, and never a
+    bare success. The previous version returned nothing, never checked the HTTP
+    status, and wrote `r.content` straight over the live ruleset. Pointed at this
+    product's own /api/agent/rules it therefore installed a LOGIN PAGE as the
+    Suricata ruleset and logged "Updated rules" — detection silently off,
+    verified live 2026-08-03 (302 -> 200, 2756 bytes of HTML, zero rules).
+
+    THE DIGEST IS MANDATORY. Making it optional would leave the bypass wide open:
+    the command listener on 127.0.0.1:5002 is UNAUTHENTICATED, so any local
+    process can already invoke update_rules with a URL of its choosing. Requiring
+    a digest that only the signing server can produce closes that pre-existing
+    hole as a consequence rather than needing a separate fix.
+
+    Redirects are NOT followed. That is what turns the live bug above into a loud
+    http_status_302 instead of an HTML file masquerading as rules. It does mean a
+    legitimate http->https redirect is refused too — acceptable, because the URL
+    is supplied by the server, which knows its own canonical address.
+    """
+    import hashlib
+    import os as _os
+
+    def fail(reason, **extra):
+        log.error("update_rules REFUSED (%s) url=%s", reason, rules_url)
+        out = {"ok": False, "error": reason, "profile": profile}
+        out.update(extra)
+        return out
+
     if not rules_url:
-        return
+        return fail("no_rules_url")
+    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64 \
+            or any(c not in "0123456789abcdefABCDEF" for c in expected_sha256):
+        return fail("digest_required")
     try:
-        r = requests.get(rules_url, timeout=30)
-        rules_dir = __import__("os").path.join(_HERE, "suricata_rules")
-        __import__("os").makedirs(rules_dir, exist_ok=True)
+        from urllib.parse import urlparse
+        scheme = urlparse(rules_url).scheme.lower()
+    except Exception:
+        return fail("bad_scheme")
+    if scheme not in ("http", "https"):
+        return fail("bad_scheme")
+    try:
+        expected_size = int(expected_size)
+    except (TypeError, ValueError):
+        return fail("size_required")
+    if expected_size <= 0:
+        return fail("size_required")
+    if expected_size > MAX_RULES_BYTES:
+        return fail("too_large_declared")
+
+    if not profile:
         profile = _expected_suricata_profile(_detect_connection_type(_conf), _conf)
-        dest = __import__("os").path.join(rules_dir, f"{profile}.rules")
-        with open(dest, "wb") as f:
-            f.write(r.content)
-        log.info("Updated rules for profile=%s from %s", profile, rules_url)
+
+    try:
+        r = requests.get(rules_url, timeout=RULES_TIMEOUT, stream=True,
+                         allow_redirects=False)
     except Exception as e:
-        log.error("update_rules failed: %s", e)
+        return fail("fetch_failed", detail=str(e)[:200])
+
+    try:
+        if r.status_code != 200:
+            return fail("http_status_%d" % r.status_code)
+        # Streamed and bounded: an oversized body is abandoned mid-transfer
+        # rather than buffered in full and rejected afterwards.
+        digest, chunks, total = hashlib.sha256(), [], 0
+        for chunk in r.iter_content(RULES_CHUNK):
+            if not chunk:
+                continue
+            total += len(chunk)
+            if total > expected_size:
+                return fail("size_mismatch", received=total, expected=expected_size)
+            digest.update(chunk)
+            chunks.append(chunk)
+    finally:
+        r.close()
+
+    if total != expected_size:
+        return fail("size_mismatch", received=total, expected=expected_size)
+    got = digest.hexdigest()
+    if not hmac.compare_digest(got, expected_sha256.lower()):
+        return fail("digest_mismatch", received_sha256=got)
+
+    content = b"".join(chunks)
+    rules_dir = _os.path.join(_HERE, "suricata_rules")
+    dest = _os.path.join(rules_dir, "%s.rules" % profile)
+    tmp, prev, rtmp = dest + ".tmp", dest + ".prev", dest + ".restore"
+
+    def _restore_prev():
+        """Put the previous ruleset back WITHOUT consuming the backup.
+
+        `os.replace(prev, dest)` would be shorter but MOVES the backup, so if the
+        restore itself lands badly there is nothing left to recover from by hand.
+        Copying to a temp and replacing keeps `.prev` on disk as a last resort.
+        """
+        if not _os.path.exists(prev):
+            return False
+        try:
+            with open(prev, "rb") as src, open(rtmp, "wb") as dst_fh:
+                dst_fh.write(src.read())
+                dst_fh.flush()
+                _os.fsync(dst_fh.fileno())
+            _os.replace(rtmp, dest)
+            return True
+        except Exception as exc:
+            log.error("could not restore the previous ruleset: %s "
+                      "(a copy remains at %s)", exc, prev)
+            return False
+
+    try:
+        _os.makedirs(rules_dir, exist_ok=True)
+        # Keep the outgoing ruleset before replacing it: the post-write
+        # verification below needs something to restore TO, and a failed install
+        # that leaves no rules at all is worse than one that changes nothing.
+        if _os.path.exists(dest):
+            with open(dest, "rb") as fh_old, open(prev, "wb") as fh_bak:
+                fh_bak.write(fh_old.read())
+        with open(tmp, "wb") as fh:
+            fh.write(content)
+            fh.flush()
+            _os.fsync(fh.fileno())
+        _os.replace(tmp, dest)      # atomic: never a half-written ruleset on disk
+
+        # Re-read from disk and re-hash. This verifies the bytes that LANDED,
+        # not the bytes we intended to write — same ordering as
+        # keyprotect/migrate.py, which only deletes the plaintext key after
+        # proving the protected copy works from a fresh read.
+        with open(dest, "rb") as fh:
+            on_disk = hashlib.sha256(fh.read()).hexdigest()
+        if not hmac.compare_digest(on_disk, expected_sha256.lower()):
+            return fail("post_write_mismatch", on_disk_sha256=on_disk,
+                        restored=_restore_prev())
+    except Exception as e:
+        return fail("install_failed", detail=str(e)[:200],
+                    restored=_restore_prev())
+    finally:
+        for leftover in (tmp, rtmp):
+            try:
+                if _os.path.exists(leftover):
+                    _os.remove(leftover)
+            except Exception:
+                pass
+
+    log.info("Updated rules for profile=%s (%d bytes, sha256=%s...)",
+             profile, total, got[:12])
+    return {"ok": True, "error": None, "profile": profile,
+            "bytes": total, "sha256": got}
 
 
 def _start_command_listener():
