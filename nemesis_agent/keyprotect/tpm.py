@@ -50,6 +50,11 @@ class TpmBackend(KeyProtectionBackend):
     def is_provisioned(self) -> bool:
         return False
 
+    def is_unlocked(self) -> bool:
+        # A TPM key is never usable without its PIN -- proven 2026-08-03:
+        # signing without one returns 0x80090022 under NCRYPT_SILENT_FLAG.
+        return False
+
     def secret_kind(self) -> str:
         return SECRET_PIN
 

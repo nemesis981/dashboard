@@ -22,6 +22,7 @@ import psutil
 import requests
 
 import config
+import keyprotect
 from modules import hardware, security, scanner
 
 _HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
@@ -55,6 +56,62 @@ POLL_INTERVAL_FLOOR = 15
 # best-effort; full adaptive logic is deferred to the connection-tuning work.
 RAMP_START = 30   # seconds — first ramp gap
 RAMP_BEATS = 4    # number of ramping beats (geometric doubling) before settling
+
+# Attempts allowed at the startup device-secret prompt before the agent gives up
+# and exits WITHOUT starting the poll loop.
+MAX_UNLOCK_ATTEMPTS = 3
+
+
+def _unlock_key_material():
+    """Unlock the signing key if it is protected. True if the agent may proceed.
+
+    Runs BEFORE enrollment, because enroll() signs — a locked key would break
+    enrollment itself — and because ensure_enrolled() can block for a long time
+    waiting on owner approval, which is no place to discover a password is
+    needed.
+
+    Deployed tier-4 devices are NEVER prompted: LegacyBackend.is_unlocked()
+    returns True because an unencrypted key genuinely needs no secret. The gate
+    asks the backend whether it can sign, rather than inspecting a tier name.
+
+    Returns False (rather than raising) so main() can exit quietly on a cancel;
+    every failure path leaves the poll loop unstarted.
+    """
+    import enrollment
+    import keyprotect
+
+    backend = enrollment.get_backend()
+    if backend is None or not backend.is_provisioned():
+        return True         # nothing provisioned yet; enrollment provisions it
+    if backend.is_unlocked():
+        return True         # tier 4, or already unlocked in this process
+
+    import secret_prompt
+    for attempt in range(1, MAX_UNLOCK_ATTEMPTS + 1):
+        try:
+            secret = secret_prompt.prompt_secret_auto(
+                kind=backend.secret_kind(), mode=secret_prompt.UNLOCK)
+        except secret_prompt.NoPromptAvailable as e:
+            log.error("device secret required but there is no way to ask: %s", e)
+            return False
+        if secret is None:
+            log.error("device secret entry cancelled — agent will not report")
+            return False
+        try:
+            backend.unlock(secret)
+            enrollment.set_backend(backend)
+            log.info("device key unlocked (tier=%s)", backend.tier_id)
+            return True
+        except keyprotect.WrongSecret:
+            log.warning("incorrect device secret (attempt %d/%d)",
+                        attempt, MAX_UNLOCK_ATTEMPTS)
+        except keyprotect.KeyProtectError as e:
+            # Corrupt/locked-out/unavailable are not retryable by typing again.
+            log.error("cannot unlock device key: %s", e)
+            return False
+    log.error("device key not unlocked after %d attempts — agent will not report",
+              MAX_UNLOCK_ATTEMPTS)
+    return False
 
 
 def _resolve_poll_interval(conf):
@@ -169,6 +226,12 @@ def _collect_payload(conf):
         "suricata_profile":   suri_profile,
         "last_scan_at":       conf.get("last_scan_at") or None,
         "last_scan_result":   _get_last_scan_result(),
+        # Key-protection tier, so uneven protection across the fleet is visible
+        # rather than silent -- the same argument ADR 0004 (b) makes for engine
+        # and ruleset versions. hw_monitor reads agent_health with specific
+        # .get() calls, so an unknown key is ignored: the agent can report this
+        # today and the dashboard display follows as an approved follow-on.
+        "key_protection_tier": _key_protection_tier(),
     }
 
     return {
@@ -185,6 +248,20 @@ def _collect_payload(conf):
         "suricata_alerts": suri_alerts,
         "scan_result":     None,
     }
+
+
+def _key_protection_tier():
+    """Reported tier, or 'unknown' if it cannot be determined.
+
+    'unknown' is deliberately NOT 'none'. A failed read must not masquerade as
+    a real measurement -- reporting 'none' here would tell the dashboard this
+    device has an unprotected key, which may be false, and would be acted on.
+    """
+    try:
+        return keyprotect.tier_of(config.keys_dir())
+    except Exception as e:
+        log.debug("could not determine key protection tier: %s", e)
+        return "unknown"
 
 
 def _get_last_scan_result():
@@ -225,6 +302,16 @@ def _sign_heartbeat(device_id, body: bytes):
         digest = hashlib.sha256(body).hexdigest()
         return signed_at, _sign(f"{device_id}|{signed_at}|{digest}")
     except Exception as e:
+        # A locked or missing key is NOT a transient signing glitch, and must not
+        # fall into the best-effort unsigned path below. The server runs in
+        # observe mode, so it ACCEPTS unsigned heartbeats — swallowing this would
+        # silently downgrade the device from authenticated to unauthenticated
+        # while it kept reporting and looking healthy. The startup gate should
+        # make this unreachable; if it happens anyway, something is wrong enough
+        # that continuing is the wrong answer.
+        import keyprotect
+        if isinstance(e, keyprotect.KeyProtectError):
+            raise
         log.warning("could not sign heartbeat (sending unsigned): %s", e)
         return None, None
 
@@ -276,6 +363,14 @@ def _poll_loop():
                     log.info("scan_on_reconnect: triggering auto-scan")
                     scanner.trigger_scan("/")
                     _scan_on_reconnect_done = True
+        except keyprotect.KeyProtectError as e:
+            # Ordered BEFORE the broad except deliberately. Nothing in this loop
+            # can re-acquire an unusable key, so retrying would only spin -- and
+            # the alternative the old code took, swallowing it, meant heartbeats
+            # kept flowing unsigned. Stop, and say why.
+            log.critical("signing key became unusable (%s) — stopping agent", e)
+            _shutdown()
+            return
         except Exception as e:
             log.exception("poll_loop error: %s", e)
 
@@ -437,6 +532,15 @@ def main():
     log.info("Nemesis Agent starting (platform=%s)", _platform_name)
 
     _conf = config.load()
+
+    # Device-secret gate. Placed above enrollment because enroll() SIGNS, so a
+    # locked key would break enrollment itself, and because ensure_enrolled()
+    # can block for a long time awaiting owner approval. Returns False on
+    # cancel/failure, and every such path exits WITHOUT starting the poll loop --
+    # the agent must never fall through to sending unsigned heartbeats.
+    if not _unlock_key_material():
+        log.error("Device key unavailable — agent will not report. Exiting.")
+        return
 
     # Owner-gated enrollment: block until the owner approves this device in the
     # Nemesis dashboard before starting the /hw_data telemetry loop. Backward-

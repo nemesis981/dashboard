@@ -44,6 +44,12 @@ AGENT_HIDDEN = [
     "requests", "psutil", "watchdog", "plyer", "cryptography", "win_run",
     "platforms.windows", "platforms.linux", "platforms.mac",
     "modules.hardware", "modules.security", "modules.scanner", "modules.suricata_local",
+    # The agent prompts for the device secret at startup when the key is
+    # protected. Tk is bundled deliberately (~10 MB on a ~326 MB bundle): a
+    # console prompt at every logon on a consumer Windows machine reads as
+    # alarming, and secret_prompt falls back to the console only where Tk
+    # genuinely cannot open a window (headless Linux).
+    "secret_prompt", "tkinter",
 ] + KEYPROTECT_HIDDEN
 
 

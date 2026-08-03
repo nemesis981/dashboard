@@ -76,6 +76,81 @@ def validate_secret(kind: str, value: str, confirm=None):
     return True, ""
 
 
+class NoPromptAvailable(RuntimeError):
+    """Neither a GUI nor a usable console exists to ask on.
+
+    An explicit failure, deliberately not a silent "no secret" -- a service
+    with no desktop and no TTY must stop, never proceed as though the user had
+    declined or as though no secret were needed.
+    """
+
+
+def _tk_available() -> bool:
+    """Can we actually open a Tk window here? Tries, rather than guessing.
+
+    Importing tkinter succeeds on plenty of machines that cannot open a display
+    (headless Linux being the obvious one), so an import check alone would
+    report a capability we do not have.
+    """
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+def prompt_secret_console(*, kind=SECRET_PASSWORD, mode=CREATE, stream=None):
+    """Console prompt. Returns the secret, or None if the user cancelled.
+
+    Used by the Linux/headless agent, and as the fallback anywhere Tk cannot
+    open a window. Raises NoPromptAvailable when there is no TTY to ask on.
+    """
+    import getpass
+    import sys as _sys
+
+    if not _sys.stdin or not _sys.stdin.isatty():
+        raise NoPromptAvailable("no interactive terminal to prompt on")
+
+    spec = describe(kind)
+    out = stream or _sys.stderr
+    print(spec["create_title"] if mode == CREATE else spec["unlock_title"], file=out)
+    print(spec["blurb"], file=out)
+    try:
+        value = getpass.getpass("%s: " % spec["noun"].capitalize())
+        confirm = (getpass.getpass("Confirm %s: " % spec["noun"])
+                   if mode == CREATE else None)
+    except (EOFError, KeyboardInterrupt):
+        return None
+    ok, message = validate_secret(kind, value, confirm)
+    if not ok:
+        print(message, file=out)
+        return None
+    return value
+
+
+def prompt_secret_auto(*, kind=SECRET_PASSWORD, mode=CREATE, title=None):
+    """Prompt using whatever this machine actually has: Tk, else console.
+
+    Creates and tears down its own hidden Tk root, so callers with no existing
+    window (the agent at startup) do not have to manage one.
+    """
+    if _tk_available():
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            return prompt_secret(root, kind=kind, mode=mode, title=title)
+        finally:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+    return prompt_secret_console(kind=kind, mode=mode)
+
+
 def prompt_secret(parent, *, kind=SECRET_PASSWORD, mode=CREATE, title=None):
     """Modal prompt. Returns the secret, or None if the user cancelled.
 

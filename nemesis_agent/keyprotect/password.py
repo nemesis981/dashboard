@@ -73,6 +73,9 @@ class PasswordBackend(KeyProtectionBackend):
     def is_provisioned(self) -> bool:
         return os.path.isfile(self.envelope_path)
 
+    def is_unlocked(self) -> bool:
+        return self._key is not None
+
     def secret_kind(self) -> str:
         return SECRET_PASSWORD
 

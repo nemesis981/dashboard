@@ -88,6 +88,18 @@ class KeyProtectionBackend(abc.ABC):
         """Does key material for this backend already exist?"""
 
     @abc.abstractmethod
+    def is_unlocked(self) -> bool:
+        """Can this backend sign RIGHT NOW, without being given a secret?
+
+        The startup gate branches on this rather than on ``tier_id``. Asking
+        "can you sign?" is the operational question; comparing a tier label
+        infers behaviour from a name, and names drift. It is also what keeps
+        already-deployed tier-4 devices from being prompted for a password
+        nobody ever set — LegacyBackend answers True because it genuinely
+        needs no secret.
+        """
+
+    @abc.abstractmethod
     def secret_kind(self) -> str:
         """SECRET_PASSWORD or SECRET_PIN — drives the prompt, not the crypto."""
 

@@ -56,6 +56,16 @@ class LegacyBackend(KeyProtectionBackend):
     def is_provisioned(self) -> bool:
         return os.path.isfile(self.private_path)
 
+    def is_unlocked(self) -> bool:
+        """Always True — and that is the honest answer, not a shortcut.
+
+        An unencrypted key really is usable by anyone holding the file, which
+        is the defect tier 3 closes. Reporting True here is what stops the
+        startup gate prompting the deployed fleet for a secret that does not
+        exist for them.
+        """
+        return True
+
     def secret_kind(self) -> str:
         return SECRET_PASSWORD      # unused; nothing here consumes a secret
 
