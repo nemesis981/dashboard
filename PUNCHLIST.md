@@ -2045,6 +2045,32 @@ this entry is the proposal, not the implementation.
       `r.status_code == 200` and nothing else"); `nemesis_agent/agent.py:598`
       (`_post_payload`) checks only `r.status_code == 200`. Real, still-open gap, not stale.
 
+- [ ] **Provenance should be recorded when a component is INSTALLED, not inferred at the end
+  from a probe taken at the start.** The proper fix behind the retry bug (now FIXED, see the
+  "Retrying a failed install" entry above) — mitigated there by caching the first probe per
+  installer process, 2026-08-03.
+    - [ ] **What the caching fix does not cover.** It is per-process by design — "was this here
+      before THIS run?" is the honest scope, and persisting it to disk would create the mirror
+      bug, refusing to remove software Nemesis installed because the user installed their own
+      copy in between. So one hole remains: if the installer **crashes or is closed** after
+      installing Tailscale and the user relaunches, the new process probes fresh, sees it, and
+      records it as the user's. Same wrong answer, different trigger.
+    - [ ] **The design change.** Write `install-manifest.json` incrementally: at the moment
+      Tailscale (or PawnIO, or any future shared component) is actually installed, record
+      `installed_by_nemesis: true` for it. Provenance then becomes an observation of what the
+      installer DID, rather than an inference from what it SAW beforehand — which is the
+      property that makes it survive retries, crashes and relaunches alike.
+    - [ ] **Why it generalises.** Every shared component Nemesis installs inherits the same
+      hazard, and each one currently needs its own `_x_pre_existing` flag threaded through
+      `_run()`. An append-as-you-go manifest removes the whole class rather than patching
+      per-component. PawnIO already has the identical bug for the identical reason.
+    - [ ] **Cost:** the manifest is currently composed near the end of a successful install, so
+      this means restructuring it to be written progressively and tolerate partial state — the
+      uninstaller must already handle a manifest from an install that never finished.
+    - [ ] **Reviewed 2026-08-04 (Window 2):** design item, no live-code claim to verify against
+      — accurately describes the residual gap left by `edc6133`'s per-process cache. Still
+      valid, still unbuilt.
+
 - [ ] **A signed ruleset update can be rolled BACK to an older-but-genuine ruleset.**
   Content authenticity is now bound into the signed task envelope (`sha256` + `size` in
   `params`, verified by the agent before install — ADR 0004 Stage 1). That closes
