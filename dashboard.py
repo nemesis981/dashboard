@@ -9948,6 +9948,15 @@ def dashboard():
     try:
         from modules.ai_engine import get_incident_banner_html as _ai_ibanner, get_incident_js as _ai_ijs, get_incident_state as _ai_istate
         incident_banner_html = _ai_ibanner()
+        # Pricing drift rides the same banner slot as the Anthropic incident
+        # banner — same module, same shape of news ("something changed on
+        # Anthropic's side that you should know about"), so it reuses the
+        # surface rather than inventing a second one.
+        try:
+            from modules.ai_engine import get_pricing_drift_banner_html as _ai_dbanner
+            incident_banner_html = (_ai_dbanner() or "") + incident_banner_html
+        except Exception:
+            pass
         incident_js_html = _ai_ijs()
         incident_state_js = f"window._nemesisIncidentState={json.dumps(_ai_istate())};"
     except Exception:

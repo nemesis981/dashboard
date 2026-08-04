@@ -173,6 +173,13 @@ def _poll_loop(stop_evt: threading.Event) -> None:
             _poll_anthropic_status()
         except Exception:
             log.exception("ai_engine: status poll loop error")
+        try:
+            # Reuses this thread rather than starting a second one: the drift
+            # check is daily and self-rate-limits on _DRIFT_LAST_RUN_KEY, so
+            # calling it on every 240s tick costs one settings read.
+            run_pricing_drift_check()
+        except Exception:
+            log.exception("ai_engine: pricing drift check error")
 
 
 def _record_call_failure(code: int) -> None:
@@ -380,6 +387,151 @@ def _fetch_pricing_doc() -> str:
         _PRICING_DOC_URL, headers={"User-Agent": "Nemesis-Firewall/1.0"})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return resp.read().decode("utf-8", "replace")
+
+
+#: How often the drift check runs when enabled. Daily, not hourly: published
+#: prices change rarely, and the check exists to notice a change within a
+#: reasonable window, not to catch it the same minute.
+_PRICING_CHECK_INTERVAL_S = 24 * 3600
+
+#: ai_settings keys holding drift state. Kept in ai_settings rather than a new
+#: table because there is exactly one row's worth of state, and ADR 0001 keeps
+#: this module writing only ai_* names either way.
+_DRIFT_STATE_KEY = "pricing_drift_state"       # JSON: last check result
+_DRIFT_NOTIFIED_KEY = "pricing_drift_notified" # signature already emailed
+_DRIFT_LAST_RUN_KEY = "pricing_drift_last_run" # epoch of last completed check
+
+
+def _esc(v) -> str:
+    """Minimal HTML escape for banner text. Module-level on purpose: the older
+    `_e` helper is nested inside get_incident_banner_html and is not visible
+    here — a mistake py_compile cannot catch, since it would only surface as a
+    NameError on the rare path where drift actually exists."""
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def _drift_signature(divergences) -> str:
+    """Stable identity for a set of divergences, so the same drift is not
+    re-notified on every daily run. Changes when the published numbers change."""
+    parts = [f"{d['model']}:{d['published']['input']}/{d['published']['output']}"
+             for d in sorted(divergences, key=lambda d: d["model"])]
+    return "|".join(parts)
+
+
+def get_pricing_drift_state() -> dict:
+    """Last recorded drift result, or an empty state. Never raises."""
+    try:
+        raw = _get_setting(_DRIFT_STATE_KEY, "")
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+def get_pricing_drift_banner_html() -> str:
+    """Dashboard banner when published pricing differs from ours, else ''.
+
+    Mirrors get_incident_banner_html: this module already surfaces
+    "something changed on Anthropic's side" as a banner, and drift is the same
+    shape of news. A log line is not a notification — nobody reads the journal
+    to discover a price change.
+
+    States what changed and that NOTHING has been altered automatically, because
+    the whole design of check_pricing_drift is detect-and-notify; a banner that
+    implied the rates had been updated would misrepresent it.
+    """
+    st = get_pricing_drift_state()
+    divs = st.get("divergences") or []
+    if not divs:
+        return ""
+    rows = "".join(
+        f"<li><b>{_esc(d['model'])}</b>: published "
+        f"${d['published']['input']}/${d['published']['output']} per MTok, "
+        f"this server is using ${d['ours']['input']}/${d['ours']['output']}</li>"
+        for d in divs)
+    return (
+        '<div style="background:#3a2d00;border:1px solid #ffaa00;color:#ffd479;'
+        'padding:10px 14px;border-radius:6px;margin:8px 0;font-size:0.86em">'
+        '<b>&#9888; Anthropic&#39;s published pricing differs from this '
+        'server&#39;s rates.</b>'
+        f'<ul style="margin:6px 0 6px 18px;padding:0">{rows}</ul>'
+        '<span style="color:#bba">Nothing has been changed automatically. '
+        'Update the rate table (and its confirmed date) if these are correct. '
+        f'Checked {_esc(st.get("checked_at", "?"))}.</span></div>')
+
+
+def _notify_pricing_drift(result) -> None:
+    """Email on NEWLY-detected drift. Never raises into the caller.
+
+    Deduplicated on the divergence signature: the check runs daily and drift
+    persists until someone acts on it, so notifying every run would train the
+    operator to ignore it. A CHANGED set of numbers is new news and notifies
+    again.
+    """
+    divs = result.get("divergences") or []
+    if not divs:
+        return
+    sig = _drift_signature(divs)
+    if _get_setting(_DRIFT_NOTIFIED_KEY, "") == sig:
+        return
+    try:
+        import sys as _sys
+        _sys.path.insert(0, "/opt/nemesis/alert_manager")
+        from email_utils import send_email
+        body = ["Anthropic's published pricing differs from the rates this "
+                "Nemesis server uses for cost estimates.", ""]
+        for d in divs:
+            body.append(
+                f"  {d['model']}: published "
+                f"${d['published']['input']}/${d['published']['output']} per MTok; "
+                f"this server uses ${d['ours']['input']}/${d['ours']['output']}")
+        body += ["",
+                 "NOTHING HAS BEEN CHANGED AUTOMATICALLY. Pricing is a maintained",
+                 "constant here by design -- a scraped value that parsed wrongly",
+                 "would silently become what the product charges against.",
+                 "",
+                 "If these figures are correct, update _MODEL_RATES and bump",
+                 "_PRICING_DEFAULTS_CONFIRMED in the same change.",
+                 f"", f"Checked at {result.get('checked_at', '?')}."]
+        send_email("[Nemesis] Anthropic pricing has changed", "\n".join(body))
+        _set_setting(_DRIFT_NOTIFIED_KEY, sig)
+        log.info("ai_engine: pricing drift notification sent (%d model(s))", len(divs))
+    except Exception:
+        # A failed send must not lose the finding -- the banner still shows it.
+        log.exception("ai_engine: pricing drift notification failed")
+
+
+def run_pricing_drift_check(force=False, fetch=None) -> dict:
+    """Scheduled entry point: check, persist, and notify. Never raises.
+
+    Returns the check result, plus `skipped` when it did not run. Gated on the
+    operator having enabled checking -- an outbound request from a firewall
+    appliance is a deliberate decision, not a default (see
+    _pricing_check_enabled).
+    """
+    if not force and not _pricing_check_enabled():
+        return {"ok": False, "skipped": "disabled"}
+    if not force:
+        try:
+            last = float(_get_setting(_DRIFT_LAST_RUN_KEY, "0") or 0)
+        except (TypeError, ValueError):
+            last = 0.0
+        if time.time() - last < _PRICING_CHECK_INTERVAL_S:
+            return {"ok": False, "skipped": "interval"}
+    result = check_pricing_drift(fetch=fetch)
+    try:
+        _set_setting(_DRIFT_LAST_RUN_KEY, str(time.time()))
+        if result.get("ok"):
+            # Persist ONLY a successful check. A failed fetch must not erase a
+            # standing drift finding -- that would look like the drift resolved.
+            _set_setting(_DRIFT_STATE_KEY, json.dumps({
+                "divergences": result.get("divergences") or [],
+                "checked_at": result.get("checked_at"),
+            }))
+            _notify_pricing_drift(result)
+    except Exception:
+        log.exception("ai_engine: persisting drift state failed")
+    return result
 
 
 def check_pricing_drift(fetch=None) -> dict:
