@@ -2337,3 +2337,38 @@ this entry is the proposal, not the implementation.
       this. Verified against live code by Window 2 before this entry was committed (the
       `parts[2]`/`parts[1]` split reproduced directly against `firewall.py`'s `parse_alert`;
       the email-rendering and truncation citations confirmed by grep).
+
+- [ ] **Rename `_hour_of_week()` to `_hour_of_day()` — the name has been wrong since
+  2026-06-20 and has now cost real time.** `modules/anomaly_detection/module.py:1268` returns
+  `dt.hour` (24 buckets, 0-23). It genuinely was hour-of-week (`dt.weekday() * 24 + dt.hour`,
+  168 buckets) until `e0c4c9a`, which narrowed it deliberately and said so: 168 slots needed
+  five weeks to reach `MIN_BASELINE_OBS=5`, making the 7-day baseline useless. That commit
+  explicitly kept the old name "for the call sites".
+    - [ ] **Not a behaviour change — the behaviour is correct and evidence-backed.** `e0c4c9a`
+      recorded the measured payoff: 118 of 680 network domains correctly classified as known
+      after baseline, versus effectively zero at 168 slots. Confirmed still true 2026-08-04:
+      24/24 buckets covered, `obs_count` avg 6.8 across 9,667 rows / 1,234 metric keys.
+    - [ ] **Scope: function name + docstring only.** The `anomaly_baseline.hour_of_week` COLUMN
+      keeps its name — renaming it is a migration on a 9,667-row table for zero functional gain,
+      and the column is referenced in several queries. A comment on the column DDL pointing at
+      the function is enough.
+    - [ ] **Why it is worth doing at all:** the name misled the 2026-08-04 AI-autonomy scoping
+      into designing item 4's readiness gate around "168 buckets covered", a criterion that can
+      never be met. That went into a design document before measurement caught it. A name that
+      only the docstring contradicts will mislead the next reader the same way.
+
+- [ ] **Revisit weekday/weekend separation in the anomaly baseline — the question `e0c4c9a`
+  explicitly deferred.** That commit ended "Weekly periodicity can be revisited once the
+  baseline design is stable." It is now stable: 9,667 rows, 1,234 metric keys, ~6.8 observations
+  per bucket.
+    - [ ] **What the current design cannot see.** With 24 hour-of-day buckets, Sunday 03:00 and
+      Wednesday 03:00 are the same bucket. A domain queried only during weekday working hours
+      looks equally normal at 3am on a Sunday, because weekday and weekend traffic are averaged
+      together. On a home or small-business network that distinction is real signal.
+    - [ ] **A hybrid is the obvious middle.** 24 hour-of-day slots plus a weekday/weekend flag =
+      48 buckets: most of the discrimination at 2x the data cost rather than 7x. That keeps the
+      saturation property `e0c4c9a` was protecting (a weekday bucket still gets ~5 observations
+      per week) while restoring the weekend/weeknight distinction.
+    - [ ] **Not urgent, and explicitly not a bug** — the current behaviour was chosen on measured
+      evidence and works as intended. This is a deferred design question with the data now
+      available to answer it, filed so it stops living only in a commit message.
