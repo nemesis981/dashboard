@@ -1048,6 +1048,22 @@ def _set_dm_actor():
             auth_log.exception("actor: set failed")
 
 
+def _current_actor_label():
+    """The acting user as a stable label, or None when unauthenticated.
+
+    Same derivation as _set_dm_actor above (username, not the editable display
+    name). Kept as its own helper for callers that need to RECORD the actor on
+    a row of their own rather than rely on the Data Manager stamping it -- the
+    chat turn log is the first of those.
+    """
+    try:
+        if current_user.is_authenticated:
+            return f"user:{current_user.username}"
+    except Exception:
+        pass
+    return None
+
+
 @app.teardown_request
 def _clear_dm_actor(exc=None):
     """Clear the actor when the request ends. THIS IS THE LOAD-BEARING HALF.
@@ -4251,6 +4267,121 @@ Alert: {raw_alert}
                         "last_seen": now, "action": new_action, "rule_name": ""})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contextual chat — the alert anchor, plus the two routes the UI talks to.
+#
+# Core owns the `alerts` table, so the alert loader lives here rather than in
+# ai_engine. Same rule the three module anchors follow: whoever owns the schema
+# supplies the loader.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _anchor_load_alert(rule_id) -> str:
+    """Rebuild an alert's facts + the analysis already shown, for a follow-up.
+
+    Anchored on rule_id (TEXT) because that is what analyze_alert() keys on and
+    what the cached analysis is stored under -- not on alerts.id.
+    """
+    try:
+        conn = _dm_conn()
+        try:
+            r = conn.execute(
+                "SELECT rule_id, rule_name, classification, priority, explanation, "
+                "risk_level, action, times_seen, first_seen, last_seen, src_ip, "
+                "dst_ip, protocol FROM alerts WHERE rule_id=?",
+                (rule_id,),
+            ).fetchone()
+            # The analysis the user is looking at lives in ai_cache, written by
+            # analyze_alert() under this exact key.
+            cached = conn.execute(
+                "SELECT response_text FROM ai_cache WHERE cache_key=?",
+                (f"alert_{rule_id}",),
+            ).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("chat: alert anchor loader failed for %s", rule_id)
+        return ""
+    if not r:
+        return ""
+
+    lines = [
+        f"Alert rule {r['rule_id']} ({r['rule_name'] or 'unnamed'})",
+        f"Classification: {r['classification'] or 'none'}   Priority: {r['priority']}",
+        f"Risk level: {r['risk_level'] or 'unassessed'}",
+        f"Source IP: {r['src_ip'] or 'n/a'}   Destination: {r['dst_ip'] or 'n/a'}"
+        f"   Protocol: {r['protocol'] or 'n/a'}",
+        f"Times seen: {r['times_seen']}  (first {r['first_seen']}, last {r['last_seen']})",
+        f"Action taken so far: {r['action']}",
+    ]
+    if r["explanation"]:
+        lines.append(f"Explanation on record:\n{r['explanation']}")
+    if cached and cached["response_text"]:
+        lines.append(f"\nAnalysis already shown to the user:\n{cached['response_text']}")
+    return "\n".join(lines)
+
+
+try:
+    from modules.ai_engine import register_anchor as _ai_register_anchor
+    _ai_register_anchor(
+        "alert",
+        _anchor_load_alert,
+        action_classes=("ip_quarantine_external", "ip_block_permanent"),
+        label="Firewall alert",
+    )
+except Exception:
+    log.exception("chat: could not register the alert anchor")
+
+
+@app.route("/api/ai/chat/state")
+def api_ai_chat_state():
+    """Read-only: what the chat affordance should show for one anchored finding.
+
+    GET is correct here -- it reads state and bills nothing. Its sibling below is
+    POST precisely because that one spends money.
+    """
+    surface = (request.args.get("surface") or "").strip()
+    row_id  = (request.args.get("row_id") or "").strip()
+    if not surface or not row_id:
+        return jsonify({"ok": False, "reason": "surface and row_id are required"}), 400
+    try:
+        from modules.ai_engine import get_chat_state
+        return jsonify(get_chat_state(surface, row_id))
+    except Exception as e:
+        log.exception("chat: state lookup failed")
+        return jsonify({"ok": False, "reason": str(e)}), 500
+
+
+@app.route("/api/ai/chat/ask", methods=["POST"])
+def api_ai_chat_ask():
+    """Ask one follow-up question about an anchored finding.
+
+    POST, never GET: every call here is a real billed API request, so a GET
+    would make it CSRF-triggerable by a plain <img> tag under default
+    SameSite=Lax cookies -- i.e. an attacker could spend the owner's money.
+    Auth-gated by absence from _AUTH_EXEMPT, matching every other spending or
+    state-changing route.
+
+    The client sends only (surface, row_id, question). It CANNOT send context:
+    ask_followup() rebuilds that server-side from the row, so a caller cannot
+    steer the model with facts of its own choosing.
+    """
+    data    = request.get_json(silent=True) or {}
+    surface = str(data.get("surface") or "").strip()
+    row_id  = str(data.get("row_id") or "").strip()
+    question = str(data.get("question") or "").strip()
+    if not surface or not row_id:
+        return jsonify({"ok": False, "code": "bad_request",
+                        "reason": "surface and row_id are required"}), 400
+    try:
+        from modules.ai_engine import ask_followup
+        result = ask_followup(surface, row_id, question,
+                              actor=_current_actor_label())
+        return jsonify(result), (200 if result.get("ok") else 400)
+    except Exception as e:
+        log.exception("chat: ask_followup failed")
+        return jsonify({"ok": False, "code": "server_error", "reason": str(e)}), 500
+
 
 @app.route("/api/report/<rule_id>")
 def report_abuse(rule_id):
@@ -10358,6 +10489,37 @@ def dashboard():
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
             </div>
+            <!-- Contextual chat. Visible whenever the AI engine is active: the
+                 answer to per-question billing is to SHOW the cost, not to bury
+                 the feature behind a second opt-in nobody finds. -->
+            <div id="alertChatSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+                    <strong style="color:#00d4ff;font-size:0.95em">
+                        <span class="tier-text"
+                              data-beginner="Ask a follow-up question about this alert"
+                              data-intermediate="Ask about this alert"
+                              data-pro="Follow-up">Ask about this alert</span>
+                    </strong>
+                    <span id="chatTurnsLeft" style="font-size:0.78em;color:#888"></span>
+                </div>
+                <!-- Always-on cost notice. Not dismissible, not behind a tooltip. -->
+                <div id="chatCostNotice"
+                     style="background:#1a1f36;border:1px solid #2a3f5f;border-radius:4px;
+                            padding:7px 10px;margin-bottom:9px;font-size:0.78em;color:#9fb3d1">
+                    <span style="color:#ffc107">&#9432;</span>
+                    <span id="chatCostText">Each question is a live AI request that costs money.</span>
+                </div>
+                <div id="chatLog" style="max-height:230px;overflow-y:auto;margin-bottom:9px;font-size:0.85em"></div>
+                <textarea id="chatInput" rows="2" placeholder="e.g. why does this matter for my network?"
+                    style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;
+                           border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+                <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                    <button id="chatAskBtn" onclick="askChatFollowup()"
+                        style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;
+                               cursor:pointer;border-radius:3px;font-weight:bold">Ask</button>
+                    <span id="chatStatus" style="font-size:0.8em;color:#ccc"></span>
+                </div>
+            </div>
             <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
                     <strong style="color:#00d4ff;font-size:0.95em">
@@ -10767,6 +10929,7 @@ def dashboard():
                     "Analyzing…"
                 ) + "</p>";
             loadNotes(ruleId);
+            initChat("alert", ruleId);
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{
@@ -10922,9 +11085,127 @@ def dashboard():
                 .catch(e => alert("Error: " + e));
         }}
 
+        // ── Contextual chat ──────────────────────────────────────────────
+        // The cost line is rendered on EVERY state refresh and every answer,
+        // never cached and never hidden behind an expander: this is the one
+        // surface where the user spends money a click at a time.
+        var _chatSurface = null, _chatRowId = null;
+
+        function _chatMoney(v) {{
+            if (v === null || v === undefined) return null;
+            return "$" + Number(v).toFixed(4);
+        }}
+
+        function initChat(surface, rowId) {{
+            _chatSurface = surface;
+            _chatRowId = rowId;
+            var sec = document.getElementById("alertChatSection");
+            document.getElementById("chatLog").innerHTML = "";
+            document.getElementById("chatInput").value = "";
+            document.getElementById("chatStatus").textContent = "";
+            sec.style.display = "none";
+            fetch("/api/ai/chat/state?surface=" + encodeURIComponent(surface)
+                  + "&row_id=" + encodeURIComponent(rowId))
+                .then(r => r.json())
+                .then(st => {{
+                    if (!st.ok || !st.available) return;   // no affordance if AI is off
+                    sec.style.display = "block";
+                    _renderChatMeta(st);
+                }})
+                .catch(() => {{}});
+        }}
+
+        function _renderChatMeta(st) {{
+            var left = st.turns_left;
+            document.getElementById("chatTurnsLeft").textContent =
+                left + " of " + st.turn_cap + " questions left";
+            var spent = _chatMoney(st.spent_usd);
+            var txt = "Each question is a live AI request that costs money.";
+            if (spent !== null) {{
+                txt += " Spent on this finding so far: " + spent;
+                // An incomplete total must say so rather than silently
+                // under-reporting what was actually billed.
+                if (st.spend_partial) txt += " (at least — some calls could not be priced)";
+            }} else if (st.spend_partial) {{
+                txt += " Cost of earlier questions could not be determined.";
+            }}
+            document.getElementById("chatCostText").textContent = txt;
+            document.getElementById("chatAskBtn").disabled = (left <= 0);
+        }}
+
+        function _appendChatTurn(q, a, costUsd) {{
+            var log = document.getElementById("chatLog");
+            var wrap = document.createElement("div");
+            wrap.style.cssText = "margin-bottom:10px;border-bottom:1px solid #222;padding-bottom:8px";
+            var qEl = document.createElement("div");
+            qEl.style.cssText = "color:#00d4ff;margin-bottom:3px";
+            qEl.textContent = "You: " + q;
+            var aEl = document.createElement("div");
+            aEl.style.cssText = "color:#ddd;white-space:pre-wrap";
+            aEl.textContent = a;
+            var cEl = document.createElement("div");
+            cEl.style.cssText = "color:#777;font-size:0.75em;margin-top:4px";
+            var money = _chatMoney(costUsd);
+            cEl.textContent = money === null
+                ? "cost unavailable for this model"
+                : "this question cost " + money;
+            wrap.appendChild(qEl); wrap.appendChild(aEl); wrap.appendChild(cEl);
+            log.appendChild(wrap);
+            log.scrollTop = log.scrollHeight;
+        }}
+
+        function askChatFollowup() {{
+            var input = document.getElementById("chatInput");
+            var q = (input.value || "").trim();
+            if (!q) return;
+            var btn = document.getElementById("chatAskBtn");
+            var status = document.getElementById("chatStatus");
+            btn.disabled = true;
+            status.textContent = "asking…";
+            fetch("/api/ai/chat/ask", {{
+                method: "POST",
+                headers: {{"Content-Type": "application/json"}},
+                body: JSON.stringify({{surface: _chatSurface, row_id: _chatRowId, question: q}})
+            }})
+                .then(r => r.json())
+                .then(d => {{
+                    if (!d.ok) {{
+                        // Surface the real reason. "Out of questions", "spend cap
+                        // reached" and "rate limited" need different responses
+                        // from the user, so they must not collapse into one
+                        // generic failure message.
+                        status.textContent = d.reason || "could not ask that question";
+                        btn.disabled = false;
+                        return;
+                    }}
+                    input.value = "";
+                    status.textContent = "";
+                    _appendChatTurn(q, d.answer, d.cost_usd);
+                    if (d.record_failed) {{
+                        status.textContent = "answered, but this question could not be "
+                            + "added to the spend record shown above";
+                    }}
+                    fetch("/api/ai/chat/state?surface=" + encodeURIComponent(_chatSurface)
+                          + "&row_id=" + encodeURIComponent(_chatRowId))
+                        .then(r => r.json())
+                        .then(st => {{ if (st.ok) _renderChatMeta(st); }})
+                        .catch(() => {{}});
+                    btn.disabled = false;
+                }})
+                .catch(e => {{
+                    status.textContent = "error: " + e;
+                    btn.disabled = false;
+                }});
+        }}
+
         function closeModal() {{
             document.getElementById("alertModal").style.display = "none";
             document.getElementById("btnReport").style.display = "none";
+            document.getElementById("alertChatSection").style.display = "none";
+            document.getElementById("chatLog").innerHTML = "";
+            document.getElementById("chatInput").value = "";
+            _chatSurface = null;
+            _chatRowId = null;
             document.getElementById("alertNotesSection").style.display = "none";
             document.getElementById("relatedNotesList").style.display = "none";
             document.getElementById("noteInput").value = "";

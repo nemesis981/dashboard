@@ -2080,3 +2080,69 @@ def _api_anomaly_settings():
 def _api_anomaly_usage():
     from flask import jsonify
     return jsonify(ai_get_usage_stats())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat anchor — lets the contextual chat rebuild an incident's context server-side
+#
+# Registered here rather than inside ai_engine because this module owns the
+# schema. ai_engine reaching across into anomaly_* columns would be the same
+# shape of debt as an ad-hoc firewall call: it works until the schema moves.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _anchor_load_incident(row_id) -> str:
+    """Rebuild an incident's facts + its existing AI report, for a chat follow-up.
+
+    Returns "" when the row does not exist — ask_followup() treats that as a hard
+    failure rather than answering over an empty context.
+    """
+    conn = _conn()
+    try:
+        r = conn.execute(
+            "SELECT id, created_at, incident_type, offending_target, score, status, "
+            "device_count, devices_json, evidence_json, ai_report "
+            "FROM anomaly_incidents WHERE id=?",
+            (row_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return ""
+
+    try:
+        devices = ", ".join(json.loads(r["devices_json"] or "[]")) or "none recorded"
+    except Exception:
+        devices = "unreadable"
+    try:
+        evidence = json.dumps(json.loads(r["evidence_json"] or "{}"), indent=2)
+    except Exception:
+        evidence = str(r["evidence_json"] or "")
+
+    lines = [
+        f"Incident #{r['id']} ({r['incident_type']}), status {r['status']}",
+        f"Offending target: {r['offending_target']}",
+        f"Anomaly score: {r['score']}",
+        f"Devices involved ({r['device_count']}): {devices}",
+        f"Evidence:\n{evidence}",
+    ]
+    if r["ai_report"]:
+        lines.append(f"\nAnalysis already shown to the user:\n{r['ai_report']}")
+    return "\n".join(lines)
+
+
+try:
+    from modules.ai_engine import register_anchor as _register_anchor
+    _register_anchor(
+        "anomaly_incident",
+        _anchor_load_incident,
+        # An incident points at an offending target, so it can lead to either IP
+        # action. The chat's scope is derived from whichever of these has earned
+        # authority — it does not grant any by being listed here.
+        action_classes=("ip_quarantine_external", "ip_block_permanent"),
+        label="Network anomaly incident",
+    )
+except Exception:
+    # A registration failure must not take the module down: without it there is
+    # simply no chat affordance on this surface, which is a degraded feature,
+    # not a broken detector.
+    log.exception("anomaly_detection: could not register chat anchor")

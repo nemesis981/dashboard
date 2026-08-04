@@ -696,3 +696,56 @@ def _api_dismiss(item_id: int):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat anchor — see the equivalent block in anomaly_detection for the rationale
+# (the module that owns the schema supplies the loader).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _anchor_load_queue_item(row_id) -> str:
+    """Rebuild a queue item's facts + its existing AI assessment."""
+    conn = _conn()
+    try:
+        r = conn.execute(
+            "SELECT id, source_type, domain_or_ip, detection_type, confidence_score, "
+            "device_count, first_detected, last_detected, incident_detail, "
+            "ai_confidence, ai_assessment, submitted "
+            "FROM community_queue WHERE id=?",
+            (row_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return ""
+
+    lines = [
+        f"Community queue item #{r['id']} ({r['source_type']})",
+        f"Target: {r['domain_or_ip']}",
+        f"Detection type: {r['detection_type'] or 'unclassified'}",
+        f"Confidence score: {r['confidence_score']}",
+        f"Devices affected: {r['device_count']}",
+        f"First seen: {r['first_detected']}   Last seen: {r['last_detected']}",
+        f"Submitted to the community feed: {'yes' if r['submitted'] else 'no'}",
+    ]
+    if r["incident_detail"]:
+        lines.append(f"Detail:\n{r['incident_detail']}")
+    if r["ai_assessment"]:
+        lines.append(f"\nAssessment already shown to the user "
+                     f"(confidence: {r['ai_confidence']}):\n{r['ai_assessment']}")
+    return "\n".join(lines)
+
+
+try:
+    from modules.ai_engine import register_anchor as _register_anchor
+    # No action_classes: this surface decides what gets SUBMITTED to a community
+    # feed, not what happens on this network. It never leads to a firewall or
+    # quarantine action, so it stays explanatory at every authority level.
+    _register_anchor(
+        "community_queue",
+        _anchor_load_queue_item,
+        action_classes=(),
+        label="Community queue submission",
+    )
+except Exception:
+    log.exception("community_queue: could not register chat anchor")
