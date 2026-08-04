@@ -2236,3 +2236,57 @@ this entry is the proposal, not the implementation.
     - [ ] Found by Window 1, 2026-08-04, while investigating mandatory-scan triggers for the
       trust-boundary work. Verified against live code and live DB state by Window 2 before
       this entry was committed.
+
+- [ ] **[SECURITY — READ BEFORE STARTING the malware/zero-day + memory-injection work] Agent-side
+  integrity attestation: two evasion paths nothing currently detects.** The trust-boundary work
+  (2026-08-04) closed the revoke→reinstate scan gap and now forces a scan whenever a device is
+  readmitted from `revoked`, `uninstalled`, or `rejected`. **Two adjacent evasion paths are NOT
+  closed by that work, and cannot be closed by any staleness or enrollment mechanism**, because
+  neither crosses a trust boundary or ages anything. Both confirmed by reading the code, not
+  inferred.
+    - [ ] **(a) The stopped-agent path.** Stop the agent process, act on the machine, restart
+      it. No uninstall, no re-enrollment: `ensure_enrolled()`
+      (`nemesis_agent/enrollment.py:484`) returns immediately when the stored `device_id` is
+      already `approved`, so `pre_enrollment_scan()` — which only runs inside `enroll()` — never
+      executes. The server-side `first_connect` trigger tests `prev is None`
+      (`hw_monitor.py:1739`) and the `agent_devices` row still exists, so it does not fire
+      either. The only remaining trigger is `extended_absence`, whose live threshold is 24h
+      (`hw_monitor.py:475`). **Stopping the agent for under 24 hours therefore evades every
+      scan trigger that exists.** Strictly easier than uninstalling.
+    - [ ] **(b) The selective file-replacement path — worse, and the ranking is
+      counter-intuitive.** Keep `nemesis_agent.conf` and `keys/`, replace the agent's own code.
+      Identity and signing keys are intact, so heartbeats authenticate normally and the server
+      sees a healthy approved device. Nothing triggers. An attacker who neuters
+      `scanner.trigger_scan` gets an agent that reports `ok: true` with no findings for every
+      scan task it is given — turning the already-documented "task results are attested claims,
+      not ground truth" limitation into an active bypass rather than a stated caveat.
+    - [ ] **There is no agent self-integrity check of any kind.** Every sha256/integrity
+      mechanism in the agent covers the server trust anchor, the heartbeat body, rules content,
+      or key rotation — confirmed by grepping specifically for code validating the agent's own
+      files. Nothing does.
+    - [ ] **The uncomfortable consequence:** a full uninstall-and-reinstall is the ONE tampering
+      path that reliably triggers a fresh scan (new `device_id` → new row → `first_connect` + a
+      real pre-enrollment scan). Every more surgical, more sophisticated tampering preserves
+      identity and triggers nothing. The protection is currently strongest against the least
+      careful attacker.
+    - [ ] **Decide the mechanism.** Agent-side integrity attestation is a new capability, not a
+      patch: signed manifest of agent files verified at start and periodically, reported in the
+      heartbeat, with the server treating a missing or failed attestation as an explicit state
+      rather than as "healthy". A self-report from a compromised agent is worth exactly what a
+      compromised agent says it is worth — the design has to state plainly what it does and does
+      not establish, rather than implying more.
+    - [ ] **Sequence it against the memory-injection work deliberately.** That work shares the
+      same threat model and the same trust assumption about the agent's own code, and will
+      inherit this gap wholesale if it is built first. **This entry exists specifically so that
+      does not happen by omission.**
+    - [ ] **Related, cheaper, and worth doing regardless:** the TOFU fingerprint match at
+      enrollment is computed and then only logged (`hw_monitor.py:2985`, "informational; the
+      match NEVER blocks enrollment — degrade-visibly principle, ADR 0011"). That is currently
+      what makes reinstall-as-new-device safe. It is safe by accident, not by design — if anyone
+      later "improves" enrollment to recognise returning devices via that match, the reinstall
+      path silently becomes an evasion too. Worth a test pinning the current behaviour so the
+      change cannot be made unknowingly.
+    - [ ] Found by Window 1, 2026-08-04, during the trust-boundary investigation. Verified
+      against live code by Window 2 before this entry was committed
+      (`ensure_enrolled`/`enroll`/`pre_enrollment_scan` in `nemesis_agent/enrollment.py`;
+      `first_connect`/`extended_absence`/TOFU-fingerprint in `hw_monitor.py`).
