@@ -14,6 +14,7 @@ DB: shared alerts.db (ai_* tables), reached via the Stage-1 module accessor.
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -379,17 +380,159 @@ def get_status() -> dict:
                 "key_valid": True, "detail": str(exc)}
 
 
+# Date the SHIPPED default rates below were last confirmed against Anthropic's
+# published pricing. Bump this in the same commit as any change to the defaults —
+# a stale date is worse than none, because it vouches for figures nobody checked.
+_PRICING_DEFAULTS_CONFIRMED = "2026-08-04"
+
+
 def get_pricing() -> dict:
-    """Read pricing from environment. Defaults: Claude Sonnet 4.6 (June 2026)."""
+    """Per-MTok rates, plus the date they were last confirmed.
+
+    THERE IS NO PRICING API. Anthropic's Models API returns model IDs, context
+    windows and capabilities, but not prices — those are published as docs only
+    (verified 2026-08-04). So these rates are a maintained constant, and their
+    AGE is the only signal of whether they can be trusted. Same discipline the
+    backup free-space reading already follows: a figure that is historical by
+    the time anyone reads it never renders without its age attached.
+
+    `updated` is an ISO date, or None meaning "nobody has vouched for these".
+    None is a real answer and must be shown as one — never silently replaced
+    with a date that makes unverified numbers look confirmed.
+
+    Two rules produce it, and the second is the one that matters:
+
+    1. The shipped date applies ONLY to the shipped defaults. If the operator
+       overrides either rate via the environment, those are THEIR figures and
+       this code has never checked them — `updated` is None unless they also
+       supply ANTHROPIC_PRICING_UPDATED.
+    2. A malformed ANTHROPIC_PRICING_UPDATED yields None rather than falling
+       back to the shipped date, so a typo surfaces as "unknown" instead of
+       being papered over by an authoritative-looking default.
+    """
+    raw_in   = (os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK")  or "").strip()
+    raw_out  = (os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK") or "").strip()
+    raw_date = (os.environ.get("ANTHROPIC_PRICING_UPDATED")       or "").strip()
+    operator_set = bool(raw_in or raw_out)
+
     try:
-        inp = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
+        inp = float(raw_in) if raw_in else 3.00
     except (ValueError, TypeError):
         inp = 3.00
     try:
-        out = float(os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK", "15.00") or "15.00")
+        out = float(raw_out) if raw_out else 15.00
     except (ValueError, TypeError):
         out = 15.00
-    return {"input_per_mtok": inp, "output_per_mtok": out}
+
+    if raw_date:
+        # Explicitly supplied: honour it only if it is a real ISO date.
+        updated = raw_date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date) else None
+    elif operator_set:
+        updated = None          # their rates, our date would be a lie
+    else:
+        updated = _PRICING_DEFAULTS_CONFIRMED
+
+    return {"input_per_mtok": inp, "output_per_mtok": out, "updated": updated}
+
+
+def get_monthly_cost(today: str | None = None) -> dict:
+    """Average monthly token spend for THIS install.
+
+    PER-INSTALL BY CONSTRUCTION, not by attribution. `ai_usage` lives in this
+    appliance's own database and records only calls this appliance made, so the
+    figure is already scoped to one install with nothing to divide. An anomaly
+    incident covering twelve devices is one install's spend either way — there
+    is deliberately no per-device split here, because at this scope the question
+    does not arise.
+
+    A future multi-appliance / MSP rollup (one client, several servers) would be
+    a SEPARATE aggregation layer over several installs' figures — it does not
+    change this function, which stays the per-install primitive that layer would
+    sum. Do not add a tenant dimension here to anticipate it.
+
+    FAILS CLOSED ON THIN HISTORY. Only calendar months the install observed in
+    full are averaged:
+
+      * the month must have STARTED on or after the first recorded usage —
+        an install that came up on the 7th never saw the 1st through 6th, so
+        that month is a partial sample dressed as a full one; and
+      * the month must have fully ELAPSED — the current month is still
+        accumulating and would drag the average down every time it is read.
+
+    With no qualifying month this returns `sufficient: False` and `None` for
+    both averages — never 0, and never a figure extrapolated from a part-month.
+    A dollar amount is a legitimate-looking answer, so it is only ever returned
+    when it is a measurement. `days_observed` is reported alongside so the UI
+    can say how much longer it needs rather than just refusing.
+
+    `today` is injectable so the month-boundary logic is testable without
+    waiting for the calendar.
+    """
+    pricing = get_pricing()
+    try:
+        ref = (datetime.strptime(today, "%Y-%m-%d").date() if today
+               else datetime.now().date())
+        conn = _conn()
+        row = conn.execute("SELECT MIN(date), MAX(date) FROM ai_usage").fetchone()
+        earliest_s = row[0] if row else None
+        if not earliest_s:
+            conn.close()
+            return {"ok": True, "sufficient": False, "reason": "no usage recorded",
+                    "days_observed": 0, "months_counted": 0,
+                    "average_tokens": None, "average_cost": None, "pricing": pricing}
+        earliest = datetime.strptime(earliest_s, "%Y-%m-%d").date()
+
+        # Enumerate fully-observed, fully-elapsed calendar months.
+        months = []
+        y, m = earliest.year, earliest.month
+        if earliest.day != 1:          # partial first month — skip to the next
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+        while (y, m) < (ref.year, ref.month):   # strictly before the current month
+            months.append(f"{y:04d}-{m:02d}")
+            y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+        if not months:
+            conn.close()
+            return {"ok": True, "sufficient": False,
+                    "reason": "no complete calendar month observed yet",
+                    "days_observed": (ref - earliest).days, "months_counted": 0,
+                    "average_tokens": None, "average_cost": None, "pricing": pricing}
+
+        marks = ",".join("?" * len(months))
+        agg = conn.execute(
+            f"SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), "
+            f"COALESCE(SUM(call_count),0) FROM ai_usage "
+            f"WHERE substr(date,1,7) IN ({marks})", months).fetchone()
+        conn.close()
+
+        n = len(months)
+        avg_in, avg_out = agg[0] / n, agg[1] / n
+        avg_cost = round(avg_in * pricing["input_per_mtok"] / 1_000_000
+                         + avg_out * pricing["output_per_mtok"] / 1_000_000, 6)
+        return {
+            "ok": True, "sufficient": True,
+            "days_observed": (ref - earliest).days,
+            "months_counted": n,
+            "months": months,
+            "average_tokens": {"in": round(avg_in, 1), "out": round(avg_out, 1)},
+            "average_calls": round(agg[2] / n, 1),
+            "average_cost": avg_cost,
+            "pricing": pricing,
+        }
+    except Exception as exc:
+        log.exception("ai_engine: get_monthly_cost failed")
+        # Same posture as get_usage_stats: no fabricated numbers on a failed read.
+        return {"ok": False, "error": str(exc)[:200], "pricing": pricing}
+
+
+def _price_age_label(pricing: dict) -> str:
+    """`(rates as of YYYY-MM-DD)`, or an explicit unknown. Never blank.
+
+    A cost figure with no provenance reads as authoritative, so every surface
+    that prints one prints this next to it.
+    """
+    upd = (pricing or {}).get("updated")
+    return f"(rates as of {upd})" if upd else "(pricing date unknown)"
 
 
 def get_upsell_prompt_html(tokens_in: int = 350, tokens_out: int = 150) -> str:
@@ -424,6 +567,13 @@ def get_upsell_prompt_html(tokens_in: int = 350, tokens_out: int = 150) -> str:
         f'data-pro="AI second-opinion available ({cost_str}). Enable in Settings.">'
         f'Local analysis complete. AI verdict adds context &#8212; est. {cost_str}. '
         f'Enable in Settings.</span>'
+        # The estimate is priced off a maintained constant, not a live feed, so it
+        # carries the date those rates were last confirmed — same rule as every
+        # other cost surface. `updated` is None when nobody has vouched for the
+        # rates, and that is stated rather than hidden.
+        f'<span style="color:#556;font-size:0.85em;white-space:nowrap;flex-shrink:0" '
+        f'title="Estimate uses maintained per-MTok rates, not a live price feed">'
+        f'{_price_age_label(pricing)}</span>'
         '<button onclick="_aiUpsellDismissOnce(this)" title="Dismiss" '
         'style="background:none;border:none;color:#444;cursor:pointer;padding:0 3px;'
         'line-height:1;font-size:1.1em;flex-shrink:0">&#215;</button>'
@@ -664,6 +814,9 @@ def get_usage_stats() -> dict:
                 "hourly": {r["hour"]: {"in": r["tokens_in"], "out": r["tokens_out"]}
                            for r in hourly_rows},
             },
+            # Per-install monthly average rides the existing payload rather than
+            # a new endpoint — no new route, no new auth surface.
+            "monthly": get_monthly_cost(),
             "cost": {
                 "today": _cost(t_in, t_out),
                 "week":  _cost(w_in, w_out),

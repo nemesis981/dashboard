@@ -185,17 +185,43 @@ confidence=low: Likely a false positive or benign behaviour — do not share."""
 
 
 def _analyse_one(row) -> dict:
-    """Run AI analysis on one queue item. Returns parsed AI result dict."""
+    """Run AI analysis on one queue item.
+
+    Returns the parsed result plus `ran`: True when the AI actually produced a
+    verdict, False when no analysis happened (rate limit, in-flight duplicate,
+    API failure). THE CALLER MUST NOT PERSIST A `ran: False` RESULT — see
+    _api_analyse.
+
+    `job_id` engages ai_engine's in-flight dedup, which this path never used.
+    The sibling alert path has passed one since the concurrency work
+    (dashboard.py, `job_id=f"alert_{rule_id}"`), added because two concurrent
+    requests for the same uncached item each made — and were each BILLED FOR —
+    a separate Claude call. Worse here: "Analyse Queue" is a BATCH, so two
+    concurrent clicks duplicated a whole queue's worth of calls, not one.
+
+    Keyed on the domain, matching the cache key: the unit of work is the target,
+    and two batches racing on the same target is exactly what must collapse.
+    """
     prompt = _build_ai_prompt(row)
     result = ai_analyze(
         prompt,
         max_tokens=300,
         cache_key=f"cq:{row['domain_or_ip']}",
         cache_hours=24,
+        job_id=f"cq:{row['domain_or_ip']}",
     )
     if not result.get("ok"):
-        return {"confidence": "uncertain",
-                "assessment": "AI analysis unavailable — review manually."}
+        # `ran: False` is the load-bearing half of this fix. Adding job_id alone
+        # would trade double-billing for silently-lost work: a dedup rejection
+        # is a not-ok result, and the caller used to write this fallback with
+        # ai_reviewed=1 — so the row would be marked reviewed with no analysis
+        # behind it and, because the selector is `ai_reviewed=0`, never picked
+        # up again. An invisible gap in the queue is worse than a visible
+        # double-charge.
+        return {"ran": False,
+                "confidence": "uncertain",
+                "assessment": "AI analysis unavailable — review manually.",
+                "reason": result.get("reason", "")}
     text = result["text"].strip()
     if text.startswith("```"):
         text = text.split("```", 2)[1].lstrip("json").strip()
@@ -204,10 +230,11 @@ def _analyse_one(row) -> dict:
         conf = parsed.get("confidence", "uncertain").lower()
         if conf not in ("high", "uncertain", "low"):
             conf = "uncertain"
-        return {"confidence": conf,
+        return {"ran": True, "confidence": conf,
                 "assessment": parsed.get("assessment", "")}
     except Exception:
-        return {"confidence": "uncertain", "assessment": text[:300]}
+        # Parsed badly, but the AI DID run and we were billed — persist it.
+        return {"ran": True, "confidence": "uncertain", "assessment": text[:300]}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -591,9 +618,15 @@ def _api_analyse():
         return jsonify({"error": str(e)}), 500
 
     reviewed = 0
+    skipped = 0
     for row in rows:
         try:
             result = _analyse_one(row)
+            if not result.get("ran"):
+                # No analysis happened — leave ai_reviewed=0 so the row is
+                # retried, rather than recording a verdict that was never made.
+                skipped += 1
+                continue
             conn = _conn()
             conn.execute("""
                 UPDATE community_queue
@@ -606,7 +639,7 @@ def _api_analyse():
         except Exception:
             log.exception("community_queue: AI analysis failed for item %s", row["id"])
 
-    return jsonify({"ok": True, "reviewed": reviewed})
+    return jsonify({"ok": True, "reviewed": reviewed, "skipped": skipped})
 
 
 def _api_rows():

@@ -5685,6 +5685,50 @@ def settings_page():
                     + ' <span style="color:#bbb">'
                     + tierText('AI analysis calls', 'calls', 'calls')
                     + ' (' + label + ')</span>';
+                /* Rates are a maintained constant, not a live feed — there is no
+                   pricing API. So every dollar figure carries the date those
+                   rates were last confirmed, the same rule the backup
+                   free-space reading follows. An absent date is stated rather
+                   than hidden: unvouched-for rates must not look authoritative.
+                   `updated` is null when the operator overrode the rates without
+                   supplying a date, which get_pricing() deliberately does not
+                   paper over. */
+                var pu = (d.pricing && d.pricing.updated) || null;
+                var priceAge = '<span style="color:#667;font-size:0.85em" title="'
+                    + 'Maintained per-MTok rates, not a live price feed">'
+                    + (pu ? ' (rates as of ' + pu + ')' : ' (pricing date unknown)')
+                    + '</span>';
+                /* Per-install monthly average. Rendered only when a full calendar
+                   month was actually observed; otherwise it reports how much
+                   history exists instead of extrapolating an average from a
+                   part-month. get_monthly_cost() returns average_cost null in
+                   that case, never 0. */
+                var mo = d.monthly || null, moLine = '';
+                if (mo && mo.ok !== false) {{
+                    if (mo.sufficient && mo.average_cost !== null
+                        && mo.average_cost !== undefined) {{
+                        moLine = '<div style="color:#8a8f98;font-size:0.85em;'
+                            + 'margin-top:3px">'
+                            + tierText('average per month for this server',
+                                       'monthly average', 'avg/mo')
+                            + ': <span style="color:#00ff88">$'
+                            + Number(mo.average_cost).toFixed(2) + '</span> '
+                            + tierText('over ' + mo.months_counted
+                                       + ' full month(s) observed',
+                                       'over ' + mo.months_counted + ' mo',
+                                       mo.months_counted + 'mo')
+                            + '</div>';
+                    }} else {{
+                        var dobs = (mo.days_observed || 0);
+                        moLine = '<div style="color:#667;font-size:0.85em;'
+                            + 'margin-top:3px">'
+                            + tierText('monthly average needs a full calendar month; '
+                                       + 'this server has ' + dobs + ' days so far',
+                                       'insufficient history (' + dobs + ' days)',
+                                       'insufficient history (' + dobs + 'd)')
+                            + '</div>';
+                    }}
+                }}
                 /* Three distinct states, deliberately. A zero-dollar figure is a
                    legitimate-looking measurement, so it is shown only when it is
                    one: no calls at all is not $0.00, it is nothing to price. */
@@ -5692,19 +5736,19 @@ def settings_page():
                     display.innerHTML = head + ' &mdash; <span style="color:#666">'
                         + tierText('no calls yet, so nothing to cost',
                                    'no calls yet', 'none')
-                        + '</span>';
+                        + '</span>' + moLine;
                 }} else if (tok && (tok.in || 0) === 0 && (tok.out || 0) === 0) {{
                     display.innerHTML = head + ' &mdash; <span style="color:#00ff88;'
                         + 'font-weight:bold">$0.0000</span> <span style="color:#666">'
                         + tierText('served from cache, so no tokens were billed',
                                    'all from cache', 'cached')
-                        + '</span>';
+                        + '</span>' + moLine;
                 }} else {{
                     display.innerHTML = head + ' &mdash; '
                         + tierText('cost from recorded token usage',
                                    'cost (recorded)', 'cost')
                         + ' <span style="color:#00ff88;font-weight:bold">$'
-                        + Number(cost).toFixed(4) + '</span>';
+                        + Number(cost).toFixed(4) + '</span>' + priceAge + moLine;
                 }}
             }}
 
