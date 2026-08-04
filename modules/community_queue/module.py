@@ -304,6 +304,17 @@ def _render_row(row) -> str:
                    margin-left:4px">
       Dismiss
     </button>
+    <button onclick="cqAsk({rid})"
+            style="background:transparent;color:#00d4ff;border:1px solid #00d4ff44;
+                   padding:3px 10px;border-radius:4px;cursor:pointer;font-size:0.8em;
+                   margin-left:4px">
+      Ask
+    </button>
+  </td>
+</tr>
+<tr id="cq-chat-row-{rid}" style="display:none">
+  <td colspan="8" style="padding:0 10px 12px 10px">
+    <div id="cq-chat-host-{rid}"></div>
   </td>
 </tr>"""
 
@@ -401,6 +412,12 @@ def _page_community_queue():
     ai_enabled     = ai_is_enabled()
     table_html     = _render_table(rows)
     upsell_js_html = ("" if ai_enabled else _ai_upsell_js()) + _ai_incident_js()
+    try:
+        from modules.ai_engine import get_chat_widget_html, get_chat_js
+        chat_html = get_chat_widget_html() + get_chat_js()
+    except Exception:
+        chat_html = ""
+    upsell_js_html += chat_html
     total       = len(rows)
     reviewed    = sum(1 for r in rows if r["ai_reviewed"])
     unreviewed  = total - reviewed
@@ -527,6 +544,18 @@ def _page_community_queue():
     </div>
 
     <script>
+    // Relocates the single shared chat widget into this row. One widget, one
+    // cost display -- see nemChatAttach in ai_engine.
+    function cqAsk(rid) {{
+        var row  = document.getElementById('cq-chat-row-' + rid);
+        var host = document.getElementById('cq-chat-host-' + rid);
+        if (!row || !host || !window.nemChatAttach) return;
+        var open = row.style.display !== 'none';
+        if (open) {{ row.style.display = 'none'; nemChatClose(); return; }}
+        row.style.display = '';
+        nemChatAttach(host, 'community_queue', rid);
+    }}
+
     function analyseQueue() {{
         if (window._aiIsInFlight && window._aiIsInFlight('cq-analyse')) return;
         var btn = document.getElementById('btnAnalyse');
@@ -730,6 +759,46 @@ def _anchor_load_queue_item(row_id) -> str:
     ]
     if r["incident_detail"]:
         lines.append(f"Detail:\n{r['incident_detail']}")
+    # ── Path 1 auto-context ──────────────────────────────────────────────
+    # Whether this target has ALSO been seen by the firewall and anomaly
+    # engines. A queue item corroborated by real alerts on this network is a
+    # far stronger submission candidate than one seen only once by one engine,
+    # and that is exactly the judgement the user is being asked to make.
+    target = (r["domain_or_ip"] or "").strip()
+    if target:
+        extra = []
+        try:
+            conn = _conn()
+            try:
+                al = conn.execute(
+                    "SELECT COUNT(*) AS n, MAX(last_seen) AS newest FROM alerts "
+                    "WHERE src_ip=? OR dst_ip=?", (target, target)
+                ).fetchone()
+                inc = conn.execute(
+                    "SELECT COUNT(*) AS n, MAX(score) AS top FROM anomaly_incidents "
+                    "WHERE offending_target=?", (target,)
+                ).fetchone()
+            finally:
+                conn.close()
+
+            n_al = int(al["n"] or 0) if al else 0
+            extra.append(
+                f"Firewall alerts involving this target: {n_al}"
+                + (f" (most recent {al['newest']})" if n_al else " — none"))
+            n_inc = int(inc["n"] or 0) if inc else 0
+            extra.append(
+                f"Anomaly incidents for this target: {n_inc}"
+                + (f" (highest score {inc['top']})" if n_inc else " — none"))
+            if n_al == 0 and n_inc == 0:
+                extra.append("No corroboration from the other engines on this network.")
+        except Exception:
+            log.exception("community_queue: chat enrichment failed for %s", row_id)
+            extra.append("(cross-engine corroboration could not be read)")
+
+        if extra:
+            lines.append("\nCURRENT STATE (read now, not when the item was queued):")
+            lines.extend(f"- {e}" for e in extra)
+
     if r["ai_assessment"]:
         lines.append(f"\nAssessment already shown to the user "
                      f"(confidence: {r['ai_confidence']}):\n{r['ai_assessment']}")

@@ -1460,6 +1460,7 @@ def _render_card(building: bool, built: bool) -> str:
   <script>{js}</script>
   {_ai_upsell_js()}
   {_ai_incident_js()}
+  {_chat_js()}
   </div><!-- end section-anomaly-body -->
 </div>"""
 
@@ -1567,10 +1568,27 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
     return "\n".join(parts), has_more
 
 
+def _chat_widget() -> str:
+    """Shared chat markup, or "" when ai_engine cannot supply it."""
+    try:
+        from modules.ai_engine import get_chat_widget_html
+        return get_chat_widget_html()
+    except Exception:
+        return ""
+
+
+def _chat_js() -> str:
+    try:
+        from modules.ai_engine import get_chat_js
+        return get_chat_js()
+    except Exception:
+        return ""
+
+
 def _ai_modal_html() -> str:
     return """
 <div id="_adAIOverlay"
-     onclick="if(event.target===this)document.getElementById('_adAIOverlay').style.display='none'"
+     onclick="if(event.target===this){nemChatClose();document.getElementById('_adAIOverlay').style.display='none';}"
      style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.88);z-index:300;overflow-y:auto">
   <div style="background:#16213e;border:1px solid #00d4ff;border-radius:10px;
               padding:24px;max-width:620px;width:90%;margin:60px auto">
@@ -1578,13 +1596,14 @@ def _ai_modal_html() -> str:
     <div id="_adAIBody" style="color:#ccc;font-size:0.9em;line-height:1.6">
       Loading…
     </div>
+    __CHAT_WIDGET__
     <div style="text-align:right;margin-top:18px">
-      <button onclick="document.getElementById('_adAIOverlay').style.display='none'"
+      <button onclick="nemChatClose();document.getElementById('_adAIOverlay').style.display='none'"
               style="background:#333;color:#eee;border:none;padding:8px 18px;
                      border-radius:5px;cursor:pointer">✕ Close</button>
     </div>
   </div>
-</div>"""
+</div>""".replace("__CHAT_WIDGET__", _chat_widget())
 
 
 def _cisa_modal_html() -> str:
@@ -1715,6 +1734,7 @@ def _card_js() -> str:
     if (!overlay) return;
     var doCall = function() {{
       overlay.style.display = 'block';
+      if (window.nemChatInit) nemChatInit('anomaly_incident', id);
       if (body)  body.innerHTML  = '<span style="color:#ccc">Generating AI analysis…</span>';
       if (title) title.textContent = '🤖 AI Incident Analysis';
       if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}
@@ -2125,6 +2145,59 @@ def _anchor_load_incident(row_id) -> str:
         f"Devices involved ({r['device_count']}): {devices}",
         f"Evidence:\n{evidence}",
     ]
+    # ── Path 1 auto-context ──────────────────────────────────────────────
+    # Baseline DEPTH is the important one. A high anomaly score against a
+    # baseline with 2 observations means "we have barely seen this before",
+    # which is a completely different statement from the same score against 40
+    # observations -- and without it the AI reasons about the score as though
+    # it were equally trustworthy in both cases.
+    target = (r["offending_target"] or "").strip()
+    if target:
+        extra = []
+        try:
+            conn = _conn()
+            try:
+                b = conn.execute(
+                    "SELECT COUNT(*) AS buckets, SUM(obs_count) AS obs, "
+                    "MAX(last_updated) AS newest FROM anomaly_baseline WHERE metric_key=?",
+                    (f"domain:{target}",),
+                ).fetchone()
+                dev = conn.execute(
+                    "SELECT device_name, os, os_version, suricata_running, "
+                    "last_scan_result, agent_last_seen FROM agent_devices "
+                    "WHERE ip_address=? OR device_name=?", (target, target)
+                ).fetchone()
+            finally:
+                conn.close()
+
+            obs = int(b["obs"] or 0) if b else 0
+            buckets = int(b["buckets"] or 0) if b else 0
+            if buckets == 0:
+                extra.append("NO BASELINE EXISTS for this target — it has never been "
+                             "observed before, so the score reflects novelty rather "
+                             "than a departure from a known pattern.")
+            else:
+                extra.append(
+                    f"Baseline depth: {obs} observations across {buckets} hourly "
+                    f"buckets (last updated {b['newest']}). "
+                    + ("This baseline is THIN — treat the score with caution."
+                       if obs < 5 else
+                       "This baseline is reasonably established."))
+            if dev:
+                extra.append(
+                    f"Target matches an enrolled device: {dev['device_name']} "
+                    f"({dev['os'] or 'unknown OS'} {dev['os_version'] or ''}), "
+                    f"Suricata {'running' if dev['suricata_running'] else 'not running'}, "
+                    f"last scan result: {dev['last_scan_result'] or 'none recorded'}, "
+                    f"last seen {dev['agent_last_seen']}.")
+        except Exception:
+            log.exception("anomaly_detection: chat enrichment failed for %s", row_id)
+            extra.append("(baseline/device context could not be read)")
+
+        if extra:
+            lines.append("\nCURRENT STATE (read now, not when the incident fired):")
+            lines.extend(f"- {e}" for e in extra)
+
     if r["ai_report"]:
         lines.append(f"\nAnalysis already shown to the user:\n{r['ai_report']}")
     return "\n".join(lines)
