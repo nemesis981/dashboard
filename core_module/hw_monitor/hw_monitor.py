@@ -332,6 +332,17 @@ def init_db():
                           # ── de-enroll on uninstall (clean-uninstall build spec) ──
                           ("uninstalled_at",      "TEXT"),
                           ("uninstalled_by",      "TEXT"),    # actor seam (device self / admin)
+                          # ── owner revocation, mirroring the uninstall pair above ──
+                          # Revocation previously recorded ONLY enrollment_status,
+                          # with no timestamp and no actor on the row, while its
+                          # sibling uninstall recorded both. That asymmetry makes
+                          # "was this queued before the device was revoked?"
+                          # unanswerable from agent_devices — the transition left
+                          # no mark to compare against. The _audit entry exists but
+                          # is a different table, and joining it to reconstruct a
+                          # device's own history is not what a per-row check needs.
+                          ("revoked_at",          "TEXT"),
+                          ("revoked_by",          "TEXT"),    # actor seam (owner action)
                           # ── heartbeat auth (ADR 0004 step 3) ──
                           # Monotonic replay floor: the newest signed_at already
                           # accepted from this device. Advanced ONLY after a
@@ -425,6 +436,16 @@ def init_db():
                 dispatched_at TEXT,
                 expires_at   TEXT,
                 dispatch_count INTEGER NOT NULL DEFAULT 0,
+                -- When this WORK was first queued, if it entered through an
+                -- earlier queue (scan_queue) before becoming a task. NULL means
+                -- created_at is already the true origin time.
+                --
+                -- Exists because scan_queue -> scan_tasks is a chain: a row that
+                -- sat pending in scan_queue for months produces a scan_tasks row
+                -- with created_at = now, which silently RESETS any staleness
+                -- measured on created_at. Age must be measured from here when
+                -- present, never from created_at alone.
+                origin_queued_at TEXT,
                 actor        TEXT,
                 -- What the DEVICE REPORTED happened (ADR 0004 Stage 1, step 4).
                 -- These are ATTESTED CLAIMS, not ground truth: status='completed'
@@ -441,7 +462,7 @@ def init_db():
                   "ON scan_tasks(device_id, status)")
         _st_cols = {r[1] for r in c.execute("PRAGMA table_info(scan_tasks)").fetchall()}
         for _c, _d in (("result_ok", "INTEGER"), ("result_detail", "TEXT"),
-                       ("reported_at", "TEXT")):
+                       ("reported_at", "TEXT"), ("origin_queued_at", "TEXT")):
             if _st_cols and _c not in _st_cols:
                 c.execute("ALTER TABLE scan_tasks ADD COLUMN %s %s" % (_c, _d))
         conn.commit()
@@ -1623,6 +1644,79 @@ def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
         log.warning("_queue_scan failed: %s", e)
 
 
+# Trust-boundary reinstatement. Its own trigger_type so the reason a scan ran is
+# recoverable later, and so the targeted dedup below cannot be confused by an
+# ordinary pending scan.
+REINSTATEMENT_TRIGGER = "reinstated"
+
+# Statuses that mean trust was WITHDRAWN or never granted. Returning to
+# 'approved' from any of these is a trust-boundary crossing and forces a scan.
+#
+# 'rejected' belongs here for the same reason as 'revoked': the owner refused
+# this device, and later admitting it is a decision about a machine whose state
+# nobody has checked since. The agent SERVICE is still installed after a
+# rejection — it exits rather than being removed — so on its next start it polls,
+# sees 'approved', and proceeds. That makes the transition real, not theoretical.
+#
+# 'pending' is deliberately absent: a first-time approval is not a re-admission,
+# and that path already has both the pre-enrollment scan and first_connect.
+TRUST_WITHDRAWN_STATUSES = ("revoked", "uninstalled", "rejected")
+
+
+def queue_reinstatement_scan(device_id, from_status, actor=None):
+    """MANDATORY scan for a device crossing back over the trust boundary.
+
+    Returns (queued: bool, reason: str) — never a bare bool, and never silence.
+
+    Deliberately NOT routed through the `scan_conditions` table like
+    first_connect and its siblings. Those are configurable preferences; this is
+    not. A revocation exists precisely because trust was withdrawn, and the
+    window is irrelevant — an hour is enough to introduce something. Making this
+    switchable would mean the one scan that must not be optional could be turned
+    off from a settings page.
+
+    Also NOT routed through `_queue_scan`, for a subtler reason: that helper
+    skips insertion when ANY pending scan already exists for the device, and
+    reports nothing back. A mandatory scan suppressed by an unrelated pending row
+    — with the caller unable to tell — is exactly the shape this codebase treats
+    as a defect. The dedup here is narrowed to this trigger only, so repeated
+    approve clicks cannot pile up while an ordinary pending scan cannot swallow
+    the mandatory one.
+    """
+    try:
+        conn = _db_connect()
+        try:
+            existing = conn.execute(
+                "SELECT id FROM scan_queue WHERE device_id=? AND status='pending' "
+                "AND trigger_type=?", (device_id, REINSTATEMENT_TRIGGER)).fetchone()
+            if existing:
+                log.info("reinstatement scan already pending for device=%s "
+                         "(queue_id=%s) — not duplicating", device_id, existing[0])
+                return (False, "already_pending")
+            detail = "reinstated from %s" % (from_status or "unknown")
+            if actor:
+                detail += " by %s" % actor
+            conn.execute(
+                "INSERT INTO scan_queue "
+                "(device_id, trigger_type, trigger_detail, scan_path, queued_at, actor) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (device_id, REINSTATEMENT_TRIGGER, detail, "/",
+                 datetime.now().isoformat(timespec="seconds"), actor))
+            conn.commit()
+        finally:
+            conn.close()
+        log.warning("MANDATORY reinstatement scan queued: device=%s from=%s actor=%s",
+                    device_id, from_status, actor)
+        return (True, "queued")
+    except Exception as e:
+        # Reported as an explicit failure, never swallowed. A reinstatement whose
+        # mandatory scan silently failed to queue is a device readmitted with no
+        # check at all, which the caller must be able to see.
+        log.error("FAILED to queue mandatory reinstatement scan for device=%s: %s",
+                  device_id, e)
+        return (False, "error: %s" % e)
+
+
 def _check_and_queue_scan_triggers(payload):
     """Evaluate all enabled scan_conditions against the incoming payload.
 
@@ -1735,13 +1829,40 @@ def _persist_known_set(device_id, column, values):
 MAX_TASKS_PER_BEAT = 5
 
 
-def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None):
+def task_age_basis(origin_queued_at, created_at):
+    """The timestamp any staleness question must be measured from. Pure.
+
+    `origin_queued_at` wins when present, because it is when the WORK was first
+    queued; `created_at` is only when this particular row was written. For a task
+    that entered through scan_queue those differ by however long the device was
+    offline, and using created_at would report months-old work as brand new.
+
+    Returns None if NEITHER is usable — an explicit "cannot determine age", never
+    a default that a caller could mistake for a real measurement. A caller that
+    gets None must not treat the task as fresh.
+    """
+    for value in (origin_queued_at, created_at):
+        if not value:
+            continue
+        try:
+            return datetime.fromisoformat(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None,
+                 origin_queued_at=None):
     """Queue one task for a device. Returns its task_id.
 
     Queuing is deliberately separate from signing: a row here is an intent, and
     the envelope is only built (and signed) at the moment it is actually handed
     to the device, so `expires_at` is measured from delivery rather than from
     whenever an operator happened to click.
+
+    `origin_queued_at` carries the ORIGINAL queue time for work that arrived via
+    an earlier queue. Pass it whenever this task is a re-expression of something
+    already waiting, or the age of that wait is lost at the boundary.
     """
     import uuid
     task_id = str(uuid.uuid4())
@@ -1749,9 +1870,11 @@ def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None):
     try:
         conn.execute(
             "INSERT INTO scan_tasks (task_id, device_id, action, params_json, "
-            "status, created_at, actor) VALUES (?,?,?,?,'pending',?,?)",
+            "status, created_at, actor, origin_queued_at) "
+            "VALUES (?,?,?,?,'pending',?,?,?)",
             (task_id, device_id, action, json.dumps(params or {}),
-             datetime.now().isoformat(timespec="seconds"), actor))
+             datetime.now().isoformat(timespec="seconds"), actor,
+             origin_queued_at))
         conn.commit()
     finally:
         conn.close()
@@ -2135,30 +2258,32 @@ def _dispatch_pending_scans(device_id, agent_ip):
     try:
         conn = _db_connect()
         rows = conn.execute(
-            "SELECT id, scan_path FROM scan_queue "
+            "SELECT id, scan_path, queued_at FROM scan_queue "
             "WHERE device_id=? AND status='pending' "
             "ORDER BY queued_at LIMIT 1",
             (device_id,),
         ).fetchall()
         conn.close()
 
-        for queue_id, scan_path in rows:
+        for queue_id, scan_path, queued_at in rows:
             scan_id = str(_uuid_mod.uuid4())
 
-            # Record in scan_jobs
+            # scan_jobs is written BEFORE dispatch, deliberately: both paths
+            # report results against this scan_id, and the local path's worker
+            # thread can finish before we would otherwise have written the row —
+            # its result UPDATE would then match nothing and be lost silently.
             conn = _db_connect()
             conn.execute(
                 "INSERT INTO scan_jobs (device_id, scan_id, path, status, started_at) "
                 "VALUES (?, ?, ?, 'running', ?)",
                 (device_id, scan_id, scan_path or "/", datetime.now().isoformat()),
             )
-            conn.execute(
-                "UPDATE scan_queue SET status='executing', executed_at=?, scan_job_id=? "
-                "WHERE id=?",
-                (datetime.now().isoformat(), scan_id, queue_id),
-            )
             conn.commit()
             conn.close()
+
+            # Whether the work was actually handed off. The scan_queue row is
+            # only advanced once this is true — see the write-back below.
+            dispatched = False
 
             if device_id == "local":
                 # Import lazily to avoid circular dependency; dashboard.py owns this fn
@@ -2172,7 +2297,14 @@ def _dispatch_pending_scans(device_id, agent_ip):
                         daemon=True,
                     )
                     _t.start()
+                    dispatched = True
                     log.info("dispatched local clamscan: queue_id=%d scan_id=%s", queue_id, scan_id)
+                else:
+                    # Previously silent: the row was marked 'executing' regardless,
+                    # so a box without clamscan accumulated queued scans that
+                    # looked as though they had started and never would.
+                    log.warning("clamscan not installed — cannot run local scan "
+                                "queue_id=%d, leaving it queued", queue_id)
             else:
                 # Queued as a task, not pushed. The direct POST this replaced went
                 # to `http://{agent_ip}:5002`, but the agent's listener binds
@@ -2181,21 +2313,53 @@ def _dispatch_pending_scans(device_id, agent_ip):
                 # branches on agent_ip at all: delivery does not depend on the
                 # device's address, only on it checking in.
                 try:
+                    # origin_queued_at carries the scan_queue row's ORIGINAL
+                    # queue time across the boundary. Without it the new
+                    # scan_tasks row gets created_at=now, so a scan that waited
+                    # three months in scan_queue arrives looking brand new and
+                    # any staleness check measured on created_at is silently
+                    # defeated by the chain.
                     task_id = enqueue_task(
                         device_id, "scan",
-                        {"path": scan_path or "/", "scan_id": scan_id})
+                        {"path": scan_path or "/", "scan_id": scan_id},
+                        origin_queued_at=queued_at)
+                    dispatched = True
                     log.info(
-                        "queued scan task for %s: queue_id=%d scan_id=%s task_id=%s",
-                        device_id, queue_id, scan_id, task_id,
+                        "queued scan task for %s: queue_id=%d scan_id=%s task_id=%s "
+                        "(originally queued %s)",
+                        device_id, queue_id, scan_id, task_id, queued_at,
                     )
                 except Exception as e:
-                    # RESIDUAL, narrowed but not closed: the scan_queue row was
-                    # already set to 'executing' above, so a failure here strands
-                    # it there. Under the push that happened for every remote
-                    # device on every attempt; it now needs a DB write to fail.
-                    # Fixing it properly means enqueuing before marking executing,
-                    # which is a separate change from retiring the transport.
                     log.warning("could not queue scan task for %s: %s", device_id, e)
+
+            # Advance the queue row ONLY once the work was really handed off.
+            #
+            # This UPDATE used to run BEFORE dispatch, which meant any failure
+            # left the row in 'executing' permanently — a scan that never runs,
+            # never retries, and reads as in-progress forever. Leaving it
+            # 'pending' instead means the next heartbeat simply tries again.
+            #
+            # The eager scan_jobs row is rolled back on failure so a failed
+            # dispatch leaves nothing behind for anyone to interpret.
+            #
+            # Tradeoff, stated rather than hidden: a permanently-failing cause
+            # (clamscan absent, say) now retries every heartbeat instead of
+            # stranding once. That is deliberate — a retry is visible in the log
+            # and ages out through the staleness sweep, whereas a stranded row is
+            # invisible and permanent.
+            conn = _db_connect()
+            try:
+                if dispatched:
+                    conn.execute(
+                        "UPDATE scan_queue SET status='executing', executed_at=?, "
+                        "scan_job_id=? WHERE id=?",
+                        (datetime.now().isoformat(), scan_id, queue_id),
+                    )
+                else:
+                    conn.execute("DELETE FROM scan_jobs WHERE scan_id=?", (scan_id,))
+                conn.commit()
+            finally:
+                conn.close()
 
     except Exception as e:
         log.warning("_dispatch_pending_scans failed for %s: %s", device_id, e)
@@ -2704,7 +2868,26 @@ def _create_enrollment(payload, remote_ip):
     yara_f = int(scan.get("yara_findings") or 0)
     total_f = clam_f + yara_f
     has_findings = 1 if (scan_status == "findings" or total_f > 0) else 0
-    enroll_status = "pending_with_findings" if has_findings else "pending"
+
+    # A scan that could not RUN is not a scan that came back CLEAN.
+    #
+    # Both used to collapse into "pending", so a device with no scanner installed
+    # enrolled carrying exactly the same status as one that was scanned and found
+    # clean. The scan JSON recorded the difference and the decision threw it away
+    # — an absent measurement wearing a real result's costume. The dashboard badge
+    # happened to render the distinction (it reads scan_status directly), but
+    # nothing queryable or policy-driven could see it.
+    #
+    # "scan_failed" is treated as unverified for the same reason as
+    # "not_available": neither produced evidence about this device.
+    scan_verified = bool(scan) and scan_status not in (
+        None, "", "not_available", "scan_failed")
+    if has_findings:
+        enroll_status = "pending_with_findings"
+    elif not scan_verified:
+        enroll_status = "pending_unverified"
+    else:
+        enroll_status = "pending"
     if not scan or scan_status in (None, "not_available"):
         scan_summary = "Pre-enrollment scan: ℹ️ Not available (scanner not installed on this device)"
     elif scan_status == "scan_failed":
@@ -2742,6 +2925,10 @@ def _create_enrollment(payload, remote_ip):
     # scan-derived enroll_status untouched → normal pending flow. Never errors out.
     token = (payload.get("enrollment_token") or "").strip()
     token_creator = None
+    # Set when a VALID token was claimed but approval was withheld for lack of
+    # scan evidence. Distinct from "no token at all": the owner needs to know the
+    # install was authorised and still stopped, or the hold looks like a bug.
+    auto_approve_withheld = False
     try:
         conn = _db_connect()
         if token:
@@ -2756,7 +2943,35 @@ def _create_enrollment(payload, remote_ip):
                         "SELECT created_by, device_name_hint FROM enrollment_tokens "
                         "WHERE token=?", (token,)).fetchone()
                     token_creator = r[0] if r else None
-                    enroll_status = "approved"
+                    # ── auto-approve requires COMPLETED, CLEAN scan evidence ──
+                    #
+                    # A valid installer token proves the INSTALL was authorised.
+                    # It proves nothing whatever about the state of the machine it
+                    # ran on. Approving on the token alone defeats the entire
+                    # purpose of scanning before trust — the scan result was
+                    # computed, recorded, and then overridden.
+                    #
+                    # The real case this closes: a client's employee enrolling
+                    # their own unmanaged device with a legitimate token. The
+                    # token is genuine; the machine is unknown. Previously that
+                    # enrolled straight to 'approved' with no scan evidence, and
+                    # a device carrying findings auto-approved just as readily as
+                    # a clean one.
+                    #
+                    # Withheld enrollments hold at the SAME status the manual path
+                    # would have produced (pending_unverified / _with_findings),
+                    # so there is one set of pending states, not a parallel set
+                    # meaning almost-the-same thing.
+                    if scan_verified and not has_findings:
+                        enroll_status = "approved"
+                    else:
+                        auto_approve_withheld = True
+                        log.warning(
+                            "installer token valid but auto-approve WITHHELD for "
+                            "device=%s: scan_verified=%s has_findings=%s — holding "
+                            "at %s for owner review",
+                            device_name, scan_verified, bool(has_findings),
+                            enroll_status)
                     # Phase 6: if the agent didn't supply a specific name (blank or a
                     # generic default), fall back to the token's device_name_hint.
                     # Safe: signature was already verified against the supplied name.
@@ -2809,6 +3024,22 @@ def _create_enrollment(payload, remote_ip):
             footer = (f"Auto-approved by installer token (created by {token_creator or 'unknown'}).\n"
                       f"Review in Settings -> Devices if unexpected.")
             prio = "HIGH" if has_findings else "LOW"
+        elif auto_approve_withheld:
+            # Explained explicitly. A token-based install that silently lands in
+            # the pending queue reads as a broken installer, and the owner's most
+            # likely response to an unexplained hold is to approve it to make the
+            # problem go away — which is precisely the decision this gate exists
+            # to inform.
+            title = f"Installer-token device HELD for approval: {device_name} ({os_name})"
+            footer = ("A valid installer token was presented, but auto-approval was "
+                      "WITHHELD because the pre-enrollment scan did not complete "
+                      "cleanly.\n\n"
+                      "The token proves the install was authorised. It says nothing "
+                      "about the state of this machine — which is what the scan was "
+                      "for.\n\n"
+                      "Review the scan result above, then approve or reject in "
+                      "Settings -> Devices.")
+            prio = "HIGH" if has_findings else "MEDIUM"
         else:
             title = f"New device pending approval: {device_name} ({os_name})"
             footer = "Approve or reject it in Settings -> Devices."

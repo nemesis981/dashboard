@@ -2819,6 +2819,13 @@ def api_header_status():
 def api_agent_approve(device_id):
     try:
         conn = _dm_conn()   # §9 batch 4 (api_agent_approve)
+        # Read the PRIOR status BEFORE the UPDATE. Reading it afterwards would
+        # always return 'approved' and the trust-boundary crossing would be
+        # undetectable — the check would run, report nothing, and look correct.
+        prior = conn.execute(
+            "SELECT enrollment_status FROM agent_devices WHERE device_id=?",
+            (device_id,)).fetchone()
+        prior_status = (prior[0] if prior else "") or ""
         conn.execute(
             "UPDATE agent_devices SET enrollment_status='approved', enrolled_by=?, enrolled_at=? "
             "WHERE device_id=?",
@@ -2826,7 +2833,26 @@ def api_agent_approve(device_id):
         conn.commit()
         conn.close()
         _audit(action="agent_approve", rule_id=device_id)
-        return jsonify({"ok": True, "status": "approved"})
+
+        # ── trust-boundary crossing → MANDATORY scan ──
+        # A device returning from 'revoked' or 'uninstalled' is being readmitted
+        # after trust was deliberately withdrawn. The length of the gap is
+        # irrelevant: an hour is enough to introduce something, and the existing
+        # time-based triggers cannot help (extended_absence needs 24h, and
+        # first_connect never fires because the agent_devices row survived the
+        # revocation).
+        resp = {"ok": True, "status": "approved"}
+        if prior_status in hw_monitor.TRUST_WITHDRAWN_STATUSES:
+            queued, why = hw_monitor.queue_reinstatement_scan(
+                device_id, prior_status, _actor())
+            resp["reinstated_from"] = prior_status
+            resp["mandatory_scan"] = why
+            if not queued and not why.startswith("already"):
+                # Surfaced, not swallowed: readmitting a device whose mandatory
+                # scan failed to queue is the one outcome the operator must see.
+                log.error("device %s readmitted from %s but its mandatory scan "
+                          "did NOT queue: %s", device_id, prior_status, why)
+        return jsonify(resp)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -2865,8 +2891,16 @@ def api_agent_revoke(device_id):
     """
     try:
         conn = _dm_conn()   # §9 batch 4 (api_agent_revoke)
-        conn.execute("UPDATE agent_devices SET enrollment_status='revoked' "
-                     "WHERE device_id=?", (device_id,))
+        # Timestamp + actor recorded ON THE ROW, mirroring the uninstall path's
+        # uninstalled_at/uninstalled_by. Without these the revocation left no mark
+        # on the device itself, so nothing could later ask "was this work queued
+        # before this device was revoked?" — the question a trust-boundary check
+        # has to answer. The _audit call below still records the event; this
+        # records the STATE, which is what per-device logic reads.
+        conn.execute("UPDATE agent_devices SET enrollment_status='revoked', "
+                     "revoked_at=?, revoked_by=? WHERE device_id=?",
+                     (datetime.now().isoformat(timespec="seconds"), _actor(),
+                      device_id))
         conn.commit()
         conn.close()
         _audit(action="agent_revoke", rule_id=device_id)
@@ -3278,13 +3312,44 @@ def _render_agent_devices_html() -> str:
     except Exception:
         return ('<div class="card" id="section-devices-enroll"><h2>&#128421; Devices</h2>'
                 '<p style="color:#888">No device data available.</p></div>')
-    pending  = [r for r in rows if (r["enrollment_status"] or "") in ("pending", "pending_with_findings")]
-    enrolled = [r for r in rows if (r["enrollment_status"] or "") == "approved"]
-    # Revoked devices need their own list or they vanish from the UI entirely --
-    # matching neither 'pending' nor 'approved' -- which would make revocation
-    # irreversible through the product. That is the same dead end this control
-    # exists to remove, just moved one step along.
-    revoked  = [r for r in rows if (r["enrollment_status"] or "") == "revoked"]
+    # ── EXHAUSTIVE partition, not a set of independent allowlists ──
+    #
+    # This grouping has silently swallowed devices three times: 'revoked' first
+    # (see below), then 'pending_unverified' nearly, then 'rejected' and
+    # 'uninstalled' — 4 real rows on the box where this was found, invisible with
+    # no way to act on them. Every previous fix added one more allowlist, which
+    # is why the bug kept recurring: an unlisted status matched nothing and
+    # disappeared, and disappearing looks exactly like "no such device".
+    #
+    # So every row is now assigned to exactly one bucket, and anything unmatched
+    # falls into `unknown` and is RENDERED rather than dropped. A status nobody
+    # anticipated becomes a visible oddity instead of a silent deletion.
+    PENDING_STATUSES = ("pending", "pending_with_findings", "pending_unverified")
+    pending, enrolled, revoked, rejected, uninstalled, unknown = [], [], [], [], [], []
+    for r in rows:
+        st = (r["enrollment_status"] or "").strip()
+        if st in PENDING_STATUSES:
+            pending.append(r)
+        elif st == "approved":
+            enrolled.append(r)
+        # Revoked devices need their own list or they vanish from the UI entirely
+        # -- which would make revocation irreversible through the product.
+        elif st == "revoked":
+            revoked.append(r)
+        # Rejected devices are re-approvable and it is meaningful: the agent
+        # SERVICE is still installed (it exited on rejection rather than being
+        # removed), so on its next start it polls, sees 'approved', and proceeds.
+        elif st == "rejected":
+            rejected.append(r)
+        # Uninstalled is historical. The agent deleted its own config, so its
+        # device_id no longer exists on that machine and a reinstall enrols as a
+        # NEW device. Re-approving this row would restore nothing, which is why
+        # it is shown without an approve action rather than with one that quietly
+        # does nothing.
+        elif st == "uninstalled":
+            uninstalled.append(r)
+        else:
+            unknown.append(r)
     h = ['<div class="card" id="section-devices-enroll" style="margin-bottom:16px">'
          '<h2>&#128421; Devices</h2>',
          # ── Windows installer generator ──
@@ -3435,6 +3500,63 @@ def _render_agent_devices_html() -> str:
                 f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
                 'border:1px solid #00ff88;border-radius:6px;padding:4px 12px;cursor:pointer;'
                 'margin-top:6px;font-size:0.92em">Re-approve</button>'
+                '</div>')
+
+    if rejected:
+        h.append('<h3 style="color:#ff9944;font-size:0.95em;margin-top:14px">Rejected devices</h3>')
+        h.append('<p style="color:#888;font-size:0.8em;margin:0 0 6px">'
+                 'These enrollment requests were refused. Re-approving admits the '
+                 'device and forces a fresh scan before it is trusted.</p>')
+        for r in rejected:
+            did = html.escape(r["device_id"], quote=True)
+            h.append(
+                '<div style="background:#0d0d1e;border:1px solid #ff994444;border-radius:8px;'
+                'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
+                f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+                f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
+                f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span><br>'
+                f'<button onclick="agentApprove(\'{did}\')" style="background:#00ff8822;color:#00ff88;'
+                'border:1px solid #00ff88;border-radius:6px;padding:4px 12px;cursor:pointer;'
+                'margin-top:6px;font-size:0.92em">Re-approve</button>'
+                '</div>')
+
+    if uninstalled:
+        h.append('<h3 style="color:#888;font-size:0.95em;margin-top:14px">Uninstalled devices '
+                 '<span style="font-weight:normal;font-size:0.85em">(historical)</span></h3>')
+        h.append('<p style="color:#888;font-size:0.8em;margin:0 0 6px">'
+                 'These devices removed their own agent. They are kept for history '
+                 'and cannot be re-approved &mdash; reinstalling enrolls as a new '
+                 'device, which is scanned before it is trusted.</p>')
+        for r in uninstalled:
+            h.append(
+                '<div style="background:#0d0d1e;border:1px solid #33333366;border-radius:8px;'
+                'padding:8px 12px;margin-bottom:6px;font-size:0.85em;opacity:0.75">'
+                f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+                f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
+                f'<span style="color:#888">last seen: {html.escape(str(r["agent_last_seen"] or "-"))}</span>'
+                '</div>')
+
+    # The catch-all. Rendering an unrecognised status as a visible oddity is the
+    # whole point: this bug has recurred because unmatched rows disappeared, and a
+    # disappearance is indistinguishable from "no such device". A row here means
+    # someone added a status without adding it above -- which should look wrong on
+    # screen rather than silently reduce the device count.
+    if unknown:
+        h.append('<h3 style="color:#ffcc00;font-size:0.95em;margin-top:14px">'
+                 'Devices in an unrecognised state</h3>')
+        h.append('<p style="color:#888;font-size:0.8em;margin:0 0 6px">'
+                 'These devices have an enrollment status this page does not know '
+                 'how to group. They are shown here so they cannot disappear &mdash; '
+                 'this usually means a new status was added without updating this '
+                 'view.</p>')
+        for r in unknown:
+            h.append(
+                '<div style="background:#0d0d1e;border:1px solid #ffcc0044;border-radius:8px;'
+                'padding:8px 12px;margin-bottom:6px;font-size:0.85em">'
+                f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
+                f'<span style="color:#aaa">{html.escape(r["os"] or "")}</span> &middot; '
+                f'<span style="color:#ffcc00">status: '
+                f'{html.escape(str(r["enrollment_status"] or "(none)"))}</span>'
                 '</div>')
     h.append('</div>')
     return "".join(h)

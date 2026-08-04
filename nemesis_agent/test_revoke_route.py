@@ -90,8 +90,22 @@ def main():
           js.index("function agentRevoke") < js.index("Revoke this device?"), True)
 
     print("\nUI does not strand revoked devices")
+    # Asserted by INTENT rather than by matching one syntactic form.
+    #
+    # This previously matched the exact text of a list comprehension
+    # (`enrollment_status"] or "") == "revoked"`). That grouping was later
+    # refactored into an exhaustive partition — so that no status can silently
+    # vanish from the UI, which is the same class of bug this very check exists
+    # to prevent — and the substring stopped matching while the behaviour was
+    # completely unchanged. A check that fails on a refactor it should welcome is
+    # measuring the wrong thing.
+    #
+    # Scoped to the render function so an unrelated mention elsewhere in
+    # dashboard.py cannot satisfy it.
+    _render = src[src.index("def _render_agent_devices_html"):]
+    _render = _render[:_render.index("\ndef ", 1)]
     check("a revoked list is derived",
-          'enrollment_status"] or "") == "revoked"' in src, True)
+          '"revoked"' in _render and "Revoked devices" in _render, True)
     check("revoked devices get a Re-approve control",
           "Re-approve" in src, True)
 
