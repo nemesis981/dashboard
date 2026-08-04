@@ -183,8 +183,7 @@ def restore(saved):
 
 def inject_and_verify(rule_id, calls):
     """Inject one fake alert, verify watcher created a quarantine. Returns qid or None."""
-    blocked_cache = set()
-    alert_watcher.handle_line(fake_line(rule_id), blocked_cache)
+    alert_watcher.handle_line(fake_line(rule_id))
 
     a = db_row("SELECT action, risk_level, src_ip FROM alerts WHERE rule_id=?", (rule_id,))
     if not check("alerts row inserted", a is not None):
@@ -292,15 +291,24 @@ def scenario_expire(live):
             conn.close()
         check("backdated expires_at by 1 min", True)
 
-        blocked_cache = {TEST_IP}
-        alert_watcher.expiry_sweep(blocked_cache)
+        alert_watcher.expiry_sweep()
 
         a = db_row("SELECT action FROM alerts WHERE rule_id=?", (rule_id,))
         check("alerts.action=pending after expiry", a and a[0] == "pending", repr(a))
         q = db_row("SELECT status FROM quarantines WHERE id=?", (qid,))
         check("quarantine.status=expired", q and q[0] == "expired", repr(q))
         check("ufw_delete called by sweep", len(calls["ufw_delete"]) == 1, repr(calls["ufw_delete"]))
-        check("blocked_cache pruned", TEST_IP not in blocked_cache)
+        # A "blocked_cache pruned" check used to sit here. It is REMOVED
+        # deliberately, not dropped by accident: alert_watcher no longer keeps an
+        # in-memory blocked-IP cache, so handle_line() and expiry_sweep() take no
+        # such argument. Rewritten against a plain local set it would have been
+        # vacuously true -- a check that can only ever pass, which is worse than
+        # no check at all because it reports a non-measurement as a result.
+        #
+        # Its intent -- "the IP is no longer treated as blocked" -- is carried by
+        # the two checks immediately above: the quarantine row reaching 'expired',
+        # and ufw_delete actually being called. There is no in-memory cache left
+        # to prune, and no load_blocked_ips() oracle exists to assert against.
     finally:
         restore(saved)
         cleanup(rule_id)
