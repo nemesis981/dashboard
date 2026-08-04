@@ -2154,3 +2154,23 @@ this entry is the proposal, not the implementation.
       `executing` once the task is confirmed queued. Deliberately not bundled into the Step 5
       commit, which was scoped to retiring the transport, not to this pre-existing
       ordering bug.
+
+- [x] **Correcting the record: the "468/468" test-suite baseline quoted in 2026-08-03's
+  handoff docs was wrong.** `docs/handoff/supplements/2026-08-03-001.md` and
+  `docs/handoff/worklog/2026-08-03-001.md` both record Window 1 reporting "16 suites/468
+  checks" during the Step 4 recovery that day. That number was a miscounted baseline, not a
+  later-outdated one — Window 1 has since proven the real structural maximum for that
+  pre-Step-5 tree was **465/465**, which matches Window 2's own independent 5-suite
+  spot-check from the same session exactly (213 checks: `test_task_results.py` 55/55,
+  `test_rules_integrity.py` 49/49, `test_key_rotation.py` 58/58, `test_task_dispatch.py`
+  24/24, `test_task_envelope.py` 27/27).
+    - [x] **Historical worklog/supplement text left unedited, per standing practice** (same
+      as the PL-10 stale-text correction above) — Rule 9's worklog is a flight recorder, not
+      rewritten after the fact. This entry is the correction pointer instead, so 468 stops
+      propagating into future references.
+    - [x] **Current baseline, post Step 5+6 (`67326d0`, 2026-08-04):** 498/498 checks across
+      18 suites — 465 plus the two new suites added by the loopback-retirement work
+      (`test_loopback_retirement.py`, 17/17) and the poll-hint work
+      (`test_next_poll_hint.py`, 16/16). 465 + 17 + 16 = 498.
+    - [x] **Going forward:** cite 465/465 (16 suites) for anything describing the tree as it
+      stood before Step 5, and 498/498 (18 suites) for current state. Neither is 468.
