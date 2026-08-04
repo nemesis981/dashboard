@@ -272,9 +272,29 @@ def parse_alert(alert_line):
             rule_part = alert_line.split("[**] [")[1].split("]")[0]
             rule_id = rule_part.split(":")[1] if ":" in rule_part else rule_part
         if "[**]" in alert_line:
+            # fast.log shape:
+            #   <ts>  [**] [gid:sid:rev] Rule message [**] [Classification: ...] ...
+            # splitting on "[**]" gives:
+            #   parts[0] timestamp
+            #   parts[1] "[gid:sid:rev] Rule message"   <- the rule name lives HERE
+            #   parts[2] "[Classification: ...] [Priority: N] {PROTO} src -> dst"
+            #
+            # This read parts[2] until 2026-08-04, so `rule_name` held the
+            # Classification/Priority block and the real rule message was
+            # discarded. It stayed invisible because the wrong value is
+            # plausible text of about the right length, truncated to 50 chars on
+            # insert — nothing errored and nothing was empty. `classification`
+            # is parsed separately below and was always correct, so the alert
+            # email showed the same classification twice and the rule name never.
             parts = alert_line.split("[**]")
-            if len(parts) > 2:
-                rule_name = parts[2].strip()
+            if len(parts) > 1:
+                seg = parts[1].strip()
+                # Drop the leading "[gid:sid:rev]" so the name is the rule
+                # message alone. Split once only: a message may legitimately
+                # contain further brackets, and those belong to the name.
+                if seg.startswith("[") and "]" in seg:
+                    seg = seg.split("]", 1)[1].strip()
+                rule_name = seg
         if "[Classification:" in alert_line:
             classification = alert_line.split("[Classification:")[1].split("]")[0].strip()
         if "{" in alert_line and "}" in alert_line:
