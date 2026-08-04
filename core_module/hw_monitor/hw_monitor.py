@@ -1851,6 +1851,47 @@ def enqueue_rules_update(device_id, profile, rules_url, actor=None):
                         actor=actor)
 
 
+# How soon to ask an agent back when it has outstanding task work (ADR 0004
+# Stage 1 step 6). Must stay at or above the agent's own POLL_INTERVAL_FLOOR
+# (15s): a smaller value would simply be clamped on arrival, which would mean the
+# two halves disagreed about the floor while appearing to work.
+TASK_POLL_HINT_SECONDS = 30
+
+
+def _next_poll_hint(device_id, dispatched):
+    """Seconds to ask this device to come back in, or None for normal cadence.
+
+    Emitted when the device has outstanding task work: either tasks just handed
+    to it (whose results we want promptly) or more still queued behind them.
+    None is a real answer -- "nothing outstanding, keep your normal cadence" --
+    not a failure default.
+
+    Step 5 is what makes this worth doing: scans and notifications are no longer
+    pushed, so their latency is now exactly one heartbeat, up to 300s by default.
+
+    The agent will only ever let this SHORTEN its interval, never lengthen it,
+    so this value cannot be used to slow a device down even if the server is
+    wrong or impersonated -- see agent.py `_effective_interval`.
+    """
+    if dispatched:
+        return TASK_POLL_HINT_SECONDS
+    try:
+        conn = _db_connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM scan_tasks WHERE device_id=? AND status='pending' "
+                "LIMIT 1", (device_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception as e:
+        # An unreadable queue is reported, and yields normal cadence rather than
+        # a guessed hint -- a fabricated "come back soon" would be indis-
+        # tinguishable from a real one.
+        log.warning("could not check pending tasks for %s: %s", device_id, e)
+        return None
+    return TASK_POLL_HINT_SECONDS if row else None
+
+
 def _tasks_for_response(device_id):
     """Signed envelopes for this device's pending tasks, oldest first.
 
@@ -1976,11 +2017,16 @@ def _record_task_results(device_id, results):
 
 
 def _dispatch_pending_scans(device_id, agent_ip):
-    """Send the oldest pending queued scan to the agent right now.
+    """Queue the oldest pending scan for the agent right now.
 
     Called immediately after a payload is processed so reconnecting devices
     execute their queued scans without needing a manual trigger.
     For device_id='local' the scan runs in-process via subprocess.
+
+    `agent_ip` is retained but NO LONGER USED: delivery moved from a direct push
+    to that address onto the task channel, which addresses devices by device_id.
+    Kept so the one caller does not have to change in the same commit that
+    retires the transport.
     """
     try:
         conn = _db_connect()
@@ -2023,28 +2069,29 @@ def _dispatch_pending_scans(device_id, agent_ip):
                     )
                     _t.start()
                     log.info("dispatched local clamscan: queue_id=%d scan_id=%s", queue_id, scan_id)
-            elif agent_ip:
+            else:
+                # Queued as a task, not pushed. The direct POST this replaced went
+                # to `http://{agent_ip}:5002`, but the agent's listener binds
+                # 127.0.0.1 — so it could only connect for a device whose address
+                # was loopback, and failed for every remote device. No longer
+                # branches on agent_ip at all: delivery does not depend on the
+                # device's address, only on it checking in.
                 try:
-                    import urllib.request as _ur
-                    import urllib.error
-                    body = json.dumps({
-                        "action": "scan",
-                        "path":    scan_path or "/",
-                        "scan_id": scan_id,
-                    }).encode()
-                    req = _ur.Request(
-                        f"http://{agent_ip}:5002",
-                        data=body,
-                        headers={"Content-Type": "application/json"},
-                        method="POST",
-                    )
-                    _ur.urlopen(req, timeout=5)
+                    task_id = enqueue_task(
+                        device_id, "scan",
+                        {"path": scan_path or "/", "scan_id": scan_id})
                     log.info(
-                        "dispatched queued scan to agent %s: queue_id=%d scan_id=%s",
-                        agent_ip, queue_id, scan_id,
+                        "queued scan task for %s: queue_id=%d scan_id=%s task_id=%s",
+                        device_id, queue_id, scan_id, task_id,
                     )
                 except Exception as e:
-                    log.warning("could not dispatch scan to agent %s: %s", agent_ip, e)
+                    # RESIDUAL, narrowed but not closed: the scan_queue row was
+                    # already set to 'executing' above, so a failure here strands
+                    # it there. Under the push that happened for every remote
+                    # device on every attempt; it now needs a DB write to fail.
+                    # Fixing it properly means enqueuing before marking executing,
+                    # which is a separate change from retiring the transport.
+                    log.warning("could not queue scan task for %s: %s", device_id, e)
 
     except Exception as e:
         log.warning("_dispatch_pending_scans failed for %s: %s", device_id, e)
@@ -2872,10 +2919,15 @@ def _start_windows_agent_listener():
                     log.error("could not record task results for device=%s: %s",
                               device_id, _e)
                     _acked = []
+                _tasks = _tasks_for_response(device_id)
+                # Always present, explicitly null when there is nothing
+                # outstanding -- a key that appears only sometimes is easy to
+                # mistake for one the server forgot to send.
                 _resp = {"ok": True,
                          "server_time": datetime.now().isoformat(timespec="seconds"),
-                         "tasks": _tasks_for_response(device_id),
-                         "results_ack": _acked}
+                         "tasks": _tasks,
+                         "results_ack": _acked,
+                         "next_poll_hint": _next_poll_hint(device_id, bool(_tasks))}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()

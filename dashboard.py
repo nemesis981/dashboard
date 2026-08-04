@@ -8307,35 +8307,29 @@ def api_scan_trigger():
                                  daemon=True, name=f"clamscan-{scan_id[:8]}")
             t.start()
         else:
-            # Send command to remote agent; queue if offline
-            conn = _dm_conn()   # §9 api_scan_trigger — SELECT agent_devices (read — passes through)
-            row = conn.execute(
-                "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
-            ).fetchone()
-            conn.close()
-            agent_ip = row[0] if row and row[0] else None
-            agent_reachable = False
-            if agent_ip:
-                try:
-                    requests.post(
-                        f"http://{agent_ip}:5002",
-                        json={"action": "scan", "path": path, "scan_id": scan_id},
-                        timeout=5,
-                    )
-                    agent_reachable = True
-                except Exception as e:
-                    log.warning("Could not reach agent %s: %s", agent_ip, e)
-            if not agent_reachable:
-                # Agent offline — delete the eager scan_job and queue instead
-                conn = _dm_conn()   # §9 api_scan_trigger — DELETE scan_jobs (granted)
-                conn.execute("DELETE FROM scan_jobs WHERE scan_id=?", (scan_id,))
-                conn.commit()
-                conn.close()
-                hw_monitor._queue_scan(device_id, "manual", "manual scan while offline", path)
-                return jsonify({
-                    "ok": True, "queued": True,
-                    "message": "Agent offline — scan queued for next reconnect",
-                })
+            # Queue the scan as a task (ADR 0004 Stage 1) rather than pushing it.
+            #
+            # This replaced a direct POST to `http://{agent_ip}:5002`. The agent's
+            # command listener binds 127.0.0.1 (agent.py `_start_command_listener`),
+            # so that push could only ever connect for a device whose recorded
+            # address was loopback — the Nemesis box itself. Every remote device
+            # failed to connect and fell through to the offline branch, which means
+            # the "reachable" path was dead code everywhere it mattered.
+            #
+            # The action is unchanged: tasks ride the heartbeat response and execute
+            # through the same `_CommandHandler._dispatch` the push targeted. Only
+            # the transport is retired.
+            #
+            # The eager scan_jobs row is now KEPT rather than deleted. Under the push
+            # it was deleted because an unreachable agent meant the scan would never
+            # run; a queued task does run, at the next check-in, and the agent reports
+            # against this scan_id.
+            task_id = hw_monitor.enqueue_task(
+                device_id, "scan", {"path": path, "scan_id": scan_id})
+            return jsonify({
+                "ok": True, "scan_id": scan_id, "queued": True, "task_id": task_id,
+                "message": "Scan queued — runs at the device's next check-in",
+            })
 
         return jsonify({"ok": True, "scan_id": scan_id, "queued": False})
     except Exception as e:
@@ -8451,25 +8445,36 @@ def api_agent_notify():
     if not device_id:
         return jsonify({"error": "device_id required"}), 400
     try:
+        # Existence, not address. This checked `ip_address` because the retired
+        # push needed somewhere to POST; delivery no longer depends on the
+        # device's address, but "unknown device" is still worth a 404 rather
+        # than silently queuing a task nothing will ever claim.
         conn = _dm_conn()   # §9 batch 1 (api_agent_notify)
         row = conn.execute(
-            "SELECT ip_address FROM agent_devices WHERE device_id=?", (device_id,)
+            "SELECT 1 FROM agent_devices WHERE device_id=?", (device_id,)
         ).fetchone()
         conn.close()
-        agent_ip = row[0] if row and row[0] else None
-        if not agent_ip:
-            return jsonify({"error": "agent IP not known for this device"}), 404
-        cmd = {
-            "action":           "notify",
+        if not row:
+            return jsonify({"error": "unknown device"}), 404
+
+        # Queued, not pushed — see api_scan_trigger for why the direct
+        # `http://{agent_ip}:5002` POST could never reach a remote device.
+        #
+        # This route is now ASYNCHRONOUS, and says so. It previously returned the
+        # agent's own reply (`agent_response`), which it can no longer know at
+        # request time. Reporting a synthesized success would assert a delivery
+        # that has not happened yet — the caller gets `task_id` instead and can
+        # follow the real outcome through task result reporting.
+        task_id = hw_monitor.enqueue_task(device_id, "notify", {
             "title":            data.get("title", "Nemesis"),
             "message":          data.get("message", ""),
             "severity":         data.get("severity", "info"),
             "suggested_action": data.get("suggested_action", ""),
-        }
-        r = requests.post(f"http://{agent_ip}:5002", json=cmd, timeout=5)
-        return jsonify({"ok": True, "agent_response": r.json()})
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "cannot reach agent"}), 502
+        })
+        return jsonify({
+            "ok": True, "queued": True, "task_id": task_id,
+            "message": "Notification queued — delivered at next check-in",
+        })
     except Exception as e:
         log.exception("api_agent_notify failed: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -9035,7 +9040,7 @@ function sendNotify() {{
         headers: {{'Content-Type': 'application/json'}},
         body: JSON.stringify(payload)
     }}).then(function(r){{return r.json();}}).then(function(d){{
-        document.getElementById('notifyResult').textContent = d.ok ? '✅ Sent' : '❌ ' + (d.error||'failed');
+        document.getElementById('notifyResult').textContent = d.ok ? '✅ Queued for next check-in' : '❌ ' + (d.error||'failed');
     }});
 }}
 

@@ -58,6 +58,11 @@ POLL_INTERVAL_FLOOR = 15
 RAMP_START = 30   # seconds — first ramp gap
 RAMP_BEATS = 4    # number of ramping beats (geometric doubling) before settling
 
+# Server-supplied cadence hint (ADR 0004 Stage 1 step 6). One-shot: set from a
+# heartbeat response, consumed by the next sleep, then cleared. Deliberately NOT
+# written to conf — a hint is a request about the next beat, not a setting.
+_poll_hint = None
+
 # Attempts allowed at the startup device-secret prompt before the agent gives up
 # and exits WITHOUT starting the poll loop.
 MAX_UNLOCK_ATTEMPTS = 3
@@ -135,6 +140,52 @@ def _ramp_interval(beat_index, poll_interval):
         return poll_interval
     ramp = RAMP_START * (2 ** beat_index)
     return max(POLL_INTERVAL_FLOOR, min(ramp, poll_interval))
+
+
+def _clamp_poll_hint(raw):
+    """Validate a server-supplied `next_poll_hint`. Seconds, or None if unusable.
+
+    None means "no usable hint, keep normal cadence". For an ABSENT hint that is
+    a real answer, not a failure default — most responses carry none. A
+    MALFORMED hint is a different thing and is logged, so a server (or something
+    impersonating one) sending garbage is visible rather than silently ignored.
+    """
+    if raw is None:
+        return None
+    # bool is checked BEFORE int deliberately: bool subclasses int, so
+    # isinstance(True, int) is True and int(True) == 1. A naive numeric check
+    # would accept it and clamp to the floor, silently turning a nonsense value
+    # into the fastest possible poll.
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        log.warning("ignoring malformed next_poll_hint: %r", raw)
+        return None
+    if raw <= 0:
+        log.warning("ignoring non-positive next_poll_hint: %r", raw)
+        return None
+    return max(POLL_INTERVAL_FLOOR, int(raw))
+
+
+def _effective_interval(beat_index, poll_interval, hint):
+    """Seconds to sleep before the next beat, given any server hint.
+
+    A hint may only ever SHORTEN the interval, never lengthen it.
+
+    That rule is what makes this field safe to honour at all. The heartbeat
+    RESPONSE is unsigned — only the task envelopes inside it are signed, and the
+    transport is plain HTTP — so anything able to answer on the socket can supply
+    a hint. Honouring a LONGER one would let an impersonator tell an agent to
+    come back in thirty days, silencing its telemetry while it still looked
+    healthy from the device's side. Refusing to lengthen means that attack does
+    not exist, rather than merely being bounded.
+
+    Shortening is bounded below by POLL_INTERVAL_FLOOR, so the worst a hostile
+    hint achieves is a chatty agent — noisy, self-limiting, and visible in the
+    server's own logs.
+    """
+    base = _ramp_interval(beat_index, poll_interval)
+    if hint is None:
+        return base
+    return max(POLL_INTERVAL_FLOOR, min(base, hint))
 
 
 def _load_platform_module():
@@ -449,6 +500,13 @@ def _handle_response_tasks(response, device_id):
 
     import tasks as task_mod
 
+    # Read BEFORE the anchor gate, for the same reason acks are: an agent whose
+    # anchor is missing still benefits from being asked back sooner, and the hint
+    # cannot do any harm that the anchor would have prevented — it can only
+    # shorten the next interval (see _effective_interval).
+    global _poll_hint
+    _poll_hint = _clamp_poll_hint(body.get("next_poll_hint"))
+
     # Acks are processed BEFORE the anchor gate, deliberately: an agent whose
     # anchor is missing still has to be able to retire reports it already made,
     # or an outage that costs the anchor leaves a queue that can never drain.
@@ -608,7 +666,7 @@ def _post_payload(conf, payload):
 
 
 def _poll_loop():
-    global _conf, _scan_on_reconnect_done
+    global _conf, _scan_on_reconnect_done, _poll_hint
     # Startup ramp re-arms on every process start: beat counter resets to 0 here, so a
     # restart (or a new machine/network) gets fast fresh beats before settling.
     beat = 0
@@ -640,7 +698,14 @@ def _poll_loop():
             log.exception("poll_loop error: %s", e)
 
         steady = _resolve_poll_interval(_conf)
-        interval = _ramp_interval(beat, steady)
+        interval = _effective_interval(beat, steady, _poll_hint)
+        if _poll_hint is not None and interval < _ramp_interval(beat, steady):
+            log.info("server asked for an earlier beat: %ds (normal would be %ds)",
+                     interval, _ramp_interval(beat, steady))
+        # One-shot. Cleared whether or not it was actually used, so a single hint
+        # can never become a standing cadence change if the server stops sending
+        # one -- which is exactly what would happen if it were left set.
+        _poll_hint = None
         beat += 1
         _interruptible_sleep(interval)
 
