@@ -385,54 +385,106 @@ def get_status() -> dict:
 # a stale date is worse than none, because it vouches for figures nobody checked.
 _PRICING_DEFAULTS_CONFIRMED = "2026-08-04"
 
+#: The model analyze() actually calls. Single source of truth — _analyze_inner
+#: reads this rather than repeating the string, so the rate table and the
+#: request can never disagree about which model is in use.
+_ACTIVE_MODEL = "claude-sonnet-4-6"
 
-def get_pricing() -> dict:
-    """Per-MTok rates, plus the date they were last confirmed.
+#: Per-MTok rates by model. A MAINTAINED CONSTANT: there is no pricing API
+#: (Models API returns capabilities, not prices — verified 2026-08-04), so this
+#: table is only as good as the last person who checked it. `_PRICING_DEFAULTS_
+#: CONFIRMED` above dates the whole table.
+#:
+#: WHY A TABLE AND NOT ONE PAIR. Input and output are priced ~5x apart, and
+#: models differ ~10x from each other. Model selection (roadmap item 3) prices
+#: whatever model the user picks; without this dimension every model would be
+#: costed at the active model's rates — silently wrong, plausible-looking, and
+#: invisible to every existing check.
+#:
+#: SONNET 5 IS DELIBERATELY LISTED AT ITS STANDARD RATE, not the $2/$10
+#: introductory rate running to 2026-08-31. Estimates for it therefore run
+#: HIGH until then. That is the safe direction — the alternative is a figure
+#: that silently becomes an under-estimate the day the intro period ends, and
+#: an over-estimate a user notices is better than an under-estimate they do not.
+_MODEL_RATES = {
+    "claude-opus-5":     {"input": 5.00,  "output": 25.00},
+    "claude-opus-4-8":   {"input": 5.00,  "output": 25.00},
+    "claude-sonnet-5":   {"input": 3.00,  "output": 15.00},
+    "claude-sonnet-4-6": {"input": 3.00,  "output": 15.00},
+    "claude-haiku-4-5":  {"input": 1.00,  "output": 5.00},
+    "claude-fable-5":    {"input": 10.00, "output": 50.00},
+}
 
-    THERE IS NO PRICING API. Anthropic's Models API returns model IDs, context
-    windows and capabilities, but not prices — those are published as docs only
-    (verified 2026-08-04). So these rates are a maintained constant, and their
-    AGE is the only signal of whether they can be trusted. Same discipline the
-    backup free-space reading already follows: a figure that is historical by
-    the time anyone reads it never renders without its age attached.
 
-    `updated` is an ISO date, or None meaning "nobody has vouched for these".
-    None is a real answer and must be shown as one — never silently replaced
-    with a date that makes unverified numbers look confirmed.
+def get_pricing(model: str | None = None) -> dict:
+    """Per-MTok rates for `model`, plus the date they were last confirmed.
 
-    Two rules produce it, and the second is the one that matters:
+    `model` defaults to the engine's active model, so every existing caller
+    keeps its current behaviour unchanged.
 
-    1. The shipped date applies ONLY to the shipped defaults. If the operator
-       overrides either rate via the environment, those are THEIR figures and
-       this code has never checked them — `updated` is None unless they also
-       supply ANTHROPIC_PRICING_UPDATED.
-    2. A malformed ANTHROPIC_PRICING_UPDATED yields None rather than falling
-       back to the shipped date, so a typo surfaces as "unknown" instead of
-       being papered over by an authoritative-looking default.
+    Returns `{model, input_per_mtok, output_per_mtok, updated, known}`.
+
+    AN UNKNOWN MODEL RETURNS `known: False` AND `None` RATES — never another
+    model's numbers. That is the whole point of this function taking a model at
+    all: pricing model X at model Y's rates is plausible, confident and wrong,
+    and nothing downstream could detect it. A caller that gets None must say
+    "pricing unknown for this model", not substitute a neighbour or a zero.
+
+    THERE IS NO PRICING API (verified 2026-08-04 — the Models API returns
+    capabilities, not prices), so `updated` is the only trust signal these
+    figures carry. See `_MODEL_RATES` for the table and its caveats.
+
+    The environment overrides (ANTHROPIC_INPUT_PRICE_PER_MTOK /
+    _OUTPUT_ / _PRICING_UPDATED) apply ONLY to the active model. They predate
+    this table and were configured for the one model the engine calls; letting
+    them silently reprice every other model would be a worse bug than the one
+    this function exists to prevent. Their date rules are unchanged:
+
+    1. The shipped date vouches for SHIPPED figures only — an operator-supplied
+       rate reads as `updated: None` unless they supply a date too.
+    2. A malformed date yields None rather than falling back to the shipped
+       date, so a typo surfaces instead of being papered over.
     """
+    target = model or _ACTIVE_MODEL
+    rates = _MODEL_RATES.get(target)
+
     raw_in   = (os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK")  or "").strip()
     raw_out  = (os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK") or "").strip()
     raw_date = (os.environ.get("ANTHROPIC_PRICING_UPDATED")       or "").strip()
-    operator_set = bool(raw_in or raw_out)
+    # Overrides are scoped to the active model — see the docstring.
+    is_active    = (target == _ACTIVE_MODEL)
+    operator_set = is_active and bool(raw_in or raw_out)
 
-    try:
-        inp = float(raw_in) if raw_in else 3.00
-    except (ValueError, TypeError):
-        inp = 3.00
-    try:
-        out = float(raw_out) if raw_out else 15.00
-    except (ValueError, TypeError):
-        out = 15.00
+    if rates is None and not operator_set:
+        # Nothing known and nothing supplied: say so explicitly.
+        return {"model": target, "input_per_mtok": None, "output_per_mtok": None,
+                "updated": None, "known": False}
 
-    if raw_date:
-        # Explicitly supplied: honour it only if it is a real ISO date.
+    base_in  = rates["input"]  if rates else None
+    base_out = rates["output"] if rates else None
+
+    inp, out = base_in, base_out
+    if is_active:
+        if raw_in:
+            try:
+                inp = float(raw_in)
+            except (ValueError, TypeError):
+                inp = base_in
+        if raw_out:
+            try:
+                out = float(raw_out)
+            except (ValueError, TypeError):
+                out = base_out
+
+    if is_active and raw_date:
         updated = raw_date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date) else None
     elif operator_set:
         updated = None          # their rates, our date would be a lie
     else:
         updated = _PRICING_DEFAULTS_CONFIRMED
 
-    return {"input_per_mtok": inp, "output_per_mtok": out, "updated": updated}
+    return {"model": target, "input_per_mtok": inp, "output_per_mtok": out,
+            "updated": updated, "known": inp is not None and out is not None}
 
 
 def get_monthly_cost(today: str | None = None) -> dict:
@@ -914,7 +966,7 @@ def _analyze_inner(
 
     client = anthropic.Anthropic(api_key=key)
     messages = [{"role": "user", "content": prompt}]
-    kwargs: dict = dict(model="claude-sonnet-4-6", max_tokens=max_tokens, messages=messages)
+    kwargs: dict = dict(model=_ACTIVE_MODEL, max_tokens=max_tokens, messages=messages)
     if system_prompt:
         kwargs["system"] = system_prompt
 
