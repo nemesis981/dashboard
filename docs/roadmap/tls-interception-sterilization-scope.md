@@ -175,6 +175,16 @@ ends. **Implementation-level detail (exactly how the gate boundary and the harde
 that bypass work) documented internally, not in the public repo** — this is a source-visibility
 decision, not a feature-gating one; the capability ships at every tier regardless.
 
+**Status update (2026-08-04): built and validated, not merely designed.** The gate and its
+randomized transition exist in code and have passed independent measurement — this piece has
+moved past the design stage described above. Two things remain open, tracked here rather than
+implied as done: **(a) every existing invisibility measurement was taken while the gate was
+IPv4-only**, before it became dual-stack, so none of them yet characterise IPv6 — re-measurement
+is needed before those figures are treated as current; **(b) delivery/steering traffic to the
+gate is still unbuilt** — the gate logic itself is validated, but getting real connections routed
+to it is separate, later work. Full measurements and further design refinement to this piece:
+documented internally, same source-visibility basis as the rest of Piece J.
+
 **Correction to the surrounding Tier 2 framing, kept public deliberately:** Tier 2, including
 this hybrid gate, does **not** prevent an undetected zero-day payload from reaching its
 destination on the very first inline-gated chunk if that chunk itself looks clean. What Tier 2
@@ -184,6 +194,37 @@ late-triggers are the actual backstop** for a payload that gets through Tiers 1 
 and begins executing locally (see
 [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md)). This is
 intentional defense-in-depth across the three tiers, not a gap unique to Tier 2.
+
+## Piece K — QUIC / HTTP-3 (added 2026-08-04)
+
+**HTTP/3 over UDP:443 bypasses Tier 2 entirely.** A TLS-terminating TCP proxy cannot MITM QUIC,
+because QUIC's crypto is integrated into its transport rather than layered on top of TCP the way
+classic HTTPS is. This was previously an unstated gap — QUIC/HTTP-3/UDP appeared nowhere in this
+doc, in ADR 0009's Fork B scope, in ADR 0009 itself, or in the private implementation notes. It
+is addressed now, not carried forward as open.
+
+**Resolution: block QUIC specifically; do not block UDP:443 broadly.** Detection matches on
+QUIC's long-header form, its fixed bit, and a known version — the version field is what provides
+real discrimination against non-QUIC UDP:443 traffic (WireGuard, STUN, DTLS, RTP, and game
+traffic all use that port without being QUIC). Measured clean against a real, adversarial test
+set, including a case deliberately crafted to defeat header-form matching alone: zero false
+positives. A `reject` response (not a silent `drop`) is used for both address families, so a
+non-browser UDP client fails fast rather than hanging for seconds waiting on a packet that will
+never come.
+
+**User-facing cost: none measured.** Browsers fall back to TLS-over-TCP transparently — the
+rendered page is identical, and load time falls inside the measurement's own noise floor.
+
+**A complementary capability worth stating plainly, not held back:** QUIC Initial packets are
+protected with keys derived from the connection ID using a fixed, published salt (RFC 9001 §5.2).
+That means hostname (SNI/ALPN) visibility into QUIC traffic is available to any on-path observer
+with no MITM, no CA trust, and no connection breakage — including on devices Tier 2 could never
+intercept in the first place. This is vendor-documented, standards-track technique, not a novel
+mechanism, so there's nothing about disclosing it that helps evade it.
+
+**Framing, stated once so it doesn't need restating elsewhere: blocking QUIC is coercion, not
+inspection.** It forces traffic back onto an inspectable transport (TCP); it does not itself let
+Tier 2 see inside QUIC.
 
 ---
 
