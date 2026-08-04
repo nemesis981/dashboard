@@ -1391,7 +1391,14 @@ _PRICING_DEFAULTS_CONFIRMED = "2026-08-04"
 #: The model analyze() actually calls. Single source of truth — _analyze_inner
 #: reads this rather than repeating the string, so the rate table and the
 #: request can never disagree about which model is in use.
-_ACTIVE_MODEL = "claude-sonnet-4-6"
+# Bumped 2026-08-04 (operator decision) from the previous-generation
+# claude-sonnet-4-6, the string CLAUDE.md had flagged as suspected-stale.
+# BLAST RADIUS -- this is every AI call site, not just the chat: alert analysis,
+# anomaly incidents (auto + manual), community-queue batch, and malware Layer C.
+# Pricing display is unchanged (_MODEL_RATES lists both at $3/$15). Note that
+# get_pricing()'s ANTHROPIC_*_PRICE_PER_MTOK overrides are scoped to whatever
+# _ACTIVE_MODEL is, so an operator override now applies to Sonnet 5.
+_ACTIVE_MODEL = "claude-sonnet-5"
 
 #: Reference price point for the user's own comparison: what Anthropic's
 #: cheapest consumer subscription costs per month. MAINTAINED CONSTANT WITH A
