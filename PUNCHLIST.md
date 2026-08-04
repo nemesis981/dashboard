@@ -2438,3 +2438,23 @@ this entry is the proposal, not the implementation.
       `memory-injection-detection-design.md`. Found and verified by Window 1, 2026-08-04,
       confirmed directly against `security.py:34-47` (the `sorted(...)[:10]` slice) before this
       entry was committed.
+
+- [ ] **`_detect_connection_type()` is IPv4-only.** `nemesis_agent/agent.py:211-212` collects
+  local addresses filtering on `addr.family == socket.AF_INET`, so IPv6 addresses are never
+  considered when deciding whether a device is local or remote.
+    - [ ] **Impact:** a device with only IPv6 on the local link is classified as remote. The
+      function fails toward the more restrictive classification (`vpn_remote`), so this is a
+      **misclassification, not an open door** — but it's the same IPv4-only-assumption class
+      already found and fixed once in the Tier 2 TLS gate, suggesting the assumption may recur
+      elsewhere too.
+    - [ ] **Secondary observation, worth fixing alongside the IPv6 gap:** the function's `except`
+      path returns a legal value (`vpn_remote`) rather than an explicit failure state
+      (`agent.py:216-218`) — confirmed: it's the same fallback the "no local subnet configured"
+      case also returns, so a genuine detection failure is indistinguishable from a real,
+      successfully-determined remote result. Defaulting to the restrictive answer on failure
+      looks deliberate but is undocumented as such — worth an explicit comment either way, even
+      if the fallback value itself doesn't change.
+    - [ ] Part of the technique-independent observation-layer foundation
+      (`docs/roadmap/agent-rebuild-config-driven.md`). Found and verified by Window 1, 2026-08-04,
+      confirmed directly against `agent.py:203-218` (both the `AF_INET`-only filter and the
+      shared except/fallback path) before this entry was committed.
