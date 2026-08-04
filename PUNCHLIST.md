@@ -2290,3 +2290,50 @@ this entry is the proposal, not the implementation.
       against live code by Window 2 before this entry was committed
       (`ensure_enrolled`/`enroll`/`pre_enrollment_scan` in `nemesis_agent/enrollment.py`;
       `first_connect`/`extended_absence`/TOFU-fingerprint in `hw_monitor.py`).
+
+- [ ] **[FIX-NOW] `parse_alert` stores the wrong field as `rule_name` — every alert row and
+  alert email carries the Classification block instead of the rule name.** `parse_alert()`
+  (`alert_manager/firewall.py`) splits a Suricata `fast.log` line on `[**]` and takes
+  **`parts[2]`** as the rule name. In that format the rule name is in **`parts[1]`**; `parts[2]`
+  is the Classification/Priority block. The result is that `alerts.rule_name` holds
+  classification text, and the actual rule name is discarded entirely.
+    - [ ] **Confirmed against a real Suricata line, not a synthetic one:**
+      ```
+      input : ... [**] [1:2001219:20] ET SCAN Potential SSH Scan [**] [Classification: Attempted
+              Information Leak] [Priority: 2] {TCP} ...
+      stored: rule_name = '[Classification: Attempted Information Leak] [Priority: 2] {'
+      lost  : 'ET SCAN Potential SSH Scan'
+      ```
+    - [ ] **Why it has stayed invisible:** the stored value is plausible-looking text of about
+      the right length, truncated to 50 chars by `insert_alert`'s `rule_name[:50]`
+      (`core_module/alert_watcher/alert_watcher.py:138`, called from `process_new_alert`).
+      Nothing errors, nothing is empty, and `classification` is populated correctly in its own
+      column — so a reader sees a populated field and no reason to doubt it. This is the
+      "instrument reporting a wrong answer confidently" shape rather than a visible failure.
+    - [ ] **Blast radius is wider than the column.** `alert_watcher.py` renders `Rule:
+      {rule_name}` into the alert email (`core_module/alert_watcher/alert_watcher.py:203`), so
+      that string has been going out to operators. Any UI, export, or triage view reading
+      `rule_name` shows the same. It is also duplicative — the classification is already
+      captured correctly elsewhere, so the field costs storage while carrying no unique
+      information.
+    - [ ] **Fix the index** and confirm against a real `fast.log` line, not a hand-built one —
+      the synthetic line used by `test_quarantine.py` happens to have the same shape, so a
+      synthetic-only check can pass while production stays wrong.
+    - [ ] **Decide what to do about existing rows.** They contain classification text in
+      `rule_name`. A migration could strip the prefix, or the rows can be left and the fix
+      applied forward-only — but the choice should be explicit, since a mixed column silently
+      means two different things depending on row age.
+    - [ ] **Check the other extracted fields against the same line shape** while in here.
+      `rule_id`, `classification`, `protocol`, and the src/dst parse all come from the same
+      string-splitting block; one confirmed off-by-one is reason to verify its neighbours
+      rather than assume they are fine.
+    - [ ] **Note for whoever fixes it:** `alert_manager/test_quarantine.py`'s Rule 11 label
+      (`69ade29`) is deliberately placed in BOTH the rule-name segment and the Classification
+      specifically so it survives this fix. Fixing `parse_alert` will not break that label, by
+      design — but it will change which of the two placements is the one doing the work, so
+      re-run that check afterwards rather than assuming.
+    - [ ] Found by Window 1, 2026-08-04, while verifying the Rule 11 cleanup label actually
+      reached the database — the label did not land where expected, and tracing why surfaced
+      this. Verified against live code by Window 2 before this entry was committed (the
+      `parts[2]`/`parts[1]` split reproduced directly against `firewall.py`'s `parse_alert`;
+      the email-rendering and truncation citations confirmed by grep).
