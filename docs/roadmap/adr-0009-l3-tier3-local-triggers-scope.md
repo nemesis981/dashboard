@@ -88,6 +88,41 @@ positive after the fact. This preserves "all judgment is server-side" for every 
 enumerated triggers, where the server's role shifts from real-time authorizer to after-the-fact
 investigator.
 
+## 5. New dependencies (added 2026-08-04) — this doc still covers more ground than it did
+
+This remains a living list. These four items don't resolve anything above — they change what
+the eventual trigger list has to account for, and are recorded here so they aren't rediscovered
+independently later.
+
+1. **The QUIC/HTTP-3 decision changes Tier 3's burden directly.** Tier 2 — including its hybrid
+   inline/mirror gate — does not prevent an undetected zero-day payload from reaching its
+   destination on a clean-looking first chunk; Tier 3 is the named backstop for exactly that case
+   (§4 above). If QUIC traffic were left unblocked, HTTP/3 bypasses Tier 2 entirely and
+   correspondingly more load falls on Tier 3 as the only remaining catch layer for that traffic.
+   Blocking QUIC (see
+   [tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md), Piece K)
+   narrows that back down. The QUIC decision should be settled before finalising this doc's
+   trigger list, since it changes the threat surface the list is written against.
+2. **Ownership needs resolving against the memory-injection detection work.** Both this doc and
+   `memory-injection-detection-design.md` cover adjacent ground — a payload that executes locally
+   after getting past Tiers 1/2 — with two different documents and two different statuses (this
+   one a live, always-on living list; that one paused/capture-only). Which one owns the
+   executing-payload case needs deciding before either resumes in earnest, or this list risks
+   being built against paused scaffolding while the other doc's scope quietly covers the same
+   ground from a different angle.
+3. **Depends on the agent observation-layer foundation, and hard-depends on agent integrity
+   attestation specifically.** A Tier 3 trigger's entire value is that it fires on a signal the
+   agent itself observed — but if the agent's own code has been replaced, that signal is exactly
+   as trustworthy as the agent that's reporting it, which today is not trustworthy at all: there
+   is no agent self-integrity check anywhere in the product. A local trigger whose signal comes
+   from a potentially-replaced agent inherits that problem wholesale, not partially.
+4. **New threat-model entry: an activity-gated UDP grant is a plausible C2 channel.** (See the new
+   UDP policy scoping doc.) It opens on demand, closes on idle so it leaves less residue than an
+   always-open port, and blends with ordinary game traffic — properties that make it attractive
+   to an attacker, not just to a legitimate application. Recording this here, in the threat model
+   this list is scoped against, rather than letting it be discovered independently once that
+   feature exists.
+
 ## Open items (TBD during build/testing, not blocking gates)
 1. **Trigger #3 (mass file-operation pattern):** keep/tune/drop — decided empirically during
    build and testing, not here. See §3 above.
@@ -105,4 +140,9 @@ too — this doc is the detailed backing for that amendment, not a duplicate of 
 [adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md) (Tier 1 — where
 process-lineage anomalies and other ambiguous signals stay, per §3 above),
 [tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (Tier 2 — a
-separate, toggleable tier; Tier 3 is always-on regardless of Tier 2's state).
+separate, toggleable tier; Tier 3 is always-on regardless of Tier 2's state; Piece K there is the
+QUIC dependency named in §5.1),
+[memory-injection-detection-design.md](memory-injection-detection-design.md) (the ownership
+question in §5.2 — adjacent ground, two docs, needs resolving),
+[agent-rebuild-config-driven.md](agent-rebuild-config-driven.md) (the agent integrity
+attestation + observation-layer foundation §5.3 hard-depends on).
