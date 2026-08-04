@@ -87,9 +87,41 @@ def check(name, cond, detail=""):
 
 
 def fake_line(rule_id, ip=TEST_IP):
-    now = datetime.now().strftime("%m/%d/%Y-%H:%M:%S.%f")
-    return (f"{now}  [**] [1:{rule_id}:1] TEST Synthetic Quarantine "
-            f"[**] [Classification: Test] [Priority: 1] {{TCP}} "
+    """One synthetic Suricata alert line, labelled for later cleanup (Rule 11).
+
+    Every row this suite writes to the live alerts.db must carry the literal
+    phrase "test data" AND the date, so a cleanup pass finds it with a single
+    `LIKE '%test data%'` sweep instead of guessing which rows are synthetic.
+
+    alert_watcher hardcodes `explanation` to '' in its INSERT and every other
+    alerts column is structured, so the label has to ride in on the parsed text.
+    It is placed in BOTH the rule-name segment and the Classification, on purpose:
+
+    `parse_alert` (alert_manager/firewall.py) splits on "[**]" and takes
+    `parts[2]` as rule_name — but in Suricata's fast.log format the rule name is
+    in `parts[1]`; `parts[2]` is the Classification/Priority block. So today the
+    label only reaches the row via the Classification, and a label placed solely
+    in the rule-name position would silently never arrive. That parser bug is
+    reported separately and is NOT assumed fixed here — putting the phrase in
+    both places means this label keeps working whether or not it is corrected,
+    rather than quietly breaking the day someone fixes it.
+
+    Kept early and short deliberately: process_new_alert stores `rule_name[:50]`,
+    so a label further right would be truncated away and the sweep would miss the
+    very rows it exists to find.
+
+    KNOWN GAP, recorded rather than papered over: the `quarantines` row this
+    alert causes CANNOT be labelled. That table is (id, ip, rule_id, expires_at,
+    created_at, status, actor) — every column structured, no free-text field —
+    exactly the shape Rule 11 already documents as the `audit_log` exception. Its
+    rows are instead findable by their RFC 5737 address (TEST_IP) and by the
+    RULE_IDS below, both of which are reserved for this suite.
+    """
+    now = datetime.now()
+    label = "test data %s" % now.strftime("%Y-%m-%d")
+    return (f"{now.strftime('%m/%d/%Y-%H:%M:%S.%f')}  [**] [1:{rule_id}:1] "
+            f"TEST Synthetic Quarantine {label} "
+            f"[**] [Classification: Test {label}] [Priority: 1] {{TCP}} "
             f"{ip}:55555 -> 192.168.1.10:443")
 
 
