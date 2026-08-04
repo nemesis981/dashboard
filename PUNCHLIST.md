@@ -2135,3 +2135,22 @@ this entry is the proposal, not the implementation.
       keytest, and report `ipv6 unavailable` distinctly from `ipv6 keytest failed`. Cheap.
     - [ ] Full evidence, mechanism confirmation, and the honestly-labelled inference about
       VPN attribution: `docs/audits/diagnostics-ipv6-keytest-false-degraded-2026-08-03.md`.
+
+- [ ] **`_dispatch_pending_scans` marks a `scan_queue` row `executing` before enqueuing the
+  task, so a failed enqueue strands the row there permanently.**
+  `core_module/hw_monitor/hw_monitor.py:2156` sets `status='executing'`; the `enqueue_task()`
+  call that's supposed to actually deliver the scan happens afterward, at line 2184. If that
+  call raises, the exception is caught and logged (`:2191-2197`) but the row is never rolled
+  back — it sits at `executing` forever, with no scan actually running.
+    - [ ] **Flagged by Window 1 during Step 5 (ADR 0004 Stage 1, loopback-push retirement,
+      `67326d0`), not fixed there — deliberately out of scope for that commit.** Pre-Step-5,
+      this was a live bug on every remote-device dispatch attempt, since the old direct POST
+      to `http://{agent_ip}:5002` failed for every non-loopback device (the listener only
+      ever binds `127.0.0.1`) — see the loopback-retirement work above. Step 5 replaced that
+      unconditionally-failing push with `enqueue_task()`, which mostly succeeds, so the
+      window in which this can strand a row narrowed from "every remote attempt" to
+      "requires a DB write to fail." Narrowed, not closed.
+    - [ ] **Fix:** reorder — call `enqueue_task()` first, and only mark the `scan_queue` row
+      `executing` once the task is confirmed queued. Deliberately not bundled into the Step 5
+      commit, which was scoped to retiring the transport, not to this pre-existing
+      ordering bug.
