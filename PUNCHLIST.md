@@ -2174,3 +2174,65 @@ this entry is the proposal, not the implementation.
       (`test_next_poll_hint.py`, 16/16). 465 + 17 + 16 = 498.
     - [x] **Going forward:** cite 465/465 (16 suites) for anything describing the tree as it
       stood before Step 5, and 498/498 (18 suites) for current state. Neither is 468.
+
+- [ ] **`community_queue`'s batch AI analysis has no in-flight dedup — the same defect class
+  the concurrency emergency fixed on `analyze_alert`, still live.** `_analyse_one()`
+  (`modules/community_queue/module.py:190-195`) calls `ai_analyze()` with `cache_key` and
+  `cache_hours` but **no `job_id`**, so `ai_engine`'s in-flight dedup never engages. The
+  sibling path does pass one — `dashboard.py:3979`, `job_id=f"alert_{rule_id}"` — added
+  precisely because two concurrent requests for the same uncached item each made, and were
+  each **billed for**, a separate Claude call. Found during the 2026-08-04 AI interaction
+  audit (`docs/audits/ai-interaction-audit-2026-08-04.md` §2).
+    - [ ] **Worse here than on the alert path, because this one is a batch.** "Analyse Queue"
+      (`_api_analyse`, `module.py:573`) loops every unreviewed row and calls `_analyse_one()`
+      per row. Two concurrent clicks bill a full duplicate batch, not a single duplicate
+      call — the cost multiplies by the queue length. The button is disabled client-side
+      during the request (`module.py:511-525`), but that is a UI courtesy, not a guard: two
+      browser tabs, a page reload mid-request, or any direct POST bypasses it entirely.
+    - [ ] **NOT a one-line fix — adding `job_id` alone would trade double-billing for
+      silently-lost work.** `_analyse_one()` collapses *every* not-ok result to
+      `{"confidence": "uncertain", "assessment": "AI analysis unavailable — review
+      manually."}` (`module.py:196-198`), and the caller writes that straight through with
+      **`ai_reviewed=1`** (`module.py:598-602`). A dedup rejection is a not-ok result, so the
+      second concurrent batch would mark rows reviewed with no analysis behind them — and
+      because the row selector is `WHERE submitted=0 AND ai_reviewed=0` (`module.py:585`),
+      those rows are then **never picked up again**. That converts a visible double-charge
+      into an invisible gap in the queue, which is the worse failure.
+    - [ ] **So the fix is two parts:** (1) pass a per-row `job_id` (e.g. keyed on
+      `domain_or_ip`, mirroring the alert path's per-`rule_id` granularity), and (2) have the
+      caller skip the `UPDATE` when the analysis did not actually run, rather than persisting
+      the fallback text as a completed review. Part 2 is the load-bearing half — it needs
+      `_analyse_one()` to distinguish "AI ran and was unsure" from "AI never ran", which it
+      currently cannot, since both return the same dict.
+    - [ ] **Same shape as the standing "a failed read must surface as an explicit failure
+      state, never as a default value" rule** — the `uncertain`/"unavailable" pair is a
+      default that reads as a real verdict to everything downstream, including the sort order
+      in `_api_rows()` that ranks by `ai_confidence`.
+    - [ ] Worth doing **before** any work that increases AI call volume (see the four items
+      scoped in `docs/roadmap/ai-interaction-scoping-2026-08-04.md`); the contextual-chat item
+      in particular adds uncached, user-triggered calls.
+
+- [ ] **[FIX-NOW] `scan_conditions` seed only backfills on an EMPTY table, so later condition
+  types never reach existing installs.** `init_db()` seeds the five default scan conditions
+  **only** when the table is empty (`if c.execute("SELECT COUNT(*) FROM scan_conditions")
+  .fetchone()[0] == 0`). Correct for a fresh install, silently wrong for every existing one: a
+  condition type added to the `defaults` list after a database already has rows is never
+  inserted, so the trigger it represents simply never fires there.
+    - [ ] **Live, not hypothetical — confirmed against this box's own DB (2026-08-04):** the
+      table holds three of the five (`first_connect`, `return_from_remote`,
+      `extended_absence`). `new_login` and `usb_inserted` are absent, so those two scan
+      triggers have never fired on this machine. Nothing looks broken: no error, no warning,
+      the feature appears present in the code.
+    - [ ] **Backfill missing condition types instead of all-or-nothing seeding.** Insert any
+      default whose `condition_type` is absent, rather than skipping the whole seed when the
+      table is non-empty. Same shape as the guarded `PRAGMA table_info` + `ALTER TABLE`
+      column migrations already used elsewhere in `init_db()` — per-item presence check, not
+      a single table-level one.
+    - [ ] **Do not resurrect deliberately disabled rows.** A condition an operator switched
+      off has `enabled=0` and still exists; only genuinely ABSENT types should be inserted, or
+      the backfill will undo an operator decision every restart.
+    - [ ] **Check for the same shape elsewhere.** Any other "seed if empty" block has the same
+      defect by construction. Worth a grep for `COUNT(*)` + seed patterns while in here.
+    - [ ] Found by Window 1, 2026-08-04, while investigating mandatory-scan triggers for the
+      trust-boundary work. Verified against live code and live DB state by Window 2 before
+      this entry was committed.
