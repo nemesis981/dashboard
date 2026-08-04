@@ -128,6 +128,22 @@
      * password clears it. That is a property of the server, not of this script —
      * but it is why this script is safe to exist at all.
      */
+    /* Defence in depth against the 2026-08-04 Firefox finding: BACK restored
+       this page with the typed password still in the field, so whoever was at
+       the keyboard could unlock without knowing it. `no-store` (dashboard.py's
+       _no_store) is the real fix — it keeps the page out of the back-forward
+       cache entirely. This clears the field on every restore as well, because
+       a security property that depends on one header being right everywhere,
+       forever, is one deployment mistake from being gone. Costs nothing when
+       no-store is working. */
+    window.addEventListener('pageshow', function (e) {
+      var pw = document.getElementById('password');
+      if (pw) { pw.value = ''; }
+      /* A restore means this page came from cache rather than the server, so
+         the lock state on screen was never re-validated. Re-request it. */
+      if (e.persisted) { window.location.replace('/account/unlock'); }
+    });
+
     (function () {
       'use strict';
       /* Matches static/header-status.js's 30s cadence for this SAME data on the

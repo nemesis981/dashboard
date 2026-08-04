@@ -960,6 +960,45 @@ def _safe_next(target):
     return target
 
 
+# ── No-store on everything the browser could replay after a lock ─────────────
+@app.after_request
+def _no_store(resp):
+    """Stop the browser retaining authenticated pages — and their form state.
+
+    THE BUG THIS CLOSES (found 2026-08-04, Firefox): from the lock screen,
+    BACK restored the previous authenticated page *including the password field
+    the operator had typed into it*. Clicking unlock then submitted a real
+    credential the person at the keyboard never knew. The server behaved
+    correctly throughout — it verified a genuine password — which is exactly
+    why this was invisible to server-side checks. The browser was handing out
+    the credential, and idle-lock's entire threat model is someone walking up
+    to an unattended machine.
+
+    `no-store` is the part that matters: Firefox will not put a no-store
+    response in its back-forward cache, so there is no restored page and no
+    restored form value. `no-cache`/`must-revalidate`/`Pragma` cover
+    intermediaries and older clients; `private` keeps any shared proxy out.
+
+    Applied to everything EXCEPT `static`, deliberately. Static assets carry no
+    session state and no form values, and blanket no-store on them would cost
+    real performance on every page load for no security gain. Anything that
+    renders session-scoped content or accepts a credential is not served from
+    that endpoint.
+
+    Set with setdefault semantics: a route that has deliberately chosen its own
+    caching (a download, a long-lived asset) keeps it rather than being
+    overridden from here.
+    """
+    if (request.endpoint or "").startswith("static"):
+        return resp
+    if not resp.headers.get("Cache-Control"):
+        resp.headers["Cache-Control"] = (
+            "no-store, no-cache, must-revalidate, private")
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+    return resp
+
+
 # ── First-run + auth guard (covers dashboard.py AND all module routes) ────────
 @app.before_request
 def _enforce_setup_and_auth():
