@@ -2094,3 +2094,21 @@ this entry is the proposal, not the implementation.
     - [ ] **Not a regression** — pre-digest, this attack was strictly easier and did not
       need a captured task at all. Filed as a tracked residual, per the standing practice
       of naming a bounded weakness rather than letting it read as fully solved.
+
+- [ ] **Archive files are written with inconsistent ownership.** `/var/lib/nemesis/archives/`
+  currently holds one file owned by `root:nemesis-db` and one by `<user>:nemesis-db` — whichever
+  account happened to run the archival job, since both are manual-invoke only today.
+    - [ ] **Nothing is broken right now.** Both files are mode `0640` with group `nemesis-db`,
+      and the directory is `2770` setgid, so the group is inherited correctly and every
+      service account that needs to read them can. This is a consistency/latent issue, not a
+      live access failure — filed so it is fixed before it becomes one.
+    - [ ] **Why it matters later:** once these jobs are scheduled rather than hand-run, the
+      owning account becomes whatever the timer/unit uses. A file written by an account whose
+      primary group is not `nemesis-db` would land group-owned by that account instead, and
+      the setgid bit on the directory is what is quietly saving this today. Archives can hold
+      the ONLY surviving copy of data removed from a live table, so a read failure here is
+      not recoverable by re-running anything.
+    - [ ] **Fix direction:** decide the owning account as part of the archival-job scheduling
+      decision (currently deferred alongside archive-integrity scheduling), and have
+      `ensure_archive_dir()`'s sibling write path assert the expected owner/mode rather than
+      relying on directory setgid inheritance to paper over it.
