@@ -1,0 +1,52 @@
+/* Health-summary styling for the idle-lock screens.
+ *
+ * ONE source of truth for BOTH places the block appears: the server-rendered
+ * /account/unlock page (templates/unlock.html) and the in-page overlay
+ * (static/nemesis-idle-lock.js), which lifts the same markup out of that page's
+ * HTML. Two copies of these values would drift the moment either screen was
+ * restyled, and the drift would be invisible until someone compared them
+ * side by side.
+ *
+ * EVERY RULE IS SCOPED UNDER .nem-health-scope, AND THAT IS LOAD-BEARING —
+ * not a namespacing habit. The overlay renders on the dashboard page, which
+ * already defines .health-green and .health-red as solid background swatches
+ * for its own status dots (dashboard.py ~9296 and ~9298). The health block's
+ * container is literally `class="health health-green"`, so an unscoped rule
+ * here would leave the dashboard's swatch painting the entire card solid
+ * green. The wrapper raises these to (0,2,0) specificity so they win, and
+ * equally stops them leaking onto the dashboard's own .health-* elements.
+ * Removing the scope would break both directions at once.
+ */
+.nem-health-scope .health {
+  border: 1px solid #2a3a5a; border-radius: 8px; padding: 12px 13px;
+  margin-bottom: 14px; background: #0f1a30;
+}
+.nem-health-scope .health-verdict {
+  display: flex; align-items: center; gap: 8px; font-size: 0.84em;
+  font-weight: bold; margin-bottom: 11px;
+}
+.nem-health-scope .health-verdict .dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: 0 0 auto;
+}
+.nem-health-scope .health-green .dot { background: #2ecc71; }
+.nem-health-scope .health-green .health-verdict { color: #2ecc71; }
+.nem-health-scope .health-amber .dot { background: #ffb020; }
+.nem-health-scope .health-amber .health-verdict { color: #ffb020; }
+.nem-health-scope .health-red .dot { background: #ff4444; }
+.nem-health-scope .health-red .health-verdict { color: #ff4444; }
+.nem-health-scope .health-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px 6px;
+}
+.nem-health-scope .hc { text-align: center; }
+.nem-health-scope .hc b {
+  display: block; font-size: 1.15em; color: #76839f; line-height: 1.35;
+  font-weight: bold;
+}
+.nem-health-scope .hc span {
+  font-size: 0.64em; color: #798496; text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.nem-health-scope .hc.on b { color: #ffc966; }
+.nem-health-scope .health-note {
+  margin-top: 11px; font-size: 0.65em; color: #78839a; text-align: center;
+}

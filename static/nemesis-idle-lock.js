@@ -22,16 +22,74 @@
 (function () {
     'use strict';
 
+    /* ── health-block extraction ──────────────────────────────────────────────
+     * Pulls the .health div out of a fetched /account/unlock page.
+     *
+     * DELIBERATELY DOM-FREE. A DOMParser version would be shorter, but this is
+     * the only piece of this file with logic that can be silently wrong, and a
+     * DOM-dependent version cannot be executed by any harness available on this
+     * box (node is present but has no HTML parser — DOMParser is undefined and
+     * jsdom/linkedom/parse5 are all absent). Keeping it a pure string function
+     * is what lets a real test run it against real captured HTML instead of
+     * someone reading it and declaring it correct.
+     *
+     * Depth-counts <div>/</div> from the opening tag: the block nests several
+     * levels (.health-verdict, .health-grid, and one .hc per tile), so "find
+     * the next </div>" would truncate it after the verdict line.
+     *
+     * FAILS CLOSED — returns null, never a partial string, on an absent or
+     * unbalanced block. A truncated fragment would inject broken markup that
+     * looks like a rendering bug rather than a fetch problem. The POST error
+     * paths of /account/unlock render WITHOUT the health block by design, so
+     * "absent" is an ordinary outcome here, not an error.
+     *
+     * Assumes no "<div" appears inside an HTML comment or attribute value
+     * within the block. True of templates/unlock.html, which is the only page
+     * this ever parses, and which is version-controlled beside it.
+     */
+    function extractHealth(htmlText) {
+        if (typeof htmlText !== 'string') { return null; }
+        var start = htmlText.indexOf('<div class="health health-');
+        if (start < 0) { return null; }
+        var tag = /<(\/?)div\b/g;
+        tag.lastIndex = start;
+        var depth = 0;
+        var m;
+        while ((m = tag.exec(htmlText)) !== null) {
+            depth += m[1] ? -1 : 1;
+            if (depth === 0) {
+                var close = htmlText.indexOf('>', m.index);
+                return close < 0 ? null : htmlText.slice(start, close + 1);
+            }
+        }
+        return null;
+    }
+
+    /* Exported for the node harness BEFORE a single browser global is touched —
+     * the bootstrap below references window/document at IIFE top level, so a
+     * require() that fell through to it would throw ReferenceError instead of
+     * handing back the function. */
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = { extractHealth: extractHealth };
+        return;
+    }
+
     var TOUCH_MIN_INTERVAL_MS = 30000;   // never beat more often than this
     var WARN_SECONDS          = 60;      // banner appears this long before lock
     var TICK_MS               = 1000;
+    /* Must equal REFRESH_MS in templates/unlock.html. Both show the SAME data
+     * from the same endpoint, and header-status.js polls it at 30s on the
+     * unlocked dashboard — a locked screen refreshing on a different cadence
+     * would be a third number to explain with nothing to justify it. */
+    var HEALTH_REFRESH_MS     = 30000;
 
     var interacted   = false;
     var lastTouch    = 0;
     var deadline     = null;   // epoch ms when the session locks
     var endsSession  = false;  // absolute cap: unlocking will NOT help
     var locked       = false;
-    var overlay, banner, pwInput, errBox, countdownEl;
+    var healthTimer  = null;   // only runs while the overlay is up
+    var overlay, banner, pwInput, errBox, countdownEl, healthEl;
 
     /* ── interaction tracking ─────────────────────────────────────────────── */
     ['mousedown', 'keydown', 'touchstart', 'scroll', 'mousemove'].forEach(function (evt) {
@@ -84,6 +142,11 @@
               '<p style="color:#8a98b3;font-size:0.85em;margin:0 0 16px;line-height:1.5">' +
                 'Locked after a period of inactivity. Nothing has been lost &mdash; ' +
                 'enter your password to carry on exactly where you left off.</p>' +
+              /* Empty until the first refreshHealth() lands. Starts absent rather
+                 than showing a placeholder row of zeros: a zero here reads as a
+                 real "all clear" measurement, which is exactly the failure this
+                 codebase keeps finding — a default that means something. */
+              '<div id="nemIdleHealth" class="nem-health-scope"></div>' +
               '<div id="nemIdleErr" style="display:none;background:#ff444422;border:1px solid #ff4444;' +
                    'color:#ff8888;border-radius:8px;padding:9px 11px;margin-bottom:12px;font-size:0.82em"></div>' +
               '<input id="nemIdlePw" type="password" autocomplete="current-password" ' +
@@ -105,12 +168,60 @@
             'text-align:center;font-family:-apple-system,Segoe UI,Roboto,sans-serif;';
         document.body.appendChild(banner);
 
-        pwInput = document.getElementById('nemIdlePw');
-        errBox  = document.getElementById('nemIdleErr');
+        /* The health markup is styled by classes that live in the lock-screen
+           stylesheet, not on the dashboard page. Injected once, here, rather
+           than added to every template that might host the overlay. /static is
+           on _IDLE_LOCK_ALLOWED, so a locked session can still load it. */
+        if (!document.getElementById('nemLockHealthCss')) {
+            var css = document.createElement('link');
+            css.id = 'nemLockHealthCss';
+            css.rel = 'stylesheet';
+            css.href = '/static/lock-health.css';
+            document.head.appendChild(css);
+        }
+
+        pwInput  = document.getElementById('nemIdlePw');
+        errBox   = document.getElementById('nemIdleErr');
+        healthEl = document.getElementById('nemIdleHealth');
         document.getElementById('nemIdleGo').addEventListener('click', submit);
         pwInput.addEventListener('keydown', function (e) {
             if (e.key === 'Enter') submit();
         });
+    }
+
+    /* ── health summary ───────────────────────────────────────────────────────
+     * Re-requests the one page a locked session is already allowed to fetch and
+     * lifts the health block out of it.
+     *
+     * NO NEW SERVER SURFACE, deliberately. /api/header/status — which is what
+     * header-status.js polls for this same data on the dashboard — is NOT on
+     * _IDLE_LOCK_ALLOWED and correctly 401s a locked session. Re-rendering the
+     * one allowed page is the mechanism, exactly as templates/unlock.html
+     * already does for the standalone lock screen.
+     *
+     * THIS CANNOT DEFEAT THE LOCK. _enforce_setup_and_auth() only stamps
+     * last_activity inside its `ep not in _IDLE_LOCK_ALLOWED` branch, so these
+     * requests never refresh the idle clock however long they run. That is a
+     * property of the server, not of this timer — but it is why polling here is
+     * safe at all, and it is asserted directly by C2 of the control harness
+     * rather than taken on trust.
+     */
+    function refreshHealth() {
+        if (!locked || !healthEl) { return; }
+        fetch('/account/unlock', {
+            headers: { 'Accept': 'text/html' },
+            credentials: 'same-origin'
+        })
+            .then(function (r) { return r.ok ? r.text() : null; })
+            .then(function (html) {
+                var block = extractHealth(html);
+                /* Leave the previous summary in place on a miss rather than
+                   blanking it. A transient failure must not look like "nothing
+                   is wrong"; the stale-but-real block is the safer thing to
+                   show, and the note under it already says it is a snapshot. */
+                if (block && healthEl) { healthEl.innerHTML = block; }
+            })
+            .catch(function () { /* transient — the next tick tries again */ });
     }
 
     function showOverlay() {
@@ -120,10 +231,18 @@
         banner.style.display = 'none';
         overlay.style.display = 'flex';
         try { pwInput.focus(); } catch (e) { /* not focusable yet */ }
+        /* Immediately, THEN on the interval. Waiting a full period would leave
+           the first thing the operator sees blank — which is the original bug
+           this fix exists for, just with a shorter duration. */
+        refreshHealth();
+        if (healthTimer === null) {
+            healthTimer = setInterval(refreshHealth, HEALTH_REFRESH_MS);
+        }
     }
 
     function hideOverlay() {
         locked = false;
+        if (healthTimer !== null) { clearInterval(healthTimer); healthTimer = null; }
         if (!overlay) return;
         overlay.style.display = 'none';
         errBox.style.display = 'none';

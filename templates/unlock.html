@@ -25,27 +25,12 @@
             line-height:1.6; }
     .hint a { color:#00d4ff; text-decoration:none; }
     /* View-only health summary. Aggregate counts + overall verdict only — no
-       identifiers of any kind reach this screen (see account_unlock's GET branch). */
-    .health { border:1px solid #2a3a5a; border-radius:8px; padding:12px 13px;
-              margin-bottom:14px; background:#0f1a30; }
-    .health-verdict { display:flex; align-items:center; gap:8px; font-size:0.84em;
-                      font-weight:bold; margin-bottom:11px; }
-    .health-verdict .dot { width:9px; height:9px; border-radius:50%; flex:0 0 auto; }
-    .health-green .dot { background:#2ecc71; }
-    .health-green .health-verdict { color:#2ecc71; }
-    .health-amber .dot { background:#ffb020; }
-    .health-amber .health-verdict { color:#ffb020; }
-    .health-red .dot { background:#ff4444; }
-    .health-red .health-verdict { color:#ff4444; }
-    .health-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:9px 6px; }
-    .hc { text-align:center; }
-    .hc b { display:block; font-size:1.15em; color:#76839f; line-height:1.35;
-            font-weight:bold; }
-    .hc span { font-size:0.64em; color:#798496; text-transform:uppercase;
-               letter-spacing:0.04em; }
-    .hc.on b { color:#ffc966; }
-    .health-note { margin-top:11px; font-size:0.65em; color:#78839a; text-align:center; }
+       identifiers of any kind reach this screen (see account_unlock's GET branch).
+       The rules themselves now live in static/lock-health.css, because the
+       in-page overlay renders this SAME markup on the dashboard and needs the
+       same styling; see that file's header for why they are scoped. */
   </style>
+  <link rel="stylesheet" href="/static/lock-health.css">
 </head>
 <body>
   <div class="card">
@@ -57,6 +42,11 @@
       your password to pick up exactly where you left off.
     </div>
     {% if health %}
+    {# .nem-health-scope wraps the block in BOTH renderers — here and in the
+       overlay — because every rule in static/lock-health.css is scoped to it.
+       The overlay extracts the .health div below, not this wrapper, and
+       supplies its own; keep the two in step if either is renamed. #}
+    <div class="nem-health-scope">
     <div class="health health-{{ health.status }}">
       <div class="health-verdict">
         <span class="dot"></span>
@@ -97,6 +87,7 @@
         {% endif %}
       </div>
       <div class="health-note">Snapshot from when this screen loaded</div>
+    </div>
     </div>
     {% endif %}
     <form method="POST" action="/account/unlock" id="unlockForm">
