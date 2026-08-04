@@ -2275,7 +2275,35 @@ def _analyze_inner(
     for attempt in range(2):
         try:
             msg        = client.messages.create(**kwargs)
-            text       = msg.content[0].text.strip()
+
+            # A declined request returns HTTP 200 with stop_reason='refusal' and
+            # empty-or-partial content, not an exception. Checked BEFORE reading
+            # content so a refusal surfaces as a stated reason rather than an
+            # unexplained empty answer.
+            if getattr(msg, "stop_reason", None) == "refusal":
+                detail = getattr(msg, "stop_details", None)
+                cat = getattr(detail, "category", None) if detail else None
+                raise RuntimeError(
+                    "the model declined this request"
+                    + (" (%s)" % cat if cat else ""))
+
+            # Select the TEXT block by type — do NOT index content[0].
+            #
+            # content is a list of typed blocks (ThinkingBlock, TextBlock, ...),
+            # and which one comes first depends on the model. On claude-opus-5
+            # thinking is ON BY DEFAULT — omitting the `thinking` parameter runs
+            # adaptive thinking, unlike opus-4-8/4-7 where omitting it meant no
+            # thinking. So content[0] became a ThinkingBlock, which has
+            # `.thinking` and no `.text`, and every AI surface in the product
+            # broke on the same AttributeError while the API call itself
+            # returned 200. Selecting by type is version-proof; indexing is not.
+            text = next((b.text for b in msg.content
+                         if getattr(b, "type", None) == "text"), "").strip()
+            if not text:
+                raise RuntimeError(
+                    "response carried no text block (blocks: %s)"
+                    % ", ".join(getattr(b, "type", "?") for b in msg.content))
+
             tokens_in  = getattr(msg.usage, "input_tokens",  0)
             tokens_out = getattr(msg.usage, "output_tokens", 0)
             _record_call_success()
