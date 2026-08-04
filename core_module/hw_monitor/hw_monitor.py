@@ -3009,6 +3009,30 @@ def _create_enrollment(payload, remote_ip):
                 log.exception("enrollment token check failed; falling back to pending")
         # ── TOFU "same device?" — compare against PRIOR fingerprints (informational; the
         #    match NEVER blocks enrollment — degrade-visibly principle, ADR 0011). ──
+        #
+        # ⚠ A TAMPERING-DETECTION PATH DEPENDS ON THIS STAYING LOG-ONLY.
+        #
+        # `outcome`, `matched_id` and `matched_n` below go to log.info and are then
+        # DISCARDED. `enroll_status` is decided entirely before this block, so nothing
+        # here can influence the enrollment outcome. That is what makes a reinstall
+        # produce a NEW device_id rather than resuming the old one.
+        #
+        # Why that matters, and it is not obvious from here: `first_connect` fires on
+        # `prev is None`. A new device_id is therefore what makes it fire. Today
+        # `first_connect` is the one path that reliably triggers a fresh scan after an
+        # agent has been wiped and reinstalled — which is exactly the shape a tamperer
+        # produces. There is no agent self-integrity check anywhere in the tree, so this
+        # is doing more work than it looks like it is doing.
+        #
+        # So: this is currently **safe by accident, not by design**. If anyone later
+        # "improves" enrollment to recognise returning devices via this match and resume
+        # their existing device_id, the reinstall path stops minting a new one,
+        # `first_connect` stops firing, and that detection closes SILENTLY — no error, no
+        # failing test, just a scan that no longer happens. Recorded here so the
+        # dependency is visible at the call site rather than rediscovered afterwards.
+        #
+        # Wiring this match into enrollment is not forbidden — but it requires replacing
+        # the trigger it removes, not just noticing afterwards that it was load-bearing.
         if hw_stable_id:
             try:
                 prior = conn.execute(
