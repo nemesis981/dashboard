@@ -1971,6 +1971,34 @@ this entry is the proposal, not the implementation.
       tunnel is up and that inbound tailnet traffic is half-opening, and surface it. Silent
       failure is what made this expensive, not the incompatibility itself.
 
+- [x] **Retrying a failed install could make Nemesis disown software it actually
+  installed — FIXED same day (`edc6133`).** `_probe_preinstall_state()` ran at the top of
+  `_run()`, but the Retry button re-enters `_run()` from the start. If the first attempt got
+  far enough to install Tailscale (the pre-auth self-onboard path does) and then failed later
+  — e.g. at the server reachability check — the second probe saw Tailscale already present
+  and recorded it as pre-existing.
+    - [x] **Confirmed live 2026-08-03.** After one retry, `install-manifest.json` contained
+      `{"pre_existing": true, "installed_by_nemesis": false, "removal": "never"}` for Tailscale
+      on a VM that had no Tailscale before the install started.
+    - [x] **Consequence (pre-fix):** the uninstaller would have honoured the manifest and never
+      offered to remove it, so uninstalling Nemesis would leave Tailscale installed AND a live
+      node in the operator's tailnet, silently and permanently. The provenance logic is
+      deliberately conservative ("never touch the user's own software") — which is right, but
+      it meant a wrong reading failed in the direction of leaving things behind.
+    - [x] **Fix, landed same day:** the probe is now idempotent across retries — a
+      `_provenance_probed` flag on `InstallerApp` captures provenance ONCE per installer
+      process (first entry to `_run()`) and reuses it on any re-entry, rather than
+      re-probing on each attempt. Regression-covered:
+      `nemesis_agent/test_provenance_retry.py` extracts `_probe_preinstall_state` verbatim
+      via AST and exercises the exact retry-after-partial-install scenario. Reviewed and
+      re-verified against live code 2026-08-04 (Window 2) before this entry was committed —
+      the fix is real, not just claimed.
+    - [x] **Residual gap this fix does NOT close — tracked separately, see the
+      "Provenance should be recorded when a component is INSTALLED" entry below.** The cache
+      is per-process by design, so a crash or manual close after installing Tailscale,
+      followed by a relaunch, still re-probes fresh and hits the same wrong answer via a
+      different trigger.
+
 - [ ] **A signed ruleset update can be rolled BACK to an older-but-genuine ruleset.**
   Content authenticity is now bound into the signed task envelope (`sha256` + `size` in
   `params`, verified by the agent before install — ADR 0004 Stage 1). That closes
