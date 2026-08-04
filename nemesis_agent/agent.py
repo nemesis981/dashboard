@@ -63,6 +63,60 @@ RAMP_BEATS = 4    # number of ramping beats (geometric doubling) before settling
 # written to conf — a hint is a request about the next beat, not a setting.
 _poll_hint = None
 
+# ── Event-triggered check-in ──────────────────────────────────────────────────
+#
+# WHAT THIS IS, AND WHAT IT IS NOT. A REPORTING accelerator: it gets
+# locally-observed evidence to the server sooner than the normal cadence would.
+# It is NOT a trigger mechanism for local action.
+#
+# Recorded here so it is not re-litigated (2026-08-04 ownership decision):
+# Tier 3 owns the executing-payload case for local, immediate action, and by
+# design it DECIDES LOCALLY and never waits for a server round-trip. Tier 3
+# therefore does not need this and must not be built on it. Its consumers are:
+#
+#   * evidence delivery — the memory-injection module is a server-side evidence
+#     source with no local action authority, so how fast its evidence ARRIVES is
+#     the whole of its latency budget;
+#   * Game Mode grant latency — a process launch that must open a UDP grant
+#     cannot wait up to POLL_INTERVAL_DEFAULT (300s) for the next beat.
+#
+# `_wake` doubles as the shutdown signal. ONE mechanism, not a second: the poll
+# loop previously burned a 1-second wakeup just to notice `_running` had gone
+# False, and a separate wake primitive alongside it would be two things to keep
+# in sync for no benefit.
+_wake = threading.Event()
+_last_beat_at = 0.0
+_early_beat_reasons = []
+_early_beat_lock = threading.Lock()
+
+
+def request_early_beat(reason: str) -> bool:
+    """Ask the poll loop to check in sooner. Returns True if a beat is due NOW.
+
+    Safe from any thread, and safe in a storm — a burst of process launches must
+    not become a burst of heartbeats. The rate limit is POLL_INTERVAL_FLOOR, the
+    SAME constant that already bounds how far a server-supplied `next_poll_hint`
+    may shorten the interval. Reusing it means there is one answer to "how often
+    can this agent possibly beat" rather than two that can drift apart.
+
+    A request inside the floor is NOT discarded — it is recorded and the loop
+    beats as soon as the floor expires. Dropping it would make the mechanism
+    lossy in exactly the case that matters most: several events arriving at once.
+    """
+    with _early_beat_lock:
+        _early_beat_reasons.append(reason)
+    _wake.set()
+    return (time.monotonic() - _last_beat_at) >= POLL_INTERVAL_FLOOR
+
+
+def _take_early_reasons():
+    """Drain the reason list. Empty means this beat was NOT event-triggered."""
+    with _early_beat_lock:
+        reasons = list(_early_beat_reasons)
+        del _early_beat_reasons[:]
+    return reasons
+
+
 # Attempts allowed at the startup device-secret prompt before the agent gives up
 # and exits WITHOUT starting the poll loop.
 MAX_UNLOCK_ATTEMPTS = 3
@@ -717,6 +771,14 @@ def _poll_loop():
     log.info("heartbeat ramp armed: %s -> steady poll_interval (RAMP_BEATS=%d)",
              ",".join(str(RAMP_START * (2 ** i)) for i in range(RAMP_BEATS)), RAMP_BEATS)
     while _running:
+        global _last_beat_at
+        _last_beat_at = time.monotonic()
+        # Drained BEFORE the payload is built, so an event arriving mid-beat is
+        # left pending for the NEXT beat rather than being consumed by one whose
+        # payload was already collected without it.
+        reasons = _take_early_reasons()
+        if reasons:
+            log.info("event-triggered check-in: %s", ", ".join(sorted(set(reasons))))
         try:
             _conf = config.load()
             payload = _collect_payload(_conf)
@@ -762,11 +824,43 @@ def _older_than_24h(iso_str):
         return True
 
 
+def _early_pending():
+    with _early_beat_lock:
+        return bool(_early_beat_reasons)
+
+
 def _interruptible_sleep(seconds):
-    for _ in range(int(seconds)):
-        if not _running:
-            break
-        time.sleep(1)
+    """Wait, waking early for shutdown or an event-triggered check-in.
+
+    Three properties, in order of how easy they are to get wrong:
+
+    1. **A pending request is never lost.** Pending-ness lives in the reasons
+       list, NOT in `_wake` — the Event gets cleared before each wait, so using
+       it to remember "something is pending" would drop a request that arrived
+       inside the floor and then silently wait out the full interval.
+    2. **The floor is honoured even under a storm.** A request arriving sooner
+       than POLL_INTERVAL_FLOOR after the last beat does not shorten the wait
+       below the floor; it waits out the remainder and then beats. Spurious
+       wakes re-evaluate rather than falling through, so repeated requests
+       cannot ratchet the interval down.
+    3. **Shutdown is immediate.** `_shutdown` sets `_wake`, and `_running` is
+       re-checked on every pass. Previously this burned a 1-second wakeup
+       forever just to notice a flag; the Event does the same job for free.
+    """
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    while _running:
+        now = time.monotonic()
+        if now >= deadline:
+            return
+        if _early_pending():
+            floor_until = _last_beat_at + POLL_INTERVAL_FLOOR
+            if now >= floor_until:
+                return                      # request honoured; beat now
+            wait_for = min(floor_until, deadline) - now
+        else:
+            wait_for = deadline - now
+        _wake.clear()
+        _wake.wait(max(0.0, wait_for))
 
 
 # ── Command listener on localhost:5002 ───────────────────────────────────────
@@ -1027,6 +1121,9 @@ def _start_command_listener():
 def _shutdown(*_):
     global _running
     _running = False
+    # The poll loop waits on `_wake`, so without this a shutdown would block for
+    # up to the full poll interval (300s default) instead of returning at once.
+    _wake.set()
     if _suricata_mod:
         _suricata_mod.stop()
     # L1 fail-safe: if DNS enforcement was active, revert it on shutdown so the box is
