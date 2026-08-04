@@ -102,7 +102,7 @@ def _init_db() -> None:
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             action_class    TEXT NOT NULL,
             surface_key     TEXT NOT NULL,
-            row_id          INTEGER NOT NULL,
+            row_id          TEXT    NOT NULL,   -- TEXT for the same reason as ai_chat_turns.row_id
             proposed_action TEXT NOT NULL,
             reasoning       TEXT NOT NULL,
             model_used      TEXT NOT NULL,
@@ -132,6 +132,26 @@ def _init_db() -> None:
             active       INTEGER NOT NULL DEFAULT 1
         );
         CREATE INDEX IF NOT EXISTS idx_aisr_active ON ai_standing_rules(active, action_class);
+
+        -- Contextual chat: one row per question asked against an anchored finding.
+        -- Carries the per-turn token split and cost because this is the first
+        -- surface where the user spends money one question at a time, and the
+        -- product's answer to that is to show them, not to hide it behind a
+        -- monthly total. Also backs the per-anchor turn cap.
+        CREATE TABLE IF NOT EXISTS ai_chat_turns (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            surface_key TEXT    NOT NULL,
+            row_id      TEXT    NOT NULL,   -- TEXT: alerts anchor on rule_id, which is not numeric
+            question    TEXT    NOT NULL,
+            answer      TEXT,
+            asked_by    TEXT,
+            asked_at    TEXT    NOT NULL,
+            tokens_in   INTEGER NOT NULL DEFAULT 0,
+            tokens_out  INTEGER NOT NULL DEFAULT 0,
+            cost_usd    REAL,
+            model_used  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_act_anchor ON ai_chat_turns(surface_key, row_id);
     """)
     conn.commit()
     conn.close()
@@ -313,6 +333,364 @@ def effective_ceiling(action_class: str) -> dict:
         "rule_types":   rule_types,
         "reasons":      reasons,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Contextual chat — follow-up questions anchored to a surfaced finding
+#
+# A chat turn is (surface_key, row_id, question). The CLIENT NEVER SENDS
+# CONTEXT: the server rebuilds it from the row via the anchor's registered
+# loader. A client able to supply arbitrary context would be a generic chatbot
+# wearing an anchor's clothing, which is the thing this design rules out.
+#
+# Cost, stated plainly because it is the single biggest spend change here:
+# every cached call in this product keys on something stable, because the SAME
+# question recurs. A follow-up is a novel question by definition, so
+# cache_hours=0 and EVERY QUESTION IS A REAL BILLED CALL. Three controls apply,
+# all pre-existing:
+#   - the hourly/daily call limits and the dollar spend cap, inherited free by
+#     going through analyze() (_check_rate_limit runs inside _analyze_inner);
+#   - a per-anchor turn cap, so one confusing alert cannot become an unbounded
+#     conversation;
+#   - job_id in-flight dedup, so a double-click cannot bill twice.
+#
+# NEVER pass force=True from this path. force=True bypasses rate limiting
+# entirely — including the spend cap — and would turn the one surface where the
+# user spends interactively into the one surface with no ceiling.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TURN_CAP_DEFAULT      = 6      # follow-ups per anchored row
+_HISTORY_TURNS         = 3      # prior Q&A pairs replayed for continuity
+_MAX_QUESTION_CHARS    = 4000   # bounds a paste-back; see Path 2 in the scoping doc
+_CHAT_MAX_TOKENS       = 700
+
+_ANCHORS: dict = {}
+
+
+def register_anchor(surface_key: str, loader, action_classes=(), label: str = "") -> None:
+    """Register a surface that may carry a chat affordance.
+
+    `loader(row_id)` must return the same facts that produced the original
+    analysis, plus that analysis — it is the function that already builds the
+    prompt inside each caller today. Returning a falsy value is treated as a
+    FAILURE, not as "this row has no context": answering confidently about
+    nothing is the failure mode this refuses to have.
+
+    `action_classes` names the action classes this surface can lead to. They
+    determine what the chat is permitted to SAY, via effective_ceiling(). A
+    surface that never leads to an action registers none and stays explanatory.
+
+    A surface that has not registered has no chat affordance at all — adding one
+    is a deliberate registration, never a side effect of the component existing.
+    """
+    if not surface_key or not callable(loader):
+        raise ValueError("register_anchor needs a surface_key and a callable loader")
+    for ac in action_classes:
+        if ac not in ACTION_CLASS_CEILINGS:
+            raise UnknownActionClass(
+                f"anchor {surface_key!r} names unknown action class {ac!r}"
+            )
+    _ANCHORS[surface_key] = {
+        "loader":         loader,
+        "action_classes": tuple(action_classes),
+        "label":          label or surface_key,
+    }
+
+
+def registered_anchors() -> list:
+    return sorted(_ANCHORS)
+
+
+def _chat_scope(action_classes) -> dict:
+    """What the chat may say, derived from each action class's earned authority.
+
+    Degrades to explanation-only if authority cannot be read — and SAYS SO via
+    `degraded`. Restricting to L0 is safe (it is the floor, so a failed read can
+    only ever under-grant), but it must never present as an ordinary L0, or an
+    unreadable authority table would look identical to a healthy new install.
+    """
+    per_class, degraded, reason = {}, False, ""
+    for ac in action_classes:
+        try:
+            per_class[ac] = effective_ceiling(ac)["level"]
+        except AuthorityUnavailable as exc:
+            per_class[ac] = L0_OBSERVE
+            degraded, reason = True, str(exc)
+        except UnknownActionClass:
+            per_class[ac] = L0_OBSERVE
+            degraded, reason = True, f"unknown action class {ac!r}"
+
+    top = max(per_class.values()) if per_class else L0_OBSERVE
+    return {"level": top, "per_class": per_class,
+            "degraded": degraded, "degraded_reason": reason}
+
+
+def _chat_system_prompt(scope: dict) -> str:
+    """The ONE place chat scope is enforced.
+
+    Written once, here, rather than per surface: the scope boundary is a safety
+    property, and a property enforced in six places is enforced in none.
+    """
+    base = (
+        "You are the security assistant built into a Nemesis firewall appliance. "
+        "You are explaining a specific finding to the person who owns this network, "
+        "who may have no IT background. Be concrete and plain-spoken. "
+        "Answer only from the finding data provided — if something is not in it, "
+        "say you cannot tell from the available data rather than guessing.\n\n"
+    )
+    if scope["level"] <= L0_OBSERVE:
+        rules = (
+            "SCOPE: You explain what this finding means and why it matters. "
+            "You do NOT recommend network changes, and you do NOT offer to take "
+            "any action. If asked what to do, explain the trade-offs of the "
+            "options that exist and say the decision is theirs to make."
+        )
+    elif scope["level"] == L1_RECOMMEND:
+        rules = (
+            "SCOPE: You may recommend a specific action and explain your reasoning. "
+            "You CANNOT execute anything — every recommendation is a proposal the "
+            "person must approve. Never imply an action has been or will be taken "
+            "automatically."
+        )
+    else:
+        allowed = [c for c, lvl in scope["per_class"].items() if lvl >= L2_ACT_REVERSIBLE]
+        rules = (
+            "SCOPE: You may recommend an action and offer to carry it out, but only "
+            f"for: {', '.join(sorted(allowed)) or 'none'}. Anything else is a "
+            "recommendation only. Every action you offer is carried out through the "
+            "system's own gated action path after explicit confirmation — never "
+            "state that something is already done."
+        )
+    if scope["degraded"]:
+        rules += ("\nNOTE: authority state could not be read, so you are restricted "
+                  "to explanation regardless of configuration.")
+    return base + rules
+
+
+def _turn_count(conn, surface_key: str, row_id) -> int:
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM ai_chat_turns WHERE surface_key=? AND row_id=?",
+        (surface_key, str(row_id)),
+    ).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def _turn_cap() -> int:
+    raw = (_get_setting("chat_turn_cap", str(_TURN_CAP_DEFAULT)) or "").strip()
+    try:
+        val = int(raw)
+        return val if val > 0 else _TURN_CAP_DEFAULT
+    except (TypeError, ValueError):
+        log.warning("ai_engine: chat_turn_cap=%r is not an integer — using %d",
+                    raw, _TURN_CAP_DEFAULT)
+        return _TURN_CAP_DEFAULT
+
+
+def _cost_of(tokens_in: int, tokens_out: int, model: str | None = None):
+    """Dollar cost of one call, or None when the model's rates are unknown.
+
+    None, never 0.0. A zero-dollar cost is a legitimate-looking measurement and
+    is exactly wrong for a call that really did bill something.
+    """
+    p = get_pricing(model)
+    if not p.get("known") or p.get("input_per_mtok") is None:
+        return None
+    return round(tokens_in * p["input_per_mtok"] / 1_000_000
+                 + tokens_out * p["output_per_mtok"] / 1_000_000, 6)
+
+
+def estimate_question_cost(question: str, surface_key: str = "", row_id="") -> dict:
+    """Pre-flight cost ESTIMATE for a question, for display before it is asked.
+
+    Explicitly an estimate: real token counts are only known after the call.
+    Returns `{estimate_usd, is_estimate: True, known, updated, model}`;
+    `estimate_usd` is None when the model's rates are unknown, never 0.0.
+    """
+    q = (question or "").strip()
+    # ~4 chars/token is the standard rough ratio; context and history dominate a
+    # follow-up prompt, so they are included rather than pricing the question alone.
+    ctx_chars = 0
+    if surface_key in _ANCHORS and row_id:
+        try:
+            conn = _conn()
+            try:
+                rows = conn.execute(
+                    "SELECT question, answer FROM ai_chat_turns "
+                    "WHERE surface_key=? AND row_id=? ORDER BY id DESC LIMIT ?",
+                    (surface_key, str(row_id), _HISTORY_TURNS),
+                ).fetchall()
+            finally:
+                conn.close()
+            ctx_chars = sum(len(r["question"] or "") + len(r["answer"] or "") for r in rows)
+        except Exception:
+            ctx_chars = 0   # estimate only; a failed read here cannot mislead a gate
+    est_in  = int((len(q) + ctx_chars + 1500) / 4)   # +1500 ≈ system prompt + finding
+    est_out = int(_CHAT_MAX_TOKENS * 0.6)
+    p = get_pricing()
+    return {
+        "estimate_usd": _cost_of(est_in, est_out),
+        "is_estimate":  True,
+        "known":        bool(p.get("known")),
+        "updated":      p.get("updated"),
+        "model":        p.get("model"),
+        "est_tokens_in":  est_in,
+        "est_tokens_out": est_out,
+    }
+
+
+def get_chat_state(surface_key: str, row_id) -> dict:
+    """Everything the UI needs to render the chat affordance honestly.
+
+    Includes what has already been spent on this anchor. The user is billed per
+    question here, so the running total belongs next to the input box, not
+    buried in a monthly settings figure.
+    """
+    anchor = _ANCHORS.get(surface_key)
+    if not anchor:
+        return {"ok": False, "code": "anchor_not_registered",
+                "reason": f"no chat affordance registered for {surface_key!r}"}
+
+    status = get_status()
+    conn = _conn()
+    try:
+        used = _turn_count(conn, surface_key, row_id)
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS tno, "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced "
+            "FROM ai_chat_turns WHERE surface_key=? AND row_id=?",
+            (surface_key, str(row_id)),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    cap    = _turn_cap()
+    spent  = _cost_of(int(row["ti"]), int(row["tno"])) if row else None
+    scope  = _chat_scope(anchor["action_classes"])
+    return {
+        "ok":              True,
+        "available":       status.get("state") == "active",
+        "unavailable_why": "" if status.get("state") == "active" else status.get("detail", ""),
+        "turns_used":      used,
+        "turn_cap":        cap,
+        "turns_left":      max(0, cap - used),
+        "spent_usd":       spent,
+        # True when some turn could not be priced — the UI must show the total as
+        # incomplete rather than quietly under-reporting it.
+        "spend_partial":   bool(row and row["unpriced"]),
+        "scope":           scope,
+        "billed_per_question": True,
+        "label":           anchor["label"],
+    }
+
+
+def ask_followup(surface_key: str, row_id, question: str,
+                 actor: str | None = None) -> dict:
+    """Ask one follow-up question about an anchored finding.
+
+    Returns {"ok": True, "answer", "cost_usd", "tokens_in/out", "turns_left", "scope"}
+    or {"ok": False, "code", "reason"} — `code` is machine-readable so the UI can
+    distinguish "you are out of turns" from "the AI is rate limited" from "this
+    finding's context could not be rebuilt", which need different messages.
+    """
+    anchor = _ANCHORS.get(surface_key)
+    if not anchor:
+        return {"ok": False, "code": "anchor_not_registered",
+                "reason": f"no chat affordance registered for {surface_key!r}"}
+
+    q = (question or "").strip()
+    if not q:
+        return {"ok": False, "code": "empty_question", "reason": "no question asked"}
+    if len(q) > _MAX_QUESTION_CHARS:
+        return {"ok": False, "code": "question_too_long",
+                "reason": (f"question is {len(q)} characters; the limit is "
+                           f"{_MAX_QUESTION_CHARS}. Trim it or paste less output.")}
+
+    conn = _conn()
+    try:
+        used = _turn_count(conn, surface_key, row_id)
+        cap  = _turn_cap()
+        if used >= cap:
+            return {"ok": False, "code": "turn_cap",
+                    "reason": (f"this finding has used all {cap} follow-up questions. "
+                               f"The cap exists because each question is a billed call.")}
+        history = conn.execute(
+            "SELECT question, answer FROM ai_chat_turns "
+            "WHERE surface_key=? AND row_id=? AND answer IS NOT NULL "
+            "ORDER BY id DESC LIMIT ?",
+            (surface_key, str(row_id), _HISTORY_TURNS),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Context is rebuilt SERVER-SIDE from the row. A loader that fails, or that
+    # returns nothing, is a hard failure — not an empty context we answer over.
+    try:
+        context = anchor["loader"](row_id)
+    except Exception as exc:
+        log.exception("ai_engine: anchor loader failed for %s/%s", surface_key, row_id)
+        return {"ok": False, "code": "context_unavailable",
+                "reason": f"could not rebuild this finding's context: {exc}"}
+    if not context:
+        return {"ok": False, "code": "context_unavailable",
+                "reason": ("this finding's context could not be rebuilt, so there is "
+                           "nothing reliable to answer from")}
+
+    scope  = _chat_scope(anchor["action_classes"])
+    system = _chat_system_prompt(scope)
+
+    parts = [f"FINDING ({anchor['label']}):", str(context).strip()]
+    if history:
+        parts.append("\nEARLIER IN THIS CONVERSATION:")
+        for h in reversed(history):
+            parts.append(f"Q: {h['question']}\nA: {h['answer']}")
+    parts.append(f"\nQUESTION: {q}")
+    prompt = "\n".join(parts)
+
+    # cache_hours=0: a follow-up is novel by definition, so a cache lookup could
+    # only ever return another question's answer. force is deliberately NOT set.
+    res = analyze(
+        prompt,
+        system_prompt=system,
+        max_tokens=_CHAT_MAX_TOKENS,
+        cache_hours=0,
+        job_id=f"chat:{surface_key}:{row_id}:{used + 1}",
+    )
+    if not res.get("ok"):
+        return {"ok": False, "code": "call_failed",
+                "reason": res.get("reason", "the AI call did not complete")}
+
+    t_in  = int(res.get("tokens_in")  or 0)
+    t_out = int(res.get("tokens_out") or 0)
+    cost  = _cost_of(t_in, t_out)
+
+    try:
+        conn = _conn()
+        try:
+            conn.execute(
+                "INSERT INTO ai_chat_turns (surface_key, row_id, question, answer, "
+                "asked_by, asked_at, tokens_in, tokens_out, cost_usd, model_used) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (surface_key, str(row_id), q, res.get("text"), actor,
+                 datetime.now().isoformat(timespec="seconds"),
+                 t_in, t_out, cost, _ACTIVE_MODEL),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        # The call already billed. Losing the record would silently under-report
+        # spend and hand back a turn the user actually used, so say so.
+        log.exception("ai_engine: failed to record chat turn for %s/%s",
+                      surface_key, row_id)
+        return {"ok": True, "answer": res.get("text"), "cost_usd": cost,
+                "tokens_in": t_in, "tokens_out": t_out,
+                "turns_left": max(0, cap - used - 1), "scope": scope,
+                "record_failed": True}
+
+    return {"ok": True, "answer": res.get("text"), "cost_usd": cost,
+            "tokens_in": t_in, "tokens_out": t_out,
+            "turns_left": max(0, cap - used - 1), "scope": scope,
+            "record_failed": False}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1601,8 +1979,12 @@ def _analyze_inner(
             ).fetchone()
             conn.close()
             if row and row["generated_at"] + cache_hours * 3600 > now:
+                # Same keys as the live-call return, so a caller reading the
+                # split never KeyErrors on a cache hit. Zero here is a real
+                # measurement: a cache hit genuinely bills nothing.
                 return {"ok": True, "text": row["response_text"],
-                        "from_cache": True, "tokens_used": 0}
+                        "from_cache": True, "tokens_used": 0,
+                        "tokens_in": 0, "tokens_out": 0}
         except Exception:
             log.exception("ai_engine: cache lookup failed for %s", cache_key)
 
@@ -1701,8 +2083,14 @@ def _analyze_inner(
     except Exception:
         log.exception("ai_engine: failed to persist usage/cache for %s", cache_key)
 
+    # tokens_in/tokens_out are returned ALONGSIDE the existing tokens_used sum,
+    # not instead of it — every current caller keeps working untouched. The split
+    # is needed because input and output are priced ~5x apart, so a per-call cost
+    # derived from the sum alone cannot be right except by coincidence. The chat
+    # surface shows the user what each question actually cost, which needs both.
     return {"ok": True, "text": text, "from_cache": False,
-            "tokens_used": (tokens_in or 0) + (tokens_out or 0)}
+            "tokens_used": (tokens_in or 0) + (tokens_out or 0),
+            "tokens_in": tokens_in or 0, "tokens_out": tokens_out or 0}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
