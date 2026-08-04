@@ -267,6 +267,172 @@ def _api_key() -> str:
 # Rate limiting (sliding window)
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Pricing change-detection (detect and notify — never auto-write)
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Where Anthropic publishes prices. Served as MARKDOWN, so this is table-row
+#: extraction rather than DOM scraping — materially more stable than a typical
+#: scrape, though still not a contract.
+_PRICING_DOC_URL = "https://platform.claude.com/docs/en/pricing.md"
+
+#: Maps the human model names in the doc to our rate-table keys. A name that is
+#: not in here is an UNRECOGNISED model, which fails the gate — see
+#: _validate_parsed_rates.
+_DOC_NAME_TO_ID = {
+    "claude opus 5":     "claude-opus-5",
+    "claude opus 4.8":   "claude-opus-4-8",
+    "claude sonnet 5":   "claude-sonnet-5",
+    "claude sonnet 4.6": "claude-sonnet-4-6",
+    "claude haiku 4.5":  "claude-haiku-4-5",
+    "claude fable 5":    "claude-fable-5",
+}
+
+#: Order-of-magnitude sanity bounds, per MTok. Deliberately wide: the job is to
+#: catch a units change or a mis-parsed cell, not to second-guess Anthropic's
+#: pricing decisions.
+_RATE_PLAUSIBLE_MIN = 0.01
+_RATE_PLAUSIBLE_MAX = 500.0
+
+
+def _pricing_check_enabled() -> bool:
+    """Whether to fetch the pricing doc at all. OFF unless explicitly enabled.
+
+    This is an outbound request from a firewall appliance to a third Anthropic
+    host (alongside api.anthropic.com and status.claude.com). That is a
+    deliberate decision for an operator to make, not a default to inherit.
+    """
+    return (_get_setting("pricing_check_enabled", "0") or "0").strip() == "1"
+
+
+def _parse_pricing_doc(text: str) -> dict:
+    """Extract ``{model_id: {"input": float, "output": float}}`` from the doc.
+
+    Pure — no network, no DB — so the parser and the gate below can be tested
+    against adversarial input without touching anything.
+
+    Returns only rows whose model name is recognised. An empty result is a
+    PARSE FAILURE for the caller to treat as a failed fetch, never as "no
+    models are priced".
+    """
+    out: dict = {}
+    if not isinstance(text, str):
+        return out
+    for line in text.splitlines():
+        if line.count("|") < 3:
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) < 3:
+            continue
+        name = cells[0].lower().strip()
+        model_id = _DOC_NAME_TO_ID.get(name)
+        if not model_id:
+            continue
+        nums = []
+        for cell in cells[1:3]:
+            m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]+)?)", cell)
+            nums.append(float(m.group(1)) if m else None)
+        if nums[0] is None or nums[1] is None:
+            continue
+        out[model_id] = {"input": nums[0], "output": nums[1]}
+    return out
+
+
+def _validate_parsed_rates(parsed: dict) -> tuple:
+    """THE GATE. Returns ``(ok, reason)``; a False makes the whole fetch fail.
+
+    A format change that parses to NOTHING is easy to notice. A format change
+    that parses to the WRONG NUMBERS is not — it produces a confident,
+    plausible, wrong price with no error anywhere. These checks are what stand
+    between that and the product. Every one of them must hold:
+
+      * both rates strictly POSITIVE — this is what makes a $0.00 rate
+        structurally impossible to accept, rather than merely unlikely;
+      * output > input — true of every Claude model, and the cheapest possible
+        tripwire for a swapped column;
+      * both within an order-of-magnitude band — catches a units change;
+      * the model is RECOGNISED — an unknown name means the table reshaped, so
+        no row from it is trustworthy, including the ones that did parse.
+
+    Rejection is not partial. If any row fails, the fetch failed.
+    """
+    if not parsed:
+        return False, "no recognised model rows parsed"
+    for model_id, r in parsed.items():
+        if model_id not in _MODEL_RATES:
+            return False, f"unrecognised model {model_id!r} — table shape changed"
+        i, o = r.get("input"), r.get("output")
+        if not isinstance(i, (int, float)) or not isinstance(o, (int, float)):
+            return False, f"{model_id}: non-numeric rate"
+        if i <= 0 or o <= 0:
+            return False, f"{model_id}: non-positive rate ({i}/{o})"
+        if o <= i:
+            return False, f"{model_id}: output {o} <= input {i} — columns look swapped"
+        for label, v in (("input", i), ("output", o)):
+            if not (_RATE_PLAUSIBLE_MIN <= v <= _RATE_PLAUSIBLE_MAX):
+                return False, f"{model_id}: {label} {v} outside plausible band"
+    return True, ""
+
+
+def _fetch_pricing_doc() -> str:
+    """Fetch the published pricing doc. Same shape as _poll_anthropic_status."""
+    req = urllib.request.Request(
+        _PRICING_DOC_URL, headers={"User-Agent": "Nemesis-Firewall/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def check_pricing_drift(fetch=None) -> dict:
+    """Compare published rates against ours and REPORT. Writes no rate, ever.
+
+    Returns ``{ok, divergences, checked_at, reason}``. `divergences` lists
+    models whose published rate differs from `_MODEL_RATES`; it is the operator
+    who decides whether to accept them, by updating the table (and its
+    confirmed date) or the env overrides.
+
+    THE POINT OF NOT AUTO-WRITING: a parse that silently produces wrong numbers
+    is undetectable from inside. If it could write, that wrong number becomes
+    what the product charges against and every downstream display inherits it.
+    Because it can only notify, the worst a bad parse can do is fail to tell
+    anyone — which the `ok: False` result makes visible in its own right.
+
+    `fetch` is injectable so the parse and gate can be exercised without
+    network access.
+    """
+    now = datetime.now().isoformat(timespec="seconds")
+    fetcher = fetch or _fetch_pricing_doc
+    try:
+        text = fetcher()
+    except Exception as exc:
+        log.warning("ai_engine: pricing doc fetch failed: %s", exc)
+        return {"ok": False, "reason": f"fetch failed: {str(exc)[:160]}",
+                "divergences": [], "checked_at": now}
+
+    parsed = _parse_pricing_doc(text)
+    ok, why = _validate_parsed_rates(parsed)
+    if not ok:
+        # A rejected parse is a FAILED FETCH, not data. Never partially applied.
+        log.warning("ai_engine: pricing doc rejected by validation: %s", why)
+        return {"ok": False, "reason": why, "divergences": [], "checked_at": now}
+
+    divergences = []
+    for model_id, pub in sorted(parsed.items()):
+        ours = _MODEL_RATES.get(model_id) or {}
+        if pub["input"] != ours.get("input") or pub["output"] != ours.get("output"):
+            divergences.append({
+                "model": model_id,
+                "ours": {"input": ours.get("input"), "output": ours.get("output")},
+                "published": {"input": pub["input"], "output": pub["output"]},
+            })
+    if divergences:
+        log.warning("ai_engine: published pricing differs from the maintained "
+                    "table for %d model(s): %s — operator confirmation required, "
+                    "nothing has been changed",
+                    len(divergences), ", ".join(d["model"] for d in divergences))
+    return {"ok": True, "reason": "", "divergences": divergences,
+            "checked_at": now, "models_checked": len(parsed)}
+
+
 def get_spend_this_month() -> dict:
     """Actual spend for the current calendar month, in dollars.
 
