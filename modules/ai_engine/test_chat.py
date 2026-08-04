@@ -241,6 +241,51 @@ def main():
     finally:
         ai.analyze = _real_analyze
 
+    print("\n-- model tiers: a client can never name a model, only a tier --")
+    eq("absent tier resolves to standard", ai.resolve_chat_tier(None)[0], "standard")
+    eq("empty tier resolves to standard", ai.resolve_chat_tier("")[0], "standard")
+    eq("unknown tier resolves DOWN to standard",
+       ai.resolve_chat_tier("premium-ultra")[0], "standard")
+    # The attack this guards: a caller trying to name an expensive model directly.
+    eq("a raw model ID is NOT honoured as a tier",
+       ai.resolve_chat_tier("claude-opus-5")[1], ai._ACTIVE_MODEL)
+    eq("(control) the real tier name IS honoured",
+       ai.resolve_chat_tier("advanced")[0], "advanced")
+    eq("advanced maps to a different model than standard is",
+       ai.resolve_chat_tier("advanced")[1] != ai.resolve_chat_tier(None)[1], True)
+    check(ai.resolve_chat_tier(None)[1] == ai._ACTIVE_MODEL,
+          "standard follows _ACTIVE_MODEL rather than pinning a second string")
+
+    print("\n-- the cost multiple is computed, never hardcoded --")
+    opts = ai.chat_model_options()
+    check(opts["multiple"] is not None and opts["multiple"] > 1,
+          f"advanced costs more than standard, by a computed factor: {opts['multiple']}x")
+    _rp = ai.get_pricing
+    ai.get_pricing = lambda model=None: {"model": model, "known": False,
+                                         "input_per_mtok": None,
+                                         "output_per_mtok": None, "updated": None}
+    try:
+        check(ai.chat_model_options()["multiple"] is None,
+              "an unknown price yields NO multiple, not a fabricated one")
+    finally:
+        ai.get_pricing = _rp
+
+    print("\n-- spend is summed from recorded per-turn cost, not re-priced --")
+    conn = ai._conn()
+    conn.execute("DELETE FROM ai_chat_turns")
+    conn.execute("INSERT INTO ai_chat_turns (surface_key,row_id,question,answer,"
+                 "asked_at,tokens_in,tokens_out,cost_usd,model_used) VALUES "
+                 "('alert','9','q','a','2026-08-04',100,50,0.5,'claude-opus-5')")
+    conn.execute("INSERT INTO ai_chat_turns (surface_key,row_id,question,answer,"
+                 "asked_at,tokens_in,tokens_out,cost_usd,model_used) VALUES "
+                 "('alert','9','q2','a2','2026-08-04',100,50,0.25,'claude-sonnet-5')")
+    conn.commit(); conn.close()
+    st = ai.get_chat_state("alert", "9")
+    eq("mixed-model spend sums the real per-turn costs", round(st["spent_usd"], 2), 0.75)
+    st2 = ai.get_chat_state("alert", "no-turns-here")
+    check(st2["spent_usd"] is None,
+          "a finding with no turns reports None, not $0.00")
+
     print("\n-- the hourly rate limit also stops the chat --")
     _reset_gates()
     conn = ai._conn()

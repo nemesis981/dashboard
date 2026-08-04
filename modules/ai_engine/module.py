@@ -554,9 +554,14 @@ def get_chat_state(surface_key: str, row_id) -> dict:
     conn = _conn()
     try:
         used = _turn_count(conn, surface_key, row_id)
+        # SUM the per-turn cost_usd rather than re-pricing aggregate tokens at
+        # one model's rates: with tier selection a conversation can mix models,
+        # and re-pricing Opus turns at Sonnet rates would UNDER-report real spend
+        # on the one surface where the user is watching the number.
         row = conn.execute(
-            "SELECT COALESCE(SUM(tokens_in),0) AS ti, COALESCE(SUM(tokens_out),0) AS tno, "
-            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced "
+            "SELECT COALESCE(SUM(cost_usd),0) AS spent, "
+            "SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) AS unpriced, "
+            "COUNT(*) AS n "
             "FROM ai_chat_turns WHERE surface_key=? AND row_id=?",
             (surface_key, str(row_id)),
         ).fetchone()
@@ -564,7 +569,9 @@ def get_chat_state(surface_key: str, row_id) -> dict:
         conn.close()
 
     cap    = _turn_cap()
-    spent  = _cost_of(int(row["ti"]), int(row["tno"])) if row else None
+    # None (not 0.0) when nothing has been asked yet -- "no spend recorded"
+    # and "$0.0000 spent" are different facts.
+    spent  = (float(row["spent"]) if row and int(row["n"] or 0) else None)
     scope  = _chat_scope(anchor["action_classes"])
     return {
         "ok":              True,
@@ -580,11 +587,12 @@ def get_chat_state(surface_key: str, row_id) -> dict:
         "scope":           scope,
         "billed_per_question": True,
         "label":           anchor["label"],
+        "models":          chat_model_options(),
     }
 
 
 def ask_followup(surface_key: str, row_id, question: str,
-                 actor: str | None = None) -> dict:
+                 actor: str | None = None, tier: str | None = None) -> dict:
     """Ask one follow-up question about an anchored finding.
 
     Returns {"ok": True, "answer", "cost_usd", "tokens_in/out", "turns_left", "scope"}
@@ -648,12 +656,15 @@ def ask_followup(surface_key: str, row_id, question: str,
 
     # cache_hours=0: a follow-up is novel by definition, so a cache lookup could
     # only ever return another question's answer. force is deliberately NOT set.
+    # Unrecognised tiers resolve DOWN -- a malformed request cannot spend more.
+    tier_name, tier_model = resolve_chat_tier(tier)
     res = analyze(
         prompt,
         system_prompt=system,
         max_tokens=_CHAT_MAX_TOKENS,
         cache_hours=0,
-        job_id=f"chat:{surface_key}:{row_id}:{used + 1}",
+        job_id=f"chat:{surface_key}:{row_id}:{used + 1}:{tier_name}",
+        model=tier_model,
     )
     if not res.get("ok"):
         return {"ok": False, "code": "call_failed",
@@ -661,7 +672,7 @@ def ask_followup(surface_key: str, row_id, question: str,
 
     t_in  = int(res.get("tokens_in")  or 0)
     t_out = int(res.get("tokens_out") or 0)
-    cost  = _cost_of(t_in, t_out)
+    cost  = _cost_of(t_in, t_out, tier_model)
 
     try:
         conn = _conn()
@@ -672,7 +683,7 @@ def ask_followup(surface_key: str, row_id, question: str,
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (surface_key, str(row_id), q, res.get("text"), actor,
                  datetime.now().isoformat(timespec="seconds"),
-                 t_in, t_out, cost, _ACTIVE_MODEL),
+                 t_in, t_out, cost, tier_model),
             )
             conn.commit()
         finally:
@@ -685,12 +696,12 @@ def ask_followup(surface_key: str, row_id, question: str,
         return {"ok": True, "answer": res.get("text"), "cost_usd": cost,
                 "tokens_in": t_in, "tokens_out": t_out,
                 "turns_left": max(0, cap - used - 1), "scope": scope,
-                "record_failed": True}
+                "tier": tier_name, "model": tier_model, "record_failed": True}
 
     return {"ok": True, "answer": res.get("text"), "cost_usd": cost,
             "tokens_in": t_in, "tokens_out": t_out,
             "turns_left": max(0, cap - used - 1), "scope": scope,
-            "record_failed": False}
+            "tier": tier_name, "model": tier_model, "record_failed": False}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1778,6 +1789,237 @@ def get_incident_banner_html() -> str:
     )
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Chat model tiers
+#
+# The client sends a TIER, never a model ID. An authenticated user choosing to
+# spend more is the feature; letting a request name an arbitrary model string is
+# not. Anything unrecognised -- absent, misspelled, or hostile -- resolves DOWN
+# to standard. Same fail-safe direction as the authority clamp: the cheap,
+# expected outcome is what you get when the input cannot be trusted.
+#
+# Standard deliberately FOLLOWS _ACTIVE_MODEL rather than pinning its own string.
+# A second hardcoded model name is exactly the staleness this codebase already
+# had once (claude-sonnet-4-6 outliving its generation); one source of truth
+# means bumping the default moves the chat with it.
+#
+# NOT gated by the graduated-authority system. Section 10 of the scoping doc
+# establishes a model FLOOR per authority level -- a weak model taking an
+# autonomous action is the risk. Raising can never violate a floor, and
+# effective_ceiling() does not read the model at all, so a better model cannot
+# grant any action the clamp forbids. Raising is a pure cost/quality choice.
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHAT_TIER_STANDARD = "standard"
+CHAT_TIER_ADVANCED = "advanced"
+_CHAT_ADVANCED_MODEL = "claude-opus-5"
+
+# Representative follow-up shape, used ONLY to compute the cost multiple between
+# tiers. The ratio is what is displayed, and it is stable across any plausible
+# mix because both tiers are priced on the same token counts.
+_CHAT_COST_SAMPLE = (2000, 420)
+
+
+def resolve_chat_tier(tier: str | None) -> tuple:
+    """(tier_name, model_id) for a client-supplied tier. Never raises; defaults down."""
+    if (tier or "").strip().lower() == CHAT_TIER_ADVANCED:
+        return CHAT_TIER_ADVANCED, _CHAT_ADVANCED_MODEL
+    return CHAT_TIER_STANDARD, _ACTIVE_MODEL
+
+
+def chat_model_options() -> dict:
+    """Tier metadata for the UI, including a COMPUTED cost multiple.
+
+    The multiple is derived from get_pricing() for both models on identical
+    token counts -- never hardcoded. If either model's rates are unknown the
+    multiple is None and the UI must say the increase cannot be quantified
+    rather than showing a fabricated number. Same discipline as never rendering
+    an unknown cost as $0.00: a plausible-looking figure nobody measured is
+    worse than an honest gap, and this one is the basis of a spending decision.
+    """
+    t_in, t_out = _CHAT_COST_SAMPLE
+    std_model = _ACTIVE_MODEL
+    adv_model = _CHAT_ADVANCED_MODEL
+    std_cost = _cost_of(t_in, t_out, std_model)
+    adv_cost = _cost_of(t_in, t_out, adv_model)
+
+    multiple = None
+    if std_cost and adv_cost and std_cost > 0:
+        multiple = round(adv_cost / std_cost, 1)
+
+    std_p = get_pricing(std_model)
+    adv_p = get_pricing(adv_model)
+    return {
+        "current_default": CHAT_TIER_STANDARD,
+        "multiple":        multiple,
+        "tiers": [
+            {"tier": CHAT_TIER_STANDARD, "label": "Standard", "model": std_model,
+             "known": bool(std_p.get("known")), "updated": std_p.get("updated"),
+             "input_per_mtok": std_p.get("input_per_mtok"),
+             "output_per_mtok": std_p.get("output_per_mtok"),
+             "sample_cost_usd": std_cost},
+            {"tier": CHAT_TIER_ADVANCED, "label": "Advanced", "model": adv_model,
+             "known": bool(adv_p.get("known")), "updated": adv_p.get("updated"),
+             "input_per_mtok": adv_p.get("input_per_mtok"),
+             "output_per_mtok": adv_p.get("output_per_mtok"),
+             "sample_cost_usd": adv_cost},
+        ],
+    }
+
+
+def get_chat_widget_html() -> str:
+    """Markup for the contextual chat affordance. Include once per page.
+
+    Shared rather than hand-rolled per surface for one specific reason: the cost
+    line. The product requirement is that no user is ever unaware there is a
+    cost, and four separately-written UIs are four chances to drop or weaken
+    that line.
+    The server-side gates are shared already; this makes the disclosure shared too.
+
+    Plain string, not an f-string -- callers interpolate it into their own
+    templates, so it must not carry brace-escaping of its own.
+    """
+    return (
+        '<div id="nemChatSection" style="display:none;margin-top:18px;'
+        'border-top:1px solid #333;padding-top:14px">'
+        '<div style="display:flex;justify-content:space-between;align-items:center;'
+        'margin-bottom:8px">'
+        '<strong style="color:#00d4ff;font-size:0.95em">Ask about this finding</strong>'
+        '<span id="nemChatTurnsLeft" style="font-size:0.78em;color:#888"></span>'
+        '</div>'
+        # Always-on, non-dismissible cost notice.
+        '<div style="background:#1a1f36;border:1px solid #2a3f5f;border-radius:4px;'
+        'padding:7px 10px;margin-bottom:9px;font-size:0.78em;color:#9fb3d1">'
+        '<span style="color:#ffc107">&#9432;</span> '
+        '<span id="nemChatCostText">Each question is a live AI request that costs money.</span>'
+        '</div>'
+        # Tier control. Raising is a button, not a dropdown selection: a passive
+        # select fires on change and would elevate spend without an explicit act.
+        '<div style="display:flex;align-items:center;gap:8px;margin-bottom:9px;'
+        'font-size:0.78em;flex-wrap:wrap">'
+        '<span style="color:#888">Model:</span>'
+        '<span id="nemChatTierLabel" style="color:#00d4ff;font-weight:bold">Standard</span>'
+        '<button id="nemChatRaiseBtn" onclick="nemChatRaise()" '
+        'style="background:transparent;color:#ffc107;border:1px solid #ffc10744;'
+        'padding:2px 9px;border-radius:3px;cursor:pointer;font-size:0.95em">'
+        'Use a more capable model\u2026</button>'
+        '<button id="nemChatLowerBtn" onclick="nemChatLower()" '
+        'style="display:none;background:transparent;color:#9fb3d1;'
+        'border:1px solid #2a3f5f;padding:2px 9px;border-radius:3px;'
+        'cursor:pointer;font-size:0.95em">Back to Standard</button>'
+        # Persistent, always rendered while elevated -- not a toast that fades.
+        '<span id="nemChatLowerHint" style="display:none;color:#8a9bb5">'
+        'You can switch back to Standard at any time.</span>'
+        '</div>'
+        '<div id="nemChatLog" style="max-height:230px;overflow-y:auto;'
+        'margin-bottom:9px;font-size:0.85em"></div>'
+        '<textarea id="nemChatInput" rows="2" '
+        'placeholder="e.g. why does this matter for my network?" '
+        'style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;'
+        'padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;'
+        'box-sizing:border-box"></textarea>'
+        '<div style="margin-top:6px;display:flex;gap:8px;align-items:center">'
+        '<button id="nemChatAskBtn" onclick="nemChatAsk()" '
+        'style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;'
+        'cursor:pointer;border-radius:3px;font-weight:bold">Ask</button>'
+        '<span id="nemChatStatus" style="font-size:0.8em;color:#ccc"></span>'
+        '</div></div>'
+    )
+
+
+def get_chat_js() -> str:
+    """Guarded <script> for the shared chat widget. Include once per page.
+
+    Exposes nemChatInit(surface,rowId) and nemChatClose(). All AI- and
+    user-supplied text is written with textContent, never innerHTML: the answer
+    is model-generated and could contain markup.
+    """
+    return (
+        '<script>'
+        '(function(){'
+        'if(window._nemChatJsLoaded)return;'
+        'window._nemChatJsLoaded=true;'
+        'var S=null,R=null;'
+        'function el(i){return document.getElementById(i);}'
+        'function money(v){return (v===null||v===undefined)?null:"$"+Number(v).toFixed(4);}'
+        'function meta(st){'
+        'el("nemChatTurnsLeft").textContent=st.turns_left+" of "+st.turn_cap+" questions left";'
+        'var sp=money(st.spent_usd);'
+        'var t="Each question is a live AI request that costs money.";'
+        'if(sp!==null){t+=" Spent on this finding so far: "+sp;'
+        'if(st.spend_partial)t+=" (at least \\u2014 some calls could not be priced)";}'
+        'else if(st.spend_partial){t+=" Cost of earlier questions could not be determined.";}'
+        'el("nemChatCostText").textContent=t;'
+        'el("nemChatAskBtn").disabled=(st.turns_left<=0);'
+        '}'
+        'function refresh(){'
+        'return fetch("/api/ai/chat/state?surface="+encodeURIComponent(S)'
+        '+"&row_id="+encodeURIComponent(R)).then(function(r){return r.json();});'
+        '}'
+        'window.nemChatInit=function(surface,rowId){'
+        'S=surface;R=rowId;'
+        'var sec=el("nemChatSection");if(!sec)return;'
+        'el("nemChatLog").innerHTML="";el("nemChatInput").value="";'
+        'el("nemChatStatus").textContent="";sec.style.display="none";'
+        'refresh().then(function(st){'
+        'if(!st.ok||!st.available)return;'
+        'sec.style.display="block";OPTS=st.models||null;meta(st);tierUI();'
+        '}).catch(function(){});'
+        '};'
+        # Relocate the single widget into whichever container is open. Surfaces
+        # that expand rows in place (malware findings, queue items) can have
+        # several open at once; moving one widget keeps a single DOM instance and
+        # a single cost display, rather than N copies to keep consistent.
+        'var TIER="standard",OPTS=null;''function tierUI(){''var adv=(TIER==="advanced");''el("nemChatTierLabel").textContent=adv?"Advanced":"Standard";''el("nemChatTierLabel").style.color=adv?"#ffc107":"#00d4ff";''el("nemChatRaiseBtn").style.display=adv?"none":"";''el("nemChatLowerBtn").style.display=adv?"":"none";''el("nemChatLowerHint").style.display=adv?"":"none";''}''window.nemChatRaise=function(){''var m=(OPTS&&OPTS.multiple)?OPTS.multiple:null;''var cost=(m===null)''?"The exact cost increase CANNOT be calculated right now, because pricing for one of the models is unknown. It will be more expensive per question."'':("Each question will cost about "+m+"x more than Standard.");''var msg="Switch to the Advanced model?\n\n"+cost''+"\n\nThis applies to new questions in this conversation only. "''+"Your spend cap and rate limits still apply.\n\n"''+"You can switch back to Standard at any time.";''if(!window.confirm(msg))return;''TIER="advanced";tierUI();''};''window.nemChatLower=function(){TIER="standard";tierUI();};''window.nemChatAttach=function(container,surface,rowId){'
+        'var sec=el("nemChatSection");'
+        'if(!sec||!container)return;'
+        'if(sec.parentNode!==container)container.appendChild(sec);'
+        'window.nemChatInit(surface,rowId);'
+        '};'
+        'window.nemChatClose=function(){'
+        'var sec=el("nemChatSection");if(sec)sec.style.display="none";'
+        'if(el("nemChatLog"))el("nemChatLog").innerHTML="";'
+        'if(el("nemChatInput"))el("nemChatInput").value="";'
+        'S=null;R=null;'
+        '};'
+        'window.nemChatAsk=function(){'
+        'var inp=el("nemChatInput");var q=(inp.value||"").trim();if(!q)return;'
+        'var btn=el("nemChatAskBtn");var stx=el("nemChatStatus");'
+        'btn.disabled=true;stx.textContent="asking\\u2026";'
+        'fetch("/api/ai/chat/ask",{method:"POST",'
+        'headers:{"Content-Type":"application/json"},'
+        'body:JSON.stringify({surface:S,row_id:R,question:q,tier:TIER})})'
+        '.then(function(r){return r.json();})'
+        '.then(function(d){'
+        # Distinct reasons must stay distinct: "out of questions", "spend cap
+        # reached" and "rate limited" need different responses from the user.
+        'if(!d.ok){stx.textContent=d.reason||"could not ask that question";'
+        'btn.disabled=false;return;}'
+        'inp.value="";stx.textContent="";'
+        'var log=el("nemChatLog");'
+        'var w=document.createElement("div");'
+        'w.style.cssText="margin-bottom:10px;border-bottom:1px solid #222;padding-bottom:8px";'
+        'var qe=document.createElement("div");'
+        'qe.style.cssText="color:#00d4ff;margin-bottom:3px";qe.textContent="You: "+q;'
+        'var ae=document.createElement("div");'
+        'ae.style.cssText="color:#ddd;white-space:pre-wrap";ae.textContent=d.answer;'
+        'var ce=document.createElement("div");'
+        'ce.style.cssText="color:#777;font-size:0.75em;margin-top:4px";'
+        'var m=money(d.cost_usd);'
+        'var lbl=(d.tier==="advanced")?" (Advanced)":"";''ce.textContent=((m===null)?"cost unavailable for this model":"this question cost "+m)+lbl;'
+        'w.appendChild(qe);w.appendChild(ae);w.appendChild(ce);'
+        'log.appendChild(w);log.scrollTop=log.scrollHeight;'
+        'if(d.record_failed){stx.textContent="answered, but this question could not be '
+        'added to the spend record shown above";}'
+        'refresh().then(function(st){if(st.ok)meta(st);}).catch(function(){});'
+        'btn.disabled=false;'
+        '}).catch(function(e){stx.textContent="error: "+e;btn.disabled=false;});'
+        '};'
+        '})();'
+        '</script>'
+    )
+
+
 def get_incident_js() -> str:
     """Guarded <script> block: in-flight lock + incident confirm + banner dismiss init.
     Include once per page (after tier.js). Guard prevents double-definition."""
@@ -1936,6 +2178,7 @@ def analyze(
     cache_hours: float = 24,
     force: bool = False,
     job_id: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """
     Single entry point for all Anthropic API calls.
@@ -1955,7 +2198,8 @@ def analyze(
             _in_flight.add(job_id)
 
     try:
-        return _analyze_inner(prompt, system_prompt, max_tokens, cache_key, cache_hours, force)
+        return _analyze_inner(prompt, system_prompt, max_tokens, cache_key,
+                              cache_hours, force, model)
     finally:
         if job_id:
             with _in_flight_lock:
@@ -1969,7 +2213,14 @@ def _analyze_inner(
     cache_key: str | None,
     cache_hours: float,
     force: bool,
+    model: str | None = None,
 ) -> dict:
+    # A non-default model gets its own cache namespace. Without this a cached
+    # answer from one model would be served for a request that explicitly asked
+    # for another -- silently, and looking exactly like a normal cache hit.
+    target_model = model or _ACTIVE_MODEL
+    if cache_key and target_model != _ACTIVE_MODEL:
+        cache_key = f"{cache_key}@{target_model}"
     key = _api_key()
     if not key:
         return {"ok": False, "reason": "ANTHROPIC_API_KEY not configured"}
@@ -2014,7 +2265,7 @@ def _analyze_inner(
 
     client = anthropic.Anthropic(api_key=key)
     messages = [{"role": "user", "content": prompt}]
-    kwargs: dict = dict(model=_ACTIVE_MODEL, max_tokens=max_tokens, messages=messages)
+    kwargs: dict = dict(model=target_model, max_tokens=max_tokens, messages=messages)
     if system_prompt:
         kwargs["system"] = system_prompt
 

@@ -15,6 +15,7 @@ from .module import (
     L0_OBSERVE, L1_RECOMMEND, L2_ACT_REVERSIBLE, L3_ACT_DISRUPTIVE, L4_GOVERN,
     register_anchor, registered_anchors,
     ask_followup, get_chat_state, estimate_question_cost,
+    get_chat_widget_html, get_chat_js,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "L0_OBSERVE", "L1_RECOMMEND", "L2_ACT_REVERSIBLE", "L3_ACT_DISRUPTIVE", "L4_GOVERN",
     "register_anchor", "registered_anchors",
     "ask_followup", "get_chat_state", "estimate_question_cost",
+    "get_chat_widget_html", "get_chat_js",
 ]
