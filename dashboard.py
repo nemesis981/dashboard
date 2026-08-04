@@ -5718,6 +5718,34 @@ def settings_page():
                                        'over ' + mo.months_counted + ' mo',
                                        mo.months_counted + 'mo')
                             + '</div>';
+                        /* Comparison against the consumer-subscription price
+                           point. Deliberately prominent when exceeded — the
+                           whole point is that the operator notices — but worded
+                           as a comparison, never a recommendation. A Claude Pro
+                           subscription issues OAuth tokens meant for
+                           interactive/CLI use; this server authenticates with a
+                           pay-per-token API key. They are different products,
+                           so we state both numbers and let the operator decide.
+                           Only ever reached on a measured month: the
+                           insufficient-history branch below carries no
+                           comparison at all. */
+                        var cmp = mo.comparison || null;
+                        if (cmp && cmp.exceeds) {{
+                            var subCompare = '<div style="margin-top:5px;'
+                                + 'padding:7px 10px;border-radius:6px;'
+                                + 'background:#3a2d0033;border:1px solid #ffaa0066;'
+                                + 'color:#ffd479;font-size:0.85em;line-height:1.5">'
+                                + '<b>Above the $' + Number(cmp.threshold_usd).toFixed(0)
+                                + '/mo ' + cmp.label + ' price point.</b> '
+                                + 'This server averages $'
+                                + Number(mo.average_cost).toFixed(2)
+                                + '/mo in API usage. '
+                                + '<span style="color:#bba">' + cmp.caveat + '</span>'
+                                + ' <span style="color:#887;font-size:0.92em">('
+                                + cmp.label + ' price as of ' + cmp.confirmed
+                                + ')</span></div>';
+                            moLine += subCompare;
+                        }}
                     }} else {{
                         var dobs = (mo.days_observed || 0);
                         moLine = '<div style="color:#667;font-size:0.85em;'

@@ -267,6 +267,58 @@ def _api_key() -> str:
 # Rate limiting (sliding window)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def get_spend_this_month() -> dict:
+    """Actual spend for the current calendar month, in dollars.
+
+    Computed from the RECORDED tokens (`ai_usage.tokens_in`/`tokens_out`, stamped
+    from `msg.usage` on every real call) priced at the active model's rates —
+    not from a per-call assumption. The old 350-in/150-out guess understated
+    real spend by ~13x, so a cap enforced against it would have been a cap
+    against a fiction.
+
+    Cache hits cost nothing and correctly contribute nothing: `analyze()` skips
+    `_increment_usage` on a cache hit, so those tokens were never recorded.
+
+    Returns `{"ok": True, "usd": float, "month": "YYYY-MM"}`, or
+    `{"ok": False, "error": ...}` with NO figure. A caller must not read a
+    missing spend as zero — see `_check_rate_limit`, which fails closed on it.
+    """
+    pricing = get_pricing()
+    month = datetime.now().strftime("%Y-%m")
+    try:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0) "
+            "FROM ai_usage WHERE substr(date,1,7)=?", (month,)).fetchone()
+        conn.close()
+        usd = (int(row[0]) * pricing["input_per_mtok"] / 1_000_000
+               + int(row[1]) * pricing["output_per_mtok"] / 1_000_000)
+        return {"ok": True, "usd": round(usd, 6), "month": month,
+                "tokens": {"in": int(row[0]), "out": int(row[1])}}
+    except Exception as exc:
+        log.exception("ai_engine: get_spend_this_month failed")
+        return {"ok": False, "error": str(exc)[:200], "month": month}
+
+
+def _spend_cap_usd() -> float | None:
+    """Configured monthly cap in dollars, or None when unset/unusable.
+
+    Unset and unparseable both mean "no cap": a garbage value must not be read
+    as a cap of 0, which would block every call and look like a bug in the
+    engine rather than a typo in a setting.
+    """
+    raw = (_get_setting("spend_cap_monthly_usd", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except (ValueError, TypeError):
+        log.warning("ai_engine: spend_cap_monthly_usd=%r is not a number — "
+                    "treating as no cap", raw)
+        return None
+    return val if val > 0 else None
+
+
 def _check_rate_limit(conn) -> tuple:
     """Return (is_limited: bool, reason: str)."""
     rate_h = int(_get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT)))
@@ -298,6 +350,31 @@ def _check_rate_limit(conn) -> tuple:
             hrs_left = max(1, int((86400 - (now - d_start)) / 3600) + 1)
             reset_str = f"resets in ~{hrs_left}h"
         return True, f"{d_count}/{rate_d} per day ({reset_str})"
+
+    # Dollar cap. Checked last so the cheaper call-count checks short-circuit
+    # first, and so its reason is the one surfaced when it is the binding limit.
+    #
+    # Call count is a poor proxy for spend and is getting worse: per-model rates
+    # differ ~10x, and any surface where the user controls prompt size makes ten
+    # calls anywhere from cents to dollars. This is the control a user actually
+    # means by "don't spend more than $X".
+    cap = _spend_cap_usd()
+    if cap is not None:
+        spend = get_spend_this_month()
+        if not spend.get("ok"):
+            # FAIL CLOSED, but only because a cap was explicitly requested.
+            # The point of a cap is protecting money: if we cannot tell whether
+            # the user is over it, allowing unlimited spend defeats it entirely.
+            # Blocking is recoverable — the reason is visible and the cap can be
+            # raised or cleared; an unnoticed overspend is not. When NO cap is
+            # set, this branch never runs, so a broken read cannot block a user
+            # who never asked for the protection.
+            return True, ("monthly spend cannot be read, and a spend cap is set "
+                          "— refusing rather than risk exceeding it")
+        usd = spend.get("usd") or 0.0
+        if usd >= cap:
+            return True, (f"monthly spend cap reached: ${usd:.2f} of ${cap:.2f} "
+                          f"for {spend.get('month')}")
 
     return False, ""
 
@@ -389,6 +466,25 @@ _PRICING_DEFAULTS_CONFIRMED = "2026-08-04"
 #: reads this rather than repeating the string, so the rate table and the
 #: request can never disagree about which model is in use.
 _ACTIVE_MODEL = "claude-sonnet-4-6"
+
+#: Reference price point for the user's own comparison: what Anthropic's
+#: cheapest consumer subscription costs per month. MAINTAINED CONSTANT WITH A
+#: DATE, for the same reason the rate table has one — this price can change,
+#: and a bare number with no provenance eventually becomes a confident lie.
+#: Bump `confirmed` in the same commit as any change to `usd`.
+#:
+#: THIS IS A COMPARISON, NOT AN ALTERNATIVE. Nemesis authenticates with an
+#: `sk-ant-api03-` API key — pay-per-token, billed separately. A consumer
+#: subscription issues `sk-ant-oat01-` OAuth tokens intended for interactive
+#: and CLI use, not for embedding in an always-on backend service. The two are
+#: different products with different billing and different intended use, so the
+#: UI states the numbers and lets the operator draw their own conclusion. It
+#: must never imply the subscription is a drop-in substitute for this workload.
+_SUBSCRIPTION_COMPARISON = {
+    "usd": 20.00,
+    "label": "Claude Pro",
+    "confirmed": "2026-08-04",
+}
 
 #: Per-MTok rates by model. A MAINTAINED CONSTANT: there is no pricing API
 #: (Models API returns capabilities, not prices — verified 2026-08-04), so this
@@ -561,6 +657,20 @@ def get_monthly_cost(today: str | None = None) -> dict:
         avg_in, avg_out = agg[0] / n, agg[1] / n
         avg_cost = round(avg_in * pricing["input_per_mtok"] / 1_000_000
                          + avg_out * pricing["output_per_mtok"] / 1_000_000, 6)
+        # Comparison against the consumer-subscription price point. Attached
+        # ONLY on this branch — the insufficient-history path returns no
+        # average, and comparing against a figure we deliberately refused to
+        # compute would be worse than not comparing at all.
+        sub = _SUBSCRIPTION_COMPARISON
+        comparison = {
+            "threshold_usd": sub["usd"],
+            "label": sub["label"],
+            "confirmed": sub["confirmed"],
+            "exceeds": avg_cost > sub["usd"],
+            "caveat": (f"{sub['label']} is a different product with different "
+                       f"billing and intended use — not a substitute for API "
+                       f"access, which is what this server uses."),
+        }
         return {
             "ok": True, "sufficient": True,
             "days_observed": (ref - earliest).days,
@@ -569,6 +679,7 @@ def get_monthly_cost(today: str | None = None) -> dict:
             "average_tokens": {"in": round(avg_in, 1), "out": round(avg_out, 1)},
             "average_calls": round(agg[2] / n, 1),
             "average_cost": avg_cost,
+            "comparison": comparison,
             "pricing": pricing,
         }
     except Exception as exc:
