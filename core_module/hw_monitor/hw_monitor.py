@@ -467,23 +467,49 @@ def init_db():
                 c.execute("ALTER TABLE scan_tasks ADD COLUMN %s %s" % (_c, _d))
         conn.commit()
 
-        # Seed default conditions if the table is empty.
-        if c.execute("SELECT COUNT(*) FROM scan_conditions").fetchone()[0] == 0:
-            defaults = [
-                (None, "first_connect",      None,  1, "/"),
-                (None, "return_from_remote", None,  1, "/"),
-                (None, "extended_absence",   "24",  1, "/"),
-                (None, "new_login",          None,  1, "/"),
-                (None, "usb_inserted",       None,  1, "/"),
-            ]
+        # Seed any MISSING default condition — NOT only when the table is empty.
+        #
+        # This guard was `if COUNT(*) == 0` until 2026-08-04, which meant a
+        # condition type added to `defaults` after an install's first boot was
+        # never inserted on that install. `new_login` and `usb_inserted` were
+        # added later and had therefore NEVER existed on this box: their trigger
+        # logic below (`"new_login" in conditions`, `"usb_inserted" in
+        # conditions`) is fully implemented but could not fire, because the row
+        # it tests for was not there.
+        #
+        # Nothing errored and the table was populated, so two dead triggers
+        # looked exactly like two triggers that had simply not fired yet — which
+        # is why this survived. Backfilling by type makes the seed converge on
+        # the defaults instead of freezing at whatever the first boot happened
+        # to contain.
+        #
+        # Scoped to GLOBAL rows (device_id IS NULL). A device-specific override
+        # must not count as "present" — that would leave the global missing for
+        # every other device, a subtler version of the same gap.
+        #
+        # Insert-only: an existing row keeps its value, so an operator who tuned
+        # `extended_absence` is never reset back to the default.
+        defaults = [
+            (None, "first_connect",      None,  1, "/"),
+            (None, "return_from_remote", None,  1, "/"),
+            (None, "extended_absence",   "24",  1, "/"),
+            (None, "new_login",          None,  1, "/"),
+            (None, "usb_inserted",       None,  1, "/"),
+        ]
+        _have = {r[0] for r in c.execute(
+            "SELECT condition_type FROM scan_conditions WHERE device_id IS NULL"
+        ).fetchall()}
+        _missing = [d for d in defaults if d[1] not in _have]
+        if _missing:
             c.executemany(
                 "INSERT INTO scan_conditions "
                 "(device_id, condition_type, condition_value, enabled, scan_path) "
                 "VALUES (?, ?, ?, ?, ?)",
-                defaults,
+                _missing,
             )
             conn.commit()
-            log.info("init_db: seeded 5 default scan conditions")
+            log.info("init_db: seeded %d missing scan condition(s): %s",
+                     len(_missing), ", ".join(d[1] for d in _missing))
 
         # One-time data migration: backfill fans_json from old fan{n}_rpm columns.
         # Use hw_map.json fan labels if available, else fall back to generic "Fan N".
