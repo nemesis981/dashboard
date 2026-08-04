@@ -267,7 +267,19 @@ def init_db():
                 hw_fp_confidence TEXT,
                 hw_fp_schema_version INTEGER,
                 hw_fp_locked_at REAL,
-                hw_is_virtual INTEGER DEFAULT 0
+                hw_is_virtual INTEGER DEFAULT 0,
+                -- ── Tier 1 agent self-attestation ──────────────────────────
+                -- DEFAULT 'absent', NOT NULL, deliberately: a device that has
+                -- never reported an attestation must not be distinguishable
+                -- from one that reported failure by accident of NULL-handling.
+                -- The A2 rule ("absent is never silently healthy") is enforced
+                -- HERE, in the schema, so it cannot be lost by a caller that
+                -- forgets to check. Existing rows migrate to 'absent', which is
+                -- the truthful value for every one of them.
+                attestation_state TEXT NOT NULL DEFAULT 'absent',
+                attestation_detail TEXT,
+                attestation_at TEXT,
+                attestation_version TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
@@ -329,6 +341,14 @@ def init_db():
                           ("hw_fp_schema_version", "INTEGER"),
                           ("hw_fp_locked_at",     "REAL"),
                           ("hw_is_virtual",       "INTEGER DEFAULT 0"),
+                          # ── Tier 1 agent self-attestation ──
+                          # NOT NULL DEFAULT 'absent' matches the CREATE above.
+                          # Every pre-existing row becomes 'absent', which is the
+                          # honest value: none of them have ever attested.
+                          ("attestation_state",   "TEXT NOT NULL DEFAULT 'absent'"),
+                          ("attestation_detail",  "TEXT"),
+                          ("attestation_at",      "TEXT"),
+                          ("attestation_version", "TEXT"),
                           # ── de-enroll on uninstall (clean-uninstall build spec) ──
                           ("uninstalled_at",      "TEXT"),
                           ("uninstalled_by",      "TEXT"),    # actor seam (device self / admin)
@@ -1595,6 +1615,17 @@ def _update_agent_device(payload, remote_ip=None):
             if lt:
                 conn.execute("UPDATE agent_devices SET link_type=? WHERE device_id=?",
                              (lt, device_id))
+            # Tier 1 attestation state, recorded after the upsert so the row
+            # exists. Deliberately NOT folded into the upsert above: an agent
+            # that omits the field entirely must leave the stored state alone
+            # rather than overwrite it via `excluded.*` with an empty value.
+            # Failure to record is non-fatal — losing a heartbeat over an
+            # attestation write would be a worse outcome than a stale state.
+            try:
+                from alert_manager import attestation
+                attestation.record_attestation(conn, device_id, ah)
+            except Exception as _ae:                      # noqa: BLE001
+                log.warning("attestation record failed for %s: %s", device_id, _ae)
             conn.commit()
         finally:
             conn.close()
