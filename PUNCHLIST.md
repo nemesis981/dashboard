@@ -2402,3 +2402,22 @@ this entry is the proposal, not the implementation.
       table in real code. Verified against live code by Window 2 before this entry was committed
       (`_quarantine_file`'s `shutil.move`/`chmod 0o000`, absence of any restore function, the
       `_api_finding_quarantine` route, and the `ACTION_CLASS_CEILINGS` pin all confirmed directly).
+
+- [ ] **`_network_connections()` reports no UDP at all.** `nemesis_agent/modules/security.py:54`
+  skips any socket whose status is not `ESTABLISHED`. UDP sockets never have an `ESTABLISHED`
+  state, so this filter excludes every UDP connection from the agent's connection reporting,
+  unconditionally.
+    - [ ] **Impact beyond the UDP/gaming policy work: UDP-based C2 is invisible to the agent's
+      connection reporting today.** This is a malware-detection gap independent of anything else
+      in the UDP-policy scoping — it exists regardless of whether default-deny or Game Mode ever
+      ship.
+    - [ ] **Also capped at 50 entries** — worth revisiting at the same time as the UDP fix rather
+      than as a separate pass.
+    - [ ] **Fix shape:** report UDP sockets explicitly rather than filtering on a TCP-only state.
+      Verify with a control that a known UDP flow actually appears in the report — an empty
+      result must not be mistaken for "no UDP traffic," the same "instrument that can only
+      produce one answer" trap this codebase keeps finding.
+    - [ ] Part of the technique-independent observation-layer foundation
+      (`docs/roadmap/agent-rebuild-config-driven.md`). Found and verified by Window 1, 2026-08-04,
+      confirmed directly against `security.py:54` (`if c.status != "ESTABLISHED": continue`)
+      before this entry was committed.
