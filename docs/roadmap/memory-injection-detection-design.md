@@ -1,9 +1,18 @@
 # Roadmap — Memory-injection detection: design prerequisites
 
-- **Status:** Capture-only, per the request that produced this doc (2026-08-03). Paused —
-  do NOT build. No implementation plan exists; this records what earlier design discussion
-  already established as prerequisites and constraints, so the module can be scoped for
-  real the next time it's picked up instead of starting from nothing. **Supersedes**
+- **Status (split 2026-08-04): the observation-layer foundation proceeds now; the detection
+  technique itself stays paused.** Approved build structure: a technique-independent observation
+  layer (full process enumeration, UDP-visible connection reporting, agent integrity attestation
+  — see [agent-rebuild-config-driven.md](agent-rebuild-config-driven.md), now active) lands
+  first, verified independently. The memory-injection detection technique layers on top
+  separately, later, and remains capture-only until the open ownership question below is
+  resolved. **This split does not change what this doc is** — see "What this doc is not," below,
+  still true without modification. It changes only when the technique-independent parts of the
+  prerequisite work can start.
+- **Status (original, 2026-08-03), unchanged for the paused part:** Capture-only. Paused — do NOT
+  build the detection technique. No implementation plan exists; this records what earlier design
+  discussion already established as prerequisites and constraints, so the module can be scoped
+  for real the next time it's picked up instead of starting from nothing. **Supersedes**
   [windows-agent-memory-injection-rework-prereqs.md](windows-agent-memory-injection-rework-prereqs.md)
   — folded in here per that stub's own instruction ("If/when that module resumes and gets
   its own scoping doc, fold this entry into it rather than tracking it separately").
@@ -13,6 +22,41 @@
   would need to run inside — privilege model, failure modes, deployment gating — captured
   because those constraints were already worked out before the technique itself was, and
   are load-bearing on how the eventual design can even be shaped.
+
+## New prerequisites and blockers (added 2026-08-04)
+
+- **Blocking dependency: agent integrity attestation.** There is no agent self-integrity check of
+  any kind anywhere in the product today. An attacker who replaces the agent's code gets an agent
+  that reports success with no findings, indefinitely, with no other signal catching it. A
+  memory-injection detector — which would run as an even more privileged component per the
+  architectural tension below — inherits this problem wholesale, not partially: the detector's
+  own verdicts are only as trustworthy as the agent process reporting them. Already tracked on
+  the public PUNCHLIST; a fuller scoping exists in the private mirror.
+- **Blocked by a concrete agent defect, not just a missing feature.** Process enumeration today is
+  a top-10-by-CPU sample, not a real process view. Memory-injection detection needs full
+  enumeration as step zero — a low-CPU malicious process is exactly the case a CPU-sorted top-10
+  sample never surfaces. This is one of the technique-independent observation-layer items above,
+  not specific to memory-injection, but memory-injection cannot proceed without it either way.
+- **New prerequisite: an appliance RAM budget model, which does not exist today.** Reading process
+  memory has a transient working-set cost with no fallback — memory cannot be scanned from disk —
+  so this work needs a real RAM budget for the appliance, and today the only figures available
+  are single idle measurements. **Stated explicitly: this budget model is a shared artefact with
+  three consumers, not an implementation detail of memory-injection specifically** — (i) this
+  feature's own working-set need; (ii) tmpfs bounds elsewhere in the product (`/tmp` and a
+  planned sandbox scratch area), expressed as percentages so they scale with whatever hardware
+  actually ships; (iii) headroom for a possible future RAM-backed detonation VM, if the parked
+  sandbox-testing roadmap item is ever picked back up. It is also a direct input to ADR 0014's
+  still-open hardware-baseline item, where the spec is deliberately a placeholder expected to
+  converge from real measurement rather than being designed against now — this budget model *is*
+  part of that measurement. Scoping it to this feature alone would produce a number that is
+  already wrong for the appliance the moment either other consumer lands.
+- **The open question this doc cannot resolve alone: who owns the executing-payload case?**
+  [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) is a
+  live, always-on local-trigger list that already covers a payload executing after getting past
+  Tiers 1/2. This doc is paused scaffolding with no detection technique yet. Two documents
+  currently cover adjacent ground with different statuses — deciding which one owns this case
+  belongs in one of these two docs, before either resumes in earnest, or this risks being built
+  against scaffolding while Tier 3's living list quietly covers the same ground independently.
 
 ## Why this exists
 
