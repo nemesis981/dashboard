@@ -74,6 +74,134 @@ def init_quarantines_table():
     finally:
         conn.close()
 
+def init_settings_table():
+    """Canonical DDL for the core `settings` table — general-purpose key/value.
+
+    DELIBERATELY NOT single-purpose. Core config has until now lived only in
+    `/etc/nemesis.env`, which needs root and a service restart to change — fine
+    for install-time values, unusable for anything a user should be able to
+    adjust while the product runs. Every module already has its own
+    `<module>_settings` table for exactly this; core had none, so the first
+    live-adjustable core knob had nowhere to go. This is that table, and it is
+    shaped for the next one too.
+
+    Unprefixed because core owns unprefixed tables (ADR 0001). Modules must keep
+    using their own `<module>_settings`; this is not a shared dumping ground.
+
+    `updated_at`/`updated_by` are the attribution seam (multi-user-ready by
+    default): who changed a setting is exactly the kind of thing that is painful
+    to retrofit once a commercial tier needs attributed actions.
+
+    Called from the dashboard's boot init. CREATE ... IF NOT EXISTS, so repeat
+    calls are no-ops and whichever process runs first wins.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key        TEXT PRIMARY KEY,
+                value      TEXT NOT NULL,
+                updated_at TEXT,
+                updated_by TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+#: Core settings and their shipped defaults. A key absent from here is not a
+#: known setting — get_setting() will still return it if stored, but the UI and
+#: validation work from this map, so adding a knob means adding it here.
+CORE_SETTING_DEFAULTS = {
+    # How often a REMOTE (vpn_remote) agent sends a full observation snapshot,
+    # expressed as "every Nth heartbeat". Local agents always observe every beat
+    # and are deliberately not adjustable — it is free on a LAN.
+    #
+    # 6 is a STARTING POINT, not a measurement: ~161MB/month per roaming device
+    # instead of ~659MB. See docs/OPERATION.md "Agent Devices: Local vs Remote
+    # Reporting" for the user-facing statement of the tradeoff.
+    "agent_remote_observe_every_n": "6",
+}
+
+#: Bounds for agent_remote_observe_every_n. 1 = full fidelity everywhere.
+#: 48 = one snapshot per 4h at the 300s default beat; beyond that the snapshot is
+#: stale enough to stop being an observation layer and start being a misleading
+#: one, so the ceiling is a real limit rather than input hygiene.
+REMOTE_OBSERVE_N_MIN = 1
+REMOTE_OBSERVE_N_MAX = 48
+
+
+def get_setting(key, default=None):
+    """Read a core setting. Falls back to CORE_SETTING_DEFAULTS, then `default`.
+
+    A missing table or unreadable row returns the DEFAULT, not None: these are
+    configuration knobs with meaningful shipped values, and a fresh install that
+    has never written one is a normal state rather than an error. That is only
+    safe because every consumer clamps the value it gets — see
+    get_remote_observe_every_n().
+    """
+    fallback = CORE_SETTING_DEFAULTS.get(key, default)
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return fallback
+    return row[0] if row and row[0] is not None else fallback
+
+
+def set_setting(key, value, actor=None):
+    """Write a core setting. Returns True on success."""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+        try:
+            conn.execute(
+                "INSERT INTO settings (key, value, updated_at, updated_by) "
+                "VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                "value=excluded.value, updated_at=excluded.updated_at, "
+                "updated_by=excluded.updated_by",
+                (key, str(value), datetime.now().isoformat(timespec="seconds"), actor),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def get_remote_observe_every_n():
+    """The remote-observation divisor, always a usable int inside the bounds.
+
+    Clamps rather than trusting storage. A stored 0 would divide-by-zero on the
+    agent; a stored negative or garbage value would make every beat 'due' and
+    turn a bandwidth SAVING into a bandwidth storm on precisely the metered
+    connections this exists to protect. So the value is bounded here, and the
+    agent bounds it again independently on receipt — neither side assumes the
+    other validated.
+    """
+    raw = get_setting("agent_remote_observe_every_n",
+                      CORE_SETTING_DEFAULTS["agent_remote_observe_every_n"])
+    default = int(CORE_SETTING_DEFAULTS["agent_remote_observe_every_n"])
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+    # Out of range falls back to the DEFAULT, not to the nearest bound. Clamping
+    # a stored 0 up to REMOTE_OBSERVE_N_MIN would resolve an invalid value to
+    # full-fidelity-every-beat -- the most expensive setting -- on the metered
+    # links this exists to protect. Clamping is only safe from a value that was
+    # meaningful to begin with; the agent applies the same rule on receipt.
+    if n < REMOTE_OBSERVE_N_MIN or n > REMOTE_OBSERVE_N_MAX:
+        return default
+    return n
+
+
 def init_devices_table():
     """Canonical DDL for the core `devices` table (LAN-scan inventory).
 
