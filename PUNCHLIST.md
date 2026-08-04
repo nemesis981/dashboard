@@ -1999,6 +1999,28 @@ this entry is the proposal, not the implementation.
       followed by a relaunch, still re-probes fresh and hits the same wrong answer via a
       different trigger.
 
+- [ ] **Uninstall leaves the agent running and some state behind.** After a successful uninstall
+  on 2026-08-03, verified on the VM: `NemesisAgent.exe` was still running (and still polling the
+  server from a now-deleted install path), and `%APPDATA%\Nemesis` still contained
+  `nemesis_agent.conf` and `reputation.db` alongside `NemesisUninstall.exe`.
+    - [ ] The uninstaller cannot delete itself while running, so its own presence is expected.
+      The surviving `nemesis_agent.conf` (which carries device_id and enrollment state) and
+      `reputation.db` are not.
+    - [ ] **The running process is the more serious half.** It keeps sending heartbeats after the
+      user believes the software is gone. Combined with the de-enroll behaviour below, a user who
+      uninstalls can be left with an agent still reporting to a fleet they think they left.
+    - [ ] Check against the clean-uninstall spec (Phase 3) — this may be a regression against a
+      documented requirement rather than a new gap.
+    - [ ] **Reviewed against live code 2026-08-04 (Window 2):** `_remove_components()`
+      (`nemesis_agent/uninstaller_gui.py`) already calls `taskkill /F /IM NemesisAgent.exe` and
+      schedules `rmdir /s /q` on the install dir (which would take `nemesis_agent.conf` and
+      `reputation.db` with it — both live in the same `%APPDATA%\Nemesis` directory as
+      `CONF`/`CACHE_PATH`). This logic has been in place since Phase 3 shipped
+      (`14ce142`), unchanged since — so the 2026-08-03 live finding is a real behavioral gap
+      (taskkill/rmdir not succeeding as intended), not a missing code path. Root cause (silent
+      `taskkill` failure — wrong session/access, or a scheduled-task relaunch race between
+      `taskkill` and the later `schtasks /Delete`) not yet diagnosed; entry left open as found.
+
 - [ ] **A signed ruleset update can be rolled BACK to an older-but-genuine ruleset.**
   Content authenticity is now bound into the signed task envelope (`sha256` + `size` in
   `params`, verified by the agent before install — ADR 0004 Stage 1). That closes
