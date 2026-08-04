@@ -76,6 +76,62 @@ def _init_db() -> None:
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        -- Graduated authority (L0-L4). current_level is EARNED via the promotion
+        -- mechanism; hard_ceiling is the code-level maximum for the class and is
+        -- never raised by anything at runtime.
+        --
+        -- NOTE ON THE NAME: the scoping doc's schema sketch called this column
+        -- "floor" while its own comment described a ceiling. It is a CEILING — the
+        -- maximum authority this class may ever reach. Named unambiguously here
+        -- because a column named "floor" holding a maximum is how a later change
+        -- writes MAX() where MIN() belongs and silently inverts the safety property.
+        CREATE TABLE IF NOT EXISTS ai_authority (
+            action_class     TEXT PRIMARY KEY,
+            current_level    INTEGER NOT NULL DEFAULT 0,
+            hard_ceiling     INTEGER NOT NULL,
+            last_promoted_at TEXT,
+            last_demoted_at  TEXT,
+            policy_ref       TEXT
+        );
+
+        -- Every L1 proposal is a labelled datapoint: the human's approve/reject is
+        -- what the promotion mechanism measures. Also the audit record for anything
+        -- executed at L2+.
+        CREATE TABLE IF NOT EXISTS ai_proposals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_class    TEXT NOT NULL,
+            surface_key     TEXT NOT NULL,
+            row_id          INTEGER NOT NULL,
+            proposed_action TEXT NOT NULL,
+            reasoning       TEXT NOT NULL,
+            model_used      TEXT NOT NULL,
+            created_at      TEXT NOT NULL,
+            human_response  TEXT,
+            responded_at    TEXT,
+            responded_by    TEXT,
+            executed        INTEGER NOT NULL DEFAULT 0,
+            executed_at     TEXT,
+            undone          INTEGER NOT NULL DEFAULT 0,
+            undone_at       TEXT,
+            undone_by       TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_aip_class ON ai_proposals(action_class);
+
+        -- User-defined standing rules. These NARROW behaviour only — see
+        -- effective_ceiling(). No rule type raises the ceiling, so a rule worded to
+        -- widen authority cannot do so. active=0 is a soft delete (the standing
+        -- no-automatic-permanent-deletion principle).
+        CREATE TABLE IF NOT EXISTS ai_standing_rules (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_type    TEXT NOT NULL,
+            action_class TEXT,
+            rule_text    TEXT NOT NULL,
+            created_by   TEXT NOT NULL,
+            created_at   TEXT NOT NULL,
+            active       INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_aisr_active ON ai_standing_rules(active, action_class);
     """)
     conn.commit()
     conn.close()
@@ -83,6 +139,180 @@ def _init_db() -> None:
 
 # Initialise at import time so any module can import and call before Module.start().
 _init_db()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Graduated authority — the ceiling clamp
+#
+# effective_ceiling() is the single place that decides how much authority an
+# action class has RIGHT NOW. Three terms, combined with min():
+#
+#   earned      — ai_authority.current_level, moved by the promotion mechanism
+#   hard        — the code-level maximum for that class (never raised at runtime)
+#   rule_clamp  — user standing rules, which NARROW ONLY
+#
+# The safety property the whole design rests on: a standing rule cannot widen
+# authority no matter how it is worded, because there is no rule type that
+# raises its term and min() cannot exceed any input. This is structural, not a
+# matter of the model interpreting an instruction conservatively.
+# ─────────────────────────────────────────────────────────────────────────────
+
+L0_OBSERVE          = 0
+L1_RECOMMEND        = 1
+L2_ACT_REVERSIBLE   = 2
+L3_ACT_DISRUPTIVE   = 3
+L4_GOVERN           = 4
+
+# Hard ceilings per action class. A class absent from this map has no ceiling
+# defined and is therefore not a known action class — see effective_ceiling().
+#
+# malware_file_quarantine is pinned at L1 because the product has NO restore
+# path for a quarantined file (_quarantine_file() moves + chmod 000s it and
+# nothing reverses either step). This is a missing-capability ceiling, not a
+# threshold choice: it cannot be raised by any amount of track record until a
+# restore function exists.
+ACTION_CLASS_CEILINGS = {
+    "ip_quarantine_external":  L3_ACT_DISRUPTIVE,
+    "ip_block_permanent":      L2_ACT_REVERSIBLE,
+    "ip_action_internal":      L1_RECOMMEND,
+    "malware_file_quarantine": L1_RECOMMEND,
+}
+
+
+class UnknownActionClass(Exception):
+    """Raised for an action class with no defined ceiling.
+
+    Deliberately an exception rather than a returned level: every integer 0-4 is
+    a legal answer, so returning one here would be indistinguishable from a real
+    measurement of a real class.
+    """
+
+
+class AuthorityUnavailable(Exception):
+    """Raised when authority state cannot be read.
+
+    Fails closed AND loud. Returning L0 instead would be a default that means
+    something, which the caller cannot tell apart from a genuine "this class is
+    only allowed to observe" result.
+    """
+
+
+def _combine_ceiling(earned: int, hard: int, rule_clamp: int) -> int:
+    """Pure combination of the three ceiling terms. Narrowing only, by construction."""
+    return min(earned, hard, rule_clamp)
+
+
+# Self-test: proves _combine_ceiling can return more than one answer and that no
+# input widens the result. Runs at import, in the production path — a clamp that
+# could only ever return one value would otherwise look exactly like a working one.
+def _selftest_combine() -> None:
+    cases = [
+        # (earned, hard, rule_clamp, expected, what it proves)
+        (4, 4, 4, 4, "no constraint anywhere leaves the level alone"),
+        (4, 4, 0, 0, "a 'never' rule clamps a fully-promoted class to L0"),
+        (4, 4, 1, 1, "an 'ask_before' rule forces L1 despite full promotion"),
+        (0, 4, 4, 0, "an unearned class stays L0 even with no rules"),
+        (4, 1, 4, 1, "the hard ceiling holds against a fully-promoted class"),
+        (2, 3, 4, 2, "the lowest term wins when they disagree"),
+    ]
+    for earned, hard, clamp, expected, why in cases:
+        got = _combine_ceiling(earned, hard, clamp)
+        if got != expected:
+            raise AssertionError(
+                f"authority clamp self-test failed ({why}): "
+                f"_combine_ceiling({earned}, {hard}, {clamp}) = {got}, expected {expected}"
+            )
+    # A widening attempt must be inert: no term above the others may raise the result.
+    if _combine_ceiling(1, 4, 4) != 1:
+        raise AssertionError("authority clamp self-test failed: a high term widened the result")
+
+
+_selftest_combine()
+
+
+def _standing_rule_clamp(conn, action_class: str) -> tuple:
+    """Most restrictive clamp from active standing rules on this class.
+
+    Returns (clamp_level, matched_rule_types). Rules with a NULL action_class are
+    NOT included: they have no structured class for this gate to match against and
+    are advisory (system-prompt) only. Callers that surface rules to the user must
+    say so, or a user believes a rule is enforced when it is not.
+    """
+    rows = conn.execute(
+        "SELECT rule_type FROM ai_standing_rules "
+        "WHERE active=1 AND action_class=?",
+        (action_class,),
+    ).fetchall()
+
+    types = {(r["rule_type"] or "").strip().lower() for r in rows}
+
+    clamp = L4_GOVERN            # no constraint
+    if "ask_before" in types:
+        clamp = min(clamp, L1_RECOMMEND)
+    if "never" in types:
+        clamp = L0_OBSERVE
+    # 'always' deliberately absent: it cannot raise the clamp. An 'always' rule
+    # specifies HOW an already-earned L2+ action behaves, never WHETHER a lower
+    # class acts autonomously — auto-approving an L1 proposal would corrupt the
+    # agreement-rate signal the promotion mechanism measures to decide on L2.
+    return clamp, sorted(types)
+
+
+def effective_ceiling(action_class: str) -> dict:
+    """How much authority this action class has right now, and why.
+
+    Returns {level, earned, hard_ceiling, rule_clamp, rule_types, reasons}.
+    Raises UnknownActionClass / AuthorityUnavailable — never a fallback level.
+
+    'reasons' names which term(s) actually bound the result, so a refusal can be
+    stated to the user ("your standing rule against this is active") rather than
+    the AI silently declining to mention an action.
+    """
+    hard = ACTION_CLASS_CEILINGS.get(action_class)
+    if hard is None:
+        raise UnknownActionClass(
+            f"no hard ceiling defined for action class {action_class!r}; "
+            f"known classes: {sorted(ACTION_CLASS_CEILINGS)}"
+        )
+
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute(
+                "SELECT current_level FROM ai_authority WHERE action_class=?",
+                (action_class,),
+            ).fetchone()
+            # No row means this class has never been promoted — a real, meaningful
+            # L0, not a failed read. The read itself succeeded.
+            earned = int(row["current_level"]) if row else L0_OBSERVE
+            clamp, rule_types = _standing_rule_clamp(conn, action_class)
+        finally:
+            conn.close()
+    except Exception as exc:
+        raise AuthorityUnavailable(
+            f"cannot read authority state for {action_class!r}: {exc}"
+        ) from exc
+
+    level = _combine_ceiling(earned, hard, clamp)
+
+    reasons = []
+    if level == clamp and clamp < min(earned, hard):
+        reasons.append("standing_rule")
+    if level == hard and hard < min(earned, clamp):
+        reasons.append("hard_ceiling")
+    if level == earned and earned < min(hard, clamp):
+        reasons.append("not_yet_earned")
+    if not reasons:
+        reasons.append("unconstrained" if level == L4_GOVERN else "tied")
+
+    return {
+        "level":        level,
+        "earned":       earned,
+        "hard_ceiling": hard,
+        "rule_clamp":   clamp,
+        "rule_types":   rule_types,
+        "reasons":      reasons,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
