@@ -98,7 +98,8 @@ sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 import database          # module handle: canonical DDL owner (init_audit_log_table)
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
-                      init_enrollment_tokens_table, init_recovery_codes_table)
+                      init_enrollment_tokens_table, init_recovery_codes_table,
+                      init_settings_table)
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append,
@@ -125,6 +126,9 @@ init_enrollment_tokens_table()
 # also created create-before-write by the device_scanner. Dual-safety-net,
 # mirroring quarantines — no systemd ordering between the two processes.
 init_devices_table()
+# Core key/value settings (general-purpose, ADR 0001 core-owned). Canonical DDL
+# in database.init_settings_table(). Created before any route reads it.
+init_settings_table()
 
 app = Flask(__name__)
 
@@ -4394,6 +4398,43 @@ except Exception:
     log.exception("chat: could not register the alert anchor")
 
 
+@app.route("/api/settings/observe-every-n", methods=["POST"])
+def api_set_observe_every_n():
+    """Set the remote-agent observation divisor (core settings table).
+
+    POST, never GET: it changes behaviour on every remote agent, so a GET would
+    be CSRF-triggerable by an <img> tag under default SameSite=Lax cookies.
+    Auth-gated by absence from _AUTH_EXEMPT, matching every other state-changing
+    route.
+
+    Validated HERE as well as in database.get_remote_observe_every_n() and again
+    on the agent. Three checks is not redundancy: this one produces a useful
+    error for the person typing, the storage layer protects readers from a value
+    written by any other path, and the agent refuses to trust the server. Only
+    the first can tell the user WHY their input was rejected.
+    """
+    data = request.get_json(silent=True) or {}
+    raw = data.get("value")
+    try:
+        n = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return jsonify({"ok": False,
+                        "error": f"'{raw}' is not a whole number"}), 400
+    lo, hi = database.REMOTE_OBSERVE_N_MIN, database.REMOTE_OBSERVE_N_MAX
+    if n < lo or n > hi:
+        return jsonify({"ok": False,
+                        "error": f"must be between {lo} and {hi} "
+                                 f"({lo} = report as often as local devices, "
+                                 f"{hi} = about once every 4 hours)"}), 400
+    if not database.set_setting("agent_remote_observe_every_n", n,
+                                actor=_current_actor_label()):
+        return jsonify({"ok": False, "error": "could not save the setting"}), 500
+    # Echo back what will actually be used, read back through the same path the
+    # agents will get it from -- so the UI confirms the STORED value rather than
+    # the submitted one.
+    return jsonify({"ok": True, "value": database.get_remote_observe_every_n()})
+
+
 @app.route("/api/ai/chat/state")
 def api_ai_chat_state():
     """Read-only: what the chat affordance should show for one anchored finding.
@@ -4597,6 +4638,15 @@ def settings_page():
     except Exception:
         _is_windows_agent = False
         _agent_ip = ""
+
+    # Remote-observation cadence (core settings table). Bounds come from
+    # database.py so the input's limits and the server-side clamp cannot drift.
+    try:
+        obs_n_value = database.get_remote_observe_every_n()
+        obs_n_min   = database.REMOTE_OBSERVE_N_MIN
+        obs_n_max   = database.REMOTE_OBSERVE_N_MAX
+    except Exception:
+        obs_n_value, obs_n_min, obs_n_max = 6, 1, 48
 
     # Read AI Engine settings from the shared DB via the ai_engine module API
     # (ADR 0001 Stage 3 — no longer reaches into modules/ai_engine/ai_engine.db).
@@ -5497,6 +5547,48 @@ def settings_page():
         </div>
     </div>
 
+    <!-- Agents -->
+    <div class="card">
+        <h2>📡 <span class="tier-text"
+            data-beginner="Devices Away From Home"
+            data-intermediate="Agent Devices"
+            data-pro="Agents">Agent Devices</span></h2>
+        <div style="padding:0 4px">
+            <p style="margin:0 0 10px;font-size:0.86em;color:#bbb">
+                <span class="tier-text"
+                    data-beginner="Devices on your own network send Nemesis a detailed report every few minutes &mdash; that costs nothing, because the data never leaves your network. A device somewhere else (hotel, coffee shop, phone hotspot) sends the same full report less often, so it does not eat your mobile data or broadband allowance."
+                    data-intermediate="Local agents send a full observation snapshot every heartbeat. Remote (VPN/roaming) agents send a complete snapshot every Nth heartbeat instead, to limit WAN data use."
+                    data-pro="Local: observe every beat (~0.02% of a 1Gb LAN at 100 agents). Remote: full snapshot every Nth beat. ~659MB/month/device at N=1 vs ~161MB at N=6.">Devices on your own network report in full every few minutes.</span>
+            </p>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <label style="font-size:0.86em;color:#eee">
+                    <span class="tier-text"
+                        data-beginner="How often should devices away from home send a full report?"
+                        data-intermediate="Remote observation: every"
+                        data-pro="observe_every_n">Remote observation: every</span>
+                </label>
+                <input id="obsEveryN" type="number" min="{obs_n_min}" max="{obs_n_max}" step="1"
+                       value="{obs_n_value}"
+                       style="width:80px;background:#0d1117;border:1px solid #00d4ff;color:#eee;padding:5px;border-radius:3px;margin:0">
+                <span style="font-size:0.86em;color:#bbb">
+                    <span class="tier-text"
+                        data-beginner="heartbeats (higher = less data used)"
+                        data-intermediate="heartbeats"
+                        data-pro="beats">heartbeats</span>
+                </span>
+                <button onclick="saveObsEveryN()"
+                        style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">Save</button>
+                <span id="obsEveryNStatus" style="font-size:0.82em;color:#bbb"></span>
+            </div>
+            <p style="margin:8px 0 0;font-size:0.78em;color:#888">
+                <span class="tier-text"
+                    data-beginner="1 means report as often as devices at home (uses the most data). Higher numbers report less often and use less data. Nothing is left out of a report either way &mdash; there is just more time between them."
+                    data-intermediate="1 = full fidelity everywhere. Higher = less frequent, still complete. Local agents are unaffected."
+                    data-pro="Range {obs_n_min}&ndash;{obs_n_max}. Takes effect on the next heartbeat; no agent restart. Snapshots are always COMPLETE &mdash; cadence changes, contents do not.">Reports are always complete; only how often they arrive changes.</span>
+            </p>
+        </div>
+    </div>
+
     <!-- Danger Zone -->
     <div class="danger-zone">
         <h2>⚠ Danger Zone</h2>
@@ -5900,6 +5992,38 @@ def settings_page():
                     status.style.color = '#ff4444';
                     status.textContent = 'Request failed';
                 }});
+        }}
+
+        function saveObsEveryN() {{
+            var el = document.getElementById('obsEveryN');
+            var st = document.getElementById('obsEveryNStatus');
+            st.style.color = '#bbb';
+            st.textContent = 'saving…';
+            fetch('/api/settings/observe-every-n', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{value: el.value}})
+            }})
+              .then(function(r) {{ return r.json(); }})
+              .then(function(d) {{
+                  if (!d.ok) {{
+                      // Show the server's reason verbatim -- it names the valid
+                      // range and what the ends mean, which a generic failure
+                      // message would throw away.
+                      st.style.color = '#ff8800';
+                      st.textContent = d.error || 'could not save';
+                      return;
+                  }}
+                  // Reflect the STORED value, not what was typed: if the server
+                  // resolved it differently the user must see that.
+                  el.value = d.value;
+                  st.style.color = '#00ff88';
+                  st.textContent = 'saved — applies on each agent\u2019s next check-in';
+              }})
+              .catch(function(e) {{
+                  st.style.color = '#ff4444';
+                  st.textContent = 'error: ' + e;
+              }});
         }}
 
         function hwRediscover() {{
