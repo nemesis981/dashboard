@@ -1,14 +1,21 @@
 # Roadmap — Storage monitoring & retention: measured baseline, stub design, items 1 & 3
 
-- **Status:** Design approved 2026-08-03 (operator). Follow-up to
-  [[data-retention-and-archival-policy]] and
+- **Status:** Items 1 (disk-space reporting) and 3 (backup-drive visibility) SHIPPED
+  2026-08-03 — item 1 via `f9ad33f feat(hw-monitor): sample disk capacity into hw_metrics
+  (storage/retention piece 1)` + `4ab95dc refactor(diagnostics): single source for the
+  low-disk thresholds (piece 2a)` + `1fec8b7 feat(dashboard): surface disk capacity on
+  the hardware card (piece 2b)`; item 3 via `58fe763 feat(backup): last-known free space
+  at the backup destination (piece 3)`, new `backup_media_status` table. The per-table
+  stub/tombstone design and measured baseline below remain design-only, not implemented —
+  this doc's own scope was always items 1+3 plus that design work, per the title. Follow-up
+  to [[data-retention-and-archival-policy]] and
   [[hw-anomaly-snapshots-top-processes-archival]] — fills three gaps identified in a
   Window 3 review of those two docs: the per-table stub/tombstone design (explicitly
   requested to be folded into the retention design, not left as an afterthought), the
-  measured numbers the design was checked against, and roadmap items 1 (disk-space
-  reporting) and 3 (backup-drive visibility) from the original scoping request, both of
-  which were underrepresented or absent from the parent doc. Implementation not yet
-  started.
+  measured numbers the design was checked against, and items 1 and 3 above, both of which
+  were underrepresented or absent from the parent doc. Header was stale until corrected
+  2026-08-04 — see
+  [roadmap-state-audit-2026-08-04](../audits/roadmap-state-audit-2026-08-04.md).
 
 ## Measured baseline (live DB, 2026-08-03)
 

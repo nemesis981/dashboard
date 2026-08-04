@@ -1,9 +1,12 @@
 # Roadmap — `hw_anomaly_snapshots.top_processes` archival
 
-- **Status:** Design approved 2026-08-03 (operator) — split out from
+- **Status:** SHIPPED 2026-08-03 (`97175ba feat(hw-monitor): archive aged top_processes
+  blobs out of hw_anomaly_snapshots (piece 4)`) — split out from
   [[data-retention-and-archival-policy]] as its own small, independent,
-  immediately-buildable item. Called out by the operator as the best standalone value in
-  that whole scope. Implementation not yet started.
+  immediately-buildable item, called out by the operator as the best standalone value in
+  that whole scope, then built the same day. 18,010 rows archived, 34.4MB→837KB, verified
+  round-trip (HANDOFF 2026-08-03 §1). Header was stale until corrected 2026-08-04 — see
+  [roadmap-state-audit-2026-08-04](../audits/roadmap-state-audit-2026-08-04.md).
 
 ## What
 
