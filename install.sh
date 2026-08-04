@@ -663,6 +663,105 @@ install_suricata() {
 # STEP 5/9 — CLAMAV
 ###############################################################################
 
+# ── Memory placement for scan staging and /tmp ────────────────────────────────
+#
+# MEASURED 2026-08-04, not assumed: this box is RAM-bound, NOT disk-bound.
+# CPU iowait 0.0%, ~240 KB/s average writes, and no Nemesis process appears in
+# the top disk writers at all (the write load is journald/systemd). Meanwhile
+# RAM is the constraint — clamd alone is the single largest RSS consumer.
+#
+# Two defaults were quietly working against that, both inherited rather than
+# chosen:
+#
+#   1. systemd's tmp.mount ships with size=50%, so /tmp can claim half of RAM.
+#      Observed real usage is ~3 MB.
+#   2. ClamAV has no TemporaryDirectory by default, so archive extraction
+#      stages into /tmp — i.e. into RAM — bounded per scan by MaxScanSize
+#      (100M) but unbounded across concurrent scans.
+#
+# Together that is an unarbitrated claim on the scarce resource, on a box about
+# to gain a memory-inspection feature that needs transient RAM headroom and has
+# no fallback (you cannot scan memory from disk; temp files can go to an idle
+# disk perfectly well).
+#
+# NOTE: the sizing here is PROVISIONAL. It should be revisited by the RAM
+# budget model, which is a shared prerequisite for the memory-injection work
+# AND a direct input to the appliance hardware profile (ADR 0014's open
+# baseline item) — the hardware spec is a placeholder expected to converge from
+# real measurement, which is why the bound below is a PERCENTAGE and not an
+# absolute: it must scale with whatever hardware actually lands.
+configure_memory_bounds() {
+    info "Bounding /tmp and giving ClamAV an explicit scan-staging directory..."
+
+    # -- 1. Bound /tmp -------------------------------------------------------
+    # Options= REPLACES the unit's option list wholesale. Every option below is
+    # copied verbatim from the shipped unit; ONLY size= differs. Dropping
+    # mode=1777 here would break /tmp for every non-root process on the box.
+    # `%%` is systemd's escape for a literal percent — not a typo.
+    local dropin=/etc/systemd/system/tmp.mount.d
+    install -d -m 0755 "$dropin"
+    cat > "$dropin/nemesis-size.conf" <<'EOF'
+[Mount]
+Options=mode=1777,strictatime,nosuid,nodev,size=25%%,nr_inodes=1m,x-systemd.graceful-option=usrquota
+EOF
+    systemctl daemon-reload
+
+    # A tmpfs remount is non-destructive — it changes the limit, contents
+    # survive. Refuses (harmlessly) if current usage already exceeds the new
+    # cap, in which case the boot-time value applies instead.
+    if mount -o remount,size=25% /tmp 2>/dev/null; then
+        ok "/tmp bounded to 25% of RAM (was 50%)"
+    else
+        warn "/tmp bound written but live remount refused — applies at next boot."
+    fi
+
+    # -- 2. Explicit ClamAV scan-staging directory ---------------------------
+    # Disk-backed on purpose: disk is the idle resource, RAM is the contended
+    # one. Reversible in one line if a future measurement shows scan latency
+    # matters more than the RAM this frees.
+    local clamav_tmp=/var/tmp/nemesis-clamav
+    install -d -o clamav -g clamav -m 0750 "$clamav_tmp" 2>/dev/null \
+        || install -d -m 0750 "$clamav_tmp"
+    if [ -f /etc/clamav/clamd.conf ]; then
+        if grep -qE '^[[:space:]]*TemporaryDirectory' /etc/clamav/clamd.conf; then
+            sed -i "s|^[[:space:]]*TemporaryDirectory.*|TemporaryDirectory $clamav_tmp|" \
+                /etc/clamav/clamd.conf
+        else
+            printf 'TemporaryDirectory %s\n' "$clamav_tmp" >> /etc/clamav/clamd.conf
+        fi
+        ok "ClamAV scan staging set to $clamav_tmp (off tmpfs)"
+    else
+        warn "clamd.conf not found — ClamAV scan staging left at its default (/tmp)."
+    fi
+
+    # -- 3. AppArmor MUST be told about the new path -------------------------
+    # NOT optional, and the reason is worth stating: Ubuntu's clamd profile
+    # permits /tmp/ and /tmp/** but nothing under /var/tmp. Without this,
+    # clamd is DENIED mknod in the staging directory and archive extraction
+    # fails — and clamdscan then reports "Infected files: 0" for an archive it
+    # never opened. Verified live 2026-08-04: the denial presents as a CLEAN
+    # SCAN, not as an error, so every archive would have been silently passed.
+    # A config change that turns the scanner off while it keeps saying "clean"
+    # is a security regression, so this step fails loudly rather than warning.
+    if [ -d /etc/apparmor.d ] && [ -f /etc/apparmor.d/usr.sbin.clamd ]; then
+        install -d -m 0755 /etc/apparmor.d/local
+        touch /etc/apparmor.d/local/usr.sbin.clamd
+        if ! grep -q "nemesis-clamav" /etc/apparmor.d/local/usr.sbin.clamd; then
+            printf '  %s/ rw,\n  %s/** krw,\n' "$clamav_tmp" "$clamav_tmp" \
+                >> /etc/apparmor.d/local/usr.sbin.clamd
+        fi
+        if apparmor_parser -r /etc/apparmor.d/usr.sbin.clamd 2>/dev/null; then
+            ok "AppArmor updated to allow ClamAV staging in $clamav_tmp"
+        else
+            # Reverting is safer than shipping a scanner that reports clean
+            # because it cannot open anything.
+            sed -i "s|^[[:space:]]*TemporaryDirectory.*|TemporaryDirectory /tmp|" \
+                /etc/clamav/clamd.conf
+            warn "AppArmor reload FAILED — reverted ClamAV staging to /tmp so archive scanning keeps working."
+        fi
+    fi
+}
+
 install_clamav() {
     step_header "5/9" "Installing ClamAV + Malware Detection Dependencies"
 
@@ -672,6 +771,10 @@ install_clamav() {
     # Stop the daemon first to avoid freshclam database lock conflicts
     systemctl stop clamav-daemon 2>/dev/null || true
     freshclam || warn "freshclam update returned an error — definitions will update on the next scheduled run."
+
+    # Must run BEFORE the daemon starts, or clamd comes up with the old config
+    # and keeps staging into tmpfs until something restarts it.
+    configure_memory_bounds
 
     systemctl enable clamav-daemon
     systemctl start clamav-daemon
