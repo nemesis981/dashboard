@@ -2291,48 +2291,52 @@ this entry is the proposal, not the implementation.
       (`ensure_enrolled`/`enroll`/`pre_enrollment_scan` in `nemesis_agent/enrollment.py`;
       `first_connect`/`extended_absence`/TOFU-fingerprint in `hw_monitor.py`).
 
-- [ ] **[FIX-NOW] `parse_alert` stores the wrong field as `rule_name` — every alert row and
-  alert email carries the Classification block instead of the rule name.** `parse_alert()`
-  (`alert_manager/firewall.py`) splits a Suricata `fast.log` line on `[**]` and takes
+- [x] **[FIX-NOW] `parse_alert` stores the wrong field as `rule_name` — FIXED 2026-08-04
+  (`53bf7ed`). Historical rows NOT backfilled — see the open decision below.** `parse_alert()`
+  (`alert_manager/firewall.py`) split a Suricata `fast.log` line on `[**]` and took
   **`parts[2]`** as the rule name. In that format the rule name is in **`parts[1]`**; `parts[2]`
-  is the Classification/Priority block. The result is that `alerts.rule_name` holds
-  classification text, and the actual rule name is discarded entirely.
-    - [ ] **Confirmed against a real Suricata line, not a synthetic one:**
+  is the Classification/Priority block. The result was that `alerts.rule_name` held
+  classification text going forward, and the actual rule name was discarded entirely.
+    - [x] **Confirmed against a real Suricata line, not a synthetic one:**
       ```
       input : ... [**] [1:2001219:20] ET SCAN Potential SSH Scan [**] [Classification: Attempted
               Information Leak] [Priority: 2] {TCP} ...
       stored: rule_name = '[Classification: Attempted Information Leak] [Priority: 2] {'
       lost  : 'ET SCAN Potential SSH Scan'
       ```
-    - [ ] **Why it has stayed invisible:** the stored value is plausible-looking text of about
+    - [x] **Why it stayed invisible:** the stored value was plausible-looking text of about
       the right length, truncated to 50 chars by `insert_alert`'s `rule_name[:50]`
       (`core_module/alert_watcher/alert_watcher.py:138`, called from `process_new_alert`).
-      Nothing errors, nothing is empty, and `classification` is populated correctly in its own
-      column — so a reader sees a populated field and no reason to doubt it. This is the
+      Nothing errored, nothing was empty, and `classification` was populated correctly in its own
+      column — so a reader saw a populated field and no reason to doubt it. This was the
       "instrument reporting a wrong answer confidently" shape rather than a visible failure.
-    - [ ] **Blast radius is wider than the column.** `alert_watcher.py` renders `Rule:
+    - [x] **Blast radius was wider than the column.** `alert_watcher.py` renders `Rule:
       {rule_name}` into the alert email (`core_module/alert_watcher/alert_watcher.py:203`), so
-      that string has been going out to operators. Any UI, export, or triage view reading
-      `rule_name` shows the same. It is also duplicative — the classification is already
-      captured correctly elsewhere, so the field costs storage while carrying no unique
-      information.
-    - [ ] **Fix the index** and confirm against a real `fast.log` line, not a hand-built one —
-      the synthetic line used by `test_quarantine.py` happens to have the same shape, so a
-      synthetic-only check can pass while production stays wrong.
-    - [ ] **Decide what to do about existing rows.** They contain classification text in
-      `rule_name`. A migration could strip the prefix, or the rows can be left and the fix
-      applied forward-only — but the choice should be explicit, since a mixed column silently
-      means two different things depending on row age.
-    - [ ] **Check the other extracted fields against the same line shape** while in here.
+      that string went out to operators. Any UI, export, or triage view reading `rule_name`
+      showed the same. It was also duplicative — the classification was already captured
+      correctly elsewhere, so the field cost storage while carrying no unique information.
+    - [x] **Fix landed (`53bf7ed`):** reads `parts[1]`, strips the leading `[gid:sid:rev]`
+      bracket via a single split (a rule message may legitimately contain further brackets,
+      which now correctly stay part of the name). 18/18 checks in the new
+      `alert_manager/test_parse_alert.py`, confirmed against the real captured line above, not
+      just a hand-built one.
+    - [ ] **OPEN DECISION FOR PAUL — NOT MADE, NOT ACTED ON.** Existing `alerts` rows written
+      before `53bf7ed` still hold classification text in `rule_name` from the pre-fix code —
+      this is historical data, deliberately untouched by the fix commit. A migration could strip
+      the prefix on old rows, or they could be left as-is with the fix applied forward-only only
+      — but the choice belongs to Paul, since a mixed column silently means two different things
+      depending on row age, and no backfill has been performed or scheduled without his explicit
+      direction. Do not act on this without that direction.
+    - [x] **Other extracted fields checked against the same line shape while fixing this.**
       `rule_id`, `classification`, `protocol`, and the src/dst parse all come from the same
-      string-splitting block; one confirmed off-by-one is reason to verify its neighbours
-      rather than assume they are fine.
-    - [ ] **Note for whoever fixes it:** `alert_manager/test_quarantine.py`'s Rule 11 label
-      (`69ade29`) is deliberately placed in BOTH the rule-name segment and the Classification
-      specifically so it survives this fix. Fixing `parse_alert` will not break that label, by
-      design — but it will change which of the two placements is the one doing the work, so
-      re-run that check afterwards rather than assuming.
-    - [ ] Found by Window 1, 2026-08-04, while verifying the Rule 11 cleanup label actually
+      string-splitting block; `test_other_fields_unaffected` in the new test suite independently
+      confirms all of them were already correct and remain so — the bug was isolated to
+      `rule_name`, not a wider parsing defect.
+    - [x] **Rule 11 label interaction confirmed, not just predicted.** `test_quarantine.py`'s
+      label (`69ade29`), placed in BOTH the rule-name segment and the Classification specifically
+      to survive this fix, is unbroken by it — the fix changes which of the two placements is
+      doing the work, exactly as anticipated when that label was written.
+    - [x] Found by Window 1, 2026-08-04, while verifying the Rule 11 cleanup label actually
       reached the database — the label did not land where expected, and tracing why surfaced
       this. Verified against live code by Window 2 before this entry was committed (the
       `parts[2]`/`parts[1]` split reproduced directly against `firewall.py`'s `parse_alert`;
