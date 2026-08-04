@@ -2021,6 +2021,30 @@ this entry is the proposal, not the implementation.
       `taskkill` failure — wrong session/access, or a scheduled-task relaunch race between
       `taskkill` and the later `schtasks /Delete`) not yet diagnosed; entry left open as found.
 
+- [ ] **A revoked device has no idea it was revoked, and neither does anyone reading its logs.**
+  `hw_monitor` refuses an unapproved device by returning **HTTP 200** with
+  `{"ok":false,"status":"not_approved"}`. The agent's `_post_payload()` only checks
+  `r.status_code == 200`, so it logs `Posted payload to ...` and carries on indefinitely.
+    - [ ] **Verified live 2026-08-03:** after a revoke at 15:48:02, the agent POSTed on schedule
+      at 15:52:30 and logged success; the server correctly did not advance `agent_last_seen`.
+      Enforcement worked perfectly — the *reporting* is what misleads.
+    - [ ] **Server side is silent too:** the not-approved branch writes no log line at all, so
+      nothing on the server records that a revoked device is still trying. During this
+      investigation that produced a false negative — grepping hw-monitor's journal for
+      rejections returns zero whether or not any occurred.
+    - [ ] **Why it matters:** an operator revoking a suspected-stolen device gets no confirmation
+      the device actually stopped, and the device's own logs claim it is still protected. Both
+      halves read as "fine" while the truth is "cut off".
+    - [ ] **Fix:** log the refusal server-side (rate-limited — a revoked agent will retry
+      forever), and have the agent inspect the response body rather than only the status code,
+      so it can report an explicit "revoked / not approved" state instead of a false success.
+    - [ ] **Reviewed against live code 2026-08-04 (Window 2), confirmed exactly as described:**
+      `core_module/hw_monitor/hw_monitor.py` sends `send_response(200)` with the
+      `not_approved` body on the unapproved-device branch, no log line either side of it; the
+      code's own inline comment even documents relying on this ("nemesis_agent checks
+      `r.status_code == 200` and nothing else"); `nemesis_agent/agent.py:598`
+      (`_post_payload`) checks only `r.status_code == 200`. Real, still-open gap, not stale.
+
 - [ ] **A signed ruleset update can be rolled BACK to an older-but-genuine ruleset.**
   Content authenticity is now bound into the signed task envelope (`sha256` + `size` in
   `params`, verified by the agent before install — ADR 0004 Stage 1). That closes
