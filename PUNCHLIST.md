@@ -2421,3 +2421,20 @@ this entry is the proposal, not the implementation.
       (`docs/roadmap/agent-rebuild-config-driven.md`). Found and verified by Window 1, 2026-08-04,
       confirmed directly against `security.py:54` (`if c.status != "ESTABLISHED": continue`)
       before this entry was committed.
+
+- [ ] **`_top_processes()` is a top-10-by-CPU sample, not process enumeration.**
+  `nemesis_agent/modules/security.py:34-47` sorts running processes by CPU usage and slices
+  `[:10]` — it never looks at the rest.
+    - [ ] **Impact:** it cannot support process-launch detection (a quiet process simply never
+      appears in a CPU-sorted top-10), and it is insufficient for the planned memory-injection
+      work, which needs full enumeration as step zero. A low-CPU malicious process — exactly the
+      kind an attacker who cares about staying unnoticed would run — is the case this sampling
+      approach never surfaces.
+    - [ ] **Fix shape:** full enumeration, with the top-N view retained as a *presentation*
+      concern (what the dashboard shows by default) rather than a *collection* one (what the
+      agent actually observes).
+    - [ ] Part of the technique-independent observation-layer foundation
+      (`docs/roadmap/agent-rebuild-config-driven.md`) and a named blocker for
+      `memory-injection-detection-design.md`. Found and verified by Window 1, 2026-08-04,
+      confirmed directly against `security.py:34-47` (the `sorted(...)[:10]` slice) before this
+      entry was committed.
