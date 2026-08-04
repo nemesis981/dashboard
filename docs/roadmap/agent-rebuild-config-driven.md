@@ -1,12 +1,56 @@
 # Roadmap — Agent rebuild (config-driven, centrally-managed client)
 
-**Status:** parked (capture-only — what + why; do NOT build yet). Ties to ADR 0005, the VM
-Lab, and `docs/operation/CONFIG_CHANGE_PROCEDURE.md`.
+**Status: parked → ACTIVE (2026-08-04) for the observation-layer foundation below.** The
+config-driven rebuild described in the rest of this doc remains capture-only/parked as
+originally captured. What's now active is a narrower, technique-independent foundation that
+several other paused/in-progress efforts depend on — see "Observation-layer foundation" below.
+Ties to ADR 0005, the VM Lab, and `docs/operation/CONFIG_CHANGE_PROCEDURE.md`.
 
 A thin, config-driven agent: intelligence lives in the server config; the client reads and
 applies it.
 
 ---
+
+## Observation-layer foundation (active, 2026-08-04) — build order
+
+Approved by the operator as a standalone foundation, independent of the rest of this doc's
+config-driven rebuild. Build order matters — each item below is a real prerequisite for the
+ones after it, not an arbitrary sequence:
+
+1. **Agent integrity attestation** — first, because every other item's output is only as
+   trustworthy as the agent reporting it. Load-bearing for access control, not just detection
+   fidelity, once any firewall grant keys off an agent-reported event (see the UDP policy
+   scoping work).
+2. **Full process enumeration** — replaces the current top-10-by-CPU sample, which cannot
+   support process-launch detection (a quiet process never appears in it) and is insufficient
+   for any future memory-injection work, which needs full enumeration as step zero.
+3. **UDP-visible connection reporting** — the agent's connection filter currently excludes all
+   UDP traffic (it filters on TCP's `ESTABLISHED` state, which UDP sockets never have), making
+   UDP-based C2 invisible to it today, independent of anything else in this list.
+4. **IPv6 connection-type fix** — local-vs-remote device classification currently only
+   considers IPv4 local addresses, so an IPv6-only local device is misclassified as remote. Fails
+   toward the more restrictive classification, so this is a misclassification, not an open
+   door — but it's the same IPv4-only-assumption class already found and fixed once in the Tier 2
+   TLS gate.
+5. **Event-triggered early check-in** — the agent polls immediately on a qualifying local event,
+   rate-limited by the existing poll-interval floor, rather than waiting up to the default
+   interval for anything event-driven to reach the server. **Designed jointly with Tier 3's
+   local-trigger path** ([adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md))
+   rather than built twice — Tier 3's whole premise is deciding locally without a server
+   round-trip at all; this is "get to the server faster when a round-trip is fine," a related but
+   distinct need that shouldn't duplicate Tier 3's design.
+
+**Why this is technique-independent and can start now, without waiting on any paused
+detection-technique decision:** every plausible memory-injection or zero-day detection approach
+needs full process visibility, and all of them benefit from UDP- and IPv6-correct connection
+reporting. The foundation doesn't block on which module ends up owning the executing-payload
+case (see [memory-injection-detection-design.md](memory-injection-detection-design.md)) — only
+the detection technique itself does.
+
+**Carried forward from CLAUDE.md, not re-derived:** this rebuild includes the actor seam on
+agent-related tables and is built auth-aware at the product's two hook points for it — the
+standing instruction is to fold these into this rebuild rather than add them a second time
+later.
 
 ## Two-phase bootstrap
 
