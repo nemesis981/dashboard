@@ -4316,6 +4316,67 @@ def _anchor_load_alert(rule_id) -> str:
     ]
     if r["explanation"]:
         lines.append(f"Explanation on record:\n{r['explanation']}")
+
+    # ── Path 1 auto-context ──────────────────────────────────────────────
+    # Facts the server can already read, pulled in without the user asking.
+    # Read from the DB and from never_block_set() rather than via
+    # firewall.list_blocked(), which needs session credentials a loader does
+    # not have. Reading `quarantines` is also strictly better here: it carries
+    # HISTORY, so "first time" and "fifth time this week" are distinguishable.
+    src = (r["src_ip"] or "").strip()
+    if src:
+        extra = []
+        try:
+            conn = _dm_conn()
+            try:
+                q_now = conn.execute(
+                    "SELECT expires_at FROM quarantines WHERE ip=? AND status='active' "
+                    "ORDER BY id DESC LIMIT 1", (src,)).fetchone()
+                q_hist = conn.execute(
+                    "SELECT COUNT(*) AS n FROM quarantines WHERE ip=?", (src,)).fetchone()
+                dev = conn.execute(
+                    "SELECT friendly_name, device_type, trusted, mac FROM devices "
+                    "WHERE ip=?", (src,)).fetchone()
+            finally:
+                conn.close()
+
+            if q_now:
+                extra.append(f"This address is CURRENTLY quarantined "
+                             f"(expires {q_now['expires_at']}).")
+            prior = int(q_hist["n"]) if q_hist else 0
+            extra.append(f"Times this address has been quarantined before: {prior}"
+                         + (" (first time seen)" if prior == 0 else ""))
+            if dev:
+                # Changes the question entirely: a known trusted device behaving
+                # oddly is a different problem from an unknown external host.
+                extra.append(
+                    f"This address belongs to a KNOWN DEVICE on this network: "
+                    f"{dev['friendly_name'] or 'unnamed'} "
+                    f"(type {dev['device_type'] or 'unknown'}, MAC {dev['mac']}, "
+                    f"{'trusted' if dev['trusted'] else 'NOT marked trusted'}).")
+            else:
+                extra.append("This address does not match any known device on this network.")
+        except Exception:
+            # Enrichment is additive. If it cannot be read, say so rather than
+            # omitting it silently -- an absent line is indistinguishable from
+            # "there was nothing to report", which is a different fact.
+            log.exception("chat: alert enrichment failed for %s", rule_id)
+            extra.append("(current firewall/device context could not be read)")
+
+        try:
+            from firewall import never_block_set
+            if src in never_block_set():
+                extra.append("PROTECTED ADDRESS: this is on the never-block list "
+                             "(this host's own address or gateway) and cannot be "
+                             "blocked by any action, at any authority level.")
+        except Exception:
+            log.exception("chat: never_block_set check failed")
+            extra.append("(never-block status could not be checked)")
+
+        if extra:
+            lines.append("\nCURRENT STATE (read now, not when the alert fired):")
+            lines.extend(f"- {e}" for e in extra)
+
     if cached and cached["response_text"]:
         lines.append(f"\nAnalysis already shown to the user:\n{cached['response_text']}")
     return "\n".join(lines)
@@ -4375,8 +4436,12 @@ def api_ai_chat_ask():
                         "reason": "surface and row_id are required"}), 400
     try:
         from modules.ai_engine import ask_followup
+        # tier is a client-supplied hint, not a model ID. resolve_chat_tier()
+        # inside ask_followup defaults DOWN on anything unrecognised, so a
+        # malformed or hostile value cannot raise spend.
         result = ask_followup(surface, row_id, question,
-                              actor=_current_actor_label())
+                              actor=_current_actor_label(),
+                              tier=str(data.get("tier") or "").strip())
         return jsonify(result), (200 if result.get("ok") else 400)
     except Exception as e:
         log.exception("chat: ask_followup failed")
@@ -10076,6 +10141,17 @@ def dashboard():
     incident_banner_html = ""
     incident_js_html = ""
     incident_state_js = "window._nemesisIncidentState={};"
+    # Shared chat widget. Empty strings when ai_engine is unavailable, so the
+    # template renders identically minus the affordance.
+    chat_widget_html = ""
+    chat_js_html = ""
+    try:
+        from modules.ai_engine import (get_chat_widget_html as _ai_cwidget,
+                                       get_chat_js as _ai_cjs)
+        chat_widget_html = _ai_cwidget()
+        chat_js_html = _ai_cjs()
+    except Exception:
+        pass
     try:
         from modules.ai_engine import get_incident_banner_html as _ai_ibanner, get_incident_js as _ai_ijs, get_incident_state as _ai_istate
         incident_banner_html = _ai_ibanner()
@@ -10226,6 +10302,7 @@ def dashboard():
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     {incident_js_html}
+    {chat_js_html}
     <script>{incident_state_js}</script>
 </head>
 <body>
@@ -10489,37 +10566,7 @@ def dashboard():
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
             </div>
-            <!-- Contextual chat. Visible whenever the AI engine is active: the
-                 answer to per-question billing is to SHOW the cost, not to bury
-                 the feature behind a second opt-in nobody finds. -->
-            <div id="alertChatSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-                    <strong style="color:#00d4ff;font-size:0.95em">
-                        <span class="tier-text"
-                              data-beginner="Ask a follow-up question about this alert"
-                              data-intermediate="Ask about this alert"
-                              data-pro="Follow-up">Ask about this alert</span>
-                    </strong>
-                    <span id="chatTurnsLeft" style="font-size:0.78em;color:#888"></span>
-                </div>
-                <!-- Always-on cost notice. Not dismissible, not behind a tooltip. -->
-                <div id="chatCostNotice"
-                     style="background:#1a1f36;border:1px solid #2a3f5f;border-radius:4px;
-                            padding:7px 10px;margin-bottom:9px;font-size:0.78em;color:#9fb3d1">
-                    <span style="color:#ffc107">&#9432;</span>
-                    <span id="chatCostText">Each question is a live AI request that costs money.</span>
-                </div>
-                <div id="chatLog" style="max-height:230px;overflow-y:auto;margin-bottom:9px;font-size:0.85em"></div>
-                <textarea id="chatInput" rows="2" placeholder="e.g. why does this matter for my network?"
-                    style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;
-                           border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
-                <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
-                    <button id="chatAskBtn" onclick="askChatFollowup()"
-                        style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;
-                               cursor:pointer;border-radius:3px;font-weight:bold">Ask</button>
-                    <span id="chatStatus" style="font-size:0.8em;color:#ccc"></span>
-                </div>
-            </div>
+            {chat_widget_html}
             <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
                     <strong style="color:#00d4ff;font-size:0.95em">
@@ -10929,7 +10976,7 @@ def dashboard():
                     "Analyzing…"
                 ) + "</p>";
             loadNotes(ruleId);
-            initChat("alert", ruleId);
+            nemChatInit("alert", ruleId);
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{
@@ -11085,127 +11132,10 @@ def dashboard():
                 .catch(e => alert("Error: " + e));
         }}
 
-        // ── Contextual chat ──────────────────────────────────────────────
-        // The cost line is rendered on EVERY state refresh and every answer,
-        // never cached and never hidden behind an expander: this is the one
-        // surface where the user spends money a click at a time.
-        var _chatSurface = null, _chatRowId = null;
-
-        function _chatMoney(v) {{
-            if (v === null || v === undefined) return null;
-            return "$" + Number(v).toFixed(4);
-        }}
-
-        function initChat(surface, rowId) {{
-            _chatSurface = surface;
-            _chatRowId = rowId;
-            var sec = document.getElementById("alertChatSection");
-            document.getElementById("chatLog").innerHTML = "";
-            document.getElementById("chatInput").value = "";
-            document.getElementById("chatStatus").textContent = "";
-            sec.style.display = "none";
-            fetch("/api/ai/chat/state?surface=" + encodeURIComponent(surface)
-                  + "&row_id=" + encodeURIComponent(rowId))
-                .then(r => r.json())
-                .then(st => {{
-                    if (!st.ok || !st.available) return;   // no affordance if AI is off
-                    sec.style.display = "block";
-                    _renderChatMeta(st);
-                }})
-                .catch(() => {{}});
-        }}
-
-        function _renderChatMeta(st) {{
-            var left = st.turns_left;
-            document.getElementById("chatTurnsLeft").textContent =
-                left + " of " + st.turn_cap + " questions left";
-            var spent = _chatMoney(st.spent_usd);
-            var txt = "Each question is a live AI request that costs money.";
-            if (spent !== null) {{
-                txt += " Spent on this finding so far: " + spent;
-                // An incomplete total must say so rather than silently
-                // under-reporting what was actually billed.
-                if (st.spend_partial) txt += " (at least — some calls could not be priced)";
-            }} else if (st.spend_partial) {{
-                txt += " Cost of earlier questions could not be determined.";
-            }}
-            document.getElementById("chatCostText").textContent = txt;
-            document.getElementById("chatAskBtn").disabled = (left <= 0);
-        }}
-
-        function _appendChatTurn(q, a, costUsd) {{
-            var log = document.getElementById("chatLog");
-            var wrap = document.createElement("div");
-            wrap.style.cssText = "margin-bottom:10px;border-bottom:1px solid #222;padding-bottom:8px";
-            var qEl = document.createElement("div");
-            qEl.style.cssText = "color:#00d4ff;margin-bottom:3px";
-            qEl.textContent = "You: " + q;
-            var aEl = document.createElement("div");
-            aEl.style.cssText = "color:#ddd;white-space:pre-wrap";
-            aEl.textContent = a;
-            var cEl = document.createElement("div");
-            cEl.style.cssText = "color:#777;font-size:0.75em;margin-top:4px";
-            var money = _chatMoney(costUsd);
-            cEl.textContent = money === null
-                ? "cost unavailable for this model"
-                : "this question cost " + money;
-            wrap.appendChild(qEl); wrap.appendChild(aEl); wrap.appendChild(cEl);
-            log.appendChild(wrap);
-            log.scrollTop = log.scrollHeight;
-        }}
-
-        function askChatFollowup() {{
-            var input = document.getElementById("chatInput");
-            var q = (input.value || "").trim();
-            if (!q) return;
-            var btn = document.getElementById("chatAskBtn");
-            var status = document.getElementById("chatStatus");
-            btn.disabled = true;
-            status.textContent = "asking…";
-            fetch("/api/ai/chat/ask", {{
-                method: "POST",
-                headers: {{"Content-Type": "application/json"}},
-                body: JSON.stringify({{surface: _chatSurface, row_id: _chatRowId, question: q}})
-            }})
-                .then(r => r.json())
-                .then(d => {{
-                    if (!d.ok) {{
-                        // Surface the real reason. "Out of questions", "spend cap
-                        // reached" and "rate limited" need different responses
-                        // from the user, so they must not collapse into one
-                        // generic failure message.
-                        status.textContent = d.reason || "could not ask that question";
-                        btn.disabled = false;
-                        return;
-                    }}
-                    input.value = "";
-                    status.textContent = "";
-                    _appendChatTurn(q, d.answer, d.cost_usd);
-                    if (d.record_failed) {{
-                        status.textContent = "answered, but this question could not be "
-                            + "added to the spend record shown above";
-                    }}
-                    fetch("/api/ai/chat/state?surface=" + encodeURIComponent(_chatSurface)
-                          + "&row_id=" + encodeURIComponent(_chatRowId))
-                        .then(r => r.json())
-                        .then(st => {{ if (st.ok) _renderChatMeta(st); }})
-                        .catch(() => {{}});
-                    btn.disabled = false;
-                }})
-                .catch(e => {{
-                    status.textContent = "error: " + e;
-                    btn.disabled = false;
-                }});
-        }}
-
         function closeModal() {{
             document.getElementById("alertModal").style.display = "none";
             document.getElementById("btnReport").style.display = "none";
-            document.getElementById("alertChatSection").style.display = "none";
-            document.getElementById("chatLog").innerHTML = "";
-            document.getElementById("chatInput").value = "";
-            _chatSurface = null;
-            _chatRowId = null;
+            nemChatClose();
             document.getElementById("alertNotesSection").style.display = "none";
             document.getElementById("relatedNotesList").style.display = "none";
             document.getElementById("noteInput").value = "";
