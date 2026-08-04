@@ -999,6 +999,77 @@ def _no_store(resp):
     return resp
 
 
+def _modules_dm():
+    """The modules-side DataManager, or raise if the loader has not run yet.
+
+    Kept as a function rather than a module-level import so that a dashboard
+    started before `modules_loader.init()` still boots — the caller treats a
+    raise as "no attribution available", never as a fatal error.
+    """
+    from modules import get_data_manager
+    return get_data_manager()
+
+
+# ── Attribution: stamp the acting user on every logged DB write ──────────────
+@app.before_request
+def _set_dm_actor():
+    """Tell the Data Manager who is acting, for the duration of this request.
+
+    ADR 0006 stamps `current_actor()` on every logged write automatically, so
+    once this is set no per-write plumbing is needed. Until 2026-08-04 nothing
+    called `set_actor()` outside tests, so every row in `dm_operation_log`
+    recorded a NULL actor — the audit trail existed but never said who.
+
+    Unauthenticated requests set None EXPLICITLY rather than leaving the
+    previous value: see _clear_dm_actor for why that distinction is the whole
+    safety property here.
+    """
+    # BOTH DataManager instances, deliberately. dashboard keeps its own via
+    # _dm() (see its docstring) while modules use modules.get_data_manager().
+    # The actor is per-instance thread-local state, so setting one leaves every
+    # write through the other unattributed — half-wired attribution that reads
+    # as complete. Having two instances is free for connections; it is NOT free
+    # here.
+    actor = None
+    try:
+        if current_user.is_authenticated:
+            # username, not display name: the stable identifier the users table
+            # is keyed on. Display names are editable.
+            actor = f"user:{current_user.username}"
+    except Exception:
+        actor = None
+    for _get in (_dm, _modules_dm):
+        try:
+            _get().set_actor(actor)
+        except Exception:
+            # Attribution must never take the dashboard down. A missing actor
+            # is a NULL in the audit trail — exactly the pre-2026-08-04 state,
+            # degraded rather than broken.
+            auth_log.exception("actor: set failed")
+
+
+@app.teardown_request
+def _clear_dm_actor(exc=None):
+    """Clear the actor when the request ends. THIS IS THE LOAD-BEARING HALF.
+
+    The actor is `threading.local()` and Flask reuses worker threads, so a
+    value left set here is inherited by whatever request lands on that thread
+    next. That would attribute one user's writes to another — and unlike a NULL
+    actor, which is honestly empty, a leaked actor is confidently wrong. Every
+    background write that happens to run on a request thread would inherit it
+    too.
+
+    teardown_request rather than after_request: teardown runs even when the
+    view raised, and an actor surviving an exception is exactly the case that
+    would be hardest to notice.
+    """
+    for _get in (_dm, _modules_dm):
+        try:
+            _get().clear_actor()
+        except Exception:
+            auth_log.exception("actor: clear failed")
+
+
 # ── First-run + auth guard (covers dashboard.py AND all module routes) ────────
 @app.before_request
 def _enforce_setup_and_auth():
