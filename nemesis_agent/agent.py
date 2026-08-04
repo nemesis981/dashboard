@@ -284,6 +284,20 @@ def _collect_payload(conf):
         # .get() calls, so an unknown key is ignored: the agent can report this
         # today and the dashboard display follows as an approved follow-on.
         "key_protection_tier": _key_protection_tier(),
+        # Tier 1 self-attestation. Same argument as key_protection_tier above:
+        # report it now, let the display follow.
+        #
+        # This is a SELF-REPORT and the server treats it as one — `attested`
+        # means this agent said its files matched a manifest, not that anything
+        # independent confirmed it. An attacker who replaced the agent replaced
+        # this too. It raises the cost of tampering; it does not establish
+        # integrity.
+        #
+        # Computed inline on each beat rather than cached: hashing the agent's
+        # own ~40 source files costs single-digit milliseconds against a poll
+        # interval measured in minutes, and a cache would need invalidating on
+        # exactly the event this exists to detect.
+        "attestation": _attestation_state(),
     }
 
     return {
@@ -381,6 +395,26 @@ def _migrate_key_material():
     except Exception as e:
         log.debug("could not clear private_key_path: %s", e)
     log.info("device key is now protected (tier=%s)", backend.tier_id)
+
+
+def _attestation_state():
+    """Tier 1 self-check result for the heartbeat, or ABSENT if it cannot run.
+
+    Never raises. A self-check that could break the heartbeat loop would be a
+    worse outcome than the tampering it looks for — telemetry is this loop's
+    primary job.
+
+    Every failure path returns 'absent', never 'attested'. Same principle as
+    `_key_protection_tier`'s 'unknown' below: a failed read must not masquerade
+    as a clean result. The server enforces the same rule independently, so a bug
+    here cannot manufacture a healthy device.
+    """
+    try:
+        import attest
+        return attest.evaluate(agent_version=attest.AGENT_VERSION)
+    except Exception as exc:                                 # noqa: BLE001
+        log.warning("attestation self-check failed: %s", exc)
+        return {"state": "absent", "detail": "self-check error: %s" % exc}
 
 
 def _key_protection_tier():
@@ -548,7 +582,17 @@ def _handle_response_tasks(response, device_id):
                         verified["task_id"])
             continue
         try:
-            if verified["action"] == task_mod.ROTATE_ACTION:
+            if verified["action"] == task_mod.ATTEST_ACTION:
+                # NEVER routed through _dispatch, for the same reason rotation
+                # is not (see below): the loopback listener is unauthenticated,
+                # and a local process able to install its own manifest would
+                # define what "intact" means for this agent. Handling it here
+                # means the only path to it runs through verify_task.
+                import attest
+                n = attest.install_manifest(
+                    (verified.get("params") or {}).get("manifest") or {})
+                result = {"installed": n}
+            elif verified["action"] == task_mod.ROTATE_ACTION:
                 # NEVER routed through _dispatch. The command listener on
                 # 127.0.0.1:5002 is UNAUTHENTICATED, so an action reachable from
                 # the dispatcher is an action any local process can invoke — and

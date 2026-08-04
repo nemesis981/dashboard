@@ -414,6 +414,16 @@ def verify_task(envelope: dict, device_id: str, pinned_key, now=None) -> dict:
 #: dispatcher, which is the single path it must never take.
 ROTATE_ACTION = "rotate_server_key"
 
+#: Tier 1 attestation manifest delivery. Same hazard as ROTATE_ACTION above and
+#: handled the same way — special-cased in `_handle_response_tasks`, NEVER
+#: reachable from `_CommandHandler._dispatch`. The loopback listener on
+#: 127.0.0.1:5002 is unauthenticated, so an action reachable from the dispatcher
+#: is one any local process can invoke; a process that could install its own
+#: manifest would get to define what "intact" means and make this agent report
+#: `attested` against its own tampering. Must stay downstream of the signature
+#: check, for exactly the reason rotation does.
+ATTEST_ACTION = "attest_manifest"
+
 
 def verify_rotation(envelope: dict, device_id: str):
     """Return the new public key object a rotation carries, or raise.

@@ -1624,6 +1624,11 @@ def _update_agent_device(payload, remote_ip=None):
             try:
                 from alert_manager import attestation
                 attestation.record_attestation(conn, device_id, ah)
+                # Self-sustaining: a device that is not attested gets a manifest
+                # queued on this beat, deduplicated against one already in
+                # flight. Without this, attestation only ever works when an
+                # operator remembers to trigger it by hand.
+                ensure_manifest_queued(conn, device_id)
             except Exception as _ae:                      # noqa: BLE001
                 log.warning("attestation record failed for %s: %s", device_id, _ae)
             conn.commit()
@@ -1983,6 +1988,51 @@ def enqueue_rotation(device_id, actor=None):
     return enqueue_task(device_id, server_keys.ROTATE_ACTION, {}, actor=actor)
 
 
+def enqueue_manifest(device_id, actor=None):
+    """Queue a Tier 1 attestation manifest for one device. Returns task_id.
+
+    Params are EMPTY on purpose. Like `enqueue_rotation` above, the payload is
+    built at DELIVERY (in `_tasks_for_response`) rather than here: a manifest
+    describes the agent build the server currently ships, and one frozen at
+    queue time would be delivered stale after any agent update — reporting every
+    updated device as build-skewed for no reason.
+    """
+    return enqueue_task(device_id, "attest_manifest", {}, actor=actor)
+
+
+def ensure_manifest_queued(conn, device_id):
+    """Queue a manifest if the device has none and none is already in flight.
+
+    This is what makes attestation self-sustaining rather than a manual trigger:
+    a device reporting anything other than `attested` gets a manifest on its next
+    beat, and one already pending or dispatched suppresses a duplicate.
+
+    The in-flight check is load-bearing. Without it every heartbeat from an
+    unattested device queues another task, which on a poll cadence is a
+    slow-motion queue flood — and a device is unattested for the entire window
+    between first contact and its first successful attestation, which is exactly
+    when heartbeats are most frequent.
+
+    Best-effort: never raises into the heartbeat path. Failing to queue leaves
+    the device `absent`, which is the truthful state anyway.
+    """
+    try:
+        row = conn.execute(
+            "SELECT attestation_state FROM agent_devices WHERE device_id=?",
+            (device_id,)).fetchone()
+        if row and row[0] == "attested":
+            return None
+        pending = conn.execute(
+            "SELECT 1 FROM scan_tasks WHERE device_id=? AND action='attest_manifest' "
+            "AND status IN ('pending','dispatched') LIMIT 1", (device_id,)).fetchone()
+        if pending:
+            return None
+        return enqueue_manifest(device_id, actor="system")
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("could not queue manifest for %s: %s", device_id, exc)
+        return None
+
+
 def rotation_readiness():
     """Per-device rotation state for the operator, plus whether cutover is safe.
 
@@ -2219,6 +2269,16 @@ def _tasks_for_response(device_id):
             if action == server_keys.ROTATE_ACTION:
                 envelopes.append(server_keys.build_rotation_task(
                     device_id, task_id=task_id, sign_with=signer, now=now))
+            elif action == "attest_manifest":
+                # Built HERE, not at queue time, so the manifest always
+                # describes the build the server ships right now. Goes through
+                # the same build_task signer as every other task — the manifest
+                # is just params, and params are covered by the signature.
+                from alert_manager import attestation as _att
+                params = {"manifest": _att.build_manifest(_att.agent_version())}
+                envelopes.append(server_keys.build_task(
+                    device_id, action, params, task_id=task_id,
+                    sign_with=signer, now=now))
             else:
                 envelopes.append(server_keys.build_task(
                     device_id, action, params, task_id=task_id,
