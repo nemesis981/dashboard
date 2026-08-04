@@ -4405,6 +4405,7 @@ def settings_page():
     # Read AI Engine settings from the shared DB via the ai_engine module API
     # (ADR 0001 Stage 3 — no longer reaches into modules/ai_engine/ai_engine.db).
     _ai_rate_h   = "10"
+    _ai_spend_cap = ""
     _ai_rate_d   = "50"
     _ai_upsell_dismissed = False
     _ai_input_price  = float(os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK",  "3.00") or "3.00")
@@ -4413,6 +4414,7 @@ def settings_page():
         from modules.ai_engine import get_settings as _ai_get_settings
         _ai_s = _ai_get_settings()
         _ai_rate_h = _ai_s["rate_per_hour"]
+        _ai_spend_cap = _ai_s.get("spend_cap_monthly_usd", "") or ""
         _ai_rate_d = _ai_s["rate_per_day"]
         _ai_upsell_dismissed = _ai_s["ai_upsell_dismissed"]
     except Exception:
@@ -4535,6 +4537,17 @@ def settings_page():
                 <input type="number" id="ai-rate-day" value="{html.escape(_ai_rate_d)}"
                        min="0" max="1000" class="module-subsettings-input"
                        onchange="saveAIEngineSettings()" oninput="updateAICostEstimate()">
+            </div>
+            <div class="module-subsettings-row">
+                <span class="module-subsettings-label">
+                    <span class="tier-text"
+                        data-beginner="Stop making AI calls once this much has been spent this calendar month. Leave empty for no limit."
+                        data-intermediate="Monthly spend cap (USD). Empty = no cap."
+                        data-pro="spend_cap_monthly_usd — enforced in _check_rate_limit from recorded tokens">Monthly spend cap (USD)</span>
+                </span>
+                <input type="text" id="ai-spend-cap" value="{html.escape(_ai_spend_cap)}"
+                       placeholder="no limit" class="module-subsettings-input"
+                       onchange="saveAIEngineSettings()">
             </div>
 
             <div id="ai-cost-estimate" style="background:#060b12;border:1px solid #1e2d4e;
@@ -5556,12 +5569,22 @@ def settings_page():
         function saveAIEngineSettings() {{
             var rateH = parseInt(document.getElementById('ai-rate-hour').value) || 10;
             var rateD = parseInt(document.getElementById('ai-rate-day').value) || 50;
+            /* Sent as the RAW string, deliberately. Coercing here (parseFloat ||
+               0) would turn a typo into 0, and a 0 cap reads as "no cap" on the
+               server — silently removing the user's protection while the save
+               reported success. The server validates and returns 400 on
+               garbage, leaving any existing cap untouched. */
+            var spendCapEl = document.getElementById('ai-spend-cap');
+            var spendCap = spendCapEl ? spendCapEl.value.trim() : null;
             var status = document.getElementById('ai-engine-settings-status');
             if (status) {{ status.style.color = '#aaa'; status.textContent = 'Saving…'; }}
             fetch('/api/ai/settings', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{ rate_per_hour: rateH, rate_per_day: rateD }})
+                body: JSON.stringify(spendCap === null
+                    ? {{ rate_per_hour: rateH, rate_per_day: rateD }}
+                    : {{ rate_per_hour: rateH, rate_per_day: rateD,
+                         spend_cap_monthly_usd: spendCap }})
             }})
             .then(function(r) {{ return r.json(); }})
             .then(function(d) {{

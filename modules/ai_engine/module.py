@@ -1344,9 +1344,45 @@ def _route_settings():
             "rate_per_hour":       int(_get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT))),
             "rate_per_day":        int(_get_setting("rate_per_day",  str(_RATE_DAY_DEFAULT))),
             "ai_upsell_dismissed": _get_setting("ai_upsell_dismissed", "0") == "1",
+            # "" means no cap. Returned as the stored string rather than a float
+            # so the UI can distinguish "unset" from "0" without guessing.
+            "spend_cap_monthly_usd": _get_setting("spend_cap_monthly_usd", ""),
         })
     data = request.get_json(silent=True) or {}
+
+    # Validate the spend cap BEFORE writing anything. Two reasons, and the
+    # second is the one that matters:
+    #
+    #  1. The POST carries several keys; applying some and then rejecting one
+    #     leaves the settings half-saved.
+    #  2. `_spend_cap_usd()` treats an unparseable stored value as "no cap"
+    #     (deliberately — a cap of 0 would block every call and read as an
+    #     engine bug rather than a typo). That is right at READ time, but it
+    #     means a typo accepted here would SILENTLY REMOVE the user's spending
+    #     protection while the save looked successful. So garbage is refused at
+    #     the point of entry, and an existing cap is left exactly as it was.
+    cap_write = None
+    if "spend_cap_monthly_usd" in data:
+        raw = ("" if data["spend_cap_monthly_usd"] is None
+               else str(data["spend_cap_monthly_usd"]).strip())
+        if raw == "":
+            cap_write = ""            # explicit clear — "no cap"
+        else:
+            try:
+                val = float(raw)
+            except (ValueError, TypeError):
+                return jsonify({"ok": False, "error":
+                                "Spend cap must be a number, or empty for no cap. "
+                                "Existing cap left unchanged."}), 400
+            if val <= 0:
+                return jsonify({"ok": False, "error":
+                                "Spend cap must be greater than 0, or empty for "
+                                "no cap. Existing cap left unchanged."}), 400
+            cap_write = f"{val:.2f}"
+
     try:
+        if cap_write is not None:
+            _set_setting("spend_cap_monthly_usd", cap_write)
         if "rate_per_hour" in data:
             _set_setting("rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
         if "rate_per_day" in data:
