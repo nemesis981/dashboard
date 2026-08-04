@@ -1851,6 +1851,106 @@ def enqueue_rules_update(device_id, profile, rules_url, actor=None):
                         actor=actor)
 
 
+# Redelivery (ADR 0004 Stage 1). A task handed to a device that never reports is
+# stuck in 'dispatched' forever: step 4's result reporting makes that visible,
+# and this is the remedy. Total deliveries per task, including the first.
+REDELIVERY_MAX_ATTEMPTS = 3
+
+# Explicit sentinel for "this row's expiry could not be read". Returned INSTEAD of
+# a real decision so an unreadable row can never be mistaken for one that was
+# examined and deliberately left alone -- a failed read must not wear the costume
+# of a legitimate answer.
+REDELIVER_UNREADABLE = "unreadable"
+
+
+def _redelivery_decision(status, expires_at, dispatch_count, now):
+    """What to do with one task. Pure — no DB, no clock of its own.
+
+    Returns 'leave' | 'redeliver' | 'abandon' | REDELIVER_UNREADABLE.
+
+    A task sitting in 'dispatched' past its envelope expiry is one whose delivery
+    OR whose response was lost — the agent either never received it, or ran it and
+    the report never arrived. Those two are indistinguishable from here, which is
+    why redelivery has to be *safe* rather than merely *probably fine*: the
+    agent's atomic claim (tasks.claim_task) refuses a task_id it has already
+    executed, so a redelivery to a device that already ran it is a no-op rather
+    than a second execution. That is what makes at-least-once delivery honest here
+    instead of dangerous.
+
+    Only 'dispatched' is ever touched. A 'completed' or 'failed' task has an
+    answer, and re-sending it would overwrite a real outcome with a fresh attempt.
+    """
+    if status != "dispatched":
+        return "leave"
+    try:
+        exp = datetime.fromisoformat(expires_at)
+    except Exception:
+        return REDELIVER_UNREADABLE
+    # Not yet expired: the device may still be working on it. Redelivering here
+    # would be the one case that genuinely races the agent.
+    if now <= exp:
+        return "leave"
+    try:
+        attempts = int(dispatch_count)
+    except Exception:
+        return REDELIVER_UNREADABLE
+    if attempts >= REDELIVERY_MAX_ATTEMPTS:
+        return "abandon"
+    return "redeliver"
+
+
+def _requeue_expired_tasks(device_id, now=None):
+    """Return timed-out tasks to 'pending'; abandon ones past the attempt limit.
+
+    Returns (requeued, abandoned). Runs on the device's own heartbeat, so no
+    separate scheduler is needed — a device that never checks in has no stuck
+    tasks worth reviving anyway.
+    """
+    now = now or datetime.now()
+    requeued = abandoned = 0
+    try:
+        conn = _db_connect()
+        try:
+            rows = conn.execute(
+                "SELECT task_id, status, expires_at, dispatch_count FROM scan_tasks "
+                "WHERE device_id=? AND status='dispatched'", (device_id,)).fetchall()
+            for task_id, status, expires_at, dispatch_count in rows:
+                decision = _redelivery_decision(status, expires_at,
+                                                dispatch_count, now)
+                if decision == "redeliver":
+                    # task_id is deliberately PRESERVED. The agent's claim store is
+                    # keyed on it, and that identity is the whole reason a
+                    # redelivery to a device that already ran this task is a no-op.
+                    # A fresh task_id would defeat the claim and run it twice.
+                    conn.execute(
+                        "UPDATE scan_tasks SET status='pending' WHERE task_id=?",
+                        (task_id,))
+                    requeued += 1
+                elif decision == "abandon":
+                    # result_ok is left NULL on purpose: that column means "what the
+                    # device attested", and nothing was attested here. The detail is
+                    # prefixed so its server-side provenance is unmistakable.
+                    conn.execute(
+                        "UPDATE scan_tasks SET status='expired', result_detail=? "
+                        "WHERE task_id=?",
+                        ("server: no result after %d delivery attempts"
+                         % REDELIVERY_MAX_ATTEMPTS, task_id))
+                    abandoned += 1
+                elif decision == REDELIVER_UNREADABLE:
+                    log.warning("task %s has an unreadable expiry (%r) — left "
+                                "dispatched, NOT redelivered", task_id, expires_at)
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        # Never let a redelivery pass break the heartbeat it rides on.
+        log.warning("redelivery pass failed for %s: %s", device_id, e)
+    if requeued or abandoned:
+        log.info("redelivery for device=%s: %d requeued, %d abandoned",
+                 device_id, requeued, abandoned)
+    return requeued, abandoned
+
+
 # How soon to ask an agent back when it has outstanding task work (ADR 0004
 # Stage 1 step 6). Must stay at or above the agent's own POLL_INTERVAL_FLOOR
 # (15s): a smaller value would simply be clamped on arrival, which would mean the
@@ -1903,6 +2003,10 @@ def _tasks_for_response(device_id):
         import server_keys
         if not server_keys.have_server_keypair():
             return []
+        # BEFORE selecting pending work, not after: a task revived by this pass
+        # must be eligible for the very same response, otherwise every redelivery
+        # costs an extra heartbeat of latency for no reason.
+        _requeue_expired_tasks(device_id)
         conn = _db_connect()
         try:
             rows = conn.execute(
