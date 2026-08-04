@@ -103,13 +103,29 @@ independently later.
    [tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md), Piece K)
    narrows that back down. The QUIC decision should be settled before finalising this doc's
    trigger list, since it changes the threat surface the list is written against.
-2. **Ownership needs resolving against the memory-injection detection work.** Both this doc and
-   `memory-injection-detection-design.md` cover adjacent ground — a payload that executes locally
-   after getting past Tiers 1/2 — with two different documents and two different statuses (this
-   one a live, always-on living list; that one paused/capture-only). Which one owns the
-   executing-payload case needs deciding before either resumes in earnest, or this list risks
-   being built against paused scaffolding while the other doc's scope quietly covers the same
-   ground from a different angle.
+2. **Ownership against the memory-injection detection work — RESOLVED 2026-08-04 (operator
+   decision). Tier 3 owns the executing-payload case for local, immediate action.** The
+   memory-injection module, if it is ever built, is a **server-side evidence source with no
+   local action authority**.
+
+   The two docs were never really competing: this list detects **what a payload does** (its
+   effects — shadow-copy deletion, canary touch, mass file-operations), while memory-injection
+   would detect **that a payload exists** (its mechanism). Same threat, different detection job,
+   which is why both could honestly describe their scope as "a payload that executes after
+   getting past Tiers 1/2".
+
+   **The decision follows §3's existing rule rather than adding a new one.** §3 already excludes
+   process-lineage anomalies from local action because they are "judgment calls, not unambiguous
+   triggers", routing them server-side. Memory-injection signals are *more* ambiguous than
+   lineage — distinguishing injected code from a JIT compiler, a packer, or legitimate API
+   hooking is exactly that class of judgement — so the same rule places them server-side too.
+   This also protects the near-zero-false-positive bar §3 requires for entry to this list, which
+   ambiguous memory signals are unlikely to meet.
+
+   Practical consequence: ownership sits with the capability that has a route to existing. This
+   list needs filesystem and process-action hooks; memory inspection additionally needs SYSTEM
+   privilege, a session-side UI component, authenticated local IPC, and a detection technique
+   that is still unscoped.
 3. **Depends on the agent observation-layer foundation, and hard-depends on agent integrity
    attestation specifically.** A Tier 3 trigger's entire value is that it fires on a signal the
    agent itself observed — but if the agent's own code has been replaced, that signal is exactly

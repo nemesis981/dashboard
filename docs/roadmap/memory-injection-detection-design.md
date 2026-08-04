@@ -50,13 +50,24 @@
   converge from real measurement rather than being designed against now — this budget model *is*
   part of that measurement. Scoping it to this feature alone would produce a number that is
   already wrong for the appliance the moment either other consumer lands.
-- **The open question this doc cannot resolve alone: who owns the executing-payload case?**
-  [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) is a
-  live, always-on local-trigger list that already covers a payload executing after getting past
-  Tiers 1/2. This doc is paused scaffolding with no detection technique yet. Two documents
-  currently cover adjacent ground with different statuses — deciding which one owns this case
-  belongs in one of these two docs, before either resumes in earnest, or this risks being built
-  against scaffolding while Tier 3's living list quietly covers the same ground independently.
+- **Who owns the executing-payload case — RESOLVED 2026-08-04 (operator decision).**
+  [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) — Tier
+  3's live, always-on local-trigger list — **owns it for local, immediate action.** This module,
+  if its detection technique is ever built, is a **server-side evidence source only: it has no
+  local action authority.**
+
+  The two docs were not competing. Tier 3 detects **what a payload does** (effects); this module
+  would detect **that a payload exists** (mechanism). Same threat, different detection job.
+
+  The decision applies ADR 0009 §3's existing rule rather than inventing one: that section
+  already routes process-lineage anomalies server-side as "judgment calls, not unambiguous
+  triggers". Memory-injection signals are *more* ambiguous than lineage — injected code versus a
+  JIT compiler, a packer, or legitimate API hooking — so they belong in the same server-side
+  lane, feeding judgement and the behavioural trigger engine rather than firing local action.
+
+  **This does not unpause the detection technique**, which remains unscoped. It fixes where that
+  technique's output would belong if it existed, so this module is no longer at risk of being
+  built against a case Tier 3 already covers.
 
 ## Why this exists
 
