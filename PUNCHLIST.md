@@ -2376,3 +2376,29 @@ this entry is the proposal, not the implementation.
     - [ ] **Not urgent, and explicitly not a bug** — the current behaviour was chosen on measured
       evidence and works as intended. This is a deferred design question with the data now
       available to answer it, filed so it stops living only in a commit message.
+
+- [ ] **Malware file quarantine has no restore/undo function.** `_quarantine_file()` in
+  `modules/malware_detection/module.py` moves a file to `quarantine_dir` and `chmod 000`s it;
+  no `restore_from_quarantine()` or equivalent exists anywhere in the module. Reversing a
+  quarantine today means a human manually moving the file back and re-chmod'ing it outside the
+  product — not a supported action.
+    - [ ] **Not a live incident** — quarantine is currently human-triggered only
+      (`_api_finding_quarantine`), so a wrong quarantine is at least a deliberate human call, not
+      an autonomous one.
+    - [ ] **Why it matters now:** it's a named prerequisite in the AI graduated-authority scoping
+      (`known-limitations/ai-interaction-scoping-2026-08-04.md`, Part IV §17, private mirror) —
+      that design caps any action class without a real undo at L1 (Recommend-only) permanently,
+      and malware quarantine is the one class in the product that currently fails this, hard-
+      blocking it from ever reaching L2 regardless of track record. Confirmed directly in the now-
+      shipped `effective_ceiling()` (`modules/ai_engine/module.py`): `malware_file_quarantine` is
+      pinned at `L1_RECOMMEND` in `ACTION_CLASS_CEILINGS` for exactly this reason, and the code
+      comment there states it cannot be raised by any amount of track record until a restore
+      function exists.
+    - [ ] **Fix:** a `restore_from_quarantine(finding_id)` that reverses both steps (`shutil.move`
+      back to the original path, restore original mode, flip `status` back) and is exercised by a
+      test — same shape as `ufw_delete` being the ufw side's proven inverse of `ufw_deny_append`.
+    - [ ] Found by Window 3, 2026-08-04, during the graduated-authority-model scoping pass, while
+      grepping `malware_detection/module.py` for a restore function to ground the action-class
+      table in real code. Verified against live code by Window 2 before this entry was committed
+      (`_quarantine_file`'s `shutil.move`/`chmod 0o000`, absence of any restore function, the
+      `_api_finding_quarantine` route, and the `ACTION_CLASS_CEILINGS` pin all confirmed directly).
