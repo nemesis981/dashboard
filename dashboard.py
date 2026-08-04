@@ -5482,10 +5482,23 @@ def settings_page():
             if (!display) return;
 
             function render(d) {{
-                var count, label;
+                /* A failed read returns ok:false and NO numbers, so there is
+                   nothing to render as usage. Showing 0 calls / $0.0000 here
+                   would report a DB failure as a real measurement of no spend. */
+                if (!d || d.ok === false) {{
+                    display.innerHTML = '<span style="color:#ff4444">'
+                        + tierText('Usage data unavailable — could not read the usage table',
+                                   'Usage data unavailable', 'usage read failed')
+                        + '</span>';
+                    return;
+                }}
+                var count, label, cost, tok;
+                var C = d.cost || {{}}, T = d.tokens || {{}};
                 if (period === 'hour') {{
                     var hr = String(new Date().getHours());
                     count = (d.hourly && d.hourly[hr]) ? d.hourly[hr] : 0;
+                    cost  = (C.hourly && C.hourly[hr]) || 0;
+                    tok   = (T.hourly && T.hourly[hr]) || null;
                     label = tierText(
                         'calls in the current hour (today)',
                         'this hour (today)',
@@ -5493,23 +5506,45 @@ def settings_page():
                     );
                 }} else if (period === 'week') {{
                     count = d.week || 0;
+                    cost  = C.week || 0;
+                    tok   = T.week || null;
                     label = tierText('calls in the last 7 days', 'last 7 days', '7d');
                 }} else if (period === 'month') {{
                     count = d.month || 0;
+                    cost  = C.month || 0;
+                    tok   = T.month || null;
                     label = tierText('calls in the last 30 days', 'last 30 days', '30d');
                 }} else {{
                     count = d.today || 0;
+                    cost  = C.today || 0;
+                    tok   = T.today || null;
                     label = tierText('AI analysis calls made today', 'calls today', 'today');
                 }}
-                var cost = (count * (d.cost_per_call || 0)).toFixed(4);
-                display.innerHTML =
-                    '<span style="color:#eee;font-weight:bold">' + count + '</span>'
+                var head = '<span style="color:#eee;font-weight:bold">' + count + '</span>'
                     + ' <span style="color:#bbb">'
                     + tierText('AI analysis calls', 'calls', 'calls')
-                    + ' (' + label + ')</span>'
-                    + ' — '
-                    + tierText('estimated cost', 'est. cost', 'est.')
-                    + ' <span style="color:#00ff88;font-weight:bold">$' + cost + '</span>';
+                    + ' (' + label + ')</span>';
+                /* Three distinct states, deliberately. A zero-dollar figure is a
+                   legitimate-looking measurement, so it is shown only when it is
+                   one: no calls at all is not $0.00, it is nothing to price. */
+                if (count === 0) {{
+                    display.innerHTML = head + ' &mdash; <span style="color:#666">'
+                        + tierText('no calls yet, so nothing to cost',
+                                   'no calls yet', 'none')
+                        + '</span>';
+                }} else if (tok && (tok.in || 0) === 0 && (tok.out || 0) === 0) {{
+                    display.innerHTML = head + ' &mdash; <span style="color:#00ff88;'
+                        + 'font-weight:bold">$0.0000</span> <span style="color:#666">'
+                        + tierText('served from cache, so no tokens were billed',
+                                   'all from cache', 'cached')
+                        + '</span>';
+                }} else {{
+                    display.innerHTML = head + ' &mdash; '
+                        + tierText('cost from recorded token usage',
+                                   'cost (recorded)', 'cost')
+                        + ' <span style="color:#00ff88;font-weight:bold">$'
+                        + Number(cost).toFixed(4) + '</span>';
+                }}
             }}
 
             if (_aiUsageCache) {{

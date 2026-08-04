@@ -587,6 +587,41 @@ def get_incident_js() -> str:
 
 
 def get_usage_stats() -> dict:
+    """Call counts, real token totals, and real cost per period.
+
+    COST IS COMPUTED FROM THE RECORDED TOKENS, not from an assumed call size.
+    Until 2026-08-04 this returned a single `cost_per_call` built from a
+    hardcoded 350-in/150-out guess and the client multiplied it by the call
+    count — while `ai_usage` had held the true per-call `tokens_in`/`tokens_out`
+    all along (`_increment_usage`, stamped from `msg.usage` on every real call).
+    The displayed dollar figure was therefore call-count (real) x per-call cost
+    (invented). Measured against one 5000-in/2000-out call it understated spend
+    by ~13x.
+
+    NO BLENDED PER-CALL FIGURE IS RETURNED, deliberately. Input and output are
+    priced ~5x apart on every current model, so one number per call cannot be
+    right except by coincidence — and exposing one is what invited the
+    multiply-by-count pattern that caused the bug. Callers get per-period totals
+    already summed, or the raw token counts to sum themselves.
+
+    A CACHE HIT IS A REAL CALL WITH ZERO TOKENS. `analyze()` returns
+    `tokens_used: 0` and skips `_increment_usage` on a cache hit, so a window
+    can legitimately hold calls whose cost is $0. That is a genuine measurement
+    and must stay distinguishable from "no calls at all" — hence counts and
+    tokens are both returned rather than cost alone.
+
+    FAILS CLOSED. On any read failure this returns `{"ok": False}` and NO
+    numbers. The previous version returned zeroed counts plus an
+    assumption-derived cost, which is indistinguishable from a real reading of
+    "no usage yet" — a default that means something, which is the failure mode
+    this codebase keeps finding.
+    """
+    pricing = get_pricing()
+
+    def _cost(tokens_in: int, tokens_out: int) -> float:
+        return round(tokens_in * pricing["input_per_mtok"] / 1_000_000
+                     + tokens_out * pricing["output_per_mtok"] / 1_000_000, 6)
+
     try:
         conn = _conn()
         now = datetime.now()
@@ -594,41 +629,54 @@ def get_usage_stats() -> dict:
         week_start  = (now - timedelta(days=7)).strftime("%Y-%m-%d")
         month_start = (now - timedelta(days=30)).strftime("%Y-%m-%d")
 
-        today_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM ai_usage WHERE date=?", (today,)
-        ).fetchone()[0] or 0)
-        week_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM ai_usage WHERE date>=?", (week_start,)
-        ).fetchone()[0] or 0)
-        month_calls = (conn.execute(
-            "SELECT SUM(call_count) FROM ai_usage WHERE date>=?", (month_start,)
-        ).fetchone()[0] or 0)
+        def _window(sql, param):
+            # COALESCE, not `or 0` on the Python side: SUM() over no rows returns
+            # NULL, and the distinction between "no rows" and "rows summing to
+            # zero" is carried by call_count, not by coercing NULL here.
+            r = conn.execute(sql, (param,)).fetchone()
+            return (int(r[0] or 0), int(r[1] or 0), int(r[2] or 0))
+
+        cols = "SUM(call_count), SUM(tokens_in), SUM(tokens_out)"
+        t_calls, t_in, t_out = _window(
+            f"SELECT {cols} FROM ai_usage WHERE date=?", today)
+        w_calls, w_in, w_out = _window(
+            f"SELECT {cols} FROM ai_usage WHERE date>=?", week_start)
+        m_calls, m_in, m_out = _window(
+            f"SELECT {cols} FROM ai_usage WHERE date>=?", month_start)
 
         hourly_rows = conn.execute(
-            "SELECT hour, call_count FROM ai_usage WHERE date=? ORDER BY hour", (today,)
+            "SELECT hour, call_count, tokens_in, tokens_out FROM ai_usage "
+            "WHERE date=? ORDER BY hour", (today,)
         ).fetchall()
         conn.close()
 
-        pricing = get_pricing()
-        cpc = (350 * pricing["input_per_mtok"] / 1_000_000 +
-               150 * pricing["output_per_mtok"] / 1_000_000)
         return {
-            "today":         int(today_calls),
-            "week":          int(week_calls),
-            "month":         int(month_calls),
-            "hourly":        {r["hour"]: r["call_count"] for r in hourly_rows},
-            "pricing":       pricing,
-            "cost_per_call": round(cpc, 6),
+            "ok":      True,
+            "today":   t_calls,
+            "week":    w_calls,
+            "month":   m_calls,
+            "hourly":  {r["hour"]: r["call_count"] for r in hourly_rows},
+            "pricing": pricing,
+            "tokens": {
+                "today": {"in": t_in, "out": t_out},
+                "week":  {"in": w_in, "out": w_out},
+                "month": {"in": m_in, "out": m_out},
+                "hourly": {r["hour"]: {"in": r["tokens_in"], "out": r["tokens_out"]}
+                           for r in hourly_rows},
+            },
+            "cost": {
+                "today": _cost(t_in, t_out),
+                "week":  _cost(w_in, w_out),
+                "month": _cost(m_in, m_out),
+                "hourly": {r["hour"]: _cost(r["tokens_in"], r["tokens_out"])
+                           for r in hourly_rows},
+            },
         }
-    except Exception:
+    except Exception as exc:
         log.exception("ai_engine: get_usage_stats failed")
-        pricing = get_pricing()
-        cpc = (350 * pricing["input_per_mtok"] / 1_000_000 +
-               150 * pricing["output_per_mtok"] / 1_000_000)
-        return {
-            "today": 0, "week": 0, "month": 0, "hourly": {},
-            "pricing": pricing, "cost_per_call": round(cpc, 6),
-        }
+        # Pricing is safe to return (it is read from env, not the DB) and the UI
+        # needs it to render the rate footnote. Everything measured is omitted.
+        return {"ok": False, "error": str(exc)[:200], "pricing": pricing}
 
 
 def analyze(
