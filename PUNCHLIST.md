@@ -2112,3 +2112,26 @@ this entry is the proposal, not the implementation.
       decision (currently deferred alongside archive-integrity scheduling), and have
       `ensure_archive_dir()`'s sibling write path assert the expected owner/mode rather than
       relying on directory setgid inheritance to paper over it.
+
+- [ ] **The connectivity watcher reports DEGRADED for as long as an IPv6-blocking VPN is
+  connected.** Moved in from `docs/audits/diagnostics-ipv6-keytest-false-degraded-2026-08-03.md`
+  now that this file is free (that doc was filed there only because PUNCHLIST.md was
+  contended at the time — kept in place as the evidence record; this entry points at it
+  rather than duplicating the analysis). `_probe()` in `modules/diagnostics/watcher.py` runs
+  three curls against `api_host` — unforced, `-4`, and `-6` — and `classify()` returns
+  `ALL_OK` only when all three succeed. A consumer VPN that blocks IPv6 as leak protection
+  (correct, deliberate behaviour) therefore pins the verdict at `DEGRADED` with note
+  `ipv6 keytest failed` for the entire time it is connected.
+    - [ ] **Observed at least 60 hours continuous** (1,264 samples, 2026-08-01 03:12 →
+      08-03 15:05); true duration unknown because the table is capped at 2,880 rows and the
+      start had already aged out. Throughout, `routing_ok`/`dns_ok`/`egress_ok`/`api_ok`
+      recorded zero failures — real connectivity was never affected.
+    - [ ] **This is the expensive part:** a permanent DEGRADED badge is indistinguishable from
+      a real one, so it hid a genuine 23-hour DNS outage (2026-08-01 10:19 → 08-02 09:22,
+      root cause still unknown — see the separate audit). A warning state that is always on
+      is not a warning state.
+    - [ ] **Fix:** treat IPv6 as N/A rather than failed when no usable IPv6 path exists —
+      check for a global IPv6 address and default route before counting `curl -6` as a
+      keytest, and report `ipv6 unavailable` distinctly from `ipv6 keytest failed`. Cheap.
+    - [ ] Full evidence, mechanism confirmation, and the honestly-labelled inference about
+      VPN attribution: `docs/audits/diagnostics-ipv6-keytest-false-degraded-2026-08-03.md`.
