@@ -76,6 +76,17 @@ NAMESPACES = {
     "malware_detection":  ("malware_",),
     "diagnostics":        ("diagnostics_",),
 
+    # An EXPLICIT table list, not an `integrity_` prefix grant, and deliberately
+    # so: this module exists to cross-check agent-reported scan activity, and a
+    # prefix grant would let it silently acquire new writable tables as it grows.
+    # Per the note above, per-table ownership is what the prefix shorthand always
+    # meant; a security-relevant module should say it outright. Adding a table
+    # here is then a deliberate act, not a side effect.
+    # Reads `scan_tasks` and `malware_findings` (ADR 0001 read-any); writes only
+    # this. Mode is the default ENFORCE — the list is authored, not
+    # static-analysis output, so it needs no WARN grace period.
+    "integrity_watch":    {"tables": ("integrity_observations",)},
+
     # ── core_module processes (retrofit, 2026-07-28) ─────────────────────────
     # Table lists derived by parsing each process's SQL with this module's own
     # classify(), so the audit and the enforcement agree by construction.

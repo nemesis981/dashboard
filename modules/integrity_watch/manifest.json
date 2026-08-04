@@ -1,0 +1,14 @@
+{
+  "name": "integrity_watch",
+  "display_name": "Agent Integrity Watch",
+  "version": "0.1.0",
+  "description": "Server-side cross-checks on agent-reported scan activity. Compares what each device CLAIMS to have scanned against what it actually produced, so an agent that reports success while finding nothing becomes visible. Observe-only: it records and surfaces signals, it never quarantines or blocks.",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
+}
