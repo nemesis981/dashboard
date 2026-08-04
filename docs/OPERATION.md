@@ -84,6 +84,50 @@ from bookmarks — using port 80 (no port needed) avoids this entirely.
 
 ---
 
+## Agent Devices: Local vs Remote Reporting
+
+Devices running the Nemesis agent report much more detail than devices without it
+— including a full list of running processes and which process owns each UDP
+network connection. **A device away from your home or office network reports that
+detail less often than one on it, and this is deliberate.**
+
+🟢 **Beginner:** A laptop sitting on your own network sends Nemesis a detailed
+report every few minutes — it costs nothing, because the data never leaves your
+network. When that same laptop is somewhere else (a coffee shop, a hotel, a phone
+hotspot), sending that much detail that often would use a noticeable amount of
+*your* mobile data or home broadband allowance. So Nemesis sends the same full
+report, just less frequently. Nothing is left out of it; there is simply more time
+between reports.
+
+🔵 **Intermediate:** The agent classifies itself as `local` or `vpn_remote` by
+checking whether its IP falls inside your configured network. Local agents send a
+full observation snapshot on every heartbeat. Remote agents send a **complete**
+snapshot every Nth heartbeat instead — the default N is 6, so roughly every 30
+minutes rather than every 5. Between those, the server keeps the last complete
+snapshot rather than discarding it.
+
+🔴 **Pro:** The observation block measures ~71KB, taking a heartbeat from ~2MB/day
+to ~22MB/day per device. On a LAN that is ~0.02% of a gigabit link even at 100
+agents — not worth optimising. Across WAN/tailnet it is ~659MB/month per roaming
+device, which is. At the default N=6 a remote agent sends 49 observations/day
+instead of 288: **~161MB/month instead of ~659MB**, a 5.9× reduction in
+observation traffic.
+
+**What a remote device gives up, stated plainly:** *timeliness, not completeness.*
+Every snapshot a remote agent sends is the full picture — the same process
+enumeration and the same UDP attribution a local agent sends. The tradeoff is that
+a process which starts and exits entirely between two remote snapshots may never
+appear in one. A thinned-down snapshot on every beat was considered and rejected
+for exactly this reason: a partial process list that *looks* complete is worse than
+an honestly less frequent complete one, and it would be worst on precisely the
+devices that are hardest to inspect.
+
+**This is driven by your bandwidth, not by a limitation of the agent.** If your
+remote devices have data to spare, lower the divisor toward 1 for full fidelity
+everywhere; if you are on tight mobile data, raise it. See **Settings → Agents**.
+
+---
+
 ## Hardware Monitor
 
 🟢 **Beginner:** This section shows how hot your computer's components are running and how fast the fans are spinning. Click any reading to see its history over time. If a reading is highlighted or flagged, it means that sensor is behaving differently than usual and is worth checking.

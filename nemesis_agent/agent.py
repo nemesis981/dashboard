@@ -321,6 +321,10 @@ def _collect_payload(conf):
             _suricata_mod.switch_profile(expected_profile, rules_dir)
             suri_profile = expected_profile
 
+    # Observation layer (technique-independent foundation). None on a deferred
+    # beat for a remote device -- see _observation_for_beat().
+    observation = _observation_for_beat(conn_type)
+
     # Agent health
     uptime = int(time.time() - _agent_start_time)
     proc = psutil.Process()
@@ -365,6 +369,7 @@ def _collect_payload(conf):
         "hardware":        hw,
         "security":        sec,
         "agent_health":    agent_health,
+        "observation":     observation,
         "suricata_alerts": suri_alerts,
         "scan_result":     None,
         # Task outcomes ride the heartbeat REQUEST rather than a dedicated
@@ -449,6 +454,263 @@ def _migrate_key_material():
     except Exception as e:
         log.debug("could not clear private_key_path: %s", e)
     log.info("device key is now protected (tier=%s)", backend.tier_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observation layer — process enumeration + UDP connection reporting
+#
+# The technique-independent half of the memory-injection foundation, and the
+# attribution source Tier 3 needs. Deliberately NOT a detector: it reports what
+# is running and what is talking, and judges nothing.
+#
+# THE PROPERTY THAT MATTERS MOST HERE IS VISIBILITY ACCOUNTING.
+# Measured on a real non-root agent host (2026-08-04): 600 processes visible but
+# 401 with exe() denied, and 33 UDP sockets with only 25 carrying an attributable
+# pid. So an unqualified list is not merely incomplete — it is a plausible,
+# confident, WRONG picture, and the server cannot tell. Every count below is
+# therefore reported alongside what was actually obtainable:
+#
+#   total        — how many the OS says exist
+#   reported     — how many are in this payload
+#   detail_denied— existed, but the agent lacked privilege to read details
+#   truncated    — the cap was hit, so `reported` < `total` by design
+#
+# A consumer that reads only the list still sees a list; a consumer that asks
+# "is this complete?" gets a real answer instead of an assumption.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Caps. A 600-process box at ~150 bytes/entry is ~90KB per beat, on a payload
+#: that is signed, transmitted and stored per device. Bounded, and the bound is
+#: reported rather than silent.
+_MAX_PROCS = 400
+_MAX_UDP   = 300
+_MAX_CMDLINE_CHARS = 200
+
+# ── Cadence: full observation, less often when it costs the user money ────────
+#
+# Measured 2026-08-04: the observation block is ~71KB, taking the beat from
+# ~2 MB/day to ~22 MB/day per device. On a LAN that is 0.02% of a gigabit link
+# at 100 agents -- not worth optimising. But _detect_connection_type() also
+# classifies agents as `vpn_remote`, and those beat across WAN/tailnet, where
+# 22 MB/day is ~659 MB/month on someone's broadband or mobile data.
+#
+# So cadence keys off connection type: local observes every beat, remote every
+# Nth. Deliberately LESS OFTEN BUT COMPLETE, never a thinned snapshot every
+# beat -- a partial process list reintroduces exactly the "looks complete,
+# isn't" problem the visibility accounting exists to prevent, and it would do so
+# on the devices hardest to inspect.
+#
+# N=6 is a STARTING POINT, not a measurement: ~110 MB/month instead of ~659.
+# Tune it once there is real roaming-fleet data.
+_REMOTE_OBSERVE_EVERY_N_BEATS = 6
+
+#: Bounds mirror database.REMOTE_OBSERVE_N_{MIN,MAX}. Duplicated deliberately:
+#: the agent must be able to reject a bad value from a server (or from something
+#: impersonating one) without trusting that the sender bounded it.
+_OBSERVE_N_MIN, _OBSERVE_N_MAX = 1, 48
+
+#: Live value, replaced by the server-supplied setting when one arrives.
+_remote_observe_n = _REMOTE_OBSERVE_EVERY_N_BEATS
+
+_beat_count = 0
+
+
+def _clamp_observe_n(raw):
+    """Validate a server-supplied observation divisor. Int, or None if unusable.
+
+    None means "keep the current value" -- an ABSENT field is a real answer (an
+    older server sends none), not a failure. A MALFORMED one is different and is
+    logged, so a server sending garbage is visible rather than silently obeyed.
+
+    bool is rejected before int for the same reason _clamp_poll_hint does it:
+    bool subclasses int, so True would otherwise pass and clamp to 1 -- turning a
+    nonsense value into full-fidelity-every-beat on a metered link.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        log.warning("ignoring malformed observe_every_n: %r", raw)
+        return None
+    # `< 1`, not `<= 0`. A fractional 0.5 is positive and would survive a
+    # non-positive check, then int() to 0 and clamp UP to 1 -- silently turning
+    # nonsense into full-fidelity-every-beat, the most expensive setting, on the
+    # metered links this exists to protect. Clamping is only safe upward from a
+    # value that was meaningful to begin with.
+    if raw < _OBSERVE_N_MIN:
+        log.warning("ignoring out-of-range observe_every_n: %r", raw)
+        return None
+    return max(_OBSERVE_N_MIN, min(_OBSERVE_N_MAX, int(raw)))
+
+
+def _observation_for_beat(conn_type: str) -> dict:
+    """Full observation on this beat, or None to defer it.
+
+    Returns None rather than a partial payload. The server persists the snapshot
+    ONLY when the field carries a non-empty dict, so a deferred beat leaves the
+    previous complete snapshot in place -- the same guard that already protects
+    against an older agent blanking it. No server-side change is needed for
+    cadence, and a deferred beat is not confusable with a failed observation,
+    because a failure returns a dict with an explicit state.
+
+    The cadence itself rides the snapshot when one IS sent, so the server can
+    tell how stale a snapshot is ALLOWED to be for this device without needing
+    to know the agent's configuration.
+    """
+    global _beat_count
+    _beat_count += 1
+
+    if conn_type == "local":
+        due, every = True, 1
+    else:
+        every = max(1, _remote_observe_n)
+        # First beat of a process observes (1 % N != 0 only for N>1, so use the
+        # count directly): a roaming device that just came up should report once
+        # immediately rather than staying invisible for N intervals.
+        due = (_beat_count == 1) or (_beat_count % every == 0)
+
+    if not due:
+        return None
+
+    return {
+        "processes": _enumerate_processes(),
+        "udp":       _enumerate_udp_connections(),
+        "observed_at": datetime.now().isoformat(timespec="seconds"),
+        # Declared so staleness is checkable server-side rather than assumed.
+        "cadence": {
+            "connection_type": conn_type,
+            "every_n_beats":   every,
+        },
+    }
+
+
+def _enumerate_processes() -> dict:
+    """Full process enumeration with explicit visibility accounting.
+
+    Sorted NEWEST FIRST, and truncation drops the oldest. That ordering is a
+    security choice, not an arbitrary one: if the cap is hit, the processes worth
+    keeping are the ones that started most recently — a payload that just began
+    executing is the case this layer exists to make visible.
+    """
+    out, total, denied = [], 0, 0
+    try:
+        procs = list(psutil.process_iter(
+            ["pid", "ppid", "name", "username", "create_time"]))
+    except Exception as exc:
+        # An enumeration that cannot run is an explicit failure, never an empty
+        # list — "no processes" is not a legal answer on a running host.
+        return {"state": "unavailable", "reason": str(exc)[:200],
+                "total": None, "reported": 0}
+
+    rows = []
+    for p in procs:
+        total += 1
+        try:
+            info = p.info
+            row = {
+                "pid":         info.get("pid"),
+                "ppid":        info.get("ppid"),
+                "name":        info.get("name"),
+                "user":        info.get("username"),
+                "started":     info.get("create_time"),
+            }
+            # exe() and cmdline() are the privileged half; on a non-root agent
+            # they fail for most processes. Recorded as null + counted, so the
+            # server can see HOW MUCH detail is missing rather than inferring
+            # that these processes simply have no executable path.
+            try:
+                row["exe"] = p.exe()
+            except (psutil.AccessDenied, psutil.ZombieProcess, psutil.NoSuchProcess):
+                row["exe"] = None
+                denied += 1
+            except Exception:
+                row["exe"] = None
+            try:
+                # Local-server-bound, not third-party (unlike the Layer C prompt),
+                # but still truncated: argv can carry credentials and this is
+                # persisted per device.
+                cl = " ".join(p.cmdline() or [])
+                row["cmdline"] = cl[:_MAX_CMDLINE_CHARS] or None
+            except Exception:
+                row["cmdline"] = None
+            rows.append(row)
+        except psutil.NoSuchProcess:
+            # Raced with exit between iteration and read. Genuinely gone, not a
+            # visibility failure — excluded from `total` would be wrong, so it
+            # stays counted and simply is not reported.
+            continue
+        except Exception:
+            continue
+
+    rows.sort(key=lambda r: (r.get("started") or 0), reverse=True)
+    truncated = len(rows) > _MAX_PROCS
+    out = rows[:_MAX_PROCS]
+    return {
+        "state":         "ok",
+        "total":         total,
+        "reported":      len(out),
+        "detail_denied": denied,
+        "truncated":     truncated,
+        "order":         "newest_first",
+        "processes":     out,
+    }
+
+
+def _enumerate_udp_connections() -> dict:
+    """UDP sockets with owning-process attribution.
+
+    Why UDP specifically: the network tier sees packets but cannot attribute them
+    to a process, and QUIC/HTTP-3 rides UDP straight past Tier 2 inspection. The
+    agent is the only vantage point that can say WHICH LOCAL PROCESS owns a given
+    UDP flow, so this closes an attribution gap nothing else on the box can.
+    """
+    try:
+        conns = psutil.net_connections(kind="udp")
+    except psutil.AccessDenied:
+        # The whole call is privileged on some platforms. An empty list here
+        # would read as "this host sends no UDP", which is almost never true and
+        # is exactly the wrong conclusion to hand a detector.
+        return {"state": "denied",
+                "reason": "insufficient privilege to enumerate UDP sockets",
+                "total": None, "reported": 0}
+    except Exception as exc:
+        return {"state": "unavailable", "reason": str(exc)[:200],
+                "total": None, "reported": 0}
+
+    names = {}
+    rows, attributable = [], 0
+    for c in conns:
+        pid = c.pid
+        if pid:
+            attributable += 1
+            if pid not in names:
+                try:
+                    names[pid] = psutil.Process(pid).name()
+                except Exception:
+                    names[pid] = None
+        try:
+            laddr = f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else None
+            raddr = f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else None
+        except Exception:
+            laddr = raddr = None
+        rows.append({
+            "laddr": laddr,
+            "raddr": raddr,
+            "pid":   pid,
+            "proc":  names.get(pid) if pid else None,
+        })
+
+    truncated = len(rows) > _MAX_UDP
+    return {
+        "state":         "ok",
+        "total":         len(conns),
+        "reported":      min(len(rows), _MAX_UDP),
+        # The gap between total and attributable IS the finding when it is
+        # non-zero: those flows are real and their owner is unknown to us.
+        "attributable":  attributable,
+        "unattributed":  len(conns) - attributable,
+        "truncated":     truncated,
+        "connections":   rows[:_MAX_UDP],
+    }
 
 
 def _attestation_state():
@@ -594,6 +856,17 @@ def _handle_response_tasks(response, device_id):
     # shorten the next interval (see _effective_interval).
     global _poll_hint
     _poll_hint = _clamp_poll_hint(body.get("next_poll_hint"))
+
+    # Observation cadence, operator-set in Settings and delivered on the beat.
+    # Clamped HERE as well as server-side: neither end assumes the other
+    # validated, and the failure this guards is asymmetric -- a 0 divides by
+    # zero, and a negative makes every beat 'due', turning a bandwidth saving
+    # into a storm on a metered link. An absent or unusable value leaves the
+    # shipped default alone rather than resetting it.
+    global _remote_observe_n
+    _clamped = _clamp_observe_n(body.get("observe_every_n"))
+    if _clamped is not None:
+        _remote_observe_n = _clamped
 
     # Acks are processed BEFORE the anchor gate, deliberately: an agent whose
     # anchor is missing still has to be able to retire reports it already made,

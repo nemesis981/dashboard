@@ -1631,6 +1631,32 @@ def _update_agent_device(payload, remote_ip=None):
                 ensure_manifest_queued(conn, device_id)
             except Exception as _ae:                      # noqa: BLE001
                 log.warning("attestation record failed for %s: %s", device_id, _ae)
+
+            # Observation layer (process enumeration + UDP attribution).
+            # Same shape and same reasoning as the attestation write above: a
+            # separate UPDATE after the row exists, and ONLY when the agent
+            # actually sent the field. An older agent that does not report
+            # `observation` must leave the stored snapshot alone rather than
+            # blank it — a wiped snapshot is indistinguishable from a host with
+            # nothing running, which is never a true statement.
+            #
+            # Stored as the CURRENT snapshot, overwritten per beat, in the
+            # long-declared-but-never-written last_heartbeat_data column. History
+            # is deliberately NOT kept here: at ~70KB per beat per device it
+            # needs a retention policy of its own, which is a separate decision
+            # rather than something to inherit by accident.
+            try:
+                obs = payload.get("observation")
+                if isinstance(obs, dict) and obs:
+                    conn.execute(
+                        "UPDATE agent_devices SET last_heartbeat_data=? WHERE device_id=?",
+                        (json.dumps(obs), device_id),
+                    )
+            except Exception as _oe:                      # noqa: BLE001
+                # Non-fatal for the same reason attestation is: losing a whole
+                # heartbeat over an observation write would be the worse outcome.
+                log.warning("observation record failed for %s: %s", device_id, _oe)
+
             conn.commit()
         finally:
             conn.close()
@@ -3399,11 +3425,27 @@ def _start_windows_agent_listener():
                 # Always present, explicitly null when there is nothing
                 # outstanding -- a key that appears only sometimes is easy to
                 # mistake for one the server forgot to send.
+                # Observation cadence for REMOTE agents, operator-adjustable in
+                # Settings. Rides the heartbeat response for the same reason
+                # next_poll_hint does: the channel exists, is already
+                # authenticated, and a change takes effect on the next beat with
+                # no agent reconfiguration or restart.
+                #
+                # Always present (same convention as next_poll_hint above), and
+                # already clamped server-side -- but the agent clamps it AGAIN on
+                # receipt. Neither side assumes the other validated: a bad value
+                # here would turn a bandwidth saving into an every-beat storm on
+                # exactly the metered connections it exists to protect.
+                try:
+                    _obs_n = database.get_remote_observe_every_n()
+                except Exception:
+                    _obs_n = None      # explicit "no usable value"; agent keeps its default
                 _resp = {"ok": True,
                          "server_time": datetime.now().isoformat(timespec="seconds"),
                          "tasks": _tasks,
                          "results_ack": _acked,
-                         "next_poll_hint": _next_poll_hint(device_id, bool(_tasks))}
+                         "next_poll_hint": _next_poll_hint(device_id, bool(_tasks)),
+                         "observe_every_n": _obs_n}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
