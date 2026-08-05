@@ -1568,15 +1568,6 @@ def _render_incident_rows(page: int = 1, per_page: int = PAGE_SIZE) -> tuple:
     return "\n".join(parts), has_more
 
 
-def _chat_widget() -> str:
-    """Shared chat markup, or "" when ai_engine cannot supply it."""
-    try:
-        from modules.ai_engine import get_chat_widget_html
-        return get_chat_widget_html()
-    except Exception:
-        return ""
-
-
 def _chat_js() -> str:
     try:
         from modules.ai_engine import get_chat_js
@@ -1596,14 +1587,23 @@ def _ai_modal_html() -> str:
     <div id="_adAIBody" style="color:#ccc;font-size:0.9em;line-height:1.6">
       Loading…
     </div>
-    __CHAT_WIDGET__
+    <!-- Chat host. The widget is a single page-wide instance injected by
+         ai_engine's get_chat_js(); _adShowAI() relocates it in here via
+         nemChatAttach(). This used to embed the widget markup directly, which
+         put a second copy of the widget's hardcoded element id on the main
+         dashboard page and silently broke the alert modal's chat box. See
+         _chat_widget_markup() in ai_engine for the full account.
+         (The id itself is deliberately not spelled out in this comment -- it
+         would show up as a false positive in exactly the grep an auditor would
+         run to find duplicate embeds.) -->
+    <div id="_adChatHost"></div>
     <div style="text-align:right;margin-top:18px">
       <button onclick="nemChatClose();document.getElementById('_adAIOverlay').style.display='none'"
               style="background:#333;color:#eee;border:none;padding:8px 18px;
                      border-radius:5px;cursor:pointer">✕ Close</button>
     </div>
   </div>
-</div>""".replace("__CHAT_WIDGET__", _chat_widget())
+</div>"""
 
 
 def _cisa_modal_html() -> str:
@@ -1734,7 +1734,9 @@ def _card_js() -> str:
     if (!overlay) return;
     var doCall = function() {{
       overlay.style.display = 'block';
-      if (window.nemChatInit) nemChatInit('anomaly_incident', id);
+      if (window.nemChatAttach) {{
+        nemChatAttach(document.getElementById('_adChatHost'), 'anomaly_incident', id);
+      }}
       if (body)  body.innerHTML  = '<span style="color:#ccc">Generating AI analysis…</span>';
       if (title) title.textContent = '🤖 AI Incident Analysis';
       if (btn) {{ btn.textContent = '…'; btn.disabled = true; }}

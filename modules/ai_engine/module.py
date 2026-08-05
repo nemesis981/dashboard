@@ -665,6 +665,7 @@ def ask_followup(surface_key: str, row_id, question: str,
         cache_hours=0,
         job_id=f"chat:{surface_key}:{row_id}:{used + 1}:{tier_name}",
         model=tier_model,
+        effort=_CHAT_EFFORT,
     )
     if not res.get("ok"):
         return {"ok": False, "code": "call_failed",
@@ -1814,6 +1815,40 @@ CHAT_TIER_STANDARD = "standard"
 CHAT_TIER_ADVANCED = "advanced"
 _CHAT_ADVANCED_MODEL = "claude-opus-5"
 
+#: Reasoning effort for chat follow-ups. One named constant so this is a
+#: one-line tuning decision rather than a value buried in a call.
+#:
+#: "medium", not "low", is a deliberate trade. The complaint this fixes is
+#: latency -- every chat question was running at the API default of "high"
+#: (see _analyze_inner) -- but these answers are security judgements a user
+#: acts on, so the cheapest tier is the wrong floor. "medium" is the
+#: documented cost/quality balance and is supported by BOTH chat tiers.
+#:
+#: Adaptive thinking is deliberately left ON (i.e. `thinking` stays unset).
+#: Disabling it on the 5-series has two documented failure modes: tool calls
+#: emitted as plain text, and <thinking> tags leaking into the visible answer.
+#: Lowering effort is the supported way to cut spend; disabling thinking is not.
+_CHAT_EFFORT = "medium"
+
+#: Models known to accept `output_config.effort`. This is an ALLOWLIST because
+#: sending `effort` to a model that does not support it is a hard 400 -- it
+#: errors on Sonnet 4.5 and Haiku 4.5. An unknown or non-capable model omits the
+#: field and runs at the API default instead of failing the whole call: slower,
+#: never broken. Both chat tiers are here by construction (resolve_chat_tier can
+#: only return _ACTIVE_MODEL or _CHAT_ADVANCED_MODEL).
+#:
+#: Note the levels differ by model even within this set -- `xhigh` exists on
+#: Opus 4.7+ / Sonnet 5 but not on Sonnet 4.6 / Opus 4.6, which cap at `max`
+#: with no `xhigh`. _CHAT_EFFORT is "medium", which every model here accepts;
+#: raising it to `xhigh` would need this list narrowed in the same edit.
+_EFFORT_CAPABLE_MODELS = frozenset({
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-fable-5",
+})
+
 # Representative follow-up shape, used ONLY to compute the cost multiple between
 # tiers. The ratio is what is displayed, and it is stable across any plausible
 # mix because both tiers are priced on the same token counts.
@@ -1868,7 +1903,21 @@ def chat_model_options() -> dict:
 
 
 def get_chat_widget_html() -> str:
-    """Markup for the contextual chat affordance. Include once per page.
+    """DEPRECATED no-op, retained as a fail-safe. Returns "" -- never markup.
+
+    The widget is now injected exactly once per page by get_chat_js(); see
+    _chat_widget_markup() for why. This function stays (rather than being
+    deleted) precisely BECAUSE the surfaces that used to call it wrap the import
+    in try/except: a missing name would be swallowed and look identical to
+    "feature off", while an empty string is inert and cannot resurrect the
+    duplicate-id collision. A caller that still embeds this renders nothing
+    extra and keeps working, because the JS supplies the node either way.
+    """
+    return ""
+
+
+def _chat_widget_markup() -> str:
+    """Markup for the contextual chat affordance. ONE instance per page, ever.
 
     Shared rather than hand-rolled per surface for one specific reason: the cost
     line. The product requirement is that no user is ever unaware there is a
@@ -1876,8 +1925,17 @@ def get_chat_widget_html() -> str:
     that line.
     The server-side gates are shared already; this makes the disclosure shared too.
 
-    Plain string, not an f-string -- callers interpolate it into their own
-    templates, so it must not carry brace-escaping of its own.
+    PRIVATE, and injected only from get_chat_js(). It carries a hardcoded
+    id="nemChatSection", so embedding it from more than one place on a page is a
+    duplicate-id collision: getElementById() silently returns whichever copy is
+    first in the DOM, and the surface that "opened" a different copy becomes a
+    no-op with no error anywhere. That is exactly what shipped in 5330220 --
+    three copies on `/`, and the alert chat box toggling a node nested inside
+    anomaly_detection's display:none overlay. Single-instancing is therefore
+    structural here, not a convention each surface has to remember.
+
+    Plain string, not an f-string -- it is embedded into JS via json.dumps(), so
+    it must not carry brace-escaping of its own.
     """
     return (
         '<div id="nemChatSection" style="display:none;margin-top:18px;'
@@ -1941,6 +1999,28 @@ def get_chat_js() -> str:
         'window._nemChatJsLoaded=true;'
         'var S=null,R=null;'
         'function el(i){return document.getElementById(i);}'
+        # The single widget instance is created HERE, not embedded by each
+        # surface -- see _chat_widget_markup() for the collision this prevents.
+        # json.dumps() because the markup is full of double quotes; a raw splice
+        # would terminate the JS string literal mid-attribute.
+        # Idempotent by construction: it returns early if the node already
+        # exists, so a second get_chat_js() on the page (the guard above already
+        # prevents that) still could not produce a duplicate.
+        'function ensureWidget(){'
+        'if(el("nemChatSection"))return true;'
+        # document.body is null when this script runs in <head> or above <body>
+        # (dashboard.py includes it well before the markup it attaches to), so
+        # report failure rather than throwing -- the DOMContentLoaded hook and
+        # the lazy calls in Init/Attach below each retry.
+        'if(!document.body)return false;'
+        'var d=document.createElement("div");'
+        'd.innerHTML=' + json.dumps(_chat_widget_markup()) + ';'
+        'var n=d.firstElementChild;if(!n)return false;'
+        'document.body.appendChild(n);'
+        'return true;'
+        '}'
+        'if(!ensureWidget()){'
+        'document.addEventListener("DOMContentLoaded",ensureWidget);}'
         'function money(v){return (v===null||v===undefined)?null:"$"+Number(v).toFixed(4);}'
         'function meta(st){'
         'el("nemChatTurnsLeft").textContent=st.turns_left+" of "+st.turn_cap+" questions left";'
@@ -1958,6 +2038,7 @@ def get_chat_js() -> str:
         '}'
         'window.nemChatInit=function(surface,rowId){'
         'S=surface;R=rowId;'
+        'ensureWidget();'
         'var sec=el("nemChatSection");if(!sec)return;'
         'el("nemChatLog").innerHTML="";el("nemChatInput").value="";'
         'el("nemChatStatus").textContent="";sec.style.display="none";'
@@ -1971,13 +2052,26 @@ def get_chat_js() -> str:
         # several open at once; moving one widget keeps a single DOM instance and
         # a single cost display, rather than N copies to keep consistent.
         'var TIER="standard",OPTS=null;''function tierUI(){''var adv=(TIER==="advanced");''el("nemChatTierLabel").textContent=adv?"Advanced":"Standard";''el("nemChatTierLabel").style.color=adv?"#ffc107":"#00d4ff";''el("nemChatRaiseBtn").style.display=adv?"none":"";''el("nemChatLowerBtn").style.display=adv?"":"none";''el("nemChatLowerHint").style.display=adv?"":"none";''}''window.nemChatRaise=function(){''var m=(OPTS&&OPTS.multiple)?OPTS.multiple:null;''var cost=(m===null)''?"The exact cost increase CANNOT be calculated right now, because pricing for one of the models is unknown. It will be more expensive per question."'':("Each question will cost about "+m+"x more than Standard.");''var msg="Switch to the Advanced model?\n\n"+cost''+"\n\nThis applies to new questions in this conversation only. "''+"Your spend cap and rate limits still apply.\n\n"''+"You can switch back to Standard at any time.";''if(!window.confirm(msg))return;''TIER="advanced";tierUI();''};''window.nemChatLower=function(){TIER="standard";tierUI();};''window.nemChatAttach=function(container,surface,rowId){'
+        'ensureWidget();'
         'var sec=el("nemChatSection");'
         'if(!sec||!container)return;'
         'if(sec.parentNode!==container)container.appendChild(sec);'
         'window.nemChatInit(surface,rowId);'
         '};'
         'window.nemChatClose=function(){'
-        'var sec=el("nemChatSection");if(sec)sec.style.display="none";'
+        'var sec=el("nemChatSection");'
+        'if(sec){'
+        'sec.style.display="none";'
+        # Park the single instance back on <body> on close. Surfaces re-render
+        # their own containers (module cards refresh on poll, modals rebuild
+        # innerHTML), and a widget left parked inside one would be destroyed
+        # with it -- silently, because every caller goes through nemChatAttach
+        # and would simply find nothing. Parking makes the node outlive every
+        # container that borrows it; ensureWidget() is the backstop if it gets
+        # destroyed anyway.
+        'if(document.body&&sec.parentNode!==document.body)'
+        'document.body.appendChild(sec);'
+        '}'
         'if(el("nemChatLog"))el("nemChatLog").innerHTML="";'
         'if(el("nemChatInput"))el("nemChatInput").value="";'
         'S=null;R=null;'
@@ -2179,6 +2273,7 @@ def analyze(
     force: bool = False,
     job_id: str | None = None,
     model: str | None = None,
+    effort: str | None = None,
 ) -> dict:
     """
     Single entry point for all Anthropic API calls.
@@ -2189,6 +2284,11 @@ def analyze(
     force=True bypasses rate limiting (for manual/override calls).
     cache_hours=0 skips cache lookup (always calls API).
     job_id — if provided, deduplicates concurrent calls for the same job.
+    effort — optional reasoning-effort hint ("low"|"medium"|"high"|...). Default
+        None means "send no output_config", which is NOT the same as sending
+        "high": it leaves the choice to the API. Every existing caller therefore
+        keeps its current behaviour byte-for-byte. Only sent for models on
+        _EFFORT_CAPABLE_MODELS -- see that constant for why it is an allowlist.
     """
     # In-flight dedup
     if job_id:
@@ -2199,7 +2299,7 @@ def analyze(
 
     try:
         return _analyze_inner(prompt, system_prompt, max_tokens, cache_key,
-                              cache_hours, force, model)
+                              cache_hours, force, model, effort)
     finally:
         if job_id:
             with _in_flight_lock:
@@ -2214,6 +2314,7 @@ def _analyze_inner(
     cache_hours: float,
     force: bool,
     model: str | None = None,
+    effort: str | None = None,
 ) -> dict:
     # A non-default model gets its own cache namespace. Without this a cached
     # answer from one model would be served for a request that explicitly asked
@@ -2268,6 +2369,25 @@ def _analyze_inner(
     kwargs: dict = dict(model=target_model, max_tokens=max_tokens, messages=messages)
     if system_prompt:
         kwargs["system"] = system_prompt
+
+    # Reasoning effort. Omitted entirely unless a caller asked for one -- an
+    # absent output_config lets the API pick (currently "high"), which is what
+    # every non-chat surface has always run at and is left untouched here.
+    #
+    # Gated on the model, not just on `effort` being set: `effort` is a hard 400
+    # on models that do not support it (Sonnet 4.5, Haiku 4.5). Failing that way
+    # would take out the whole call, so a non-capable model drops the hint and
+    # runs at the default -- slower, never broken -- and says so in the log
+    # rather than dropping it silently.
+    if effort:
+        if target_model in _EFFORT_CAPABLE_MODELS:
+            kwargs["output_config"] = {"effort": effort}
+        else:
+            log.warning(
+                "ai_engine: model %s is not on the effort allowlist; sending no "
+                "output_config (request runs at the API default effort)",
+                target_model,
+            )
 
     text = tokens_in = tokens_out = None
     last_exc = None

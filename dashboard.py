@@ -7398,6 +7398,18 @@ def firewall_db():
         "Suricata sig match. LOW risk. See alert view for raw context."
     )
 
+    # Shared chat widget for the full alert view. This page anchors on the same
+    # TEXT rule_id the "alert" chat surface is registered with (dashboard.py's
+    # _anchor_load_alert), so the existing anchor serves it as-is -- no second
+    # surface to register. Empty string when ai_engine is unavailable, so the
+    # page renders identically minus the affordance.
+    chat_js_html = ""
+    try:
+        from modules.ai_engine import get_chat_js as _ai_cjs
+        chat_js_html = _ai_cjs()
+    except Exception:
+        pass
+
     try:
         conn = _dm_conn()   # §9 batch 2 (firewall_db)
         c = conn.cursor()
@@ -7576,6 +7588,9 @@ def firewall_db():
             document.getElementById("dbNoteInput").value = "";
             document.getElementById("dbNotesList").innerHTML =
                 "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
+            if (window.nemChatAttach) {{
+                nemChatAttach(document.getElementById("_dbChatHost"), "alert", ruleId);
+            }}
             fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
                 .then(function(r) {{ return r.json(); }})
                 .then(function(notes) {{
@@ -7590,6 +7605,7 @@ def firewall_db():
 
         function closeDbNotes() {{
             document.getElementById("dbNotesModal").style.display = "none";
+            if (window.nemChatClose) nemChatClose();
             _dbNotesRuleId = null;
         }}
 
@@ -7756,6 +7772,8 @@ def firewall_db():
         {rows}
     </table>
 
+    {chat_js_html}
+
     <!-- Notes panel modal -->
     <div class="db-modal" id="dbNotesModal" onclick="if(event.target.id==='dbNotesModal')closeDbNotes()">
         <div class="db-modal-inner">
@@ -7764,6 +7782,10 @@ def firewall_db():
                 <div id="dbNotesList" style="flex:1;font-size:0.85em"></div>
             </div>
             <div id="dbRelatedNotesList" style="display:none;border-top:1px solid #222;padding-top:10px;margin-bottom:10px"></div>
+            <!-- Chat host for the full alert view. Single page-wide widget
+                 instance, injected by ai_engine's get_chat_js() and relocated
+                 here by nemChatAttach(). -->
+            <div id="_dbChatHost"></div>
             <div style="border-top:1px solid #333;padding-top:12px;margin-top:4px">
                 <textarea id="dbNoteInput" placeholder="Add a note…" rows="3"
                     style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
@@ -10267,12 +10289,9 @@ def dashboard():
     incident_state_js = "window._nemesisIncidentState={};"
     # Shared chat widget. Empty strings when ai_engine is unavailable, so the
     # template renders identically minus the affordance.
-    chat_widget_html = ""
     chat_js_html = ""
     try:
-        from modules.ai_engine import (get_chat_widget_html as _ai_cwidget,
-                                       get_chat_js as _ai_cjs)
-        chat_widget_html = _ai_cwidget()
+        from modules.ai_engine import get_chat_js as _ai_cjs
         chat_js_html = _ai_cjs()
     except Exception:
         pass
@@ -10690,7 +10709,12 @@ def dashboard():
                 <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
                 <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
             </div>
-            {chat_widget_html}
+            <!-- Chat host. The widget itself is a single page-wide instance
+                 injected by ai_engine's get_chat_js(); nemChatAttach() moves it
+                 in here when an alert is opened. Do NOT embed the widget markup
+                 here again -- see _chat_widget_markup() for the duplicate-id
+                 collision that caused. -->
+            <div id="_alertChatHost"></div>
             <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
                 <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
                     <strong style="color:#00d4ff;font-size:0.95em">
@@ -11100,7 +11124,9 @@ def dashboard():
                     "Analyzing…"
                 ) + "</p>";
             loadNotes(ruleId);
-            nemChatInit("alert", ruleId);
+            if (window.nemChatAttach) {{
+                nemChatAttach(document.getElementById("_alertChatHost"), "alert", ruleId);
+            }}
             fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
                 .then(r => r.json())
                 .then(data => {{

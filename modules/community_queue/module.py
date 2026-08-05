@@ -413,8 +413,10 @@ def _page_community_queue():
     table_html     = _render_table(rows)
     upsell_js_html = ("" if ai_enabled else _ai_upsell_js()) + _ai_incident_js()
     try:
-        from modules.ai_engine import get_chat_widget_html, get_chat_js
-        chat_html = get_chat_widget_html() + get_chat_js()
+        # get_chat_js() also injects the single widget instance -- the markup is
+        # deliberately NOT embedded here. See _chat_widget_markup() in ai_engine.
+        from modules.ai_engine import get_chat_js
+        chat_html = get_chat_js()
     except Exception:
         chat_html = ""
     upsell_js_html += chat_html

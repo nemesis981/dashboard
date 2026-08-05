@@ -2489,3 +2489,50 @@ this entry is the proposal, not the implementation.
       route change; re-verify the six cascaded checks pass once the method mismatch is corrected.
     - [ ] Found by Window 1, 2026-08-05, during the `data_manager`/`scan_tasks` namespace audit
       (unrelated investigation — the red suite was collateral discovery, not the target).
+
+- [ ] **Shared chat widget: duplicate `id="nemChatSection"` collides on the main dashboard page.**
+  `modules/ai_engine/module.py:1883` hardcodes `id="nemChatSection"`, and three surfaces each
+  embed their own copy of that markup onto the SAME page (`/`): `dashboard.py:10693` (inside
+  `#alertModal`), `modules/anomaly_detection/module.py:1458` via `_ai_modal_html()` (inside the
+  `display:none` `#_adAIOverlay`), and `modules/malware_detection/module.py:3173`.
+    - [ ] **Impact — the alert chat box is dead.** `document.getElementById()` returns the FIRST
+      match, and module load order (`modules_loader.py:164`, alphabetical among non-required
+      modules) puts anomaly_detection's copy first. So `viewAlert()`'s `nemChatInit("alert", ...)`
+      (`dashboard.py:11103`) sets `display:block` on a node nested inside `#_adAIOverlay`, whose
+      own `display:none` the alert flow never touches — the widget "opens" behind a hidden
+      ancestor. The alert modal itself is unaffected (unique ID); only the chat affordance is a
+      no-op. This is the surface a user tries first.
+    - [ ] **Anomaly-incident chat works only by coincidence** of that same load order, and
+      **malware-finding chat breaks it destructively**: `nemChatAttach()` RELOCATES the node it
+      finds into its own container, so using malware chat once moves anomaly_detection's widget
+      out of its overlay for the rest of the page session. community_queue is unaffected — it
+      renders on its own page (`/community-queue`), never sharing the DOM.
+    - [ ] **Fix shape:** render the widget exactly ONCE per page and relocate it into place at
+      every surface — i.e. `nemChatAttach()`'s existing approach applied consistently, rather
+      than at one of four surfaces. Injecting the markup from `get_chat_js()` (already guarded by
+      `window._nemChatJsLoaded`) makes single-instancing structural rather than a convention each
+      surface has to remember.
+    - [ ] Found by Window 3, 2026-08-05, investigating an operator report that chat was "not
+      appearing to work." Confirmed by executing the render path directly (not by reading):
+      `_ai_modal_html()` returns 3036 chars containing exactly one `id="nemChatSection"` at
+      offset 595, nested inside the `#_adAIOverlay` opened at offset 6. Ruled out the obvious
+      suspects first — no `/api/ai/chat` request ever reached the backend, no journal errors, and
+      anchor registration did NOT fail.
+
+- [ ] **Chat runs adaptive thinking at `high` effort on every question.**
+  `modules/ai_engine/module.py:2268` builds the API kwargs as
+  `dict(model, max_tokens, messages)` (+ optional `system`) and sets neither `thinking` nor
+  `output_config`.
+    - [ ] **Impact:** on `claude-sonnet-5`, omitting `thinking` runs adaptive thinking and
+      omitting `output_config` defaults effort to `high`. Every short chat follow-up therefore
+      pays deep-reasoning latency and tokens. This is the same model-drift root cause as
+      `d151dc3`: the code was written when `_ACTIVE_MODEL` was `claude-sonnet-4-6`, and `110239f`
+      bumped it to `claude-sonnet-5` — that bump broke the response parse loudly and the latency
+      quietly.
+    - [ ] **Fix shape:** thread an explicit `effort` through `analyze()` → `_analyze_inner()` and
+      set it for the chat path only; leave adaptive thinking ON (disabling it on the 5-series has
+      two documented failure modes — tool calls emitted as plain text, and `<thinking>` tags
+      leaking into output). **`effort` is model-gated** — it errors on Sonnet 4.5 / Haiku 4.5 —
+      so it must be sent against an allowlist, not unconditionally.
+    - [ ] Identified by Window 1, 2026-08-04 (evening handoff); model-gating constraint confirmed
+      by Window 3, 2026-08-05 against the current API contract before the fix was written.
