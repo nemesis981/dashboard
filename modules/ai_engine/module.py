@@ -425,6 +425,48 @@ def _chat_scope(action_classes) -> dict:
             "degraded": degraded, "degraded_reason": reason}
 
 
+def _diagnostics_capability_note() -> str:
+    """The appliance's own diagnostic checks, enumerated AT RUNTIME.
+
+    Deliberately dynamic rather than a list written into the prompt. A hardcoded
+    list goes stale silently and in the worse direction: a check added later would
+    never be mentioned, and one renamed or removed would have the assistant sending
+    a non-technical user to a button that is not there -- which reads as
+    authoritative and is worse than saying nothing. Enumerating means a new check
+    is picked up with no prompt edit, which is the whole point.
+
+    Returns "" on ANY failure. That is a real answer here, not a default dressed up
+    as one: the caller's wording already covers the generic case ("prefer this
+    appliance's own diagnostics where they fit"), so an empty note degrades to
+    generic-but-true guidance instead of naming tools that may not exist. Reading
+    the beginner description deliberately -- this text exists to help someone with
+    no IT background, and the pro variant would defeat that.
+    """
+    try:
+        import diagnostics as _diag
+        lines = []
+        for chk in getattr(_diag, "CHECKS", []):
+            meta = getattr(chk, "META", None) or {}
+            cid, name = meta.get("id"), meta.get("name")
+            if not cid or not name:
+                continue
+            desc = meta.get("descriptions")
+            blurb = desc.get("beginner", "") if isinstance(desc, dict) else ""
+            blurb = " ".join(str(blurb).split())
+            lines.append(f"- {name} ({cid})" + (f": {blurb}" if blurb else ""))
+        if not lines:
+            return ""
+        return (
+            "\n\nDIAGNOSTIC CHECKS BUILT INTO THIS APPLIANCE. The person can run any "
+            "of these from the Diagnostics page without installing anything, and each "
+            "is read-only. Point them at one by name when it would answer their "
+            "question, and say what in the output to look at:\n" + "\n".join(lines)
+        )
+    except Exception:
+        log.debug("chat: diagnostics capability note unavailable", exc_info=True)
+        return ""
+
+
 def _chat_system_prompt(scope: dict) -> str:
     """The ONE place chat scope is enforced.
 
@@ -434,16 +476,50 @@ def _chat_system_prompt(scope: dict) -> str:
     base = (
         "You are the security assistant built into a Nemesis firewall appliance. "
         "You are explaining a specific finding to the person who owns this network, "
-        "who may have no IT background. Be concrete and plain-spoken. "
-        "Answer only from the finding data provided — if something is not in it, "
-        "say you cannot tell from the available data rather than guessing.\n\n"
+        "who may have no IT background. Be concrete, plain-spoken and reassuring: "
+        "most findings are routine, and someone asking about one deserves a clear "
+        "answer rather than a hedge.\n\n"
+        # Two standards, not one. The single old rule ("answer only from the finding
+        # data") was written against hallucination and did stop it -- but it also
+        # stopped the assistant bringing the general knowledge that makes it useful,
+        # so it answered "I cannot tell from this alert" to questions that were not
+        # about the alert's contents at all. Splitting the standards keeps the
+        # anti-hallucination guarantee exactly where it belongs (claims about THIS
+        # network) without gagging the part a non-expert actually needs.
+        "Two kinds of statement, held to different standards:\n"
+        "- FACTS ABOUT THIS NETWORK (what this alert saw, which host, how often, "
+        "what action was taken) come only from the finding data below. If a detail "
+        "is not there, say so plainly and name what you would need — never guess "
+        "or infer it.\n"
+        "- GENERAL SECURITY KNOWLEDGE RELEVANT TO INVESTIGATING OR UNDERSTANDING "
+        "THIS FINDING (what this class of signature usually means, how someone "
+        "would check it, what a given tool would show) is yours to bring, and you "
+        "are expected to use it. \"I cannot tell from the data\" applies to the "
+        "first kind, not the second. Keep it to what bears on this finding — you "
+        "are not a general security tutor.\n\n"
+        "HELPING THEM INVESTIGATE. When they ask how to check something, help them: "
+        "name the read-only commands or checks that would answer the question, say "
+        "what output to look for, and explain how to read it. Prefer this "
+        "appliance's own diagnostics where they fit — already installed, already "
+        "safe to run.\n\n"
+        # The restriction that makes the loosening above safe. Read-only is the
+        # boundary the whole change rests on, so it is stated as a hard rule rather
+        # than left implied by "investigate".
+        "ONLY EVER SUGGEST COMMANDS THAT READ STATE. Never suggest a command that "
+        "changes configuration, kills a process, modifies firewall rules, or "
+        "deletes anything. If the answer requires a change, describe what needs to "
+        "change and let them decide how.\n\n"
     )
     if scope["level"] <= L0_OBSERVE:
         rules = (
-            "SCOPE: You explain what this finding means and why it matters. "
-            "You do NOT recommend network changes, and you do NOT offer to take "
-            "any action. If asked what to do, explain the trade-offs of the "
-            "options that exist and say the decision is theirs to make."
+            "SCOPE: You explain what this finding means, why it matters, and how to "
+            "investigate it. You do NOT recommend changes to the network or firewall, "
+            "and you do NOT offer to take any action yourself. Read-only "
+            "investigation is not a change — suggesting a diagnostic command or "
+            "check that the person runs and interprets is expected of you, and is "
+            "not the same as recommending a configuration change. If asked what to "
+            "DO about the finding, explain the trade-offs of the options that exist "
+            "and say the decision is theirs to make."
         )
     elif scope["level"] == L1_RECOMMEND:
         rules = (
@@ -464,7 +540,11 @@ def _chat_system_prompt(scope: dict) -> str:
     if scope["degraded"]:
         rules += ("\nNOTE: authority state could not be read, so you are restricted "
                   "to explanation regardless of configuration.")
-    return base + rules
+    # Appended AFTER the scope rules, and at every level: read-only investigation is
+    # deliberately not gated on action authority, so a degraded or L0 scope still
+    # gets the check list. Empty string when it cannot be enumerated -- see
+    # _diagnostics_capability_note().
+    return base + rules + _diagnostics_capability_note()
 
 
 def _turn_count(conn, surface_key: str, row_id) -> int:
