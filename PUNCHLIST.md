@@ -2439,22 +2439,35 @@ this entry is the proposal, not the implementation.
       confirmed directly against `security.py:34-47` (the `sorted(...)[:10]` slice) before this
       entry was committed.
 
-- [ ] **`_detect_connection_type()` is IPv4-only.** `nemesis_agent/agent.py:211-212` collects
-  local addresses filtering on `addr.family == socket.AF_INET`, so IPv6 addresses are never
+- [x] **`_detect_connection_type()` is IPv4-only — FIXED 2026-08-05 (`41ba66f`).** `nemesis_agent/agent.py:211-212` collected
+  local addresses filtering on `addr.family == socket.AF_INET`, so IPv6 addresses were never
   considered when deciding whether a device is local or remote.
-    - [ ] **Impact:** a device with only IPv6 on the local link is classified as remote. The
-      function fails toward the more restrictive classification (`vpn_remote`), so this is a
-      **misclassification, not an open door** — but it's the same IPv4-only-assumption class
-      already found and fixed once in the Tier 2 TLS gate, suggesting the assumption may recur
-      elsewhere too.
-    - [ ] **Secondary observation, worth fixing alongside the IPv6 gap:** the function's `except`
-      path returns a legal value (`vpn_remote`) rather than an explicit failure state
-      (`agent.py:216-218`) — confirmed: it's the same fallback the "no local subnet configured"
-      case also returns, so a genuine detection failure is indistinguishable from a real,
-      successfully-determined remote result. Defaulting to the restrictive answer on failure
-      looks deliberate but is undocumented as such — worth an explicit comment either way, even
-      if the fallback value itself doesn't change.
-    - [ ] Part of the technique-independent observation-layer foundation
-      (`docs/roadmap/agent-rebuild-config-driven.md`). Found and verified by Window 1, 2026-08-04,
+    - [x] **Impact (resolved):** a device with only IPv6 on the local link was classified as remote.
+      The function failed toward the more restrictive classification (`vpn_remote`), so this was a
+      **misclassification, not an open door** — but it was the same IPv4-only-assumption class
+      already found and fixed once in the Tier 2 TLS gate. `41ba66f` widens the sweep to
+      `AF_INET`/`AF_INET6` both.
+    - [x] **Secondary observation, fixed alongside the IPv6 gap:** the function's `except`
+      path still returns the shared `vpn_remote` fallback (`agent.py`) rather than an explicit
+      failure state — kept deliberately (Paul's call; sentinel work is a separate, unopened
+      future item, see below). What changed: the failure path now logs at **WARNING**, not
+      DEBUG, and the docstring documents the shared-fallback tradeoff explicitly instead of
+      leaving it undocumented.
+    - [x] **Two more defects found during the fix, not in this entry originally:** the
+      per-address parse sat inside a loop-wide `try/except`, so one unparseable address (e.g. a
+      scope-suffixed IPv6 link-local like `fe80::1%eth0`) silently aborted the whole sweep — the
+      guard moved inside the loop. A dead `hostname = socket.gethostname()` assignment was also
+      removed.
+    - [x] Part of the technique-independent observation-layer foundation
+      (`docs/roadmap/agent-rebuild-config-driven.md`) — **step 4 of 5** in the operator-approved
+      observation-layer foundation order. Found and verified by Window 1, 2026-08-04,
       confirmed directly against `agent.py:203-218` (both the `AF_INET`-only filter and the
-      shared except/fallback path) before this entry was committed.
+      shared except/fallback path) before this entry was committed. **Fixed and verified by
+      Window 1, 2026-08-05:** `nemesis_agent/test_connection_type.py` (new, 14/14 checks,
+      mutation control reimplementing the pre-fix v4-only sweep to confirm it fails the v6 and
+      bad-address-first cases); full agent suite reconciles to 621 (607 baseline + 14, no
+      regressions); `alert_manager/test_attestation_e2e.py` still 22/22. `AGENT_VERSION` bumped
+      `1.0.0` → `1.0.1` (`attest.py`) to reflect the changed digest set (55 → 58 files).
+      Committed and pushed by Window 2, 2026-08-05 (`41ba66f`). **Sentinel/explicit-failure-state
+      work for the three callers of `_detect_connection_type()` remains open, scoped out of this
+      fix as a separate future change — not closed by this entry.**
