@@ -52,6 +52,7 @@ import json
 import logging
 import os
 import sqlite3
+from datetime import datetime
 
 log = logging.getLogger("nemesis.degraded_ingest")
 
@@ -101,14 +102,34 @@ def read_offset(conn):
 def write_offset(conn, offset):
     """Persist the offset. Best-effort BY DESIGN — see the idempotency note in the
     module docstring. Failure is logged, not raised: the rows are already written
-    and correct, and the duplicate guard makes a re-scan harmless."""
+    and correct, and the duplicate guard makes a re-scan harmless.
+
+    THE TIMESTAMP IS LOCAL, AND THAT IS LOAD-BEARING, NOT COSMETIC.
+    This wrote `datetime('now')` until 2026-08-05 — SQLite's UTC — while every
+    other timestamp in this database is local (`audit_log.ts`, `alerts.last_seen`,
+    `database.set_setting`). Measured: the stored stamp read 19:03:56 while the
+    machine clock said 14:04:50, a five-hour skew on a row that had just been
+    written.
+
+    Nothing broke, because nothing read it yet. The moment something did — the
+    ADR 0019 status panel, which derives sweep health from exactly this column —
+    it would have compared a UTC stamp against a local `now` and reported a
+    sweep running every 60 seconds as FIVE HOURS STALE. Permanently degraded, on
+    a healthy system: a health indicator that can only ever return one answer,
+    which is the failure class this panel exists to detect.
+
+    Stamped in Python rather than SQL so it matches `datetime.now().isoformat()`
+    used elsewhere, instead of relying on SQLite's `'localtime'` modifier, which
+    silently depends on the server process's TZ.
+    """
     try:
         conn.execute(
             "INSERT INTO settings (key, value, updated_at, updated_by) "
-            "VALUES (?,?,datetime('now'),?) ON CONFLICT(key) DO UPDATE SET "
+            "VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
             "value=excluded.value, updated_at=excluded.updated_at, "
             "updated_by=excluded.updated_by",
-            (OFFSET_KEY, str(int(offset)), "degraded_ingest"))
+            (OFFSET_KEY, str(int(offset)),
+             datetime.now().isoformat(timespec="seconds"), "degraded_ingest"))
         conn.commit()
         return True
     except Exception:

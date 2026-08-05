@@ -254,6 +254,126 @@ def _start_degraded_ingest():
                      daemon=True).start()
     log.info("degraded journal ingest started (every %ds)",
              DEGRADED_INGEST_INTERVAL)
+
+
+#: ADR 0019 visibility, Phase 2. FOUR states, and the two `unknown` variants are
+#: the point of the design rather than defensive padding.
+#:
+#: The ingest logs only when it FINDS something, so a healthy idle sweep and a
+#: dead poller thread are indistinguishable in the journal — proven on 2026-08-05,
+#: when liveness had to be established from /proc/<pid>/task/*/comm because
+#: nothing else could answer it. This panel exists to answer it, which means it
+#: must never report health it has not measured.
+INGEST_HEALTHY = "healthy"
+INGEST_DEGRADED = "degraded"
+INGEST_UNKNOWN_NO_SWEEP = "unknown-no-sweep"
+INGEST_UNKNOWN_UNREADABLE = "unknown-unreadable"
+
+
+def degraded_ingest_health(conn_factory=None, now=None, interval=None):
+    """Derive the degraded-journal ingest's health from state it already writes.
+
+    Sources, both existing storage — no new tables, no parallel bookkeeping that
+    could drift from what the ingest actually does:
+      * HEARTBEAT — `settings.updated_at` for `degraded_ingest_offset`, stamped on
+        EVERY completed sweep whether or not it found anything. `audit_log` cannot
+        serve here: the ingest only writes a row when it finds something, so an
+        empty audit_log cannot distinguish "never ran" from "runs constantly and
+        there is nothing to report".
+      * CONTENT — the `audit_log` rows the ingest has produced.
+
+    `interval` defaults to the RUNNING config, not a hardcoded 60: changing
+    NEMESIS_DEGRADED_INGEST_INTERVAL would otherwise silently invalidate the
+    staleness threshold and start reporting a healthy system as degraded.
+
+    Returns a dict. `state` is always one of the four constants above — never a
+    bare bool, and never absent. Two distinct `unknown` values because "no sweep
+    has ever completed" (a fresh install) and "the stamp is unreadable" (a real
+    fault) call for different responses, and collapsing them would hide the
+    second inside the first.
+    """
+    interval = DEGRADED_INGEST_INTERVAL if interval is None else interval
+    now = datetime.now() if now is None else now
+    threshold = interval * 2
+
+    result = {"state": INGEST_UNKNOWN_NO_SWEEP, "last_sweep": None,
+              "age_seconds": None, "threshold_seconds": threshold,
+              "interval_seconds": interval, "events": None, "detail": ""}
+
+    conn_factory = conn_factory or (lambda: sqlite3.connect(DB_PATH, timeout=5.0))
+    try:
+        conn = conn_factory()
+    except Exception as exc:
+        result["state"] = INGEST_UNKNOWN_UNREADABLE
+        result["detail"] = "could not open the database: %s" % exc
+        return result
+    try:
+        row = conn.execute("SELECT updated_at FROM settings WHERE key=?",
+                           ("degraded_ingest_offset",)).fetchone()
+        try:
+            result["events"] = conn.execute(
+                "SELECT COUNT(*) FROM audit_log WHERE action IN "
+                "('fw_table_tampered','fw_enforcement_alert')").fetchone()[0]
+        except Exception:
+            # Content is supplementary; leaving it None is honest and does not
+            # change the health verdict, which rests on the heartbeat alone.
+            result["events"] = None
+    except Exception as exc:
+        result["state"] = INGEST_UNKNOWN_UNREADABLE
+        result["detail"] = "could not read the ingest heartbeat: %s" % exc
+        return result
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not row or not row[0]:
+        result["detail"] = ("no sweep has completed yet — expected on a fresh "
+                            "install, or after the dashboard restarted less than "
+                            "one interval ago")
+        return result
+
+    try:
+        stamp = datetime.fromisoformat(str(row[0]))
+    except Exception:
+        # A stamp that cannot be parsed is NOT evidence of health, and guessing
+        # either way would be exactly the plausible-but-wrong instrument this
+        # panel exists to detect. (This is also what a UTC/local mix looked like
+        # before it was fixed on 2026-08-05 — see degraded_ingest.write_offset.)
+        result["state"] = INGEST_UNKNOWN_UNREADABLE
+        result["detail"] = "last-sweep timestamp is unreadable: %r" % (row[0],)
+        return result
+
+    age = (now - stamp).total_seconds()
+    result["last_sweep"] = stamp.isoformat(timespec="seconds")
+    result["age_seconds"] = int(age)
+
+    # A sweep stamped in the FUTURE is not a measurement to trust, and must not
+    # sail through as healthy just because a negative age satisfies `<=`.
+    # Caught by this panel reading its own live input on 2026-08-05: the
+    # pre-fix UTC stamp produced age = -17957s and the panel called it HEALTHY —
+    # the most confident possible answer derived from the most broken possible
+    # input. Clock skew and a timezone regression both land here, and both mean
+    # the heartbeat cannot be interpreted, which is `unknown`, not `healthy`.
+    # A few seconds of tolerance absorbs ordinary clock jitter.
+    if age < -5:
+        result["state"] = INGEST_UNKNOWN_UNREADABLE
+        result["detail"] = ("last-sweep timestamp is %ds in the FUTURE — clock "
+                            "skew or a timezone mismatch; the heartbeat cannot "
+                            "be interpreted" % int(-age))
+        return result
+
+    if age <= threshold:
+        result["state"] = INGEST_HEALTHY
+        result["detail"] = "last sweep %ds ago (within %ds)" % (int(age), threshold)
+    else:
+        result["state"] = INGEST_DEGRADED
+        result["detail"] = ("last sweep %ds ago, beyond the %ds threshold — the "
+                            "poller may have stopped" % (int(age), threshold))
+    return result
+
+
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 # State, not code — so it belongs in DATA_DIR, not the tree. It was written to
@@ -7241,6 +7361,58 @@ def diagnostics_page():
         </div>
     </div>"""
 
+    # ── ADR 0019 Phase 2: enforcement-visibility panel (READ-ONLY) ────────────
+    # Rendered from the state the ingest ACTUALLY writes, never a parallel table
+    # that could drift from it — the roadmap's explicit constraint, because a
+    # panel showing a rule the kernel does not have is exactly the
+    # plausible-but-wrong instrument this work exists to rule out.
+    #
+    # Built in Python like the check cards above, and for the stated reason: it
+    # avoids the JS-string-inside-an-f-string escaping bug that is this repo's
+    # single most common defect.
+    _h = degraded_ingest_health()
+    _state_style = {
+        INGEST_HEALTHY:            ("#00ff88", "Healthy"),
+        INGEST_DEGRADED:           ("#ffaa00", "Degraded"),
+        INGEST_UNKNOWN_NO_SWEEP:   ("#bbbbbb", "Unknown — no sweep yet"),
+        INGEST_UNKNOWN_UNREADABLE: ("#ff4444", "Unknown — cannot read"),
+    }
+    _colour, _label = _state_style.get(_h["state"], ("#ff4444", "Unknown"))
+    _last = html.escape(_h["last_sweep"] or "never")
+    _age = "—" if _h["age_seconds"] is None else f"{_h['age_seconds']}s ago"
+    _events = "—" if _h["events"] is None else str(_h["events"])
+    enforcement_html = f"""
+    <h2><span class="tier-text"
+        data-beginner="Is Nemesis still watching its own firewall?"
+        data-intermediate="Enforcement Visibility"
+        data-pro="ADR 0019 ingest health">Enforcement Visibility</span></h2>
+    <div class="check-card">
+        <div class="check-header">
+            <span class="check-icon">&#128737;</span>
+            <span class="check-name">Degraded-journal ingest</span>
+            <span class="check-status"
+                  style="background:{_colour};color:#111;font-weight:bold">{html.escape(_label)}</span>
+        </div>
+        <div style="padding:8px 12px;color:#ccc;font-size:0.88em;line-height:1.6">
+            <div><span style="color:#888">Last completed sweep:</span> {_last}
+                 <span style="color:#888">({html.escape(_age)})</span></div>
+            <div><span style="color:#888">Expected at least every:</span>
+                 {_h['threshold_seconds']}s
+                 <span style="color:#888">(2 &times; the {_h['interval_seconds']}s poll interval)</span></div>
+            <div><span style="color:#888">Enforcement events recorded:</span> {html.escape(_events)}</div>
+            <div style="margin-top:6px;color:#bbb">{html.escape(_h['detail'])}</div>
+            <div style="margin-top:8px;color:#777;font-size:0.92em">
+                <span class="tier-text"
+                    data-beginner="A quiet sweep and a stopped one look identical in the logs, so this reports what it actually measured &mdash; it never assumes healthy from silence."
+                    data-intermediate="Heartbeat is the ingest offset stamp, written every sweep whether or not anything is found. Silence is never read as healthy."
+                    data-pro="Heartbeat: settings.updated_at[degraded_ingest_offset]. Content: audit_log. No inferred state.">
+                    This never infers healthy from silence.
+                </span>
+            </div>
+        </div>
+    </div>
+"""
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -7339,6 +7511,8 @@ def diagnostics_page():
         <button class="btn-run-all" id="btnRunAll" onclick="runAll()">▶ Run All Checks</button>
         <span id="runAllProgress"></span>
     </div>
+
+{enforcement_html}
 
     <h2><span class="tier-text"
         data-beginner="Individual Checks — click Run to see results"

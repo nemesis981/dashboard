@@ -29,6 +29,7 @@ Runs entirely against a throwaway database and a temp journal — it never touch
 the live DB, and never imports the watcher.
 """
 import json
+from datetime import datetime
 import os
 import sqlite3
 import sys
@@ -39,7 +40,7 @@ sys.path.insert(0, HERE)
 
 import degraded_ingest as di
 
-EXPECTED_CHECKS = 25
+EXPECTED_CHECKS = 27
 
 _results = []
 
@@ -246,6 +247,36 @@ def main():
     stored = sqlite3.connect(db6).execute(
         "SELECT value FROM settings WHERE key=?", (di.OFFSET_KEY,)).fetchone()
     check("the offset landed in the separate store", stored is not None, True)
+
+    # ── the offset stamp must be LOCAL time, not UTC ─────────────────────────
+    # This wrote SQLite's datetime('now') (UTC) until 2026-08-05 while every
+    # other timestamp in the database is local. Nothing broke because nothing
+    # read it — but the ADR 0019 status panel derives sweep health from exactly
+    # this column, and a UTC stamp compared against a local `now` reports a
+    # 60-second sweep as hours stale: permanently degraded, on a healthy system.
+    print("\nthe offset timestamp is local, matching every other stored time")
+    db7 = make_db()
+    jp7 = os.path.join(tmp, "tz.jsonl")
+    write_journal(jp7, [REC_TAMPER])
+    di.ingest_once(factory(db7), jp7)
+    stored = sqlite3.connect(db7).execute(
+        "SELECT updated_at FROM settings WHERE key=?", (di.OFFSET_KEY,)).fetchone()[0]
+    stamp = datetime.fromisoformat(stored)
+    skew = abs((datetime.now() - stamp).total_seconds())
+    # Generous window: this asserts "same clock", not "same instant". A UTC/local
+    # mix shows up as a whole-hours offset, far outside this.
+    check("the stored stamp is within seconds of local now", skew < 120, True)
+    # CONTROL: the same comparison against a deliberately UTC-stamped value MUST
+    # fail. Without it, a machine running in UTC would make the check above pass
+    # for the wrong reason and prove nothing.
+    utc_stored = sqlite3.connect(db7).execute("SELECT datetime('now')").fetchone()[0]
+    utc_skew = abs((datetime.now() - datetime.fromisoformat(utc_stored)).total_seconds())
+    if utc_skew < 120:
+        print("  [SKIP] machine clock is UTC — the control cannot distinguish; "
+              "skipping rather than asserting vacuously")
+        _results.append(("CONTROL a UTC stamp is detected as skewed (skipped: UTC host)", True))
+    else:
+        check("CONTROL a UTC stamp IS detected as skewed", utc_skew < 120, False)
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)
