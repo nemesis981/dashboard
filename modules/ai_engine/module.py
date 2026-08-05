@@ -2097,6 +2097,26 @@ def get_chat_js() -> str:
         'd.innerHTML=' + json.dumps(_chat_widget_markup()) + ';'
         'var n=d.firstElementChild;if(!n)return false;'
         'document.body.appendChild(n);'
+        # Enter submits, Shift+Enter inserts a newline -- standard chat-input
+        # behaviour. Bound HERE, inside the one branch that actually creates the
+        # node, so it attaches exactly once no matter how often ensureWidget()
+        # is called (it early-returns above when the node already exists).
+        #
+        # Gated on the Ask button's OWN disabled state rather than re-deriving
+        # the conditions: that flag already covers both "out of turns"
+        # (meta() sets it from turns_left) and "a request is in flight"
+        # (nemChatAsk disables it on entry). So Enter can never spend a turn the
+        # button itself would have refused, and cannot double-submit.
+        #
+        # isComposing is checked so Enter that is committing an IME candidate
+        # (CJK input) does not fire a question mid-word.
+        'var _inp=el("nemChatInput");'
+        'if(_inp){_inp.addEventListener("keydown",function(e){'
+        'if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing){'
+        'e.preventDefault();'
+        'var b=el("nemChatAskBtn");'
+        'if(b&&!b.disabled&&window.nemChatAsk)window.nemChatAsk();'
+        '}});}'
         'return true;'
         '}'
         'if(!ensureWidget()){'
