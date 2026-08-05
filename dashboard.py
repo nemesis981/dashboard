@@ -4243,6 +4243,41 @@ def _alert_body_from_row(row):
     return " | ".join(parts)
 
 
+#: A model asked for "JSON only, no markdown" still wraps its reply in a fence
+#: often enough that the prompt cannot be relied on to prevent it. Measured live
+#: 2026-08-05: rule 1000002's analysis came back inside ```json ... ```, so
+#: json.loads() failed on the first backtick.
+_JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.S | re.I)
+
+
+def _parse_ai_json(text):
+    """Decode a model's JSON reply, tolerating a markdown code fence.
+
+    Returns the decoded dict, or None when the text genuinely is not a JSON
+    object. **None is an explicit "could not parse" sentinel, not an empty
+    dict** — the caller must be able to tell a failed parse from a successful
+    parse of something empty, because those call for different handling.
+
+    Only a dict is accepted. A bare string or list is valid JSON but cannot be
+    an analysis, and letting one through would put a plausible-looking wrong
+    shape into the row.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    candidates = [text]
+    fenced = _JSON_FENCE_RE.match(text)
+    if fenced:
+        candidates.append(fenced.group(1))
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
 @app.route("/api/analyze/<rule_id>")
 def analyze_alert(rule_id):
     try:
@@ -4371,13 +4406,28 @@ Alert: {alert_body}
         if not ai_result.get("ok"):
             return jsonify({"error": ai_result.get("reason", "AI unavailable")}), 503
         response_text = ai_result["text"]
-        try:
-            analysis = json.loads(response_text)
-        except Exception as e:
-            log.warning("analyze_alert: failed to parse Claude response as JSON: %s", e)
+        analysis = _parse_ai_json(response_text)
+        if analysis is None:
+            # A PARSE FAILURE IS NOT EVIDENCE ABOUT THE RISK. Until 2026-08-05
+            # this branch hardcoded risk_level="UNKNOWN" and wrote it straight
+            # over the stored value — measured live on rule 1000002, whose
+            # CRITICAL became UNKNOWN because the model wrapped its (correct,
+            # MEDIUM) answer in a ```json fence. Downgrading a real severity
+            # because a parser tripped is strictly worse than knowing nothing:
+            # "UNKNOWN" is a legal value, so nothing downstream could tell the
+            # difference between it and a genuine assessment.
+            #
+            # So the prior value is carried forward instead, and the write-back
+            # below COALESCEs on it, meaning a parse failure can no longer make
+            # an alert look safer than it is.
+            prior_risk = existing[6] if existing and len(existing) > 6 else None
+            log.warning("analyze_alert: could not parse the model reply as JSON "
+                        "for rule_id=%s; keeping the stored risk_level (%r) and "
+                        "storing the raw reply as the explanation",
+                        rule_id, prior_risk)
             analysis = {
                 "explanation": response_text,
-                "risk_level": "UNKNOWN",
+                "risk_level": prior_risk,
                 "is_threat": False,
                 "recommended_action": "Monitor",
                 "reason": "Could not parse response"
@@ -4393,15 +4443,23 @@ Alert: {alert_body}
         # guarded by NOT EXISTS in the same statement, so it cannot duplicate
         # even if a third writer lands between the two. No schema change and no
         # transaction held across the API call.
-        c.execute("UPDATE alerts SET explanation=?, risk_level=? WHERE rule_id=?",
+        # COALESCE, not a bare assignment: a None risk_level means "the parse
+        # failed, I have nothing to say about severity" and must leave whatever
+        # is stored intact. A bare `risk_level=?` with None would NULL the column
+        # — the same data loss the hardcoded "UNKNOWN" caused, just quieter.
+        c.execute("UPDATE alerts SET explanation=?, "
+                  "risk_level=COALESCE(?, risk_level) WHERE rule_id=?",
                   (analysis["explanation"], analysis["risk_level"], rule_id))
         if c.rowcount == 0:
             c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
                 SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
                 WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE rule_id = ?)""",
+                # On a BRAND NEW row there is no prior value to preserve, so an
+                # unparseable reply genuinely leaves the risk unknown — unlike the
+                # UPDATE path above, "UNKNOWN" is the honest answer here.
                 (rule_id, raw_alert[:50], "", 1, analysis["explanation"],
-                 analysis["risk_level"], new_action, now, now, rule_id))
+                 analysis["risk_level"] or "UNKNOWN", new_action, now, now, rule_id))
         conn.commit()
         conn.close()
         return jsonify({**analysis, "cached": False, "src_ip": src_ip,

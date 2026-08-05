@@ -46,7 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-EXPECTED_CHECKS = 17
+EXPECTED_CHECKS = 29
 
 _results = []
 
@@ -60,26 +60,41 @@ def check(label, got, want):
     print("  [%s] %s   (got=%s want=%s)" % ("PASS" if ok else "FAIL", label, g, w))
 
 
-def load_body_builder():
-    """Import ONLY the helper, by AST-extracting it from dashboard.py.
+def load_named(name):
+    """Import ONE named helper, by AST-extracting it from dashboard.py.
 
     Importing dashboard.py wholesale runs its module-level init against the live
     database and loads every module — far too much for a pure-function test, and
     it would make this suite depend on the machine's state. Extracting the one
     function keeps the test hermetic while still testing the REAL source, not a
     reimplementation of it (which would drift and prove nothing).
+
+    Module-level names the extracted function closes over (json, re, and any
+    compiled pattern) are supplied explicitly, so a helper that grows a new
+    dependency fails loudly here rather than silently testing a stub.
     """
-    import ast
+    import ast, json as _json, re as _re
     src = open(os.path.join(REPO, "dashboard.py")).read()
     tree = ast.parse(src)
+    ns = {"json": _json, "re": _re}
+    # Pull in module-level constants the helpers reference (e.g. _JSON_FENCE_RE).
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == "_alert_body_from_row":
-            ns = {}
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id.startswith("_JSON_")
+                for t in node.targets):
             exec(compile(ast.Module(body=[node], type_ignores=[]),
                          "dashboard.py", "exec"), ns)
-            return ns["_alert_body_from_row"]
-    raise AssertionError("_alert_body_from_row not found in dashboard.py — the "
-                         "fix is absent, not merely failing")
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            exec(compile(ast.Module(body=[node], type_ignores=[]),
+                         "dashboard.py", "exec"), ns)
+            return ns[name]
+    raise AssertionError("%s not found in dashboard.py — the fix is ABSENT, "
+                         "not merely failing" % name)
+
+
+def load_body_builder():
+    return load_named("_alert_body_from_row")
 
 
 # Row shape mirrors analyze_alert's documented SELECT * mapping:
@@ -162,6 +177,45 @@ def main():
     check("the prompt interpolates the rebuilt body", "Alert: {alert_body}" in fn_src, True)
     check("CONTROL the prompt no longer interpolates raw directly",
           "Alert: {raw_alert}" in fn_src, False)
+
+    # ── fence-tolerant JSON parse ────────────────────────────────────────────
+    # Found live 2026-08-05: the model wrapped its (correct) answer in ```json
+    # despite the prompt saying "JSON only, no markdown". json.loads() died on
+    # the first backtick, the except branch stored the whole fenced blob as the
+    # "plain English explanation", and hardcoded risk_level="UNKNOWN" straight
+    # over a stored CRITICAL. The analysis was right; only the storage was wrong.
+    print("\na fenced JSON reply is parsed, not treated as unparseable")
+    parse = load_named("_parse_ai_json")
+    good = '{"explanation": "x", "risk_level": "MEDIUM"}'
+    check("CONTROL bare JSON still parses", (parse(good) or {}).get("risk_level"), "MEDIUM")
+    check("```json fenced JSON parses",
+          (parse("```json\n" + good + "\n```") or {}).get("risk_level"), "MEDIUM")
+    check("bare ``` fenced JSON parses",
+          (parse("```\n" + good + "\n```") or {}).get("risk_level"), "MEDIUM")
+    check("fence with trailing whitespace parses",
+          (parse("  ```json\n" + good + "\n```  \n") or {}).get("risk_level"), "MEDIUM")
+    # None is the explicit failure sentinel — it must NOT be an empty dict, or the
+    # caller cannot tell "unparseable" from "parsed something empty".
+    check("genuinely non-JSON returns the None sentinel", parse("hello there"), None)
+    check("empty text returns None", parse(""), None)
+    # A bare string/list is valid JSON but cannot be an analysis; letting one
+    # through would put a plausible wrong shape into the row.
+    check("a JSON string (not object) is rejected", parse('"just a string"'), None)
+    check("a JSON list (not object) is rejected", parse('[1,2,3]'), None)
+
+    # ── a parse failure must not rewrite severity ────────────────────────────
+    print("\na parse failure does not overwrite a stored risk_level")
+    fn_src2 = ast.get_source_segment(src, fn) or ""
+    check("the fallback no longer hardcodes UNKNOWN",
+          '"risk_level": "UNKNOWN"' in fn_src2, False)
+    check("the fallback carries the prior stored risk forward",
+          "prior_risk" in fn_src2, True)
+    check("the UPDATE coalesces rather than clobbering",
+          "COALESCE(?, risk_level)" in fn_src2, True)
+    # CONTROL: the INSERT path has no prior value, so UNKNOWN is correct there —
+    # proving the two paths are deliberately different, not accidentally the same.
+    check("CONTROL the INSERT path still defaults to UNKNOWN",
+          'or "UNKNOWN"' in fn_src2, True)
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)
