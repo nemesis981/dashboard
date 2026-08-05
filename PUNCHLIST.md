@@ -2471,3 +2471,21 @@ this entry is the proposal, not the implementation.
       Committed and pushed by Window 2, 2026-08-05 (`41ba66f`). **Sentinel/explicit-failure-state
       work for the three callers of `_detect_connection_type()` remains open, scoped out of this
       fix as a separate future change — not closed by this entry.**
+
+- [ ] **`alert_manager/test_quarantine.py` has been RED for 8 days.** The quarantine confirm/lift
+  routes were hardened to `methods=["POST"]` on 2026-07-28 (`8c8bce9`, "require POST for
+  state-changing quarantine/action endpoints"), but the test still issues GETs against them —
+  405s on confirm/lift, cascading to six dependent checks.
+    - [ ] **Confirmed unrelated to the 2026-08-05 `data_manager`/`scan_tasks` namespace work:**
+      zero references to `data_manager`, `scan_tasks`, or `namespace` anywhere in the test file.
+      Its last touch (2026-08-04, `69ade29`) was a Rule 11 test-data-labelling pass, not a method
+      fix — the file has been silently broken since the security hardening landed, not since
+      anything done this week.
+    - [ ] **The real gap this exposes:** an e2e suite went red the moment a security fix shipped
+      and stayed red over a week without anyone noticing, because nothing runs `alert_manager`'s
+      suites as a whole by default — only per-suite, which is why this surfaced only when Window 1
+      swept the full directory today rather than running a targeted suite.
+    - [ ] **Fix shape:** update the test's confirm/lift calls to POST, matching `8c8bce9`'s
+      route change; re-verify the six cascaded checks pass once the method mismatch is corrected.
+    - [ ] Found by Window 1, 2026-08-05, during the `data_manager`/`scan_tasks` namespace audit
+      (unrelated investigation — the red suite was collateral discovery, not the target).
