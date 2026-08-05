@@ -2175,7 +2175,15 @@ this entry is the proposal, not the implementation.
     - [x] **Going forward:** cite 465/465 (16 suites) for anything describing the tree as it
       stood before Step 5, and 498/498 (18 suites) for current state. Neither is 468.
 
-- [ ] **`community_queue`'s batch AI analysis has no in-flight dedup — the same defect class
+- [x] **`community_queue`'s batch AI analysis has no in-flight dedup — the same defect class
+  **RESOLVED 2026-08-04 (`d7851df`).** Both halves shipped: `job_id=f"cq:{domain_or_ip}"`
+  engages `ai_engine`'s in-flight dedup, AND `_analyse_one()` returns `ran: False` on any
+  not-ok result which `_api_analyse` honours by skipping the write and leaving
+  `ai_reviewed=0`, so the row is retried instead of being marked reviewed with no
+  analysis behind it. Code-verified 2026-08-05 (caller checked, not just the docstring's
+  claim). **Follow-on fixed 2026-08-05:** the backend returned a `skipped` count that the
+  UI dropped, so a deduped second click reported "0 item(s) reviewed" and said nothing
+  about the rows it had skipped — the dedup worked but looked like nothing happened.
   the concurrency emergency fixed on `analyze_alert`, still live.** `_analyse_one()`
   (`modules/community_queue/module.py:190-195`) calls `ai_analyze()` with `cache_key` and
   `cache_hours` but **no `job_id`**, so `ai_engine`'s in-flight dedup never engages. The
@@ -2490,7 +2498,12 @@ this entry is the proposal, not the implementation.
     - [ ] Found by Window 1, 2026-08-05, during the `data_manager`/`scan_tasks` namespace audit
       (unrelated investigation — the red suite was collateral discovery, not the target).
 
-- [ ] **Shared chat widget: duplicate `id="nemChatSection"` collides on the main dashboard page.**
+- [x] **Shared chat widget: duplicate `id="nemChatSection"` collides on the main dashboard page.**
+  **RESOLVED 2026-08-05 (`dd32ccb`, deployed).** Render-once/relocate-everywhere: markup moved
+  to a private `_chat_widget_markup()`, injected once by `get_chat_js()`, every surface
+  relocates it via `nemChatAttach()`. NOTE: fixing this did NOT restore chat — a separate
+  pre-existing `SyntaxError` (see the newline entry) was the actual cause of the reported
+  symptom. Both had to land.
   `modules/ai_engine/module.py:1883` hardcodes `id="nemChatSection"`, and three surfaces each
   embed their own copy of that markup onto the SAME page (`/`): `dashboard.py:10693` (inside
   `#alertModal`), `modules/anomaly_detection/module.py:1458` via `_ai_modal_html()` (inside the
@@ -2519,7 +2532,12 @@ this entry is the proposal, not the implementation.
       suspects first — no `/api/ai/chat` request ever reached the backend, no journal errors, and
       anchor registration did NOT fail.
 
-- [ ] **Chat runs adaptive thinking at `high` effort on every question.**
+- [x] **Chat runs adaptive thinking at `high` effort on every question.**
+  **RESOLVED 2026-08-05 (`dd32ccb`, deployed).** `effort` threaded through `analyze()` and set
+  to `medium` for the chat path only, against an allowlist (`effort` is a hard 400 on Sonnet 4.5
+  / Haiku 4.5). Non-chat callers still send no `output_config` at all. Adaptive thinking left ON
+  deliberately. Latency improvement is UNMEASURED — no chat call completed before the fix, so
+  there is no baseline to compare against.
   `modules/ai_engine/module.py:2268` builds the API kwargs as
   `dict(model, max_tokens, messages)` (+ optional `system`) and sets neither `thinking` nor
   `output_config`.
@@ -2593,7 +2611,7 @@ this entry is the proposal, not the implementation.
       turning a type error into a plausible-looking string that a caller cannot
       distinguish from a real answer. See also the two entries above.
 
-- [ ] **Chat input required clicking "Ask"; Enter did not submit.**
+- [x] **Chat input required clicking "Ask"; Enter did not submit.**
   `modules/ai_engine/module.py` — the shared chat widget's input is a `<textarea>`, so
   Enter inserted a newline and the only way to send a question was the button. Standard
   chat-input expectation is Enter-to-send.
@@ -2616,3 +2634,23 @@ this entry is the proposal, not the implementation.
     - [ ] **Not done, deliberately:** no "(Enter to send)" hint added to the placeholder.
       The existing placeholder is already a full example sentence and the operator asked
       only for the behaviour. Worth considering separately if discoverability matters.
+
+- [ ] **PUNCHLIST entries are being trusted at face value instead of code-verified, and four
+  were stale in one day.** On 2026-08-05, four AI-related entries marked `[ ]` open were found
+  already fixed: the duplicate-`id` collision and the `high`-effort chat bug (both shipped in
+  `dd32ccb`), Enter-to-submit, and `community_queue`'s batch dedup (shipped in `d7851df` the
+  previous day).
+    - [ ] **The concrete cost:** during an AI-item survey the `community_queue` dedup was ranked
+      *"the highest-value bug in the batch"* purely on the strength of its entry text, and was
+      queued as the next piece of work. It had been fixed for a day. Reading the code first is
+      what caught it; a fix would otherwise have been written for a bug that no longer existed,
+      and the duplicate work would have looked like progress.
+    - [ ] **Habit change:** before picking up ANY punchlist item as work, verify it against the
+      current code — the entry describes the bug as it was when written, not as it is now. This
+      mirrors the rule the morning roadmap audit already applies (`CLAUDE.md`: do not classify
+      off each file's `Status:` header, because headers go stale on shipping). PUNCHLIST has the
+      same failure mode and no equivalent guard.
+    - [ ] **Why entries go stale:** a fix commit closes the code but nothing forces the entry to
+      be updated, so the list drifts one-way toward over-reporting open work. Marking `[x]` at
+      fix time is the cheap prevention; a periodic verify-and-close sweep is the cure.
+    - [ ] Found by Window 3, 2026-08-05, while working the AI-related items as a batch.
