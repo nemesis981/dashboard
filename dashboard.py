@@ -7562,6 +7562,33 @@ def firewall_db():
                     f"""title="Opens this alert so you can unblock {html.escape(str(a[11]), quote=True)}">&#128275; Unblock</a>"""
                 )
 
+            # Analyze hand-off (2026-08-05). This page lists EVERY alert; the main
+            # dashboard lists only the recent/pending ones, so an alert like the
+            # host-defence SYN-sweep exists here and nowhere else — and Analyze was
+            # reachable only from the main page. There was no route to analysing it.
+            #
+            # A LINK to the main page's modal, NOT a local fetch — the same choice
+            # the Unblock hand-off above makes, for the same reason. `viewAlert()`
+            # carries the tiered rendering, the cached-vs-fresh indicator, notes,
+            # and the chat anchor; re-implementing any of that here would give two
+            # renderers for one result, and they would drift. The deep-link
+            # (`/?alert=<rule_id>`) is already handled on the main page and already
+            # calls viewAlert(), so this reuses a working path rather than adding one.
+            #
+            # Shown on EVERY row, deliberately, not just un-analysed ones. Whether an
+            # analysis exists is exactly what the (just-fixed) gate in analyze_alert()
+            # decides, and duplicating that judgement here would be a SECOND place
+            # that can be wrong about it — the off-by-one the gate fix corrected was
+            # itself a wrong answer to this question. An already-analysed alert
+            # early-returns from cache and costs nothing.
+            analyze_link = (
+                f"""<a href="/?alert={html.escape(rule_id_raw, quote=True)}" """
+                f"""onclick="event.stopPropagation()" """
+                f"""style="display:inline-block;margin-left:8px;color:#00d4ff;font-size:0.85em" """
+                f"""title="Opens this alert on the dashboard and runs the AI analysis">"""
+                f"""&#129302; Analyze</a>"""
+            )
+
             rows += f"""<tr class="db-row-click" style="{row_style}cursor:pointer" onclick="{row_notes_onclick}">
                 <td style="color:#bbb">{rule_id}</td>
                 <td class="rule-name-cell" data-tip-beginner="{tip_b}" data-tip-intermediate="{tip_m}" data-tip-pro="{tip_p}" title="{tip_m}">{rule_name}</td>
@@ -7576,7 +7603,7 @@ def firewall_db():
                         <option {"selected" if a[7]=="block" else ""}>block</option>
                         <option {"selected" if a[7]=="monitor" else ""}>monitor</option>
                     </select>
-                    {unblock_link}
+                    {unblock_link}{analyze_link}
                 </td>
                 <td style="color:#bbb;font-size:0.85em;white-space:nowrap">Notes ▸</td>
             </tr>"""
