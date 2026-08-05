@@ -2547,3 +2547,48 @@ this entry is the proposal, not the implementation.
       `/firewall-db` one-shot AI-analysis panel entry above. Captured per Rule 7 so it is not
       silently re-discovered or silently built.
     - [ ] Requested by the operator, 2026-08-05.
+
+- [ ] **`analyze_alert()`'s early-return gate reads `priority`, so the AI is never called
+  for any alert.** `dashboard.py` — `SELECT * FROM alerts` column order is
+  `0 id · 1 rule_id · 2 rule_name · 3 classification · 4 priority · 5 explanation ·
+  6 risk_level · …`, but the gate is `if existing and existing[4]:` and the code treats
+  index 4 as `explanation`. An off-by-one on two indices only; 2/7/8/10/11 are correct,
+  which is why it went unnoticed.
+    - [ ] **Impact (measured 2026-08-05):** `priority` is truthy on **20/20** rows, so the
+      early return ALWAYS fires. `/api/analyze/<rule_id>` therefore never reaches the AI,
+      `ai_cache` is never written for an alert (confirmed: 0 `alert_*` rows for any real
+      alert), and the chat anchor's "Analysis already shown to the user" enrichment in
+      `_anchor_load_alert` is consequently **dead** — it looks like a grounding source and
+      contributes nothing. Only 1 of 20 rows has an `explanation` at all.
+    - [ ] **DISPLAY HALF FIXED 2026-08-05** (same commit as this entry): the two display
+      reads were the same off-by-one and are corrected — `"explanation": existing[5]` and
+      `"risk_level": existing[6]`. That removes the literal **"Explanation: 2"** in the
+      alert modal (it was rendering `priority`) and the **"Risk Level: UNKNOWN"** on an
+      alert stored as `HIGH` (it was rendering the empty `explanation`).
+    - [ ] **GATE DELIBERATELY LEFT WRONG — needs a COST decision, not a code decision.**
+      Correcting `existing[4]` → `existing[5]` would start making **real billed AI calls**
+      for every alert that currently returns instantly. Operator explicitly held this on
+      2026-08-05 pending a separate spend decision. The reason is documented inline above
+      the gate so it is not "tidied" by accident. Do not change it without that decision.
+    - [ ] Found by Window 3, 2026-08-05, while answering whether the "Analyse this alert"
+      pre-step matters for chat grounding. It does — but via `_HISTORY_TURNS=3`
+      conversation replay, NOT via the cached-analysis path, which this bug had disabled.
+
+- [ ] **`_anchor_load_incident()` reported every anomaly incident's device list as
+  "unreadable".** `modules/anomaly_detection/module.py` — `devices_json` holds a list of
+  **dicts** (`{ip, name, first_seen_ts, query_count}`), but the loader did
+  `", ".join(json.loads(...))`, which raises `TypeError: expected str instance, dict found`.
+  A bare `except` converted that into the literal string `"unreadable"`.
+    - [ ] **Impact (measured 2026-08-05): 153 of 153 incidents — it had never once
+      succeeded.** The anomaly chat was told `Devices involved (1): unreadable` while the
+      same row contained `<device-name> (<lan-ip>)`. Operator had to identify the
+      device by hand mid-conversation; the loader already had it and discarded it.
+    - [ ] **FIXED 2026-08-05** (same commit as this entry): format the dicts as
+      `name (ip)`, tolerate the plain-string shape the old code assumed, and `log.exception`
+      on failure so the next shape change is visible instead of silently absorbed.
+      Verified across all 153 incidents (153/153 now format; was 0/153), with a control
+      confirming the old expression still raises on the same real data.
+    - [ ] **The durable lesson:** `"unreadable"` reads like a DATA problem, so nobody
+      suspected the reader. Third instance today of the same shape — a bare `except`
+      turning a type error into a plausible-looking string that a caller cannot
+      distinguish from a real answer. See also the two entries above.
