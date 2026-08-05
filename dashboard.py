@@ -7505,6 +7505,15 @@ def diagnostics_page():
             data-pro="Redaction: loads /etc/nemesis.env + live os.environ at run time; replaces all secret values ≥8 chars with [REDACTED] before JSON response is serialized.">
             Your API keys, email passwords, and other private settings are automatically hidden.
         </span>
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,212,255,0.15)">
+            <strong>What this does not cover:</strong>
+            <span class="tier-text"
+                data-beginner="This hides passwords and keys. It does NOT hide network details such as device addresses. If you use the AI alert analysis, the alert details — including the addresses of the devices involved — are sent to the AI service to be analysed."
+                data-intermediate="Scope is secrets only. Network identifiers (IP addresses, MAC addresses, hostnames) are NOT redacted. The AI alert-analysis feature sends alert content, including source and destination IPs, to an external model."
+                data-pro="redact.py matches _SECRET_KEYS + values &ge;8 chars from nemesis.env only; no PII or network-identifier handling. /api/analyze/&lt;rule_id&gt; applies no redaction — the prompt carries src_ip and dst_ip verbatim.">
+                Secrets only — network addresses are not redacted, and AI alert analysis sends them to an external service.
+            </span>
+        </div>
     </div>
 
     <div class="top-actions">
