@@ -4499,6 +4499,23 @@ def analyze_alert(rule_id):
                 "reason": "The alert has no stored detail and none was supplied.",
             }), 422
 
+        # ── Pseudonymize before the prompt leaves the network ───────────────
+        # Every network address in the body becomes a stable token (host-A,
+        # host-B) and the real-address map stays here, in this request, and is
+        # discarded when it returns. See alert_manager/nemesis_pseudonymize.py
+        # for why this is NOT diagnostics/redact.py: that scrubs known secrets
+        # by substring, which would DESTROY the relational reasoning this call
+        # exists to buy ("host-A is scanning host-B" survives; "[REDACTED] is
+        # scanning [REDACTED]" does not).
+        #
+        # It runs on the ASSEMBLED BODY, not on the src_ip/dst_ip columns. The
+        # `raw` fallback path above is a whole Suricata fast.log line with
+        # addresses inline rather than in fields, and rule_name/classification
+        # are free text that can carry one — tokenizing the two columns would
+        # leave the caller-controlled path completely unprotected.
+        import nemesis_pseudonymize as _pseudo
+        alert_body, _addr_map = _pseudo.pseudonymize(alert_body)
+
         from modules.ai_engine import analyze as ai_analyze
         ai_result = ai_analyze(
             f"""You are Nemesis, an AI security assistant for a home network firewall.
@@ -4525,7 +4542,26 @@ Alert: {alert_body}
         )
         if not ai_result.get("ok"):
             return jsonify({"error": ai_result.get("reason", "AI unavailable")}), 503
-        response_text = ai_result["text"]
+        # ── Resolve tokens back IMMEDIATELY, before anything stores the reply ──
+        # Deliberately the very first thing done to the response, because the
+        # reply fans out to four places from here: `alerts.explanation` (a
+        # persisted column), ai_engine's 24h `ai_cache`, the JSON handed to the
+        # browser, and — downstream — `_anchor_load_alert()`, which feeds BOTH
+        # the explanation and the cached reply into the chat prompt. Resolving
+        # once, here, means none of those four need to know tokens ever existed;
+        # resolving at display time would mean updating every one of them and
+        # persisting the map, for no gain this feature needs.
+        #
+        # KNOWN EDGE, bounded and deliberately not solved here: on an `ai_cache`
+        # HIT the cached text carries tokens from the ORIGINAL call, resolved
+        # against a map computed fresh from today's row. The map is deterministic
+        # from the body, so an unchanged row resolves identically — but if
+        # src_ip/dst_ip changed since the reply was cached, host-A could resolve
+        # to a different address than it meant when written. Narrow (the gate
+        # above early-returns once `explanation` is set, so this path needs a
+        # cached reply with no stored explanation) but real; captured in
+        # PUNCHLIST rather than fixed inside an unrelated change.
+        response_text = _pseudo.resolve(ai_result["text"], _addr_map)
         analysis = _parse_ai_json(response_text)
         if analysis is None:
             # A PARSE FAILURE IS NOT EVIDENCE ABOUT THE RISK. Until 2026-08-05
@@ -7508,10 +7544,10 @@ def diagnostics_page():
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,212,255,0.15)">
             <strong>What this does not cover:</strong>
             <span class="tier-text"
-                data-beginner="This hides passwords and keys. It does NOT hide network details such as device addresses. If you use the AI alert analysis, the alert details — including the addresses of the devices involved — are sent to the AI service to be analysed."
-                data-intermediate="Scope is secrets only. Network identifiers (IP addresses, MAC addresses, hostnames) are NOT redacted. The AI alert-analysis feature sends alert content, including source and destination IPs, to an external model."
-                data-pro="redact.py matches _SECRET_KEYS + values &ge;8 chars from nemesis.env only; no PII or network-identifier handling. /api/analyze/&lt;rule_id&gt; applies no redaction — the prompt carries src_ip and dst_ip verbatim.">
-                Secrets only — network addresses are not redacted, and AI alert analysis sends them to an external service.
+                data-beginner="This hides passwords and keys. AI alert analysis no longer sends your device addresses out: each one is swapped for a stand-in label (host-A, host-B) before the alert is sent, and swapped back for you to read. The swap list never leaves your network. One thing this does NOT cover: when an alert is looked up in the AbuseIPDB and ipinfo.io reputation services, the real source address IS sent, because those services cannot look up an address they are not given."
+                data-intermediate="Scope is secrets only. Network identifiers are not redacted in general. The AI alert-analysis prompt IS pseudonymized: IPs and MACs are replaced with stable tokens before the call and resolved back for display, and the mapping stays local. SEPARATE EXPOSURE, unaffected by that: IP reputation enrichment sends the real source IP to AbuseIPDB and ipinfo.io, which those APIs require in order to function."
+                data-pro="redact.py matches _SECRET_KEYS + values &ge;8 chars from nemesis.env only; no PII or network-identifier handling. /api/analyze/&lt;rule_id&gt; pseudonymizes its prompt via alert_manager/nemesis_pseudonymize.py (IPv4/IPv6/MAC &rarr; host-N tokens on the assembled body, resolved before storage; map is per-request, never persisted). NOT covered: enrich_ip() (alert_manager/ip_enrichment.py) transmits the real src_ip to api.abuseipdb.com and ipinfo.io on the same route, before the AI call. Pseudonymization cannot apply there — the lookup is the address.">
+                Secrets only. AI alert analysis is pseudonymized, but IP-reputation lookups still send the real source address to AbuseIPDB and ipinfo.io.
             </span>
         </div>
     </div>
