@@ -575,7 +575,20 @@ def _page_community_queue():
                         if (status) status.textContent = '✗ ' + d.error;
                         return;
                     }}
-                    if (status) status.textContent = '✓ ' + (d.reviewed || 0) + ' item(s) reviewed';
+                    // Surface `skipped` too. The backend has returned it since the
+                    // job_id dedup landed (d7851df), but this line dropped it — so a
+                    // second concurrent "Analyse Queue" reported "0 item(s) reviewed"
+                    // and said nothing about the rows it had deduped. The dedup was
+                    // working; it just looked like nothing happened. Skipped rows keep
+                    // ai_reviewed=0 and are retried, so say that rather than leaving
+                    // the user to guess whether work was lost.
+                    if (status) {{
+                        var _msg = '✓ ' + (d.reviewed || 0) + ' item(s) reviewed';
+                        if (d.skipped) {{
+                            _msg += ' · ' + d.skipped + ' skipped (no analysis ran — will retry)';
+                        }}
+                        status.textContent = _msg;
+                    }}
                     _reloadTable();
                 }})
                 .catch(function(e) {{

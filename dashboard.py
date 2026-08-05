@@ -4239,23 +4239,30 @@ def analyze_alert(rule_id):
         #   5 explanation · 6 risk_level · 7 action · 8 times_seen · 9 first_seen
         #   10 last_seen · 11 src_ip · 12 dst_ip · 13 protocol
         #
-        # ⚠ THIS GATE IS KNOWINGLY WRONG AND IS LEFT WRONG ON PURPOSE.
-        # It reads existing[4] = `priority`, not `explanation`. priority is truthy
-        # for every real alert (measured 2026-08-05: 20/20 rows), so this early
-        # return ALWAYS fires: the AI is never called, `ai_cache` is never written
-        # for an alert, and the chat anchor's "Analysis already shown to the user"
-        # enrichment is consequently dead.
+        # This gate decides "do we already have an analysis, or must we call the
+        # AI?" -- so it MUST read `explanation` (index 5), not `priority` (index 4).
         #
-        # Correcting it to existing[5] would start making REAL BILLED AI CALLS for
-        # every alert that currently returns instantly -- a spend change, not a
-        # display fix. Operator is deciding that separately (2026-08-05); see
-        # PUNCHLIST. Do NOT "tidy" this index without that decision.
+        # It read [4] until 2026-08-05. `priority` is truthy on every real alert
+        # (measured: 20/20 rows), so the early return ALWAYS fired: the AI was
+        # never called for any alert, `ai_cache` was never written under
+        # `alert_<rule_id>`, and the chat anchor's "Analysis already shown to the
+        # user" enrichment was silently dead as a result. The same off-by-one also
+        # rendered `priority` as the explanation (the literal "Explanation: 2") and
+        # the empty explanation as the risk level ("Risk Level: UNKNOWN" on an
+        # alert stored HIGH) -- those two display reads were fixed first, on their
+        # own, because they were free; this one changes spend and so was held for
+        # an explicit operator decision (approved 2026-08-05).
         #
-        # The two DISPLAY reads below were the same off-by-one and ARE fixed: the
-        # modal was rendering priority as the explanation (hence the literal
-        # "Explanation: 2") and the empty explanation as the risk level (hence
-        # "Risk Level: UNKNOWN" on an alert stored as HIGH).
-        if existing and existing[4]:
+        # Cost of correcting it, measured rather than assumed: ~$0.004 per analysis
+        # typical / ~$0.008 at the max_tokens=500 ceiling, against 20 un-analysed
+        # alerts -- so ~$0.08-0.16 ONE TIME, not recurring. One-time because the
+        # success path below writes `explanation` back to the row, after which this
+        # gate correctly early-returns for that rule permanently. Steady state is
+        # one analysis per newly-seen rule, which is the feature working as
+        # designed. Deliberately left ON-DEMAND rather than backfilled in bulk:
+        # 20 calls at once would collide with the live rate_per_hour=25 ceiling,
+        # and filling as alerts are actually opened costs the same and never does.
+        if existing and existing[5]:
             # Fall back to DB-stored src_ip when raw alert had no parseable IP
             if not src_ip and len(existing) > 11 and existing[11]:
                 src_ip = existing[11]
