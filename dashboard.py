@@ -4218,6 +4218,31 @@ def update_device():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+def _alert_body_from_row(row):
+    """Reconstruct a Suricata-alert description from a stored `alerts` row.
+
+    Positional indices per analyze_alert's `SELECT *` mapping, documented there.
+    Indexed defensively: `analyze_alert` already guards `len(existing) > 11`
+    before touching src_ip, so a short row is a shape this code has seen.
+
+    Returns "" when the row carries nothing describable — an explicit empty
+    string the caller must handle, NOT a stub like "Alert <id>" that would look
+    like content and get sent to a billed model.
+    """
+    def col(i):
+        try:
+            v = row[i]
+        except (IndexError, TypeError):
+            return ""
+        return "" if v is None else str(v).strip()
+
+    fields = (("Signature", 2), ("Classification", 3), ("Priority", 4),
+              ("Protocol", 13), ("Source", 11), ("Destination", 12),
+              ("Times seen", 8))
+    parts = [f"{label}: {col(i)}" for label, i in fields if col(i)]
+    return " | ".join(parts)
+
+
 @app.route("/api/analyze/<rule_id>")
 def analyze_alert(rule_id):
     try:
@@ -4285,12 +4310,46 @@ def analyze_alert(rule_id):
                 "src_ip": src_ip,
                 "enrichment": enrichment
             })
+        # ── The prompt's alert body: DB row FIRST, `raw` only as a fallback ─────
+        # `raw` arrives in the query string, and the deep-link entry point
+        # (`/?alert=<rule_id>` → `viewAlert(deepLink, "")`) has ALWAYS passed an
+        # empty one. That was invisible while the gate above was broken and the AI
+        # was never called at all. The moment the gate was fixed, the first
+        # deep-linked analysis asked the model to analyse an empty string and got
+        # the only answer it could — "No alert data was provided for analysis" —
+        # which was cached for 24h AND written back to `alerts.explanation`, where
+        # the now-correct gate early-returns on it permanently. A billed call that
+        # poisoned the row it existed to fill, and overwrote a CRITICAL risk_level
+        # with LOW on the way. Measured live 2026-08-05 on rule 1000002.
+        #
+        # The row is also the BETTER source, not merely the available one: `raw` is
+        # whatever a caller chose to put in a URL, while the row is what the alert
+        # pipeline actually recorded. So build from the row and keep `raw` only for
+        # the case where no row exists yet.
+        alert_body = (raw_alert or "").strip()
+        if not alert_body and existing:
+            alert_body = _alert_body_from_row(existing)
+
+        # A call with no alert body can only ever produce a non-answer, so refuse
+        # it instead of paying to prove that again. Fails loud and explicit — the
+        # previous behaviour was to buy a guaranteed-useless response and store it
+        # as though it were an analysis, which is the "instrument that can only
+        # return one answer" shape this codebase keeps finding.
+        if not alert_body:
+            log.warning("analyze_alert: refusing AI call for rule_id=%s — no alert "
+                        "body (raw empty, and no usable DB row)", rule_id)
+            conn.close()
+            return jsonify({
+                "error": "No alert data available to analyse",
+                "reason": "The alert has no stored detail and none was supplied.",
+            }), 422
+
         from modules.ai_engine import analyze as ai_analyze
         ai_result = ai_analyze(
             f"""You are Nemesis, an AI security assistant for a home network firewall.
 Analyze this Suricata alert and respond in JSON only, no markdown:
 
-Alert: {raw_alert}
+Alert: {alert_body}
 
 {{
     "explanation": "Plain English explanation for home user",
