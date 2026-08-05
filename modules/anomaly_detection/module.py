@@ -2131,9 +2131,31 @@ def _anchor_load_incident(row_id) -> str:
     if not r:
         return ""
 
+    # devices_json holds a list of DICTS -- {ip, name, first_seen_ts, query_count} --
+    # not a list of strings. The previous `", ".join(...)` therefore raised
+    # TypeError on every incident with a device, the bare except turned that into
+    # the string "unreadable", and the chat was told "Devices involved (1):
+    # unreadable" while the row right beside it named the device. Measured
+    # 2026-08-05: 153 of 153 incidents, i.e. it had never once succeeded.
+    #
+    # "unreadable" reads like a DATA problem, which is why this survived -- the
+    # reader was at fault, not the row. Format the dicts instead, and log on
+    # failure so the next shape change is visible rather than silently absorbed.
     try:
-        devices = ", ".join(json.loads(r["devices_json"] or "[]")) or "none recorded"
+        parsed = json.loads(r["devices_json"] or "[]")
+        names = []
+        for d in parsed:
+            if isinstance(d, dict):
+                nm = str(d.get("name") or "").strip()
+                ip = str(d.get("ip") or "").strip()
+                names.append(f"{nm} ({ip})" if nm and ip else (nm or ip or "unidentified device"))
+            else:
+                # Tolerate the plain-string shape this code originally assumed, in
+                # case any older row still carries it.
+                names.append(str(d).strip())
+        devices = ", ".join(n for n in names if n) or "none recorded"
     except Exception:
+        log.exception("chat: incident %s device list could not be formatted", row_id)
         devices = "unreadable"
     try:
         evidence = json.dumps(json.loads(r["evidence_json"] or "{}"), indent=2)

@@ -4234,6 +4234,27 @@ def analyze_alert(rule_id):
         c = conn.cursor()
         c.execute("SELECT * FROM alerts WHERE rule_id = ?", (rule_id,))
         existing = c.fetchone()
+        # ── POSITIONAL INDICES: `SELECT *` order is ─────────────────────────────
+        #   0 id · 1 rule_id · 2 rule_name · 3 classification · 4 priority
+        #   5 explanation · 6 risk_level · 7 action · 8 times_seen · 9 first_seen
+        #   10 last_seen · 11 src_ip · 12 dst_ip · 13 protocol
+        #
+        # ⚠ THIS GATE IS KNOWINGLY WRONG AND IS LEFT WRONG ON PURPOSE.
+        # It reads existing[4] = `priority`, not `explanation`. priority is truthy
+        # for every real alert (measured 2026-08-05: 20/20 rows), so this early
+        # return ALWAYS fires: the AI is never called, `ai_cache` is never written
+        # for an alert, and the chat anchor's "Analysis already shown to the user"
+        # enrichment is consequently dead.
+        #
+        # Correcting it to existing[5] would start making REAL BILLED AI CALLS for
+        # every alert that currently returns instantly -- a spend change, not a
+        # display fix. Operator is deciding that separately (2026-08-05); see
+        # PUNCHLIST. Do NOT "tidy" this index without that decision.
+        #
+        # The two DISPLAY reads below were the same off-by-one and ARE fixed: the
+        # modal was rendering priority as the explanation (hence the literal
+        # "Explanation: 2") and the empty explanation as the risk level (hence
+        # "Risk Level: UNKNOWN" on an alert stored as HIGH).
         if existing and existing[4]:
             # Fall back to DB-stored src_ip when raw alert had no parseable IP
             if not src_ip and len(existing) > 11 and existing[11]:
@@ -4245,8 +4266,8 @@ def analyze_alert(rule_id):
                         enrichment = None
             conn.close()
             return jsonify({
-                "explanation": existing[4],
-                "risk_level": existing[5],
+                "explanation": existing[5],   # was [4] = priority
+                "risk_level": existing[6],    # was [5] = explanation
                 "action": existing[7],
                 "times_seen": existing[8] or 1,
                 "last_seen": existing[10] or "",
