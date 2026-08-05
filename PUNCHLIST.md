@@ -2672,3 +2672,56 @@ this entry is the proposal, not the implementation.
       route in this file already follows), not a fire drill.
     - [ ] Flagged by Window 1, 2026-08-05, while adding the `/firewall-db` Analyze link
       (`6358b5d`) — noticed in passing, not the target of that change.
+
+- [ ] **`/api/analyze/<rule_id>` sends real source/destination IPs to an external AI model
+  with no redaction — decision made, build not started.** Confirmed live: the prompt for
+  rule 1000002 carried `{TCP} <internal-ip>:53779 -> <internal-ip>:53` verbatim, and the
+  stored reply quoted both back. `diagnostics/redact.py` does NOT cover this and would not
+  if wired in — it is a secrets scrubber (`_SECRET_KEYS` + values ≥8 chars from
+  `nemesis.env`), confirmed to have zero IP/MAC/hostname handling. Window 1's own
+  empty-prompt fix (`8f227a4`) widened this exposure on the deep-link path without
+  checking it at the time.
+    - [ ] **DECISION (operator, 2026-08-05): pseudonymize to stable `host-A`/`host-B`
+      tokens.** Mapping stays local; the UI resolves tokens client-side so real addresses
+      still display to the user. Preserves the relational reasoning that makes an analysis
+      useful (rule 1000002's answer was good *because* it could say which host scanned
+      which) while sending no real addresses externally.
+    - [ ] **Scope boundary, explicit:** its own PII pass with its own tests — do NOT
+      overload `redact.py`. A secrets scrubber and a PII pseudonymizer have different
+      correctness conditions (one matches known key names/lengths, the other must
+      recognize IPs/hosts it has never seen before); conflating them risks both jobs
+      being done poorly.
+    - [ ] **Build is queued behind UDP work, not started.**
+    - [ ] **Interim mitigation shipped separately:** `/diagnostics`'s redaction banner
+      previously implied broader coverage than it has. Now carries an explicit "what this
+      does not cover" disclosure at all three tier levels, stating plainly that network
+      addresses are not redacted and that AI alert analysis sends them externally.
+    - [ ] Found by Window 1, 2026-08-05, while auditing malware-detection completeness;
+      not the target of that investigation.
+
+- [ ] **Layer D (local ML classifier) is declared in three places with zero
+  implementation — an honesty gap, not a build gap.** `modules/malware_detection/module.py`
+  — the module header comment (`D — local ML classifier (EMBER/PE, no API key)`, line 8),
+  the `LAYERS` enumeration (`"ml"`, line 50), and a UI legend colour (`"ml": "#00d4ff"`,
+  line 2956). Confirmed: zero EMBER references anywhere else in the module, no classifier
+  code, no entry point.
+    - [ ] **Why this is distinct from "Layer D is on the roadmap":** a roadmapped-but-absent
+      feature is normal and fine. A feature that appears in the product's own layer
+      enumeration and UI legend — the exact places a reader checks to learn what the
+      product does — reads as present. That is actively misleading independent of whether
+      Layer D is ever built, and does not require Layer D to exist to fix: the fix is
+      dropping it from the enumeration and legend until it does.
+    - [ ] **Fix shape (small, one-line-ish):** remove `"ml"` from `LAYERS` and its entry
+      from the UI colour legend. Re-add both together when Layer D actually ships — not
+      before.
+    - [ ] **Distinct from the two related findings that do NOT need a fix, only accurate
+      status:** Layer C (AI verdict) is deliberately evidence-only by design — the only
+      `SELECT` of `ai_verdict` anywhere is its own test, and that is correct, not a bug.
+      Quarantine has no restore path (`restore_from_quarantine()` does not exist anywhere
+      in the repo) — a real gap, but pinned as a documented ceiling (L1, per
+      `ai_engine/module.py:189-192`'s own comment: "missing-capability ceiling, not a
+      threshold choice"), not something this entry asks to change.
+    - [ ] Found by Window 1, 2026-08-05, verifying against code rather than memory whether
+      malware detection could be called done. It cannot: Layer A+B is shippable and
+      useful, but the four-layer description the product gives of itself is not accurate
+      today.
