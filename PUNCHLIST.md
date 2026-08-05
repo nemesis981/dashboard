@@ -2592,3 +2592,27 @@ this entry is the proposal, not the implementation.
       suspected the reader. Third instance today of the same shape — a bare `except`
       turning a type error into a plausible-looking string that a caller cannot
       distinguish from a real answer. See also the two entries above.
+
+- [ ] **Chat input required clicking "Ask"; Enter did not submit.**
+  `modules/ai_engine/module.py` — the shared chat widget's input is a `<textarea>`, so
+  Enter inserted a newline and the only way to send a question was the button. Standard
+  chat-input expectation is Enter-to-send.
+    - [ ] **FIXED 2026-08-05** (same commit as this entry): `keydown` handler on the input —
+      **Enter submits, Shift+Enter still inserts a newline.** Bound inside the one branch of
+      `ensureWidget()` that creates the node, so it attaches exactly once however many times
+      `ensureWidget()` runs (verified: a second call does not double-bind).
+    - [ ] **Gated on the Ask button's own `disabled` flag** rather than re-deriving the
+      conditions. That flag already means both "out of turns" (`meta()` sets it from
+      `turns_left`) and "a request is in flight" (`nemChatAsk` disables it on entry), so
+      Enter can never spend a turn the button itself would have refused, and cannot
+      double-submit. Re-deriving those conditions would have been a second copy of a
+      spend-gating rule — the thing the shared widget exists to avoid.
+    - [ ] `isComposing` is checked so an Enter that commits an IME candidate (CJK input)
+      does not fire a half-typed question.
+    - [ ] Verified behaviourally against the *emitted* JS in node with a DOM stub: 11
+      checks including Shift+Enter passthrough, the disabled-button no-op, a control
+      proving re-enabling makes Enter work again (i.e. the guard is the live button state,
+      not a one-way latch), and single-binding on repeat calls.
+    - [ ] **Not done, deliberately:** no "(Enter to send)" hint added to the placeholder.
+      The existing placeholder is already a full example sentence and the operator asked
+      only for the behaviour. Worth considering separately if discoverability matters.
