@@ -2022,6 +2022,84 @@ def get_chat_js() -> str:
         'if(!ensureWidget()){'
         'document.addEventListener("DOMContentLoaded",ensureWidget);}'
         'function money(v){return (v===null||v===undefined)?null:"$"+Number(v).toFixed(4);}'
+        # ── copy-to-clipboard ────────────────────────────────────────────────
+        # The answer often contains a command the operator needs to RUN, and
+        # drag-selecting inside a short scrolling box is the interaction this
+        # product least wants to require. So every answer, and every fenced
+        # block inside it, gets an explicit copy button.
+        #
+        # execCommand IS the load-bearing path here, not a legacy fallback: the
+        # dashboard is served over plain HTTP on a LAN address, which is not a
+        # secure context, so `navigator.clipboard` is UNDEFINED in Chrome. A
+        # clipboard-API-only button would look identical to a working one and do
+        # nothing. Try the modern API when it exists (HTTPS / localhost), fall
+        # back otherwise, and ALWAYS report the outcome on the button so a
+        # failure cannot pass for success.
+        'function copyDone(btn,prev,ok){'
+        'btn.textContent=ok?"Copied":"Copy failed";'
+        'btn.style.color=ok?"#00ff88":"#ff6666";'
+        'setTimeout(function(){btn.textContent=prev;btn.style.color="#00d4ff";},1400);'
+        '}'
+        'function copyFallback(t,btn,prev){'
+        'var ok=false;'
+        'try{'
+        'var ta=document.createElement("textarea");'
+        'ta.value=t;ta.setAttribute("readonly","");'
+        'ta.style.cssText="position:fixed;top:0;left:-9999px;opacity:0";'
+        'document.body.appendChild(ta);'
+        'ta.select();ta.setSelectionRange(0,String(t).length);'
+        'ok=document.execCommand("copy");'
+        'document.body.removeChild(ta);'
+        '}catch(e){ok=false;}'
+        'copyDone(btn,prev,ok);'
+        '}'
+        'function copyText(t,btn){'
+        'var prev=btn.textContent;'
+        'if(navigator.clipboard&&navigator.clipboard.writeText){'
+        'navigator.clipboard.writeText(t).then(function(){copyDone(btn,prev,true);})'
+        '.catch(function(){copyFallback(t,btn,prev);});'
+        '}else{copyFallback(t,btn,prev);}'
+        '}'
+        # txt is a parameter, so each button closes over its OWN text -- do not
+        # refactor this to read a loop variable, which would make every button
+        # copy the last block.
+        'function copyBtn(txt,label){'
+        'var b=document.createElement("button");'
+        'b.type="button";b.textContent=label||"Copy";'
+        'b.style.cssText="background:transparent;border:1px solid #2a3f5f;color:#00d4ff;'
+        'padding:1px 8px;border-radius:3px;cursor:pointer;font-size:0.95em;flex-shrink:0";'
+        'b.onclick=function(){copyText(txt,b);};'
+        'return b;'
+        '}'
+        # Split the answer on ``` fences: prose stays flowing text, each fenced
+        # block becomes its own monospace box with a copy button. Model output is
+        # still written with textContent ONLY -- never innerHTML -- so this adds
+        # structure without letting model-generated markup render.
+        'function renderAnswer(host,text){'
+        'var parts=String(text).split("```");'
+        'for(var i=0;i<parts.length;i++){'
+        'var seg=parts[i];'
+        'if(!seg.replace(/\\s/g,""))continue;'
+        'if(i%2===1){'
+        'var body=seg.replace(/^[a-zA-Z0-9_.+-]*\\r?\\n/,"");'
+        'if(!body.replace(/\\s/g,""))continue;'
+        'var box=document.createElement("div");'
+        'box.style.cssText="margin:6px 0;border:1px solid #2a3f5f;border-radius:4px;background:#0d1117";'
+        'var hd=document.createElement("div");'
+        'hd.style.cssText="display:flex;justify-content:flex-end;padding:3px 5px;border-bottom:1px solid #1c2942";'
+        'hd.appendChild(copyBtn(body,"Copy"));'
+        'var pre=document.createElement("pre");'
+        'pre.style.cssText="margin:0;padding:7px 9px;overflow-x:auto;white-space:pre;'
+        'font-family:monospace;font-size:0.92em;color:#9fe8c0";'
+        'pre.textContent=body;'
+        'box.appendChild(hd);box.appendChild(pre);host.appendChild(box);'
+        '}else{'
+        'var p=document.createElement("div");'
+        'p.style.cssText="color:#ddd;white-space:pre-wrap";'
+        'p.textContent=seg;host.appendChild(p);'
+        '}'
+        '}'
+        '}'
         'function meta(st){'
         'el("nemChatTurnsLeft").textContent=st.turns_left+" of "+st.turn_cap+" questions left";'
         'var sp=money(st.spent_usd);'
@@ -2096,11 +2174,20 @@ def get_chat_js() -> str:
         'var qe=document.createElement("div");'
         'qe.style.cssText="color:#00d4ff;margin-bottom:3px";qe.textContent="You: "+q;'
         'var ae=document.createElement("div");'
-        'ae.style.cssText="color:#ddd;white-space:pre-wrap";ae.textContent=d.answer;'
+        'renderAnswer(ae,d.answer);'
+        # Cost row doubles as the per-answer action row: the log auto-scrolls to
+        # the bottom on each new answer, so a control here is in view without
+        # scrolling, and it costs no extra height in a 230px-max box.
         'var ce=document.createElement("div");'
-        'ce.style.cssText="color:#777;font-size:0.75em;margin-top:4px";'
+        'ce.style.cssText="display:flex;align-items:center;gap:8px;color:#777;'
+        'font-size:0.75em;margin-top:5px";'
         'var m=money(d.cost_usd);'
-        'var lbl=(d.tier==="advanced")?" (Advanced)":"";''ce.textContent=((m===null)?"cost unavailable for this model":"this question cost "+m)+lbl;'
+        'var lbl=(d.tier==="advanced")?" (Advanced)":"";'
+        'var cost=document.createElement("span");'
+        'cost.style.cssText="flex:1";'
+        'cost.textContent=((m===null)?"cost unavailable for this model":"this question cost "+m)+lbl;'
+        'ce.appendChild(cost);'
+        'ce.appendChild(copyBtn(d.answer,"Copy answer"));'
         'w.appendChild(qe);w.appendChild(ae);w.appendChild(ce);'
         'log.appendChild(w);log.scrollTop=log.scrollHeight;'
         'if(d.record_failed){stx.textContent="answered, but this question could not be '
