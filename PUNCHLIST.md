@@ -2536,3 +2536,14 @@ this entry is the proposal, not the implementation.
       so it must be sent against an allowlist, not unconditionally.
     - [ ] Identified by Window 1, 2026-08-04 (evening handoff); model-gating constraint confirmed
       by Window 3, 2026-08-05 against the current API contract before the fix was written.
+
+- [ ] **BACKLOG IDEA (not scoped, do not build): "unpin" the chat widget into a separate,
+  user-resizable popup window.** Feature request, not a bug — the fixed-size embedded chat area
+  (`#nemChatSection`) works well for some users but feels cramped for others.
+    - [ ] **Shape:** an "unpin" affordance next to the existing widget controls that opens the
+      chat in its own popup/window, sized and positioned by the user, as an alternative to the
+      inline embedded view rather than a replacement for it.
+    - [ ] **Not scoped for immediate build** — same backlog status as the descoped
+      `/firewall-db` one-shot AI-analysis panel entry above. Captured per Rule 7 so it is not
+      silently re-discovered or silently built.
+    - [ ] Requested by the operator, 2026-08-05.
