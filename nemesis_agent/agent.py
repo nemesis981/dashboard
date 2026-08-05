@@ -255,20 +255,48 @@ def _load_platform_module():
 
 
 def _detect_connection_type(conf):
-    """Compare local IP against nemesis_subnet to determine local vs vpn_remote."""
+    """Compare local IPs against nemesis_subnet to determine local vs vpn_remote.
+
+    BOTH address families are considered. `nemesis_subnet` may name a v4 or a v6
+    network; ipaddress's containment test returns False rather than raising when
+    the address family and the network family differ, so collecting both is safe
+    whichever family the subnet turns out to be.
+
+    THE FALLBACK IS SHARED, AND THAT IS DELIBERATE. Three distinct paths return
+    "vpn_remote": no subnet configured, a detection failure, and a genuine
+    not-on-the-subnet result. A caller therefore cannot tell a failure from a real
+    remote answer. That is accepted rather than accidental -- vpn_remote is the
+    more restrictive classification, so failing to it fails safe. The failure path
+    logs at WARNING (not debug) so the two ARE distinguishable in the journal even
+    though they are not in the return value. Giving failure its own sentinel is
+    deliberately left as a separate change: it ripples into all three callers.
+    """
     try:
         subnet_str = conf.get("nemesis_subnet") or ""
         if not subnet_str:
             return "vpn_remote"   # no local subnet configured -> treat as remote
         subnet = ipaddress.ip_network(subnet_str, strict=False)
-        hostname = socket.gethostname()
-        local_ips = [addr.address for iface_addrs in psutil.net_if_addrs().values()
-                     for addr in iface_addrs if addr.family == socket.AF_INET]
-        for ip in local_ips:
-            if ipaddress.ip_address(ip) in subnet:
-                return "local"
+        for iface_addrs in psutil.net_if_addrs().values():
+            for addr in iface_addrs:
+                if addr.family not in (socket.AF_INET, socket.AF_INET6):
+                    continue
+                # Parsed per address, INSIDE the loop, so one unparseable address
+                # cannot abort the whole sweep. This guard is load-bearing for the
+                # v6 half rather than defensive padding: link-local addresses
+                # arrive scope-suffixed ("fe80::1%eth0"), which is precisely the
+                # shape most likely to fail parsing, so widening to v6 without it
+                # would INTRODUCE the silent-abort failure it looks like it is
+                # guarding against.
+                raw = addr.address or ""
+                try:
+                    ip = ipaddress.ip_address(raw.split("%", 1)[0])
+                except ValueError:
+                    log.debug("skipping unparseable local address %r", raw)
+                    continue
+                if ip in subnet:
+                    return "local"
     except Exception as e:
-        log.debug("connection type detection error: %s", e)
+        log.warning("connection type detection failed, treating as remote: %s", e)
     return "vpn_remote"
 
 

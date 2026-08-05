@@ -60,7 +60,7 @@ log = logging.getLogger(__name__)
 # being remembered together. Bump it when the agent's shipped files change —
 # a stale value makes every device report `absent` (build skew), which is
 # noisy-but-safe rather than falsely `attested`.
-AGENT_VERSION = "1.0.0"
+AGENT_VERSION = "1.0.1"
 
 ATTESTED = "attested"
 FAILED = "failed"
