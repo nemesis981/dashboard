@@ -2555,6 +2555,22 @@ this entry is the proposal, not the implementation.
     - [ ] Identified by Window 1, 2026-08-04 (evening handoff); model-gating constraint confirmed
       by Window 3, 2026-08-05 against the current API contract before the fix was written.
 
+- [ ] **BACKLOG IDEA (not scoped, do not build): one-shot AI analysis panel on `/firewall-db`.**
+  The full alert view now carries the contextual **chat** affordance (`dd32ccb`), but not the
+  one-shot AI analysis panel the main dashboard's alert modal has via `/api/analyze/<rule_id>`.
+    - [ ] **Why it's plausible:** `/firewall-db` lists ALL alerts including historical ones
+      (20 rows today vs the main dashboard's active subset), so it is the natural surface for
+      "explain this old alert to me." The route is already auth-gated and already keys on the
+      same TEXT `rule_id` the analyze endpoint takes.
+    - [ ] **Why it is NOT being built now:** operator explicitly descoped it (2026-08-05) —
+      "hold the /firewall-db one-shot AI analysis panel — not scoped for this pass." To be
+      folded into the work-order doc separately if it gets prioritised. Captured here per
+      Rule 7 so it is not silently re-discovered or silently built.
+    - [ ] **Cost caveat to settle first if it IS prioritised:** `/api/analyze/` is a billed
+      call with a 24h cache, and putting it on a page that lists every historical alert makes
+      it far easier to trigger many analyses in a row than the current active-only surface
+      does. Decide the spend-gating story before wiring, not after.
+
 - [ ] **BACKLOG IDEA (not scoped, do not build): "unpin" the chat widget into a separate,
   user-resizable popup window.** Feature request, not a bug — the fixed-size embedded chat area
   (`#nemChatSection`) works well for some users but feels cramped for others.
@@ -2673,8 +2689,48 @@ this entry is the proposal, not the implementation.
     - [ ] Flagged by Window 1, 2026-08-05, while adding the `/firewall-db` Analyze link
       (`6358b5d`) — noticed in passing, not the target of that change.
 
-- [ ] **`/api/analyze/<rule_id>` sends real source/destination IPs to an external AI model
-  with no redaction — decision made, build not started.** Confirmed live: the prompt for
+- [x] **RESOLVED 2026-08-05 (Window 3) — `/api/analyze/<rule_id>` sends real
+  source/destination IPs to an external AI model with no redaction.** Built as
+  `alert_manager/nemesis_pseudonymize.py` (new module, not an extension of `redact.py`,
+  per the scope boundary below) plus three `dashboard.py` integration points:
+  pseudonymize after the empty-body 422 guard, resolve immediately on the reply before
+  anything stores it, and the `/diagnostics` disclosure string updated to match.
+  Tests: `alert_manager/test_pseudonymize.py`, 51/51; the pre-existing
+  `test_analyze_alert_body.py` re-run for regression, 29/29.
+    - [x] **Resolve-immediately, ephemeral per-call mapping, no persisted table**
+      (operator decision). The reply fans out to four places — `alerts.explanation`,
+      ai_engine's 24h `ai_cache`, the browser JSON, and `_anchor_load_alert()` feeding
+      chat — so resolving once at the source means none of the four need to know tokens
+      existed. Storing tokenized would have needed a persisted map plus every display
+      path updated, for a benefit (cross-call token stability) only multi-turn chat needs.
+    - [x] **Tokenize every address, no public/private branch** (operator decision). A LAN
+      address identifies a device on this network and is exactly what is being protected.
+      Also avoids a live test trap: Python classifies all three RFC 5737 TEST-NET blocks —
+      this repo's own test-address convention — as `is_private`, so private-branching
+      logic would have been silently skipped by its own fixtures and passed without ever
+      executing. No branch, no trap.
+    - [x] **Operates on the assembled body, not the `src_ip`/`dst_ip` columns.** The `raw`
+      fallback path is a whole Suricata fast.log line with addresses inline rather than in
+      fields, and `rule_name`/`classification` are free text that can carry one — column-level
+      tokenizing would have left the caller-controlled path fully unprotected.
+    - [x] **Both substring hazards handled by single-pass boundary-anchored regex, both
+      tested:** outbound, `192.0.2.1` inside `192.0.2.10`; inbound, `host-A` inside
+      `host-AA` (tested with 27 addresses to force the rollover). A replace-loop corrupts
+      in both directions; one `re.sub` pass cannot.
+    - [x] **Accepted tradeoff, documented not hidden:** a bare dotted quad that is really a
+      version number is tokenized (fail-closed — over-tokenizing costs prompt fidelity,
+      under-tokenizing leaks). The `v1.2.3.4` form is spared by the lookbehind, which is a
+      partial mitigation and is labelled as one in both the code and the tests.
+    - [ ] **CARRIED FORWARD, not fixed here — cache-hit token skew.** On an `ai_cache` hit
+      the cached reply carries tokens from the original call, resolved against a map
+      recomputed from today's row. The map is deterministic from the body, so an unchanged
+      row resolves identically — but if `src_ip`/`dst_ip` changed since the reply was
+      cached, `host-A` could resolve to a different address than it meant when written.
+      Narrow (the gate early-returns once `explanation` is set, so this needs a cached
+      reply with no stored explanation) but real, and silently wrong rather than visibly
+      broken if it fires. Deliberately not solved inside an unrelated change.
+
+- [ ] **Superseded detail from the original entry, kept for provenance.** Confirmed live: the prompt for
   rule 1000002 carried `{TCP} <internal-ip>:53779 -> <internal-ip>:53` verbatim, and the
   stored reply quoted both back. `diagnostics/redact.py` does NOT cover this and would not
   if wired in — it is a secrets scrubber (`_SECRET_KEYS` + values ≥8 chars from
@@ -2691,13 +2747,44 @@ this entry is the proposal, not the implementation.
       correctness conditions (one matches known key names/lengths, the other must
       recognize IPs/hosts it has never seen before); conflating them risks both jobs
       being done poorly.
-    - [ ] **Build is queued behind UDP work, not started.**
-    - [ ] **Interim mitigation shipped separately:** `/diagnostics`'s redaction banner
+    - [x] **Build was queued behind UDP work — since built, see the resolved entry above.**
+    - [x] **Interim mitigation shipped separately:** `/diagnostics`'s redaction banner
       previously implied broader coverage than it has. Now carries an explicit "what this
-      does not cover" disclosure at all three tier levels, stating plainly that network
-      addresses are not redacted and that AI alert analysis sends them externally.
+      does not cover" disclosure at all three tier levels — rewritten 2026-08-05 to state
+      that AI analysis IS now pseudonymized, and to disclose the separate AbuseIPDB/ipinfo
+      exposure that pseudonymization does not touch (see the entry below).
     - [ ] Found by Window 1, 2026-08-05, while auditing malware-detection completeness;
       not the target of that investigation.
+
+- [ ] **The alert-analysis path is NOT leak-free even with pseudonymization shipped —
+  `enrich_ip()` sends the real source IP to two external services, and this is
+  unfixable by pseudonymization.** `alert_manager/ip_enrichment.py:141-147` transmits the
+  real `src_ip` to `api.abuseipdb.com` and `ipinfo.io` — on the *same* `/api/analyze/<rule_id>`
+  route, *before* the AI call (`dashboard.py`, the `enrich_ip(src_ip)` calls near the top of
+  `analyze_alert`). Tokenizing cannot help here: for a reputation lookup the address **is**
+  the query, so a token would return a lookup of nothing.
+    - [ ] **Why this entry exists separately from the resolved one above:** so nobody reads
+      "AI prompt pseudonymization shipped" as "the alert path no longer sends real addresses
+      off-box." It still does, by a different route, for a different reason. Two exposures,
+      one fixed, one not.
+    - [ ] **Must be a DISCLOSED exposure, not just an internal known-limitation**
+      (operator, 2026-08-05). Partially done: the `/diagnostics` disclosure string now names
+      AbuseIPDB and ipinfo.io explicitly at all three tier levels, and states the real source
+      address is sent because those APIs require it to function. **Still open:** confirm
+      `/diagnostics` is the right or only surface — anywhere the product describes its
+      data-handling posture should say the same thing, and today only one place does.
+    - [ ] **Make the transmission user-initiated, not automatic** (operator, 2026-08-05).
+      Add a confirmation dialog with an explicit **"Report with real address"** button,
+      shown wherever an external API genuinely requires a real address — abuse reporting
+      and IP-reputation enrichment being the known cases. The user then chooses, per
+      action, to send it, instead of it happening silently as a side effect of opening an
+      alert. Design note: this needs a stated default for the un-chosen case (skip the
+      lookup and show the alert without enrichment, rather than block the alert), and
+      should not become a dialog the user learns to click through reflexively — worth
+      pairing with a remembered per-service preference rather than prompting every time.
+    - [ ] Found by Window 3, 2026-08-05, while auditing the analyze_alert prompt path for
+      the pseudonymization build — not the target of that work, and specifically NOT fixed
+      by it.
 
 - [ ] **Layer D (local ML classifier) is declared in three places with zero
   implementation — an honesty gap, not a build gap.** `modules/malware_detection/module.py`
