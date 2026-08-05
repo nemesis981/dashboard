@@ -4288,6 +4288,15 @@ def _anchor_load_alert(rule_id) -> str:
     """
     try:
         conn = _dm_conn()
+        # This loader reads rows BY NAME (23 accesses below), so it needs Row.
+        # _dm_conn() deliberately resets row_factory to None -- see its docstring:
+        # most migrated dashboard reads serialise rows to JSON, and sqlite3.Row is
+        # not JSON-serialisable, so tuples are the safe default there. The
+        # docstring's own instruction is that sites wanting Row set it themselves,
+        # after; _users_conn() is the existing precedent. Without this line every
+        # r['col'] raises "tuple indices must be integers or slices, not str",
+        # which the caller reports as "could not rebuild this finding's context".
+        conn.row_factory = sqlite3.Row
         try:
             r = conn.execute(
                 "SELECT rule_id, rule_name, classification, priority, explanation, "
@@ -4332,6 +4341,7 @@ def _anchor_load_alert(rule_id) -> str:
         extra = []
         try:
             conn = _dm_conn()
+            conn.row_factory = sqlite3.Row   # same reason as above -- named access
             try:
                 q_now = conn.execute(
                     "SELECT expires_at FROM quarantines WHERE ip=? AND status='active' "
