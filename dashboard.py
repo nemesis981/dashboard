@@ -203,6 +203,57 @@ def _dm_conn():
     conn = _dm().connect("dashboard")
     conn.row_factory = None
     return conn
+
+
+#: How often the degraded journal is swept into audit_log. A stat + seek on a
+#: file that is usually unchanged, so the cost is nil; 60s bounds how long a
+#: tamper event sits in the journal without reaching the audit trail.
+DEGRADED_INGEST_INTERVAL = int(os.environ.get("NEMESIS_DEGRADED_INGEST_INTERVAL", "60"))
+
+
+def _start_degraded_ingest():
+    """Sweep `degraded.jsonl` into `audit_log` on a timer.
+
+    This is the reader half of a split ADR 0019 designed but never built:
+    `nemesis_fw_watch._audit_row()` is a deliberate no-op (a privileged process
+    must not hold a handle to this database — it created root-owned WAL sidecars
+    and locked the dashboard out of its own DB, measured on the VM 2026-08-01),
+    and its docstring says the audit requirement MOVES here. Until now nothing
+    read that file, so a real `modified outside Nemesis` event from 2026-08-01
+    reached the journal and an email but never the audit trail.
+
+    TWO CONNECTIONS, DELIBERATELY. `audit_log` goes through the Data Manager
+    guard, where dashboard holds a documented shared-writer grant. The offset
+    goes on a RAW connection because `settings` is granted to no namespace at
+    all — core writes it plainly from `database.py`. Routing the offset through
+    the guard was measured to be DENIED under enforce, which silently degraded
+    the sweep into a full re-scan every run.
+
+    Started from `__main__` rather than at import so a test or a `py_compile`
+    that imports this module does not spawn a thread against the live database.
+    """
+    import degraded_ingest
+
+    def _raw_conn():
+        return sqlite3.connect(DB_PATH, timeout=5.0)
+
+    def _loop():
+        while True:
+            try:
+                degraded_ingest.ingest_once(
+                    _dm_conn, offset_conn_factory=_raw_conn)
+            except Exception:
+                # Never let one bad sweep kill the thread — but never swallow it
+                # silently either. An ingest that has stopped working must be
+                # visible in the journal, because its own output (no new rows)
+                # is indistinguishable from a healthy quiet system.
+                log.exception("degraded ingest sweep failed; will retry")
+            time.sleep(DEGRADED_INGEST_INTERVAL)
+
+    threading.Thread(target=_loop, name="nemesis-degraded-ingest",
+                     daemon=True).start()
+    log.info("degraded journal ingest started (every %ds)",
+             DEGRADED_INGEST_INTERVAL)
 ABUSEIPDB_KEY = os.environ.get("ABUSEIPDB_KEY", "")
 MODULES_DIR = os.path.join(_HERE, "modules")
 # State, not code — so it belongs in DATA_DIR, not the tree. It was written to
@@ -12816,4 +12867,7 @@ if __name__ == "__main__":
     # directives fail open, so the unit file is never evidence of confinement.
     import nemesis_privsep
     nemesis_privsep.attest_from_env("dashboard")
+    # Started here, not at import: this spawns a thread that writes the live
+    # database, which a test import or py_compile has no business doing.
+    _start_degraded_ingest()
     app.run(host="0.0.0.0", port=5000)
