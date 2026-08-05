@@ -2654,3 +2654,21 @@ this entry is the proposal, not the implementation.
       be updated, so the list drifts one-way toward over-reporting open work. Marking `[x]` at
       fix time is the cheap prevention; a periodic verify-and-close sweep is the cure.
     - [ ] Found by Window 3, 2026-08-05, while working the AI-related items as a batch.
+
+- [ ] **`/api/analyze/<rule_id>` is a GET route that spends money.** `dashboard.py:4221`
+  — `@app.route("/api/analyze/<rule_id>")` carries no `methods=`, so it defaults to GET.
+  Pre-existing shape, not introduced by today's changes, and auth-gated (absent from
+  `_AUTH_EXEMPT`) — but now more consequential than when it was written.
+    - [ ] **Why it matters more today:** until `analyze_alert()`'s gate fix (`9521346`,
+      2026-08-05) this route's early-return always fired, so hitting it never actually
+      called the AI. The gate now works as designed, so every un-cached hit is a real
+      billed call. A GET that spends money is CSRF-triggerable via a plain `<img>` tag
+      under default SameSite=Lax cookies — the same pattern CLAUDE.md's route-level
+      audit already names as a known-fixed-pattern regression class to watch for
+      (`db_action`'s GET-as-write bug, fixed prior).
+    - [ ] **Not urgent:** auth-gating limits this to an authenticated session, and the
+      per-alert 24h cache bounds repeat-spend even under abuse. Worth a look eventually
+      (methods=["POST"], matching the convention every other state-changing/spending
+      route in this file already follows), not a fire drill.
+    - [ ] Flagged by Window 1, 2026-08-05, while adding the `/firewall-db` Analyze link
+      (`6358b5d`) — noticed in passing, not the target of that change.
