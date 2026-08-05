@@ -109,6 +109,22 @@ NAMESPACES = {
             # first real run — precisely the transcription error a static list
             # cannot catch about itself.
             "fan_status",
+            # `scan_tasks` ADDED 2026-08-05. Not a transcription miss like
+            # `fan_status` above — a DRIFT miss, which is a different failure and
+            # worth recording as such. This list was derived 2026-07-28 (c10a9d3)
+            # and was correct then; `scan_tasks` did not exist until 2026-08-03
+            # (d4cd2a7, ADR 0004 Stage 1 step 3), and nothing re-ran the
+            # derivation when it arrived. hw_monitor owns the DDL and is the only
+            # writer (dashboard and database.py never touch it); integrity_watch
+            # only reads it, under ADR 0001 read-any. A column grant would not be
+            # narrower here — hw_monitor INSERTs whole rows, so it needs full
+            # table write. Note what that means: the :5001 process handling
+            # untrusted agent payloads can write the dispatch queue. That is
+            # inherent to it BEING the dispatcher, so this grant does not widen
+            # its real authority — but it is the opposite of the deliberately
+            # narrow enrollment_tokens column grant below, so it should not sit
+            # here unremarked.
+            "scan_tasks",
             # `enrollment_tokens` RESOLVED 2026-07-29 and moved to a column grant
             # below — hw_monitor is the token CONSUMER, not its owner.
         ),
