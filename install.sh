@@ -649,6 +649,48 @@ install_suricata() {
         warn "  sudo nano /etc/suricata/suricata.yaml  (look for 'af-packet')"
     fi
 
+    # ── Host-defence rules ───────────────────────────────────────────────────
+    # Added 2026-08-06. Until now this installer set Suricata up and stopped, so
+    # every fresh install shipped with ZERO host-defence rules — the rules existed
+    # only as a hand-placed file on the development box. The adversarial test that
+    # motivated them (full port scans against the Nemesis host running four hours
+    # undetected) therefore still applied to every real deployment.
+    local rules_src="$DASHBOARD_DIR/config/suricata/local.rules"
+    local rules_dest="/etc/suricata/rules/local.rules"
+
+    if [[ -f "$rules_src" ]]; then
+        mkdir -p /etc/suricata/rules
+
+        # BOTH halves are required. Deploying the file without registering it in
+        # rule-files: leaves it on disk and never loaded — indistinguishable from
+        # a working install until something scans the box and nothing alerts.
+        if ! grep -q "^[[:space:]]*-[[:space:]]*$rules_dest" "$yaml_file" 2>/dev/null; then
+            # Absolute path deliberately: default-rule-path is suricata-update's
+            # territory and it rewrites that directory.
+            sed -i "\|^rule-files:|a\\  - $rules_dest" "$yaml_file"
+            ok "Registered host-defence rules in $yaml_file"
+        else
+            info "Host-defence rules already registered in $yaml_file"
+        fi
+
+        # deploy-suricata-rules.sh resolves @NEMESIS_HOST@, VALIDATES with
+        # `suricata -T`, and refuses to install a ruleset that does not parse.
+        # That refusal matters more than it looks: a rule that fails to parse does
+        # not error at runtime, it simply never loads, and host-defence detection
+        # is silently off.
+        if "$DASHBOARD_DIR/scripts/deploy-suricata-rules.sh" >/dev/null 2>&1; then
+            ok "Host-defence rules deployed and validated"
+        else
+            # Non-fatal: a box without these rules is the pre-2026-08-06 status
+            # quo, not a broken install. But it must be SAID, not swallowed.
+            warn "Host-defence rules FAILED to deploy — Suricata is running WITHOUT"
+            warn "  them. Re-run manually to see why:"
+            warn "  $DASHBOARD_DIR/scripts/deploy-suricata-rules.sh --check"
+        fi
+    else
+        warn "config/suricata/local.rules not found — skipping host-defence rules"
+    fi
+
     systemctl enable suricata
     systemctl restart suricata
 
