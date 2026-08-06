@@ -3035,3 +3035,33 @@ this entry is the proposal, not the implementation.
           looking at from the alert text alone.
     - [ ] Related: the source-exclusion fix (2026-08-06) means these rules no longer fire
           on this host's own scanning, so the remaining alerts are genuinely third-party.
+
+- [ ] **BACKLOG IDEA (documented, deliberately NOT built): "same device as X" manual merge,
+      for when a device's randomised MAC makes it reappear as new.** Investigated
+      2026-08-06; the automatic version was assessed and REJECTED on feasibility.
+    - [ ] **Why automatic re-identification is not buildable reliably, measured not assumed:**
+          reverse DNS resolves **1 of 41** LAN devices on the dev network, so the hostname
+          signal that any such scheme would lean on is effectively absent. The Pi-hole lease
+          API needs a token (401 unauthenticated) and the lease files are not readable, so
+          even the authenticated path is unverified.
+    - [ ] **The asymmetry that kills it:** devices which randomise MACs (phones, laptops) are
+          the ones that do NOT advertise a stable hostname; devices with stable, meaningful
+          names (printers, TVs, speakers, smart-home gear) generally do NOT randomise. The
+          available signal and the actual problem barely overlap.
+    - [ ] DHCP fingerprinting (Option 55/60) identifies a device CLASS or OS, never an
+          individual device — useful for the category, useless for re-attaching a name.
+          mDNS could catch some Apple devices but needs a listener this codebase does not
+          have, and Apple has been reducing passive discoverability. Traffic/TLS
+          fingerprinting is fragile and adversarial for a home product.
+    - [ ] **And the point of principle:** MAC randomisation exists specifically to defeat
+          this correlation. Anything that worked reliably would be a tracking mechanism.
+    - [ ] Mitigating fact: iOS/Android randomised MACs are **stable per-SSID** by default,
+          not per-connection. A device usually only reappears as "new" after forgetting/
+          rejoining the network, a reset, or a privacy-setting toggle — rarer than it feels.
+    - [ ] **If ever built, build the MANUAL version only:** an operator-driven "this is the
+          same device as X" merge, requiring confirmation. A wrong auto-merge silently
+          corrupts the inventory (a name lands on the wrong device, or two devices collapse
+          into one) and is INVISIBLE; a wrong suggestion is visible and free to dismiss.
+    - [ ] Operator decision 2026-08-06: do not build MAC-rotation persistence. The related
+          real bug — the OUI vendor being stored in `friendly_name` and destroyed on rename —
+          IS being fixed, via a persisted `vendor` column in the categorisation work.
