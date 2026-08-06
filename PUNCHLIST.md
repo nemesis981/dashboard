@@ -2879,3 +2879,29 @@ this entry is the proposal, not the implementation.
     - [ ] Found by Window 1, 2026-08-05, while load-testing the gauge appliance VM. Verified
       against `agent.py` by direct search before filing — the absence of jitter is confirmed,
       not inferred from the measurement.
+
+- [ ] **Dashboard alert list can read as empty on a noisy network while the severity cards
+  report real counts — same root cause already fixed once, in only one of two consumers.**
+  `get_active_alerts()` (`dashboard.py:2406-2428`) sources from `get_suricata_alerts()`
+  (`dashboard.py:2207-2222`), which runs `tail -n 100 /var/log/suricata/fast.log`.
+  `get_active_alerts()` then filters to today + Priority 1/2 only, drops `ignore`d rules,
+  and caps the result at 10 (`active[:10]`, line 2425). On a busy network a burst of
+  Priority-3 noise pushes every P1/P2 line out of that 100-line window before the P1/P2
+  filter ever runs, so the list renders empty even though real high-priority alerts exist.
+    - [ ] **The severity-card counters do NOT share this bug — it was already fixed there.**
+      `get_alert_counts()` (`dashboard.py:2236-`), which feeds `alert_counts["p2"]` etc.,
+      carries its own docstring recording this exact failure mode as already found and
+      fixed: *"The previous version only sampled the last 100 lines, so a burst of P3 noise
+      would push P1/P2 entries off the window and report counts as 0."* It now runs
+      `tail -n 200000`. So the list and the counters read the same log through two
+      different windows — one deep, one shallow — and can legitimately disagree: a real
+      "534 High P2" card sitting directly above a list rendering nothing.
+    - [ ] **Fix is a known pattern here already, not a new design.** Apply the same
+      deep-tail approach `get_alert_counts()` already uses to `get_suricata_alerts()` (or
+      have `get_active_alerts()` source from the same wide read `get_alert_counts()`
+      performs, deduped against the existing 10-row display cap). The display cap of 10 is
+      not the bug and should stay — the bug is the read window feeding it.
+    - [ ] Found by Window 3, 2026-08-05, while testing alert chat against a visually-empty
+      list sitting next to a populated severity card. Re-verified against live code
+      2026-08-06 immediately before filing — line numbers and the already-fixed sibling
+      function were confirmed today, not carried over from the prior session's memory.
