@@ -3065,3 +3065,31 @@ this entry is the proposal, not the implementation.
     - [ ] Operator decision 2026-08-06: do not build MAC-rotation persistence. The related
           real bug — the OUI vendor being stored in `friendly_name` and destroyed on rename —
           IS being fixed, via a persisted `vendor` column in the categorisation work.
+
+- [x] **[CLOSED — NOT A BUG] AI chat popup reopening at its last size/position.** Reported
+      2026-08-06, **retested by the operator the same day: the resize DID persist correctly.**
+      The original report was against a stale/pre-deploy page. The existing implementation
+      works as built; no work is owed. Kept rather than deleted because the source-read below
+      documents how the persistence actually works, which is worth having written down.
+    - [x] **Geometry persistence is fully implemented** in `modules/ai_engine/module.py`
+          (the unpin/floating-panel work):
+        - `FKEY="nemChatFloat"` in `localStorage`; `fstate()`/`fsave()` read/write it, both
+          guarded so a corrupt value falls back to defaults instead of throwing.
+        - **position** saved on drag — `st.left`/`st.top`.
+        - **size** saved via a guarded **`ResizeObserver`** — the only way to notice a corner
+          drag, since CSS `resize:both` fires no standard event.
+        - **floating state** saved as `st.on` and read back on load:
+          `if(fstate().on&&window.nemChatUnpin)window.nemChatUnpin();`
+        - `fapply()` restores all four with defaults (`st.w||420`, `st.h||460`, etc.), then
+          `fclamp()` keeps an off-screen panel reachable.
+    - [ ] **WORTH KEEPING — `localStorage` is PER-ORIGIN, and this dashboard has several.**
+          It is reachable via nginx on `:80` at the box's LAN address, the Flask port
+          directly, and a tailnet address. Each is a separate localStorage bucket, so a panel
+          sized at one origin legitimately reopens at defaults when the dashboard is opened
+          at another — indistinguishable from broken persistence. Not the cause this time,
+          but it WILL be the cause eventually, and it applies to every localStorage-backed
+          preference the dashboard grows, not just this panel.
+    - [x] **Process note worth more than the item:** the first report was tested against a
+          stale page. Re-testing after the deploy is what resolved it. A UI bug report taken
+          before the fix is live reads exactly like a real defect — confirm what build the
+          page was actually serving before scoping any UI investigation.
