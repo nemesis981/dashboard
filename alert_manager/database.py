@@ -31,9 +31,43 @@ def init_db():
             last_seen TIMESTAMP,
             src_ip TEXT,
             dst_ip TEXT,
-            protocol TEXT
+            protocol TEXT,
+            explanation_beginner TEXT,
+            explanation_intermediate TEXT,
+            explanation_pro TEXT
         )
     ''')
+    # ── Guarded migration: per-expertise-tier AI explanations ────────────────
+    #
+    # The dashboard has had a three-tier explanation system (static/tier.js:
+    # beginner | intermediate | pro) since long before AI alert analysis existed,
+    # but the AI path never participated in it: the prompt asked for one "Plain
+    # English explanation for home user" unconditionally, so a `pro` user and a
+    # `beginner` user received identical consumer-style prose.
+    #
+    # WHY THREE COLUMNS AND NOT A RE-USE OF `explanation`. `explanation` has a
+    # live downstream consumer: dashboard's `_anchor_load_alert()` reads it BY
+    # NAME and feeds it into the chat grounding prompt. Storing JSON (or any
+    # multi-variant encoding) in that column would silently feed raw markup to a
+    # model as though it were prose -- broken in a way that returns a plausible
+    # answer rather than an error. So the variants get their own columns and
+    # `explanation` keeps its existing meaning and format.
+    #
+    # `explanation` continues to be written, with the INTERMEDIATE variant: it is
+    # the tier system's own documented default (tier.js `DEFAULT = 'intermediate'`)
+    # and is the tier-neutral choice for a consumer that cannot express a tier.
+    #
+    # NOT BACKFILLED, deliberately. Pre-existing rows keep their single
+    # `explanation` and leave these three NULL; the dashboard falls back to
+    # `explanation` for every tier when they are absent, so old rows render
+    # exactly as they do today. Backfilling would mean re-running a BILLED AI
+    # call per historical row against a live `rate_per_hour` ceiling, to rewrite
+    # analyses nobody has asked to see -- the same on-demand-not-bulk reasoning
+    # already recorded inline at dashboard.py's analyze gate.
+    _alert_cols = {row[1] for row in c.execute("PRAGMA table_info(alerts)").fetchall()}
+    for _col in ("explanation_beginner", "explanation_intermediate", "explanation_pro"):
+        if _col not in _alert_cols:
+            c.execute("ALTER TABLE alerts ADD COLUMN %s TEXT" % _col)
     conn.commit()
     conn.close()
     print("Database initialized successfully")

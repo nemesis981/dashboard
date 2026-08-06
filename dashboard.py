@@ -4403,6 +4403,57 @@ def _parse_ai_json(text):
     return None
 
 
+#: The expertise tiers static/tier.js renders, in its own order. These exact
+#: names are the JSON keys the analyze prompt asks for, the `alerts` column
+#: suffixes they persist to, and the `data-*` attribute suffixes the browser
+#: reads — one vocabulary end to end, so a mismatch is a typo in one place
+#: rather than a mapping anyone has to maintain.
+_EXPLANATION_TIERS = ("beginner", "intermediate", "pro")
+
+
+def _tiered_explanations(analysis, rule_id=None):
+    """Pull the three per-tier explanations out of a parsed model reply.
+
+    Returns `(beginner, intermediate, pro)` — always three non-empty-if-possible
+    strings, in `_EXPLANATION_TIERS` order.
+
+    EVERY TIER FALLS BACK RATHER THAN RENDERING BLANK. Three inputs legitimately
+    arrive without all three variants: a pre-2026-08-06 row carrying only the
+    flat `explanation`, a reply where the model supplied some keys but not
+    others, and the parse-failure branch below, which synthesises an `analysis`
+    with a single `explanation`. In all three the reader must still see
+    something, because an empty explanation renders as "nothing to say about
+    this alert" — a legal-looking answer that nothing downstream can distinguish
+    from a real one. That is the same failure shape as this route's three
+    2026-08-05 defects (a truthy `priority`, an empty prompt, an `UNKNOWN` risk),
+    so it is guarded the same way: fall back, never blank.
+
+    Fallback order is intermediate → flat `explanation` → whichever variant did
+    arrive. Intermediate first because tier.js's own `DEFAULT` is intermediate,
+    so it is the closest thing to a tier-neutral answer.
+    """
+    got = {t: str(analysis.get("explanation_" + t) or "").strip()
+           for t in _EXPLANATION_TIERS}
+    flat = str(analysis.get("explanation") or "").strip()
+    supplied = [t for t in _EXPLANATION_TIERS if got[t]]
+
+    # A model that returns three IDENTICAL variants has ignored the instruction
+    # while producing a reply that passes every structural check — three keys
+    # present, all non-empty, valid JSON. Nothing downstream could tell that
+    # apart from a genuine three-tier answer, so it is surfaced here rather than
+    # shipping a tier system that silently does nothing. Only checked when all
+    # three were actually supplied: the fallback paths above produce identical
+    # variants BY DESIGN, and warning on those would be noise that trains the
+    # reader to ignore the real signal.
+    if len(supplied) == 3 and len({got[t] for t in _EXPLANATION_TIERS}) == 1:
+        log.warning("analyze_alert: model returned three IDENTICAL explanation "
+                    "variants for rule_id=%s — the tier prompt is not being "
+                    "honoured, so every tier will read the same text", rule_id)
+
+    fallback = got["intermediate"] or flat or (got[supplied[0]] if supplied else "")
+    return tuple(got[t] or fallback for t in _EXPLANATION_TIERS)
+
+
 @app.route("/api/analyze/<rule_id>")
 def analyze_alert(rule_id):
     try:
@@ -4456,7 +4507,37 @@ def analyze_alert(rule_id):
                         enrichment = enrich_ip(src_ip)
                     except Exception:
                         enrichment = None
+            # ── The stored per-tier variants ────────────────────────────────
+            # THIS PATH IS THE ONE THAT MATTERS FOR TIERING. The gate above
+            # early-returns permanently once `explanation` is set, so after the
+            # single analysis every subsequent view of that alert — by anyone,
+            # at any tier, forever — is served from right here. A tier-aware
+            # prompt with a tier-blind cached path would work exactly once per
+            # alert and then silently serve one tier's text to everybody, which
+            # would look like a working feature.
+            #
+            # Read BY NAME, not by positional index, deliberately. The rest of
+            # this function indexes `SELECT *` positionally against a documented
+            # 0-13 map, and the three new columns land at 14-16 — but only if the
+            # ALTER order on a migrated database happens to match the CREATE
+            # order on a fresh one. That is true today and is exactly the kind of
+            # coupling that breaks silently later, returning the wrong tier's
+            # text rather than an error. A named read cannot drift.
+            tier_row = c.execute(
+                "SELECT explanation_beginner, explanation_intermediate, "
+                "explanation_pro FROM alerts WHERE rule_id=?", (rule_id,)
+            ).fetchone()
             conn.close()
+            # Pre-2026-08-06 rows have all three NULL and are NOT backfilled, so
+            # every tier falls back to the flat `explanation` they do have. Those
+            # alerts render exactly as they did before this feature existed —
+            # untiered, but never blank.
+            cached_b, cached_m, cached_p = _tiered_explanations({
+                "explanation": existing[5],
+                "explanation_beginner": tier_row[0] if tier_row else None,
+                "explanation_intermediate": tier_row[1] if tier_row else None,
+                "explanation_pro": tier_row[2] if tier_row else None,
+            }, rule_id)
             return jsonify({
                 "explanation": existing[5],   # was [4] = priority
                 "risk_level": existing[6],    # was [5] = explanation
@@ -4468,7 +4549,10 @@ def analyze_alert(rule_id):
                 "reason": "Retrieved from local database",
                 "cached": True,
                 "src_ip": src_ip,
-                "enrichment": enrichment
+                "enrichment": enrichment,
+                "explanation_beginner": cached_b,
+                "explanation_intermediate": cached_m,
+                "explanation_pro": cached_p,
             })
         # ── The prompt's alert body: DB row FIRST, `raw` only as a fallback ─────
         # `raw` arrives in the query string, and the deep-link entry point
@@ -4521,6 +4605,27 @@ def analyze_alert(rule_id):
         import nemesis_pseudonymize as _pseudo
         alert_body, _addr_map = _pseudo.pseudonymize(alert_body)
 
+        # ── One call, three explanations, ONE verdict ────────────────────────
+        # The dashboard's expertise-tier system (static/tier.js) has three levels
+        # and every other user-facing string in the product honours them. This
+        # prompt did not: it asked for a single "Plain English explanation for
+        # home user", so a `pro` user read consumer prose and a `beginner` user
+        # had no more help than a `pro` one.
+        #
+        # WHY ALL THREE IN ONE CALL rather than one call per tier. Three calls
+        # would triple the spend AND consume three slots against the live
+        # `rate_per_hour` ceiling -- but the deciding reason is correctness, not
+        # cost: three independent analyses of one alert can disagree on
+        # `risk_level` and `recommended_action`, so two operators looking at the
+        # same alert at different tier settings could see contradictory verdicts
+        # with nothing to reconcile them. Asking once keeps the VERDICT fields
+        # single and varies only the explanation of it, which is the actual
+        # intent. (Scoped 2026-08-06; this is "Option C" of three.)
+        #
+        # The tier therefore never needs to reach the server at all: the server
+        # emits every variant and the browser picks one, which is exactly the
+        # mechanism tier.js already documents as its Method 2 for server-rendered
+        # content. This route stops being an exception to the tier architecture.
         from modules.ai_engine import analyze as ai_analyze
         ai_result = ai_analyze(
             f"""You are Nemesis, an AI security assistant for a home network firewall.
@@ -4528,14 +4633,33 @@ Analyze this Suricata alert and respond in JSON only, no markdown:
 
 Alert: {alert_body}
 
+Write THREE explanations of the SAME finding, for three different readers. They
+must differ in depth and vocabulary, not merely in length -- do not pad one to
+make another. All three describe the same conclusion; only the reader changes.
+
 {{
-    "explanation": "Plain English explanation for home user",
+    "explanation_beginner": "For someone with no networking or security knowledge. Explain what happened, why it matters, and whether to worry. Assume nothing.",
+    "explanation_intermediate": "For a confident computer user. Balanced detail, enough to act on, without explaining fundamentals.",
+    "explanation_pro": "For a network/security professional. Terse and technical. Protocol names, attack terminology and abbreviations are expected.",
     "risk_level": "LOW/MEDIUM/HIGH",
     "is_threat": true/false,
     "recommended_action": "Block/Ignore/Monitor",
     "reason": "Brief reason"
 }}""",
-            max_tokens=500,
+            # Raised from 500 for the three-variant reply. NOT a measured floor:
+            # the single-variant replies this route produced were ~120-160 tokens
+            # (measured across the two 2026-08-06 verification calls), so three
+            # plus the shared verdict fields is estimated at ~450-600 and 1200
+            # leaves real headroom rather than sitting on the edge. Stated as an
+            # estimate because that is what it is -- if replies are seen hitting
+            # the ceiling, a truncated reply fails `json.loads` outright and the
+            # parse-failure path below preserves the prior risk_level, so the
+            # failure is loud and non-destructive rather than silent.
+            #
+            # This ceiling is paid on EVERY analysis, including for a reader who
+            # only ever looks at one tier -- the known cost of one-call-three-
+            # variants over one-call-per-tier-on-demand.
+            max_tokens=1200,
             cache_key=f"alert_{rule_id}",
             cache_hours=24,
             # job_id engages ai_engine's in-flight dedup. The mechanism already
@@ -4593,6 +4717,17 @@ Alert: {alert_body}
                 "recommended_action": "Monitor",
                 "reason": "Could not parse response"
             }
+        # Resolve the three variants ONCE, here, so the UPDATE, the INSERT and
+        # the response below all persist and report exactly the same strings.
+        # Deriving them separately at each site is how two of them drift.
+        expl_b, expl_m, expl_p = _tiered_explanations(analysis, rule_id)
+        # `explanation` keeps its existing meaning and gets the INTERMEDIATE
+        # variant. It is NOT dead weight beside the three new columns:
+        # `_anchor_load_alert()` reads it by name into the chat grounding prompt,
+        # and /firewall-db and the DB helpers read it too. Intermediate is the
+        # tier-neutral choice (tier.js's own DEFAULT) for consumers that cannot
+        # express a tier — a chat prompt has no expertise setting to honour.
+        analysis["explanation"] = expl_m
         now = datetime.now().isoformat()
         new_action = "ignore" if analysis.get("risk_level") == "LOW" else "pending"
         # Decide from the CURRENT state, not from `existing` — that was read
@@ -4627,22 +4762,27 @@ Alert: {alert_body}
         #     must never overturn a human's decision — only advance a row nobody
         #     has ruled on yet.
         c.execute("UPDATE alerts SET explanation=?, "
+                  "explanation_beginner=?, explanation_intermediate=?, "
+                  "explanation_pro=?, "
                   "risk_level=COALESCE(?, risk_level), "
                   "action=CASE WHEN ? IS NOT NULL AND action='pending' "
                   "            THEN ? ELSE action END "
                   "WHERE rule_id=?",
-                  (analysis["explanation"], analysis["risk_level"],
+                  (analysis["explanation"], expl_b, expl_m, expl_p,
+                   analysis["risk_level"],
                    analysis["risk_level"], new_action, rule_id))
         if c.rowcount == 0:
             c.execute("""INSERT INTO alerts
-                (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
-                SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ?
+                (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen,
+                 explanation_beginner, explanation_intermediate, explanation_pro)
+                SELECT ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?
                 WHERE NOT EXISTS (SELECT 1 FROM alerts WHERE rule_id = ?)""",
                 # On a BRAND NEW row there is no prior value to preserve, so an
                 # unparseable reply genuinely leaves the risk unknown — unlike the
                 # UPDATE path above, "UNKNOWN" is the honest answer here.
                 (rule_id, raw_alert[:50], "", 1, analysis["explanation"],
-                 analysis["risk_level"] or "UNKNOWN", new_action, now, now, rule_id))
+                 analysis["risk_level"] or "UNKNOWN", new_action, now, now,
+                 expl_b, expl_m, expl_p, rule_id))
         # Report what was actually STORED, not what we intended to store. The
         # guards above deliberately decline to overwrite an operator's decision,
         # so `new_action` is our proposal — the row is the truth. Returning the
@@ -4653,9 +4793,18 @@ Alert: {alert_body}
         actual_action = stored[0] if stored else new_action
         conn.commit()
         conn.close()
+        # The three variants are set EXPLICITLY rather than left to `**analysis`.
+        # `analysis` carries whatever the model happened to return — possibly
+        # missing keys, possibly none at all on the parse-failure path — whereas
+        # these are the resolved, fallback-applied strings that were just
+        # persisted. Spreading the raw reply alone would let the browser render a
+        # blank tier for a row whose stored columns are populated.
         return jsonify({**analysis, "cached": False, "src_ip": src_ip,
                         "enrichment": enrichment, "times_seen": 1,
-                        "last_seen": now, "action": actual_action, "rule_name": ""})
+                        "last_seen": now, "action": actual_action, "rule_name": "",
+                        "explanation_beginner": expl_b,
+                        "explanation_intermediate": expl_m,
+                        "explanation_pro": expl_p})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -11659,6 +11808,26 @@ def dashboard():
                     // 5. Tiered explanation block
                     var tierExpl = _tierExplanation(data);
 
+                    /* 5b. The AI explanation itself, per expertise tier.
+                       Method 2 from static/tier.js: emit ALL THREE variants as
+                       data-* attributes and let applyTierText() pick one. Method 1
+                       (a tierText() call) would evaluate once at render time and
+                       then be frozen — this modal is built by innerHTML and is not
+                       re-rendered, so changing tier in another tab would leave a
+                       stale explanation on screen while every OTHER string on the
+                       page updated. Method 2 re-picks on the storage event.
+                       Initial content is the intermediate variant, per tier.js's
+                       own guidance, so the text is right even before JS runs. */
+                    var explFallback = data.explanation || "No explanation available";
+                    var explB = data.explanation_beginner || explFallback;
+                    var explM = data.explanation_intermediate || explFallback;
+                    var explP = data.explanation_pro || explFallback;
+                    var explHtml = "<span class='tier-text'"
+                        + " data-beginner='" + escapeHtml(explB) + "'"
+                        + " data-intermediate='" + escapeHtml(explM) + "'"
+                        + " data-pro='" + escapeHtml(explP) + "'>"
+                        + escapeHtml(explM) + "</span>";
+
                     document.getElementById("modalContent").innerHTML =
                         // action badge at top
                         "<div style='margin-bottom:8px'>" + actionBadge + "</div>"
@@ -11666,10 +11835,16 @@ def dashboard():
                         + prevInstances
                         + "<p><strong>" + tierText("Threat Level","Risk Level","Risk") + ":</strong>"
                         + " <span style='color:" + riskColor + "'>" + escapeHtml(riskLabel) + "</span>" + aiStatus + "</p>"
-                        + "<p><strong>" + tierText("What is this?","Explanation","Detail") + ":</strong> " + escapeHtml(data.explanation || "No explanation available") + "</p>"
+                        + "<p><strong>" + tierText("What is this?","Explanation","Detail") + ":</strong> " + explHtml + "</p>"
                         + "<p><strong>" + tierText("What should I do?","Recommended Action","Action") + ":</strong> " + escapeHtml(data.recommended_action || "Monitor") + "</p>"
                         + "<p><strong>" + tierText("Why?","Reason","Reason") + ":</strong> " + escapeHtml(data.reason || "") + "</p>"
                         + renderEnrichment(data.enrichment);
+                    /* The .tier-text span above is injected AFTER the page's own
+                       DOMContentLoaded pass, so nothing has resolved it yet — without
+                       this call it would render the intermediate variant regardless of
+                       the reader's setting. tier.js documents exactly this: "call after
+                       dynamic content injection". */
+                    if (window.applyTierText) applyTierText();
                     if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {{
                         document.getElementById("btnReport").style.display = "inline-block";
                     }}
