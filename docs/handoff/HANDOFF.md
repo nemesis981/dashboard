@@ -1,155 +1,170 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-05 (Window 2)**. Overwritten each closeout (latest state wins).
-> Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
-> live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
+> Last updated **2026-08-06, ~14:50 CDT (Window 2)**. Overwritten each closeout (latest
+> state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
+> IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
+> placeholders here per Rule 8.
 >
-> Written to stand on its own — the operator may or may not be back tomorrow. Full detail
-> behind every claim below: `docs/handoff/supplements/2026-08-05-001.md` (curated) and
-> `docs/handoff/worklog/2026-08-05-001.md` (raw, reconstructed from git log at closeout —
-> see the discipline-gap note in §6, same gap as 2026-08-04, not yet resumed).
+> **⚡ WRITTEN UNDER POWER-LOSS RISK — a storm is in progress and Paul is on battery
+> backup with limited, uncertain runtime. Power could drop with no warning, ending any
+> window's session mid-action.** This file is being kept current after every meaningful
+> step from here on, not just at natural stopping points. If you are picking this up
+> cold: read the section immediately below first and trust it over anything later in this
+> file, since the rest may be a stale narrative relative to it.
 
 ---
 
-## 1. Live in production right now — verified, not assumed
+## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
-- **`origin/main` is at `f30126c`** as of this writing (confirmed `HEAD == origin/main` via
-  fresh fetch). 26 commits landed and pushed today, all from Window 2, none reverted.
-- **Production is confirmed restarted and caught up to `f30126c`.** `dashboard.service`
-  `ActiveEnterTimestamp` is `2026-08-05 18:57:04`, well after today's last commit
-  (`15:54:20`). The service's `WorkingDirectory`/`ExecStart` run directly against
-  `/opt/nemesis` (no separate deploy copy), so the restart picked up everything through
-  `f30126c`. Startup log confirms all 7 modules loaded clean, zero errors/tracebacks in the
-  journal since restart (checked directly, not inferred from the restart alone). Note: this
-  restart was **not performed by Window 2** — no state-changing action was taken in this
-  session; it happened between sessions, presumably Window 1 or the operator directly.
-- **Verified live against the running system, not just claimed:**
-  - `settings.degraded_ingest_offset.updated_at` reads `2026-08-05T19:03:04` — genuinely
-    local-format (not UTC), confirming the timestamp fix (`31a9bbf`) is live and the sweep is
-    actively running post-restart.
-  - Zero `WOULD DENY` namespace-guard lines in the journal since restart — the `scan_tasks`
-    grant fix (`d636f2e`, landed earlier today's predecessor session) is holding clean.
-  - Alert `1000002`'s stored row now reads `risk_level=MEDIUM` with a real, readable
-    explanation — the poisoned CRITICAL→LOW→UNKNOWN chain from earlier today is confirmed
-    repaired in the live DB, not just claimed in a commit message. The explanation text
-    contains a real LAN address, which is **correct, not a leak**: pseudonymization tokenizes
-    only the outbound prompt to the external model; the stored, operator-facing explanation
-    is deliberately resolved back to real addresses for readability. **Not independently
-    re-verified end-to-end against a fresh live call since deploy** (would require billing a
-    real analysis) — the design and the unit/AST-level wiring proof are solid (51/51 +
-    29/29 tests), but a live production round-trip of the pseudonymization path specifically
-    has not been observed by this window.
-  - `alert_manager/test_quarantine.py`: 38 passed, 14 failed — consistent with the
-    pre-existing, already-tracked 8-day-old regression (PUNCHLIST, unrelated to today's
-    work). No new failures introduced today.
-- **Total code lines: 65,960** (`find`+`wc -l` across `.py/.js/.html/.css/.sh`, excluding
-  `__pycache__`/`.git`).
+**Public repo (`/opt/nemesis`) is fully clean and pushed.**
+- `origin/main` HEAD == local HEAD == `13239ea`, confirmed by direct hash comparison
+  (`git rev-parse HEAD` / `git rev-parse origin/main`), not inferred.
+- **Zero unpushed commits.** Working tree has exactly ONE modified file:
+  `docs/roadmap/venue-guest-network.md` — this is **foreign WIP, not Window 2's**,
+  confirmed independently by Window 1, Window 3, and this window all day. Leave it alone.
+- If power drops right now, **nothing of Window 2's is lost or half-committed.**
 
-## 2. What shipped today (26 commits, one continuous Window 2 session)
+**Production (`/opt/nemesis`, the live box) is caught up and verified healthy.**
+- `dashboard` service restarted **11:34:24 CDT**, running code == `0ee0c57` at that time
+  (md5 of on-disk `dashboard.py` matches `git show HEAD:dashboard.py` for that commit,
+  confirmed directly). Zero errors/tracebacks/exceptions in the dashboard journal since
+  restart (grepped directly, count=0, not assumed from a clean-looking log).
+- `watchdog` and `alert-watcher` restarted separately, **13:18 CDT** (later than dashboard
+  — they needed a restart Window 1 found independently; see below). Also zero errors since
+  their restart.
+- `malware-canary`, `diagnostics-watcher`, `vpn-dns-guard` last restarted 2026-08-03 —
+  correctly NOT restarted today; Window 1 checked their real import graphs against `git
+  log` and found them not stale. Do not restart them for nothing.
+- **All six services report `active` right now** (checked via `systemctl is-active`
+  moments before this write).
+- Production `HEAD` was `0ee0c57` as of the last direct check (Window 3, before standing
+  down) — **five commits behind current `origin/main` (`13239ea`)**: the CLAUDE.md
+  VM-rename fix and the chat-popup PUNCHLIST closure landed AFTER that last production
+  check and have NOT triggered a restart (they're docs-only — nothing to serve
+  differently). **No code-behavior gap exists** between what's committed and what's
+  running; the 5-commit gap is entirely docs/PUNCHLIST/rev-bump content already covered
+  in "what shipped" below.
 
-Full detail in the supplement. Headline sequence, roughly in dependency order:
+**What is mid-flight RIGHT NOW, and it is NOT in this repo:**
+Window 1 is actively working on a **separate VM** (`Nemesis Appliance Gateway`, renamed
+today from `Nemesis Appliance HW-GAUGE`, same UUID) building a gateway/NAT/DHCP test
+zone. This is VM-lab infrastructure work, **not a change to `/opt/nemesis` or
+production**. Window 1's own live cold-start doc is
+`~/work/nemesis-internal/handoff/2026-08-06-window1-handoff-IN-PROGRESS.md` — read that
+directly if picking up Window 1's specific thread; it is not duplicated here. Headline:
+proving gateway packet forwarding works, currently blocked on a Pi-hole DHCP config
+reset-on-restart bug, actively being chased. **This does not block or relate to anything
+in the public repo or production dashboard.**
 
-1. **IPv6 connection-type fix** (`41ba66f`) + PUNCHLIST closure — Window 1's step 4/5 of the
-   observation-layer foundation, dual-stack `_detect_connection_type()`.
-2. **`scan_tasks` namespace grant** (`d636f2e`) — closed a drift gap in `hw_monitor`'s write
-   grant, plus a new PUNCHLIST entry for the unrelated 8-day-red `test_quarantine.py`,
-   found as collateral discovery during that audit.
-3. **Chat-widget rescue arc** — three real, sequential defects behind "chat looks broken":
-   duplicate `id="nemChatSection"` DOM collision (`dd32ccb`), a literal-newline
-   `SyntaxError` silently killing the entire chat IIFE (`a5c7137` — the ACTUAL root cause,
-   found after the duplicate-id fix alone didn't restore chat), and a `sqlite3.Row` gap on
-   the alert anchor loader (`940b1a6`). Plus two features once chat worked: copyable
-   answers/fenced code blocks (`746d522`) and Enter-to-submit (`2129331`).
-4. **The analyze-alert chain — three real, sequential defects**, same "fix one, find the
-   next" shape as the chat arc:
-   - Off-by-one display indices + the SAME off-by-one in the gate itself, the latter
-     deliberately held for a cost decision before fixing (`9521346`, then the gate
-     correction after operator approval).
-   - Empty deep-linked alert body (`8f227a4`) — the deep-link path had ALWAYS passed
-     `raw=""`; once the gate started working, this billed the AI to analyze nothing and
-     poisoned `alerts.explanation` + `risk_level` for rule `1000002` (CRITICAL→UNKNOWN).
-   - Fenced JSON in the model's reply (`f8c116f`) — a *correct* MEDIUM answer wrapped in
-     ` ```json ` broke `json.loads()`, and the fallback hardcoded `risk_level="UNKNOWN"`
-     straight over a stored CRITICAL. Fixed with a fence-tolerant parser and `COALESCE`
-     write-back so a parse failure can never again downgrade a real severity.
-5. **ADR 0019 Phase 2 — enforcement-visibility panel** (`31a9bbf`), landed together with
-   the local-time timestamp fix it structurally depends on (a UTC/local mismatch that
-   nothing had read yet — the panel is the first reader, and would have shown a permanent
-   false-degraded on any host until both landed in the same commit). Includes a
-   self-caught bug: a future-dated heartbeat (exactly what the pre-fix UTC stamp produced)
-   read as HEALTHY with no lower bound on the age check.
-6. **`/firewall-db` Analyze link** (`6358b5d`) + a new PUNCHLIST entry for the GET route it
-   surfaced as now-consequential (`/api/analyze/<rule_id>` has no `methods=`, so it's a
-   GET-that-spends-money — auth-gated, not urgent, but flagged).
-7. **Malware-detection/AI-analysis completeness audit** (Window 1, private handoff `c5f7a1c`
-   in `~/work/nemesis-internal`) surfaced two real findings that Window 2 verified against
-   code and filed to the PUBLIC PUNCHLIST for the first time this session (they had NOT
-   actually reached the public repo despite being recorded as "decided" in the private
-   handoff — see §6 for the process gap this exposed):
-   - Layer D (local ML classifier) declared in three places (module header, `LAYERS` list,
-     UI legend colour) with zero implementation anywhere else — an honesty gap, not a build
-     gap; fix is dropping it from the enumeration/legend, not building Layer D.
-   - `/api/analyze/<rule_id>` sending real source/destination IPs externally with no
-     redaction — decision recorded (pseudonymize to `host-A`/`host-B` tokens), build queued
-     behind UDP work at the time it was filed.
-8. **Pseudonymization built and shipped same day** (`f743b9a`) — new module
-   `alert_manager/nemesis_pseudonymize.py`, wired into `analyze_alert()`. Both substring
-   hazards (outbound address-inside-address, inbound token-inside-token) handled by a
-   single boundary-anchored regex pass, tested with a 27-address rollover to force the
-   collision case. Deliberately NOT a `redact.py` extension — a secrets scrubber and a
-   PII pseudonymizer have different correctness conditions. 51/51 tests, plus this
-   window's own adversarial probes beyond the suite (comma-separated lists, CIDR suffixes,
-   IPv4-mapped-IPv6-with-port, an invalid octet) — all clean. Also surfaced and disclosed a
-   SEPARATE, un-fixed exposure: `enrich_ip()` still sends the real source IP to AbuseIPDB
-   and ipinfo.io on the same route (pseudonymization can't help — the lookup IS the
-   address). Filed to PUNCHLIST explicitly so the two exposures aren't conflated.
+**Nothing else is held or owed to Window 2 right now.** Checked directly against both
+Window 1's and Window 3's own handoff files (`~/work/nemesis-internal/handoff/`,
+2026-08-06 dated) for anything listed as "held for Window 2" — the two PUNCHLIST entries
+and the CLAUDE.md rename Window 1 flagged are now all committed (`13239ea`, `07985b7`).
+Window 3 explicitly stood down from the gateway-zone work (reassigned to Window 1) and
+reports zero held items of its own.
 
-## 3. Open items to pick up first, in priority order
+**If this section and anything below it ever disagree, THIS SECTION is newer.**
 
-1. **`enrich_ip()` external IP exposure (AbuseIPDB/ipinfo.io)** — disclosed in
-   `/diagnostics`, not yet fixed. Operator wants a user-initiated "Report with real
-   address" confirmation flow rather than automatic transmission; design note in
-   PUNCHLIST about needing a stated default for the un-chosen case.
-2. **Layer D honesty fix** — small, mechanical: drop `"ml"` from `LAYERS` and the UI
-   colour legend in `modules/malware_detection/module.py`. Not done yet.
-3. **Cache-hit token skew** (pseudonymization) — narrow, documented, not fixed: an
-   `ai_cache` hit resolves against a token map computed fresh from today's row, so
-   `host-A` could resolve to the wrong address if `src_ip`/`dst_ip` changed since the
-   reply was cached.
-4. **Installer token revocation** — still not built, carried forward unchanged from
-   prior days.
-5. **Three agent-defect PUNCHLIST items** (UDP exclusion in `_network_connections()`,
-   top-10 sampling in `_top_processes()`, IPv4-only `_detect_connection_type()` in the
-   OLDER agent-side function — distinct from the observation-layer fix that shipped
-   today) — carried forward, still open.
-6. **`test_quarantine.py`** — RED for 8+ days now (was 8, is likely 9-10 by the time this
-   is read), fix is known (routes hardened to POST, test still issues GET), not yet done.
-7. **Credential rotation** — operator's call, not code work, carried forward unchanged.
-8. **Concurrency Phase 3** — deferred by agreement, unchanged.
+---
 
-## 4. Rule 10 / disclosure notes today
+## 1. What shipped today (31 commits, one continuous Window 2 session)
 
-- The `/diagnostics` redaction-scope disclosure (`cb00d4a`, later rewritten by `f743b9a`'s
-  wiring) is a straightforward honesty fix — public by default, no held content.
-- The QUIC/nftables static-policy-table ADR question that appeared in the working tree late
-  in the session (uncommitted, another window's — see §6) records its own Rule 10 check
-  inline: "architecture and the standards-track RFC 9001 detail are not new disclosure, the
-  public roadmap already describes the detection approach." Not evaluated independently by
-  Window 2 since it was never handed off as a task this session — flagging its existence
-  here only so it isn't lost.
+Full per-commit detail is in each commit's own message (`git log`, all pushed). Headline
+sequence, roughly in dependency order:
 
-## 5. Blocked on a decision — the operator's calls
+1. **Roadmap-vs-state audit refresh** (`ce239a0`) — two build days' drift absorbed;
+   `agent-rebuild-config-driven.md` upgraded PARKED→PARTIAL (its observation-layer
+   foundation shipped). Tally: 8 SHIPPED / 10 PARTIAL / 58 PARKED — 76 total.
+2. **`test_quarantine.py` fixed** (`0115fd0`) — five-week-old false-pass bug: the suite
+   followed the auth gate's redirect and treated the login page's 200 as the route's own
+   answer. 35/35 now.
+3. **Canonical timestamp helper + all four `audit_log.ts` writers wired to it**
+   (`85813d0`, `7da46f2`) — closes a space-vs-ISO-T split that made `ORDER BY ts`
+   non-chronological on any day two different writers touched the table.
+4. **Layer D honesty fix** (`dc6c16c`) — malware_detection module stopped declaring an
+   unimplemented local-ML layer in its own enumeration/UI legend.
+5. **`analyze_alert()`'s missing-action bug fixed** (`710620b`) — the API said "ignore",
+   the row stayed "pending"; UPDATE was missing the `action` column entirely.
+6. **Suricata host-defence rules versioned + two false positives fixed**
+   (`52a9141`, `96e6736`, `7204331`) — first time these rules entered version control
+   (previously lived only unversioned in `/etc/suricata/rules/`); excluded this host's own
+   service ports AND excluded this host as a scan SOURCE (its own device-scanner was
+   tripping its own rules). `scripts/deploy-suricata-rules.sh` (`cc0fe33`) added as the
+   validate-before-install deploy path; `install.sh` (`46e7ea8`) wired to deploy rules on
+   fresh installs. 24/24 tests, verified live against Suricata 8.0.3 throughout.
+7. **Per-expertise-tier AI alert explanations** (`0469678`) — one AI call now returns
+   beginner/intermediate/pro variants instead of one generic explanation; new `alerts`
+   columns, guarded migration. 32/32, verified with real billed API calls per Window 3
+   (three genuinely different variants observed).
+8. **Chat widget "unpin" into a floating, resizable panel** (`1f75ae6`) — confirmed
+   working directly by the operator ("unpin and resize both work"). A false bug report
+   against this was investigated and closed (`13239ea`) — the operator retested against a
+   stale pre-deploy page the first time.
+9. **Device-categorization Phase 1** (`e0bc3da`, `2ee25a2`, `6027f3c`) — five-category
+   device classifier + `render_devices_html()` grouping + operator override; migration
+   already applied to the live DB (41/41 devices now carry a vendor). 62/62 tests.
+10. **Shared alert-analysis modal extraction** (`0ee0c57`) — fixes `/firewall-db`'s
+    "duplicate dashboard" bug (Analyze used to navigate the tab to the main dashboard
+    instead of opening in place). One renderer (`_alert_modal_css/html/js`), included by
+    both pages. 26/26; also caught and fixed a real near-miss where the CSS didn't travel
+    with the extracted markup/JS, which would have shipped invisibly to every automated
+    check.
+11. **Doc corrections** (`07985b7`, `13239ea`) — CLAUDE.md's VM-fleet entry updated for
+    today's rename; the chat-popup PUNCHLIST entry closed as not-a-bug.
 
-1. **`enrich_ip()` external-transmission UX** — confirmation-dialog design (§3.1).
-2. **Cache-hit token skew fix** — whether/when to build the sentinel-style fix.
-3. **Installer token revocation, credential rotation, Concurrency Phase 3** — all
-   carried forward unchanged from prior days.
-4. **QUIC/nftables static-policy table** — operator decision recorded as already taken
-   (2026-08-05, per the uncommitted PUNCHLIST addition) but the commit implementing/
-   documenting it was never handed to Window 2 this session; carried forward as an open
-   item to close out cleanly next session.
+Several PUNCHLIST-only commits also landed today, filing (not fixing) real findings:
+QUIC/nftables ADR-needed, agent check-in jitter/thundering-herd, empty-alert-list
+read-window mismatch, install.sh's default-route interface-detection bug, host-defence
+rule naming vs. actual scope, `audit_log.ts` dual-format bug (superseded by fix above),
+SYN-sweep rate-vs-sweep false positive, device re-identification (assessed and rejected).
 
-## ⚠ Standing elevated grants — REVIEW FOR REVOCATION
+## 2. Open items to pick up first, in priority order
+
+1. **`enrich_ip()` external IP exposure (AbuseIPDB/ipinfo.io)** — carried forward from
+   yesterday, still disclosed-not-fixed. Operator wants a user-initiated confirmation flow.
+2. **QUIC/nftables static-policy table** — technical input filed to PUNCHLIST, ADR not yet
+   authored (Window 2's to write, next free number 0022).
+3. **Agent check-in jitter** — fix is a small random splay on the computed sleep interval,
+   not yet built.
+4. **Empty-alert-list read-window mismatch** — `get_active_alerts()` needs the same
+   deep-tail fix `get_alert_counts()` already has.
+5. **install.sh's default-route interface detection** — wrong interface chosen on any box
+   with a VPN default route; `deploy-suricata-rules.sh`'s safer derivation should be reused.
+6. **Host-defence rule naming vs. LAN-wide scope** — cosmetic/honesty fix, rules watch more
+   than their names claim, deliberately (lateral-movement coverage).
+7. **Cache-hit token skew (pseudonymization)** — narrow, documented, not fixed.
+8. **Installer token revocation, credential rotation, Concurrency Phase 3** — all carried
+   forward unchanged from prior days.
+9. **`/api/analyze/<rule_id>` is a GET that spends money** — flagged by Window 3 today,
+   not yet a PUNCHLIST entry, not fixed. Bounded by rate limit; worth filing.
+
+## 3. Verified live today, not just claimed (Rule 3 discipline)
+
+- `test_quarantine.py`, `test_alert_modal_shared.py`, `test_tiered_explanations.py`,
+  `test_nemesis_device_category.py`, `test_nemesis_timestamp.py`, `test_degraded_ingest.py`
+  all run directly this session, all green at the counts stated in their own commits.
+- Suricata `local.rules` changes verified against a real `suricata -T`/pcap-replay harness
+  against Suricata 8.0.3, not just unit-tested.
+- `scripts/deploy-suricata-rules.sh --check` dry-run executed live against the real
+  production interface/address set — passed.
+- Device-category migration verified against the LIVE production DB via direct
+  `PRAGMA table_info` + row-count query, not trusted from the commit message alone.
+- Production restart timestamps and journal error-counts checked directly this session
+  (see cold-start summary above) — including catching and fixing my own broken
+  verification instrument mid-check (a `$?` that was capturing the wrong command's exit
+  code, corrected before trusting the result).
+
+## 4. State snapshots taken today (USB backup, per Rule 6)
+
+Confirmed present on `/run/media/<user>/storage/nemesis-state-backups/` as of this
+writing (most recent five): `2026-08-06-0715-pre-hw-monitor-scan-tasks-restart`,
+`2026-08-06-0956-pre-tier-popup-timestamp-layerD-deploy` (per Window 3, superseded name
+`1015` in their own log — both refer to the same pre-deploy set),
+`2026-08-06-1004-pre-device-category-migration`, `2026-08-06-1133-pre-shared-alert-modal-
+deploy`. Each integrity-checked and test-restored per Window 3's own verification (see
+their handoff for full detail — not re-derived here).
+
+## 5. ⚠ Standing elevated grants — REVIEW FOR REVOCATION
 
 Elevated privileges granted for a specific piece of work, which must be revoked when
 that work ends rather than left to accumulate. **Anything listed here is expected to be
@@ -185,46 +200,29 @@ removed — its presence is a live decision, not settled state.**
 
 ## 6. Known issues/gaps, not yet fixed
 
-- **Live worklog discipline gap, again.** Same as 2026-08-04: no live worklog was appended
-  during the day. `worklog/2026-08-05-001.md` is reconstructed from `git log` at closeout.
-  Git log is authoritative so nothing is lost, but the point of a live worklog (surviving a
-  mid-session compaction or crash without a closeout) was not met today either. Two days
-  running now — worth treating as a pattern, not a one-off.
-- **A real process gap surfaced today, worth carrying forward explicitly.** Window 1's
-  private-mirror handoff (`~/work/nemesis-internal`, commit `c5f7a1c`) recorded an operator
-  decision ("pseudonymize to host-A/host-B tokens... build queued behind UDP") as though it
-  were captured — but that decision had never actually reached the public `PUNCHLIST.md`.
-  When Window 2 was asked to "verify these landed correctly," they had not: the private
-  handoff commit and a public PUNCHLIST entry are two different things, and this is at
-  least the second time this session that boundary blurred (see the QUIC/nftables item in
-  §5.4, which has the identical shape — "decision already taken" recorded somewhere that
-  is not yet the public PUNCHLIST). Worth a explicit habit check across windows: a decision
-  recorded in a private handoff is not "landed" until it's in the artifact that's actually
-  supposed to hold it.
-- Everything else carried forward unchanged from prior HANDOFFs unless stated resolved
-  above: the Rule-8 username finding (`9ffac56`), three unrelated temporary sudoers grants,
+- **No live worklog was appended during today's session** (same gap flagged 08-04/08-05).
+  Given the power-risk framing, this HANDOFF itself is being kept current continuously
+  instead, which is the higher-value substitute today — see the cold-start summary above,
+  updated after every meaningful step rather than only at closeout.
+- Everything carried forward unchanged from prior HANDOFFs unless resolved above: the
+  Rule-8 username finding (`9ffac56`), three unrelated temporary sudoers grants,
   `NEMESIS_AGENT_EXE`'s real home path, `migrate_to_opt.sh` fragility, missing ADR for the
   `/opt` relocation, `backupproc.md` unconfirmed for current layout, ADR 0015 vs.
   venue-guest-network tension, no hardware baseline, legal review not started, ruleset-
   rollback residual (bounded, fix deferred).
-- **Two new parked roadmap stubs appeared today, uncommitted, not Window 2's** — `docs/
-  roadmap/device-coverage-tier-indicator.md` and `docs/roadmap/ipv6-rogue-router-
-  detection.md`. Both self-declare `Status: parked (capture-only)`, captured 2026-08-05.
-  Left untouched all session (not handed off as tasks); flagging so they're not lost.
-- **`docs/roadmap/venue-guest-network.md`** — still modified, uncommitted, all session,
-  every session this week. Still not Window 2's to touch absent an explicit handoff.
+- **`docs/roadmap/venue-guest-network.md`** — still modified, uncommitted, every session
+  this week+. Still not Window 2's to touch absent an explicit handoff.
 
 ## 7. Cross-references
 
-- `docs/handoff/supplements/2026-08-05-001.md` — curated narrative for today.
-- `docs/handoff/worklog/2026-08-05-001.md` — raw log (reconstructed at closeout, see §6).
-- `PUNCHLIST.md` — Layer D, `enrich_ip()` exposure, cache-hit token skew, GET-that-spends-
-  money, `test_quarantine.py`, plus the four closed-today entries (d1c23d7, analyze_alert
-  gate, anomaly device-list, Enter-to-submit, pseudonymization).
-- `~/work/nemesis-internal/handoff/2026-08-05-window1-handoff.md` — Window 1's full
-  session detail, including the malware-detection/AI-analysis completeness audit this
-  session's PUNCHLIST entries were sourced from.
-- Prior day: `docs/handoff/supplements/2026-08-04-001.md`.
+- `~/work/nemesis-internal/handoff/2026-08-06-window1-handoff-IN-PROGRESS.md` — Window 1's
+  live cold-start doc, gateway-zone VM work, written under the same power-risk framing.
+- `~/work/nemesis-internal/handoff/2026-08-06-window3-handoff.md` — Window 3's full
+  session detail (deployments, verification evidence, design rationale for every feature
+  shipped today), and its own power-risk cold-start summary at the top.
+- `PUNCHLIST.md` — every finding named in §2 above has its full entry there.
+- `docs/audits/roadmap-state-audit-2026-08-06.md` — today's roadmap baseline.
+- Prior day: `docs/handoff/supplements/2026-08-05-001.md`.
 
 ## Topology (durable, unchanged from prior handoffs)
 - `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`), LAN-scoped
