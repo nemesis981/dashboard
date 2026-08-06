@@ -8200,20 +8200,31 @@ def firewall_db():
             # there. This page is where a blocked alert IS still listed, so it has
             # to offer the way back.
             #
-            # A LINK, not an action: it opens the alert modal on the main page
-            # rather than unblocking directly. Two reasons. The credential prompt
-            # (fwPrompt/fwHandleError) is defined only in dashboard()'s template,
-            # and duplicating a password dialog is exactly the kind of thing that
-            # drifts out of sync. More importantly, a privileged firewall change
-            # must never be triggerable by following a URL — that is CSRF-shaped,
-            # and no confirmation dialog makes it acceptable.
+            # OPENS the alert modal; it does NOT unblock. That distinction is the
+            # load-bearing part and is unchanged: a privileged firewall change must
+            # never be triggerable by following a link — that is CSRF-shaped, and no
+            # confirmation dialog makes it acceptable. The operator still has to
+            # press Unblock IP inside the modal and satisfy `fwPrompt`.
+            #
+            # It now opens IN PLACE rather than linking to `/?alert=<id>`. The old
+            # comment justified the navigation partly on `fwPrompt`/`fwHandleError`
+            # being "defined only in dashboard()'s template" — that stopped being
+            # true when they moved to the shared `/static/fw-credential.js`, which
+            # THIS PAGE ALREADY LOADS. Verified against the live file, not assumed;
+            # the comment had simply outlived the constraint it described.
+            #
+            # Converted alongside Analyze deliberately: it is the same link shape
+            # with the same consequence, and fixing only one would leave the
+            # duplicate-dashboard bug reachable by the other.
             unblock_link = ""
             if a[7] == "block" and a[11]:
+                unblock_onclick = html.escape(
+                    "event.stopPropagation();viewAlert(%s,'');return false"
+                    % json.dumps(str(a[1])), quote=True)
                 unblock_link = (
-                    f"""<a href="/?alert={html.escape(str(a[1]), quote=True)}" """
-                    f"""onclick="event.stopPropagation()" """
+                    f"""<a href="#" onclick="{unblock_onclick}" """
                     f"""style="display:inline-block;margin-left:8px;color:#00d4ff;font-size:0.85em" """
-                    f"""title="Opens this alert so you can unblock {html.escape(str(a[11]), quote=True)}">&#128275; Unblock</a>"""
+                    f"""title="Opens this alert here so you can unblock {html.escape(str(a[11]), quote=True)}">&#128275; Unblock</a>"""
                 )
 
             # Analyze hand-off (2026-08-05). This page lists EVERY alert; the main
@@ -8235,11 +8246,29 @@ def firewall_db():
             # that can be wrong about it — the off-by-one the gate fix corrected was
             # itself a wrong answer to this question. An already-analysed alert
             # early-returns from cache and costs nothing.
+            # OPENS IN PLACE (2026-08-06). This was a link to `/?alert=<id>`,
+            # which NAVIGATED this tab to the main dashboard. Closing the modal
+            # then left the operator looking at a second copy of the dashboard in
+            # a tab that was supposed to be showing the alert database -- the
+            # "duplicate dashboard" report. Nothing closed it, because nothing was
+            # opened: the tab had simply been steered somewhere else.
+            #
+            # The original comment justified the link on the grounds that a second
+            # renderer here would drift from the main page's. That objection was
+            # right, and the answer is a SHARED renderer (`_alert_modal_html()` /
+            # `_alert_modal_js()`), not a second one -- so the link can now do the
+            # obvious thing and open the modal without leaving the page.
+            #
+            # `return false` (not just stopPropagation) is what suppresses the
+            # navigation; the row's own onclick still needs stopPropagation, or
+            # opening the analysis would also open the notes panel behind it.
+            analyze_onclick = html.escape(
+                "event.stopPropagation();viewAlert(%s,'');return false"
+                % json.dumps(rule_id_raw), quote=True)
             analyze_link = (
-                f"""<a href="/?alert={html.escape(rule_id_raw, quote=True)}" """
-                f"""onclick="event.stopPropagation()" """
+                f"""<a href="#" onclick="{analyze_onclick}" """
                 f"""style="display:inline-block;margin-left:8px;color:#00d4ff;font-size:0.85em" """
-                f"""title="Opens this alert on the dashboard and runs the AI analysis">"""
+                f"""title="Analyse this alert here, without leaving the alert database">"""
                 f"""&#129302; Analyze</a>"""
             )
 
@@ -8277,6 +8306,11 @@ def firewall_db():
         tr.db-row-click:hover td {{ background: rgba(0,212,255,0.05); }}
         select {{ background: #16213e; color: #eee; border: 1px solid #333; padding: 3px; border-radius:3px; }}
         a {{ color: #00d4ff; }}
+        /* The shared alert-modal's own styles. Emitted from the same function
+           the main dashboard uses, so the component cannot ship here with its
+           markup and JS but without the rules that hide and lay it out --
+           which is exactly how it first landed on this page. */
+        {_alert_modal_css()}
         .db-modal {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }}
         .db-modal-inner {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:560px; width:90%; max-height:85vh; overflow-y:auto; margin:60px auto; position:relative; }}
         .db-modal-inner h3 {{ color:#00d4ff; margin-top:0; }}
@@ -8544,6 +8578,16 @@ def firewall_db():
 
     {chat_js_html}
 
+    <!-- The shared alert-modal behaviour. This page has no script block open at
+         this point, so it supplies its own wrapper; the main dashboard drops the
+         same emitter INSIDE a block it already has open, which is why the emitter
+         returns raw JS with no tags of its own.
+         NOTE: deliberately no literal markup tag written inside this comment. A
+         tag name in comment text is invisible to a browser but not to every tool
+         that scans the page -- it fooled this change's own render checker into
+         reading the comment as the start of a script block. -->
+    <script>{_alert_modal_js()}</script>
+
     <!-- Notes panel modal -->
     <div class="db-modal" id="dbNotesModal" onclick="if(event.target.id==='dbNotesModal')closeDbNotes()">
         <div class="db-modal-inner">
@@ -8571,6 +8615,13 @@ def firewall_db():
             </div>
         </div>
     </div>
+
+    <!-- The SHARED alert-analysis modal. Same emitter the main dashboard uses,
+         so there is exactly one renderer for an alert analysis rather than two
+         that drift. Analyze on this page opens THIS, in place -- it used to be
+         a link to /?alert=<id>, which navigated this tab to the main dashboard
+         and left the operator staring at a duplicate of it after closing. -->
+    {_alert_modal_html()}
 </body>
 </html>"""
     except Exception as e:
@@ -10946,6 +10997,563 @@ setInterval(nemPoll(loadAllHw), 30000);
 </html>"""
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared alert-analysis modal — ONE renderer, included by every surface.
+#
+# WHY THIS EXISTS. `/firewall-db`'s Analyze control used to be a LINK to
+# `/?alert=<id>`, which navigated that tab away from the alert database to the
+# main dashboard. Closing the modal then left the operator looking at a second
+# copy of the dashboard in a tab that was supposed to be showing the alert list
+# — the "duplicate dashboard" bug. The fix is to open the modal in place, which
+# requires the modal to exist on more than one page.
+#
+# The alternative was a second renderer on /firewall-db, and the comment that
+# used to sit on that Analyze link named the real objection: two renderers for
+# one result WILL drift. That objection is right, and this is the answer to it —
+# not a second implementation, but one implementation emitted from one place.
+# Exactly the pattern ai_engine's `_chat_widget_markup()` / `get_chat_js()`
+# already uses for the chat widget, and for the same reason.
+#
+# HOST CONTRACT — what a page must provide to include this:
+#   * `/static/tier.js`           (tierText / applyTierText)
+#   * `/static/fw-credential.js`  (fwPrompt / fwHandleError)
+#   * ai_engine's `get_chat_js()` (nemChatAttach / nemChatClose)
+#   * `_alert_modal_html()` placed somewhere in the body
+#   * `_alert_modal_js()` inside a <script> block
+# Both `/` and `/firewall-db` already loaded all three assets before this change,
+# which is what made the extraction cheap — verified, not assumed.
+#
+# NO host-supplied refresh callback is needed, contrary to the initial estimate:
+# `takeAction()` and `unblockIp()` already finish with `location.reload()`, which
+# reloads whichever page is hosting the modal. That is correct on both surfaces,
+# so nothing was parameterised that did not need to be.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _alert_modal_css() -> str:
+    """The modal's styles. Include ONCE per page, inside a <style> block.
+
+    THE CSS IS PART OF THE COMPONENT, NOT THE PAGE. Shipping the markup without
+    it is not a cosmetic shortfall: `.modal` is what carries `display:none`, so a
+    page that lacks the rule renders the whole modal — heading, buttons, chat
+    host — expanded and unstyled in the document flow on load.
+
+    Found exactly that way on 2026-08-06: `/firewall-db` had none of these nine
+    classes, and every structural check still passed (markup present, ids unique,
+    JS parsing, functions defined once). A component whose styles live in one
+    page's template is only half-shared, and the missing half fails visibly while
+    every automated check reports success.
+
+    `.btn-save` is deliberately NOT here — it belongs to the device-edit modal,
+    which is main-page-only. Only what THIS component renders travels with it.
+    """
+    return """
+        .modal { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }
+        .modal-content { background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:600px; margin:80px auto; }
+        .modal h3 { color:#00d4ff; }
+        .btn { padding:8px 16px; border:none; border-radius:5px; cursor:pointer; margin:5px; font-weight:bold; }
+        .btn-block { background:#ff4444; color:white; }
+        .btn-ignore { background:#aaaaaa; color:#1a1a2e; }
+        .btn-monitor { background:#ffaa00; color:#1a1a2e; }
+        .btn-close { background:#333; color:#eee; }
+        .btn-report { background:#8800ff; color:white; }
+        .enrichment-card { background:#0d1117; border:1px solid #333; border-radius:6px; padding:10px; margin:10px 0; }
+        .enrichment-card h4 { color:#00d4ff; margin:0 0 8px 0; font-size:0.95em; }
+        .enrichment-card p { margin:4px 0; font-size:0.9em; }
+        .flag { font-size:1.3em; vertical-align:middle; }
+        .warn-tor { color:#ff4444; font-weight:bold; }
+        .warn-vpn { color:#ffaa00; font-weight:bold; }
+"""
+
+
+def _alert_modal_html() -> str:
+    """The alert-analysis modal markup. Include ONCE per page.
+
+    Carries a hardcoded `id="alertModal"` (and `id="_alertChatHost"`), so two
+    copies on one page would be a duplicate-id collision — `getElementById()`
+    returns whichever is first in the DOM and the other silently becomes inert.
+    That is the same failure ai_engine's chat widget documents from 5330220.
+    """
+    return """    <div class="modal" id="alertModal">
+        <div class="modal-content" style="max-height:85vh;overflow-y:auto">
+            <h3>🔍 Nemesis AI Analysis</h3>
+            <div id="modalContent">Analyzing...</div>
+            <div style="margin-top:15px">
+                <button class="btn btn-block" onclick="takeAction('block')" id="btnBlock">🚫 Block IP</button>
+                <button class="btn btn-monitor" onclick="unblockIp()" id="btnUnblock">🔓 Unblock IP</button>
+                <button class="btn btn-ignore" onclick="takeAction('ignore')" id="btnIgnore">✓ Ignore Rule</button>
+                <button class="btn btn-monitor" onclick="takeAction('monitor')" id="btnMonitor">👁 Monitor</button>
+                <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
+                <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
+            </div>
+            <!-- Chat host. The widget itself is a single page-wide instance
+                 injected by ai_engine's get_chat_js(); nemChatAttach() moves it
+                 in here when an alert is opened. Do NOT embed the widget markup
+                 here again -- see _chat_widget_markup() for the duplicate-id
+                 collision that caused. -->
+            <div id="_alertChatHost"></div>
+            <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <strong style="color:#00d4ff;font-size:0.95em">
+                        <span class="tier-text"
+                              data-beginner="Your Notes for this Alert Type"
+                              data-intermediate="Admin Notes (this rule)"
+                              data-pro="Notes">Admin Notes</span>
+                    </strong>
+                    <button onclick="loadRelatedNotes()" style="background:transparent;border:1px solid #555;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
+                        <span class="tier-text"
+                              data-beginner="Find notes from the same source IP"
+                              data-intermediate="Find Related Notes"
+                              data-pro="Related Notes">Find Related Notes</span>
+                    </button>
+                </div>
+                <div id="notesList" style="margin-bottom:12px;font-size:0.85em;color:#ccc"></div>
+                <div id="relatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
+                <div>
+                    <textarea id="noteInput" placeholder="Add a note…" rows="3"
+                        style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
+                    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
+                        <button onclick="addNote()"
+                            style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">
+                            <span class="tier-text"
+                                  data-beginner="Save Note"
+                                  data-intermediate="Add Note"
+                                  data-pro="Add">Add Note</span>
+                        </button>
+                        <span id="noteStatus" style="font-size:0.8em;color:#ccc"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>"""
+
+
+def _alert_modal_js() -> str:
+    """The modal's behaviour. Include ONCE per page, INSIDE an existing <script>.
+
+    Returns RAW JS with no <script> wrapper deliberately: the main dashboard
+    interpolates this into a script block it already has open, and wrapping it
+    here would nest <script> tags there. `/firewall-db` supplies its own wrapper.
+    """
+    return """        var currentRuleId = "";
+        var currentSrcIp = "";
+
+        function escapeHtml(s) {
+            if (s === null || s === undefined) return "";
+            return String(s).replace(/[&<>"']/g, function(c) {
+                return {"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}[c];
+            });
+        }
+
+        function countryFlag(cc) {
+            if (!cc || cc.length !== 2) return "";
+            return cc.toUpperCase().replace(/./g, function(c) {
+                return String.fromCodePoint(127397 + c.charCodeAt(0));
+            });
+        }
+
+        function threatColor(level) {
+            if (level === "CRITICAL") return "#ff0000";
+            if (level === "HIGH") return "#ff4444";
+            if (level === "MEDIUM") return "#ffaa00";
+            return "#00ff88";
+        }
+
+        function renderEnrichment(enr) {
+            if (!enr) return "";
+            var flag = countryFlag(enr.country);
+            var loc = [enr.city, enr.country].filter(Boolean).map(escapeHtml).join(", ") || "Unknown location";
+            var isp = escapeHtml(enr.isp || enr.org || "Unknown ISP");
+            var level = enr.threat_level || "LOW";
+            var color = threatColor(level);
+            var score = (enr.abuse_confidence_score == null) ? "n/a" : enr.abuse_confidence_score;
+            var reports = (enr.total_reports == null) ? 0 : enr.total_reports;
+            var lastRep = enr.last_reported ? escapeHtml(enr.last_reported) : "never";
+            var warnings = "";
+            if (enr.is_tor) warnings += '<p class="warn-tor">⚠ TOR exit node</p>';
+            if (enr.is_vpn) warnings += '<p class="warn-vpn">⚠ VPN / Proxy / Hosting</p>';
+            return `
+                <div class="enrichment-card">
+                    <h4>🌍 IP Intelligence — ${escapeHtml(enr.ip)}</h4>
+                    <p><span class="flag">${flag}</span> <strong>${loc}</strong></p>
+                    <p><strong>ISP:</strong> ${isp}</p>
+                    <p><strong>Threat Level:</strong> <span style="color:${color};font-weight:bold">${escapeHtml(level)}</span></p>
+                    <p><strong>Abuse Score:</strong> ${escapeHtml(score)}/100 &nbsp; <strong>Reports:</strong> ${escapeHtml(reports)} &nbsp; <strong>Last:</strong> ${lastRep}</p>
+                    ${warnings}
+                </div>
+            `;
+        }
+
+        var _currentNotesRuleId = null;
+        var _notesPage = 0;
+        var _allNotes = [];
+        var _notesSortDesc = true;
+
+        function _actionBadge(action) {
+            var colors = {
+                block:   "#ff4444", ignore: "#555", monitor: "#00d4ff",
+                pending: "#ffaa00", none:   "#555"
+            };
+            var labels = {
+                block:   tierText("Blocked — source IP is blocked", "Blocked",        "block"),
+                ignore:  tierText("Ignored — alert suppressed",     "Ignored",        "ignore"),
+                monitor: tierText("Monitoring — kept under watch",   "Monitoring",     "monitor"),
+                pending: tierText("Pending Review — needs a decision","Pending Review","pending"),
+                none:    tierText("No action taken yet",             "No action",      "none"),
+            };
+            var a = action || "none";
+            return "<span style='display:inline-block;padding:2px 8px;border-radius:3px;"
+                + "background:#0d1117;border:1px solid " + (colors[a]||"#555") + "33;"
+                + "color:" + (colors[a]||"#555") + ";font-size:0.78em;font-weight:bold'>"
+                + (labels[a] || a) + "</span>";
+        }
+
+        function _tierExplanation(data) {
+            var seen = data.times_seen || 1;
+            var action = data.action || "none";
+            var risk   = data.risk_level || "UNKNOWN";
+            var b = 'This alert has been seen ' + seen + ' time(s) and is currently marked as "' + action + '". Risk level: ' + risk + '.';
+            var m = 'Seen ' + seen + '×. Action: ' + action + '. Risk: ' + risk + '.';
+            var p = "seen=" + seen + " action=" + action + " risk=" + risk;
+            return "<div style='font-size:0.82em;color:#bbb;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
+                + tierText(b, m, p) + "</div>";
+        }
+
+        function viewAlert(ruleId, rawAlert) {
+            currentRuleId = ruleId;
+            currentSrcIp = "";
+            document.getElementById("btnReport").style.display = "none";
+            document.getElementById("alertModal").style.display = "block";
+            document.getElementById("modalContent").innerHTML =
+                "<p>🤖 " + tierText(
+                    "Nemesis AI is checking this alert — this takes a few seconds…",
+                    "Nemesis AI analyzing...",
+                    "Analyzing…"
+                ) + "</p>";
+            loadNotes(ruleId);
+            if (window.nemChatAttach) {
+                nemChatAttach(document.getElementById("_alertChatHost"), "alert", ruleId);
+            }
+            fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
+                .then(r => r.json())
+                .then(data => {
+                    currentSrcIp = data.src_ip || "";
+                    var seen = data.times_seen || 1;
+
+                    // 1. Prior action badge
+                    var actionBadge = _actionBadge(data.action);
+
+                    // 2. Previous instances row (only when seen > 1)
+                    var prevInstances = "";
+                    if (seen > 1) {
+                        var lastTs = (data.last_seen || "").substring(0, 16).replace("T", " ");
+                        prevInstances = "<details style='margin:4px 0 8px;font-size:0.82em'>"
+                            + "<summary style='cursor:pointer;color:#ccc'>"
+                            + tierText(
+                                "Seen " + seen + " times — expand for details",
+                                "Previous instances (" + seen + ")",
+                                seen + "× seen"
+                              )
+                            + "</summary>"
+                            + "<div style='color:#bbb;padding:4px 0 0 10px'>"
+                            + tierText(
+                                "This alert has triggered " + seen + " times. Last occurrence: " + (lastTs||"unknown") + ".",
+                                "Count: " + seen + " · Last seen: " + (lastTs||"—"),
+                                "n=" + seen + " last=" + (lastTs||"?")
+                              )
+                            + "</div></details>";
+                    }
+
+                    // 3. AI status indicator
+                    var aiStatus = data.cached
+                        ? " <span style='color:#ccc;font-size:0.78em'>(" + tierText("previously analysed — from cache", "cached result", "cached") + ")</span>"
+                        : " <span style='color:#00ff88;font-size:0.78em'>(" + tierText("freshly analysed by AI just now", "AI analyzed", "fresh") + ")</span>";
+
+                    var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
+                    var riskLabel = tierText(
+                        {HIGH:"HIGH — Investigate this now", MEDIUM:"MEDIUM — Worth reviewing", LOW:"LOW — Likely safe"}[data.risk_level] || data.risk_level,
+                        data.risk_level || "UNKNOWN",
+                        data.risk_level || "?"
+                    );
+
+                    // 5. Tiered explanation block
+                    var tierExpl = _tierExplanation(data);
+
+                    /* 5b. The AI explanation itself, per expertise tier.
+                       Method 2 from static/tier.js: emit ALL THREE variants as
+                       data-* attributes and let applyTierText() pick one. Method 1
+                       (a tierText() call) would evaluate once at render time and
+                       then be frozen — this modal is built by innerHTML and is not
+                       re-rendered, so changing tier in another tab would leave a
+                       stale explanation on screen while every OTHER string on the
+                       page updated. Method 2 re-picks on the storage event.
+                       Initial content is the intermediate variant, per tier.js's
+                       own guidance, so the text is right even before JS runs. */
+                    var explFallback = data.explanation || "No explanation available";
+                    var explB = data.explanation_beginner || explFallback;
+                    var explM = data.explanation_intermediate || explFallback;
+                    var explP = data.explanation_pro || explFallback;
+                    var explHtml = "<span class='tier-text'"
+                        + " data-beginner='" + escapeHtml(explB) + "'"
+                        + " data-intermediate='" + escapeHtml(explM) + "'"
+                        + " data-pro='" + escapeHtml(explP) + "'>"
+                        + escapeHtml(explM) + "</span>";
+
+                    document.getElementById("modalContent").innerHTML =
+                        // action badge at top
+                        "<div style='margin-bottom:8px'>" + actionBadge + "</div>"
+                        + tierExpl
+                        + prevInstances
+                        + "<p><strong>" + tierText("Threat Level","Risk Level","Risk") + ":</strong>"
+                        + " <span style='color:" + riskColor + "'>" + escapeHtml(riskLabel) + "</span>" + aiStatus + "</p>"
+                        + "<p><strong>" + tierText("What is this?","Explanation","Detail") + ":</strong> " + explHtml + "</p>"
+                        + "<p><strong>" + tierText("What should I do?","Recommended Action","Action") + ":</strong> " + escapeHtml(data.recommended_action || "Monitor") + "</p>"
+                        + "<p><strong>" + tierText("Why?","Reason","Reason") + ":</strong> " + escapeHtml(data.reason || "") + "</p>"
+                        + renderEnrichment(data.enrichment);
+                    /* The .tier-text span above is injected AFTER the page's own
+                       DOMContentLoaded pass, so nothing has resolved it yet — without
+                       this call it would render the intermediate variant regardless of
+                       the reader's setting. tier.js documents exactly this: "call after
+                       dynamic content injection". */
+                    if (window.applyTierText) applyTierText();
+                    if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {
+                        document.getElementById("btnReport").style.display = "inline-block";
+                    }
+                })
+                .catch(e => {
+                    document.getElementById("modalContent").innerHTML = "<p style='color:#ff4444'>Error: " + escapeHtml(e) + "</p>";
+                });
+        }
+
+        /* ── Privileged firewall actions ──────────────────────────────
+           Every ufw change is performed by nemesis-fwd, which verifies the
+           admin password itself against the stored hash. This page cannot
+           assert "already verified" — there is no such field to send. */
+        /* In-page modal with a real masked field. Deliberately NOT
+           window.prompt(): that renders the password in plaintext as it is
+           typed, which would undercut the credential verification this whole
+           path exists to enforce. Returns a Promise so callers can await it. */
+        /* fwPrompt / fwCredOk / fwCredCancel / fwHandleError now live in
+           the same prompt for Settings-save and Restart. */
+
+        /* Best-effort acceleration ONLY. The server enforces a short idle
+           timeout regardless of whether this ever fires; a hostile or
+           non-cooperating client simply does not send it.
+           Honest limitation: browsers expose no true "screen locked" event.
+           Locking the screen does trigger this (the browser loses focus), but
+           so does switching tabs — an accepted tradeoff that errs toward
+           prompting more often. */
+        function fwDropCredential() {
+            try {
+                navigator.sendBeacon("/api/firewall/credential/drop");
+            } catch (e) { /* never block page teardown on this */ }
+        }
+        document.addEventListener("visibilitychange", function () {
+            if (document.visibilityState === "hidden") fwDropCredential();
+        });
+        window.addEventListener("blur", fwDropCredential);
+
+        function takeAction(action) {
+            var url = "/api/action/" + currentRuleId + "/" + action;
+            if (action === "block" && currentSrcIp) url += "?ip=" + encodeURIComponent(currentSrcIp);
+            var body = {};
+            var pwPromise = (action === "block")
+                /* Writes always require a fresh credential — never cached. */
+                ? fwPrompt("block " + (currentSrcIp || "this source"))
+                : Promise.resolve("");
+            pwPromise.then(function (pw) {
+              if (action === "block") {
+                  if (!pw) return;
+                  body.password = pw;
+              }
+              fetch(url, {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(body)
+              }).then(r => r.json()).then(data => {
+                  if (data && data.error) { fwHandleError(data, "Action failed"); return; }
+                  closeModal();
+                  location.reload();
+              }).catch(e => alert("Error: " + e));
+            });
+        }
+
+        /* Symmetric counterpart to takeAction('block'). Deliberately placed on the
+           same modal: the block is applied from here, so the undo belongs here too
+           rather than somewhere the user has to go hunting for. */
+        function unblockIp() {
+            if (!currentSrcIp) { alert("No source IP on this alert to unblock."); return; }
+            /* Same rule as block — an unblock is a firewall write, so it takes a
+               fresh credential and never a cached one. */
+            fwPrompt("unblock " + currentSrcIp).then(function (pw) {
+                if (!pw) return;
+                fetch("/api/firewall/unblock", {
+                    method: "POST",
+                    headers: {"Content-Type": "application/json"},
+                    body: JSON.stringify({ip: currentSrcIp, rule_id: currentRuleId, password: pw})
+                }).then(r => r.json()).then(data => {
+                    if (data && data.error) { fwHandleError(data, "Unblock failed"); return; }
+                    if (data && data.warning) { alert("Unblocked " + currentSrcIp + " — note: " + data.warning); }
+                    closeModal();
+                    location.reload();
+                }).catch(e => alert("Error: " + e));
+            });
+        }
+
+        function reportAbuse() {
+            if (!currentSrcIp) { alert("No source IP to report"); return; }
+            if (!confirm("Report " + currentSrcIp + " to AbuseIPDB?")) return;
+            fetch("/api/report/" + currentRuleId + "?ip=" + encodeURIComponent(currentSrcIp))
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) {
+                        alert("Reported to AbuseIPDB. Current confidence score: " + (d.abuse_confidence_score == null ? "unknown" : d.abuse_confidence_score));
+                    } else {
+                        alert("Report failed: " + (d.error || "unknown error"));
+                    }
+                })
+                .catch(e => alert("Error: " + e));
+        }
+
+        function closeModal() {
+            document.getElementById("alertModal").style.display = "none";
+            document.getElementById("btnReport").style.display = "none";
+            nemChatClose();
+            document.getElementById("alertNotesSection").style.display = "none";
+            document.getElementById("relatedNotesList").style.display = "none";
+            document.getElementById("noteInput").value = "";
+            document.getElementById("noteStatus").textContent = "";
+            _currentNotesRuleId = null;
+            _allNotes = [];
+            _notesPage = 0;
+        }
+
+        function loadNotes(ruleId) {
+            _currentNotesRuleId = ruleId;
+            _notesPage = 0;
+            _allNotes = [];
+            var sec = document.getElementById("alertNotesSection");
+            sec.style.display = "block";
+            document.getElementById("relatedNotesList").style.display = "none";
+            document.getElementById("noteStatus").textContent = "";
+            document.getElementById("notesList").innerHTML =
+                "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
+            fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
+                .then(function(r) { return r.json(); })
+                .then(function(notes) {
+                    _allNotes = notes;
+                    _renderNotesList();
+                })
+                .catch(function() {
+                    document.getElementById("notesList").innerHTML =
+                        "<span style='color:#ff4444;font-size:0.85em'>Failed to load notes</span>";
+                });
+        }
+
+        function _renderNotesList() {
+            var el = document.getElementById("notesList");
+            var perPage = 5;
+            var visible = _notesSortDesc
+                ? _allNotes.slice(0, (_notesPage + 1) * perPage)
+                : _allNotes.slice().reverse().slice(0, (_notesPage + 1) * perPage);
+            if (_allNotes.length === 0) {
+                el.innerHTML = "<span style='color:#bbb;font-size:0.85em'>" +
+                    tierText("No notes yet. Add the first one below.", "No notes yet.", "—") + "</span>";
+                return;
+            }
+            var sortBtn = "<button onclick='_toggleNoteSort()' style='background:transparent;border:none;color:#ccc;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
+                (_notesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
+            var items = visible.map(function(n) {
+                return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
+                    '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                    '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
+                    escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
+                    '</div>';
+            }).join("");
+            var moreCount = _allNotes.length - visible.length;
+            var moreBtn = moreCount > 0
+                ? '<button onclick="_showMoreNotes()" style="background:transparent;border:1px solid #444;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
+                : "";
+            el.innerHTML = sortBtn + items + moreBtn;
+        }
+
+        function _toggleNoteSort() {
+            _notesSortDesc = !_notesSortDesc;
+            _notesPage = 0;
+            _renderNotesList();
+        }
+
+        function _showMoreNotes() {
+            _notesPage++;
+            _renderNotesList();
+        }
+
+        function addNote() {
+            var text = (document.getElementById("noteInput").value || "").trim();
+            if (!text || !_currentNotesRuleId) { return; }
+            var status = document.getElementById("noteStatus");
+            status.style.color = "#aaa";
+            status.textContent = tierText("Saving…", "Saving…", "…");
+            fetch("/api/tickets/notes/" + encodeURIComponent(_currentNotesRuleId), {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({note: text})
+            })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d.ok) {
+                    document.getElementById("noteInput").value = "";
+                    status.style.color = "#00ff88";
+                    status.textContent = tierText("Note saved", "Saved", "✓");
+                    loadNotes(_currentNotesRuleId);
+                    setTimeout(function() { status.textContent = ""; }, 2000);
+                } else {
+                    status.style.color = "#ff4444";
+                    status.textContent = "Error: " + escapeHtml(d.error || "unknown");
+                }
+            })
+            .catch(function() {
+                status.style.color = "#ff4444";
+                status.textContent = "Error saving note";
+            });
+        }
+
+        function loadRelatedNotes() {
+            if (!_currentNotesRuleId) { return; }
+            var el = document.getElementById("relatedNotesList");
+            el.style.display = "block";
+            el.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching for related notes…</span>";
+            fetch("/api/tickets/related/" + encodeURIComponent(_currentNotesRuleId))
+                .then(function(r) { return r.json(); })
+                .then(function(notes) {
+                    if (notes.length === 0) {
+                        el.innerHTML = "<div style='color:#bbb;font-size:0.85em'>" +
+                            tierText(
+                                "No notes found for other alerts from the same source IP.",
+                                "No related notes found.",
+                                "No related notes."
+                            ) + "</div>";
+                        return;
+                    }
+                    var header = "<div style='color:#ccc;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
+                        tierText("Notes from other alerts by the same source", "Related Notes (same source IP)", "Related Notes") +
+                        "</div>";
+                    var items = notes.map(function(n) {
+                        return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
+                            '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
+                            '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
+                            escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
+                            '</div>';
+                    }).join("");
+                    el.innerHTML = header + items;
+                })
+                .catch(function() {
+                    el.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Failed to load related notes</span>";
+                });
+        }"""
+
 @app.route("/")
 def dashboard():
     clamav_status = get_clamav_status()
@@ -11112,24 +11720,13 @@ def dashboard():
         .p2 {{ color: #ffaa00; }}
         .p3 {{ color: #aaaaaa; }}
         .total {{ color: #00d4ff; }}
-        .modal {{ display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.8); z-index:1000; }}
-        .modal-content {{ background:#16213e; border:1px solid #00d4ff; border-radius:10px; padding:20px; max-width:600px; margin:80px auto; }}
-        .modal h3 {{ color:#00d4ff; }}
-        .btn {{ padding:8px 16px; border:none; border-radius:5px; cursor:pointer; margin:5px; font-weight:bold; }}
-        .btn-block {{ background:#ff4444; color:white; }}
-        .btn-ignore {{ background:#aaaaaa; color:#1a1a2e; }}
-        .btn-monitor {{ background:#ffaa00; color:#1a1a2e; }}
-        .btn-close {{ background:#333; color:#eee; }}
+        {_alert_modal_css()}
         .btn-save {{ background:#00ff88; color:#1a1a2e; }}
-        .btn-report {{ background:#8800ff; color:white; }}
         input, select {{ background:#0d1117; color:#eee; border:1px solid #00d4ff; padding:5px; border-radius:3px; width:100%; margin:3px 0; }}
         a {{ color: #00d4ff; }}
-        .enrichment-card {{ background:#0d1117; border:1px solid #333; border-radius:6px; padding:10px; margin:10px 0; }}
-        .enrichment-card h4 {{ color:#00d4ff; margin:0 0 8px 0; font-size:0.95em; }}
-        .enrichment-card p {{ margin:4px 0; font-size:0.9em; }}
-        .flag {{ font-size:1.3em; vertical-align:middle; }}
-        .warn-tor {{ color:#ff4444; font-weight:bold; }}
-        .warn-vpn {{ color:#ffaa00; font-weight:bold; }}
+        /* .enrichment-card / .flag / .warn-* moved into _alert_modal_css():
+           renderEnrichment() emits them and now lives in the shared modal JS, so
+           the rules have to reach every page that hosts the modal. */
         .quarantine-banner {{ background:#2a0d0d; border:2px solid #ff4444; border-radius:10px; padding:15px; margin-bottom:15px; }}
         .quarantine-banner h2 {{ color:#ff4444; margin-top:0; }}
         .q-row {{ display:flex; justify-content:space-between; align-items:center; padding:8px; border-bottom:1px solid #4a1010; flex-wrap:wrap; gap:8px; }}
@@ -11467,58 +12064,7 @@ def dashboard():
     <!-- Alert Modal -->
      shared with settings_page(). Removed from this template 2026-07-31. -->
 
-    <div class="modal" id="alertModal">
-        <div class="modal-content" style="max-height:85vh;overflow-y:auto">
-            <h3>🔍 Nemesis AI Analysis</h3>
-            <div id="modalContent">Analyzing...</div>
-            <div style="margin-top:15px">
-                <button class="btn btn-block" onclick="takeAction('block')" id="btnBlock">🚫 Block IP</button>
-                <button class="btn btn-monitor" onclick="unblockIp()" id="btnUnblock">🔓 Unblock IP</button>
-                <button class="btn btn-ignore" onclick="takeAction('ignore')" id="btnIgnore">✓ Ignore Rule</button>
-                <button class="btn btn-monitor" onclick="takeAction('monitor')" id="btnMonitor">👁 Monitor</button>
-                <button class="btn btn-report" id="btnReport" onclick="reportAbuse()" style="display:none">🚨 Report to AbuseIPDB</button>
-                <button class="btn btn-close" onclick="closeModal()">✕ Close</button>
-            </div>
-            <!-- Chat host. The widget itself is a single page-wide instance
-                 injected by ai_engine's get_chat_js(); nemChatAttach() moves it
-                 in here when an alert is opened. Do NOT embed the widget markup
-                 here again -- see _chat_widget_markup() for the duplicate-id
-                 collision that caused. -->
-            <div id="_alertChatHost"></div>
-            <div id="alertNotesSection" style="display:none;margin-top:20px;border-top:1px solid #333;padding-top:15px">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-                    <strong style="color:#00d4ff;font-size:0.95em">
-                        <span class="tier-text"
-                              data-beginner="Your Notes for this Alert Type"
-                              data-intermediate="Admin Notes (this rule)"
-                              data-pro="Notes">Admin Notes</span>
-                    </strong>
-                    <button onclick="loadRelatedNotes()" style="background:transparent;border:1px solid #555;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">
-                        <span class="tier-text"
-                              data-beginner="Find notes from the same source IP"
-                              data-intermediate="Find Related Notes"
-                              data-pro="Related Notes">Find Related Notes</span>
-                    </button>
-                </div>
-                <div id="notesList" style="margin-bottom:12px;font-size:0.85em;color:#ccc"></div>
-                <div id="relatedNotesList" style="display:none;margin-bottom:12px;border-top:1px solid #222;padding-top:10px"></div>
-                <div>
-                    <textarea id="noteInput" placeholder="Add a note…" rows="3"
-                        style="width:100%;background:#0d1117;border:1px solid #333;color:#eee;padding:8px;border-radius:4px;font-size:0.85em;resize:vertical;box-sizing:border-box"></textarea>
-                    <div style="margin-top:6px;display:flex;gap:8px;align-items:center">
-                        <button onclick="addNote()"
-                            style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">
-                            <span class="tier-text"
-                                  data-beginner="Save Note"
-                                  data-intermediate="Add Note"
-                                  data-pro="Add">Add Note</span>
-                        </button>
-                        <span id="noteStatus" style="font-size:0.8em;color:#ccc"></span>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+    {_alert_modal_html()}
 
     <!-- Hardware Stats Modal -->
     <div class="modal" id="hwModal">
@@ -11808,423 +12354,7 @@ def dashboard():
             }});
         }}
 
-        var currentRuleId = "";
-        var currentSrcIp = "";
-
-        function escapeHtml(s) {{
-            if (s === null || s === undefined) return "";
-            return String(s).replace(/[&<>"']/g, function(c) {{
-                return {{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;","'":"&#39;"}}[c];
-            }});
-        }}
-
-        function countryFlag(cc) {{
-            if (!cc || cc.length !== 2) return "";
-            return cc.toUpperCase().replace(/./g, function(c) {{
-                return String.fromCodePoint(127397 + c.charCodeAt(0));
-            }});
-        }}
-
-        function threatColor(level) {{
-            if (level === "CRITICAL") return "#ff0000";
-            if (level === "HIGH") return "#ff4444";
-            if (level === "MEDIUM") return "#ffaa00";
-            return "#00ff88";
-        }}
-
-        function renderEnrichment(enr) {{
-            if (!enr) return "";
-            var flag = countryFlag(enr.country);
-            var loc = [enr.city, enr.country].filter(Boolean).map(escapeHtml).join(", ") || "Unknown location";
-            var isp = escapeHtml(enr.isp || enr.org || "Unknown ISP");
-            var level = enr.threat_level || "LOW";
-            var color = threatColor(level);
-            var score = (enr.abuse_confidence_score == null) ? "n/a" : enr.abuse_confidence_score;
-            var reports = (enr.total_reports == null) ? 0 : enr.total_reports;
-            var lastRep = enr.last_reported ? escapeHtml(enr.last_reported) : "never";
-            var warnings = "";
-            if (enr.is_tor) warnings += '<p class="warn-tor">⚠ TOR exit node</p>';
-            if (enr.is_vpn) warnings += '<p class="warn-vpn">⚠ VPN / Proxy / Hosting</p>';
-            return `
-                <div class="enrichment-card">
-                    <h4>🌍 IP Intelligence — ${{escapeHtml(enr.ip)}}</h4>
-                    <p><span class="flag">${{flag}}</span> <strong>${{loc}}</strong></p>
-                    <p><strong>ISP:</strong> ${{isp}}</p>
-                    <p><strong>Threat Level:</strong> <span style="color:${{color}};font-weight:bold">${{escapeHtml(level)}}</span></p>
-                    <p><strong>Abuse Score:</strong> ${{escapeHtml(score)}}/100 &nbsp; <strong>Reports:</strong> ${{escapeHtml(reports)}} &nbsp; <strong>Last:</strong> ${{lastRep}}</p>
-                    ${{warnings}}
-                </div>
-            `;
-        }}
-
-        var _currentNotesRuleId = null;
-        var _notesPage = 0;
-        var _allNotes = [];
-        var _notesSortDesc = true;
-
-        function _actionBadge(action) {{
-            var colors = {{
-                block:   "#ff4444", ignore: "#555", monitor: "#00d4ff",
-                pending: "#ffaa00", none:   "#555"
-            }};
-            var labels = {{
-                block:   tierText("Blocked — source IP is blocked", "Blocked",        "block"),
-                ignore:  tierText("Ignored — alert suppressed",     "Ignored",        "ignore"),
-                monitor: tierText("Monitoring — kept under watch",   "Monitoring",     "monitor"),
-                pending: tierText("Pending Review — needs a decision","Pending Review","pending"),
-                none:    tierText("No action taken yet",             "No action",      "none"),
-            }};
-            var a = action || "none";
-            return "<span style='display:inline-block;padding:2px 8px;border-radius:3px;"
-                + "background:#0d1117;border:1px solid " + (colors[a]||"#555") + "33;"
-                + "color:" + (colors[a]||"#555") + ";font-size:0.78em;font-weight:bold'>"
-                + (labels[a] || a) + "</span>";
-        }}
-
-        function _tierExplanation(data) {{
-            var seen = data.times_seen || 1;
-            var action = data.action || "none";
-            var risk   = data.risk_level || "UNKNOWN";
-            var b = 'This alert has been seen ' + seen + ' time(s) and is currently marked as "' + action + '". Risk level: ' + risk + '.';
-            var m = 'Seen ' + seen + '×. Action: ' + action + '. Risk: ' + risk + '.';
-            var p = "seen=" + seen + " action=" + action + " risk=" + risk;
-            return "<div style='font-size:0.82em;color:#bbb;margin:4px 0 8px 0;border-left:2px solid #1e2d4e;padding:4px 8px'>"
-                + tierText(b, m, p) + "</div>";
-        }}
-
-        function viewAlert(ruleId, rawAlert) {{
-            currentRuleId = ruleId;
-            currentSrcIp = "";
-            document.getElementById("btnReport").style.display = "none";
-            document.getElementById("alertModal").style.display = "block";
-            document.getElementById("modalContent").innerHTML =
-                "<p>🤖 " + tierText(
-                    "Nemesis AI is checking this alert — this takes a few seconds…",
-                    "Nemesis AI analyzing...",
-                    "Analyzing…"
-                ) + "</p>";
-            loadNotes(ruleId);
-            if (window.nemChatAttach) {{
-                nemChatAttach(document.getElementById("_alertChatHost"), "alert", ruleId);
-            }}
-            fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
-                .then(r => r.json())
-                .then(data => {{
-                    currentSrcIp = data.src_ip || "";
-                    var seen = data.times_seen || 1;
-
-                    // 1. Prior action badge
-                    var actionBadge = _actionBadge(data.action);
-
-                    // 2. Previous instances row (only when seen > 1)
-                    var prevInstances = "";
-                    if (seen > 1) {{
-                        var lastTs = (data.last_seen || "").substring(0, 16).replace("T", " ");
-                        prevInstances = "<details style='margin:4px 0 8px;font-size:0.82em'>"
-                            + "<summary style='cursor:pointer;color:#ccc'>"
-                            + tierText(
-                                "Seen " + seen + " times — expand for details",
-                                "Previous instances (" + seen + ")",
-                                seen + "× seen"
-                              )
-                            + "</summary>"
-                            + "<div style='color:#bbb;padding:4px 0 0 10px'>"
-                            + tierText(
-                                "This alert has triggered " + seen + " times. Last occurrence: " + (lastTs||"unknown") + ".",
-                                "Count: " + seen + " · Last seen: " + (lastTs||"—"),
-                                "n=" + seen + " last=" + (lastTs||"?")
-                              )
-                            + "</div></details>";
-                    }}
-
-                    // 3. AI status indicator
-                    var aiStatus = data.cached
-                        ? " <span style='color:#ccc;font-size:0.78em'>(" + tierText("previously analysed — from cache", "cached result", "cached") + ")</span>"
-                        : " <span style='color:#00ff88;font-size:0.78em'>(" + tierText("freshly analysed by AI just now", "AI analyzed", "fresh") + ")</span>";
-
-                    var riskColor = data.risk_level === "HIGH" ? "#ff4444" : data.risk_level === "MEDIUM" ? "#ffaa00" : "#00ff88";
-                    var riskLabel = tierText(
-                        {{HIGH:"HIGH — Investigate this now", MEDIUM:"MEDIUM — Worth reviewing", LOW:"LOW — Likely safe"}}[data.risk_level] || data.risk_level,
-                        data.risk_level || "UNKNOWN",
-                        data.risk_level || "?"
-                    );
-
-                    // 5. Tiered explanation block
-                    var tierExpl = _tierExplanation(data);
-
-                    /* 5b. The AI explanation itself, per expertise tier.
-                       Method 2 from static/tier.js: emit ALL THREE variants as
-                       data-* attributes and let applyTierText() pick one. Method 1
-                       (a tierText() call) would evaluate once at render time and
-                       then be frozen — this modal is built by innerHTML and is not
-                       re-rendered, so changing tier in another tab would leave a
-                       stale explanation on screen while every OTHER string on the
-                       page updated. Method 2 re-picks on the storage event.
-                       Initial content is the intermediate variant, per tier.js's
-                       own guidance, so the text is right even before JS runs. */
-                    var explFallback = data.explanation || "No explanation available";
-                    var explB = data.explanation_beginner || explFallback;
-                    var explM = data.explanation_intermediate || explFallback;
-                    var explP = data.explanation_pro || explFallback;
-                    var explHtml = "<span class='tier-text'"
-                        + " data-beginner='" + escapeHtml(explB) + "'"
-                        + " data-intermediate='" + escapeHtml(explM) + "'"
-                        + " data-pro='" + escapeHtml(explP) + "'>"
-                        + escapeHtml(explM) + "</span>";
-
-                    document.getElementById("modalContent").innerHTML =
-                        // action badge at top
-                        "<div style='margin-bottom:8px'>" + actionBadge + "</div>"
-                        + tierExpl
-                        + prevInstances
-                        + "<p><strong>" + tierText("Threat Level","Risk Level","Risk") + ":</strong>"
-                        + " <span style='color:" + riskColor + "'>" + escapeHtml(riskLabel) + "</span>" + aiStatus + "</p>"
-                        + "<p><strong>" + tierText("What is this?","Explanation","Detail") + ":</strong> " + explHtml + "</p>"
-                        + "<p><strong>" + tierText("What should I do?","Recommended Action","Action") + ":</strong> " + escapeHtml(data.recommended_action || "Monitor") + "</p>"
-                        + "<p><strong>" + tierText("Why?","Reason","Reason") + ":</strong> " + escapeHtml(data.reason || "") + "</p>"
-                        + renderEnrichment(data.enrichment);
-                    /* The .tier-text span above is injected AFTER the page's own
-                       DOMContentLoaded pass, so nothing has resolved it yet — without
-                       this call it would render the intermediate variant regardless of
-                       the reader's setting. tier.js documents exactly this: "call after
-                       dynamic content injection". */
-                    if (window.applyTierText) applyTierText();
-                    if (data.enrichment && data.enrichment.abuse_confidence_score !== null && currentSrcIp) {{
-                        document.getElementById("btnReport").style.display = "inline-block";
-                    }}
-                }})
-                .catch(e => {{
-                    document.getElementById("modalContent").innerHTML = "<p style='color:#ff4444'>Error: " + escapeHtml(e) + "</p>";
-                }});
-        }}
-
-        /* ── Privileged firewall actions ──────────────────────────────
-           Every ufw change is performed by nemesis-fwd, which verifies the
-           admin password itself against the stored hash. This page cannot
-           assert "already verified" — there is no such field to send. */
-        /* In-page modal with a real masked field. Deliberately NOT
-           window.prompt(): that renders the password in plaintext as it is
-           typed, which would undercut the credential verification this whole
-           path exists to enforce. Returns a Promise so callers can await it. */
-        /* fwPrompt / fwCredOk / fwCredCancel / fwHandleError now live in
-           the same prompt for Settings-save and Restart. */
-
-        /* Best-effort acceleration ONLY. The server enforces a short idle
-           timeout regardless of whether this ever fires; a hostile or
-           non-cooperating client simply does not send it.
-           Honest limitation: browsers expose no true "screen locked" event.
-           Locking the screen does trigger this (the browser loses focus), but
-           so does switching tabs — an accepted tradeoff that errs toward
-           prompting more often. */
-        function fwDropCredential() {{
-            try {{
-                navigator.sendBeacon("/api/firewall/credential/drop");
-            }} catch (e) {{ /* never block page teardown on this */ }}
-        }}
-        document.addEventListener("visibilitychange", function () {{
-            if (document.visibilityState === "hidden") fwDropCredential();
-        }});
-        window.addEventListener("blur", fwDropCredential);
-
-        function takeAction(action) {{
-            var url = "/api/action/" + currentRuleId + "/" + action;
-            if (action === "block" && currentSrcIp) url += "?ip=" + encodeURIComponent(currentSrcIp);
-            var body = {{}};
-            var pwPromise = (action === "block")
-                /* Writes always require a fresh credential — never cached. */
-                ? fwPrompt("block " + (currentSrcIp || "this source"))
-                : Promise.resolve("");
-            pwPromise.then(function (pw) {{
-              if (action === "block") {{
-                  if (!pw) return;
-                  body.password = pw;
-              }}
-              fetch(url, {{
-                method: "POST",
-                headers: {{"Content-Type": "application/json"}},
-                body: JSON.stringify(body)
-              }}).then(r => r.json()).then(data => {{
-                  if (data && data.error) {{ fwHandleError(data, "Action failed"); return; }}
-                  closeModal();
-                  location.reload();
-              }}).catch(e => alert("Error: " + e));
-            }});
-        }}
-
-        /* Symmetric counterpart to takeAction('block'). Deliberately placed on the
-           same modal: the block is applied from here, so the undo belongs here too
-           rather than somewhere the user has to go hunting for. */
-        function unblockIp() {{
-            if (!currentSrcIp) {{ alert("No source IP on this alert to unblock."); return; }}
-            /* Same rule as block — an unblock is a firewall write, so it takes a
-               fresh credential and never a cached one. */
-            fwPrompt("unblock " + currentSrcIp).then(function (pw) {{
-                if (!pw) return;
-                fetch("/api/firewall/unblock", {{
-                    method: "POST",
-                    headers: {{"Content-Type": "application/json"}},
-                    body: JSON.stringify({{ip: currentSrcIp, rule_id: currentRuleId, password: pw}})
-                }}).then(r => r.json()).then(data => {{
-                    if (data && data.error) {{ fwHandleError(data, "Unblock failed"); return; }}
-                    if (data && data.warning) {{ alert("Unblocked " + currentSrcIp + " — note: " + data.warning); }}
-                    closeModal();
-                    location.reload();
-                }}).catch(e => alert("Error: " + e));
-            }});
-        }}
-
-        function reportAbuse() {{
-            if (!currentSrcIp) {{ alert("No source IP to report"); return; }}
-            if (!confirm("Report " + currentSrcIp + " to AbuseIPDB?")) return;
-            fetch("/api/report/" + currentRuleId + "?ip=" + encodeURIComponent(currentSrcIp))
-                .then(r => r.json())
-                .then(d => {{
-                    if (d.success) {{
-                        alert("Reported to AbuseIPDB. Current confidence score: " + (d.abuse_confidence_score == null ? "unknown" : d.abuse_confidence_score));
-                    }} else {{
-                        alert("Report failed: " + (d.error || "unknown error"));
-                    }}
-                }})
-                .catch(e => alert("Error: " + e));
-        }}
-
-        function closeModal() {{
-            document.getElementById("alertModal").style.display = "none";
-            document.getElementById("btnReport").style.display = "none";
-            nemChatClose();
-            document.getElementById("alertNotesSection").style.display = "none";
-            document.getElementById("relatedNotesList").style.display = "none";
-            document.getElementById("noteInput").value = "";
-            document.getElementById("noteStatus").textContent = "";
-            _currentNotesRuleId = null;
-            _allNotes = [];
-            _notesPage = 0;
-        }}
-
-        function loadNotes(ruleId) {{
-            _currentNotesRuleId = ruleId;
-            _notesPage = 0;
-            _allNotes = [];
-            var sec = document.getElementById("alertNotesSection");
-            sec.style.display = "block";
-            document.getElementById("relatedNotesList").style.display = "none";
-            document.getElementById("noteStatus").textContent = "";
-            document.getElementById("notesList").innerHTML =
-                "<span style='color:#bbb;font-size:0.85em'>Loading notes…</span>";
-            fetch("/api/tickets/notes/" + encodeURIComponent(ruleId))
-                .then(function(r) {{ return r.json(); }})
-                .then(function(notes) {{
-                    _allNotes = notes;
-                    _renderNotesList();
-                }})
-                .catch(function() {{
-                    document.getElementById("notesList").innerHTML =
-                        "<span style='color:#ff4444;font-size:0.85em'>Failed to load notes</span>";
-                }});
-        }}
-
-        function _renderNotesList() {{
-            var el = document.getElementById("notesList");
-            var perPage = 5;
-            var visible = _notesSortDesc
-                ? _allNotes.slice(0, (_notesPage + 1) * perPage)
-                : _allNotes.slice().reverse().slice(0, (_notesPage + 1) * perPage);
-            if (_allNotes.length === 0) {{
-                el.innerHTML = "<span style='color:#bbb;font-size:0.85em'>" +
-                    tierText("No notes yet. Add the first one below.", "No notes yet.", "—") + "</span>";
-                return;
-            }}
-            var sortBtn = "<button onclick='_toggleNoteSort()' style='background:transparent;border:none;color:#ccc;cursor:pointer;font-size:0.75em;padding:0;float:right'>" +
-                (_notesSortDesc ? "↓ Newest first" : "↑ Oldest first") + "</button>";
-            var items = visible.map(function(n) {{
-                return '<div style="border-left:2px solid #333;padding:6px 10px;margin-bottom:8px">' +
-                    '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                    '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
-                    escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
-                    '</div>';
-            }}).join("");
-            var moreCount = _allNotes.length - visible.length;
-            var moreBtn = moreCount > 0
-                ? '<button onclick="_showMoreNotes()" style="background:transparent;border:1px solid #444;color:#ccc;padding:3px 8px;cursor:pointer;border-radius:3px;font-size:0.8em">Show ' + Math.min(perPage, moreCount) + ' more…</button>'
-                : "";
-            el.innerHTML = sortBtn + items + moreBtn;
-        }}
-
-        function _toggleNoteSort() {{
-            _notesSortDesc = !_notesSortDesc;
-            _notesPage = 0;
-            _renderNotesList();
-        }}
-
-        function _showMoreNotes() {{
-            _notesPage++;
-            _renderNotesList();
-        }}
-
-        function addNote() {{
-            var text = (document.getElementById("noteInput").value || "").trim();
-            if (!text || !_currentNotesRuleId) {{ return; }}
-            var status = document.getElementById("noteStatus");
-            status.style.color = "#aaa";
-            status.textContent = tierText("Saving…", "Saving…", "…");
-            fetch("/api/tickets/notes/" + encodeURIComponent(_currentNotesRuleId), {{
-                method: "POST",
-                headers: {{"Content-Type": "application/json"}},
-                body: JSON.stringify({{note: text}})
-            }})
-            .then(function(r) {{ return r.json(); }})
-            .then(function(d) {{
-                if (d.ok) {{
-                    document.getElementById("noteInput").value = "";
-                    status.style.color = "#00ff88";
-                    status.textContent = tierText("Note saved", "Saved", "✓");
-                    loadNotes(_currentNotesRuleId);
-                    setTimeout(function() {{ status.textContent = ""; }}, 2000);
-                }} else {{
-                    status.style.color = "#ff4444";
-                    status.textContent = "Error: " + escapeHtml(d.error || "unknown");
-                }}
-            }})
-            .catch(function() {{
-                status.style.color = "#ff4444";
-                status.textContent = "Error saving note";
-            }});
-        }}
-
-        function loadRelatedNotes() {{
-            if (!_currentNotesRuleId) {{ return; }}
-            var el = document.getElementById("relatedNotesList");
-            el.style.display = "block";
-            el.innerHTML = "<span style='color:#ccc;font-size:0.85em'>Searching for related notes…</span>";
-            fetch("/api/tickets/related/" + encodeURIComponent(_currentNotesRuleId))
-                .then(function(r) {{ return r.json(); }})
-                .then(function(notes) {{
-                    if (notes.length === 0) {{
-                        el.innerHTML = "<div style='color:#bbb;font-size:0.85em'>" +
-                            tierText(
-                                "No notes found for other alerts from the same source IP.",
-                                "No related notes found.",
-                                "No related notes."
-                            ) + "</div>";
-                        return;
-                    }}
-                    var header = "<div style='color:#ccc;font-size:0.75em;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:8px'>" +
-                        tierText("Notes from other alerts by the same source", "Related Notes (same source IP)", "Related Notes") +
-                        "</div>";
-                    var items = notes.map(function(n) {{
-                        return '<div style="border-left:2px solid #444;padding:6px 10px;margin-bottom:8px">' +
-                            '<div style="color:#bbb;font-size:0.75em;margin-bottom:2px">' + escapeHtml(n.rule_name || n.rule_id) + '</div>' +
-                            '<div style="color:#ddd;font-size:0.85em;white-space:pre-wrap">' + escapeHtml(n.note) + '</div>' +
-                            '<div style="color:#bbb;font-size:0.75em;margin-top:3px">' +
-                            escapeHtml(n.author) + ' · ' + escapeHtml(n.created_at) + '</div>' +
-                            '</div>';
-                    }}).join("");
-                    el.innerHTML = header + items;
-                }})
-                .catch(function() {{
-                    el.innerHTML = "<span style='color:#ff4444;font-size:0.85em'>Failed to load related notes</span>";
-                }});
-        }}
+        {_alert_modal_js()}
 
         function editDevice(mac, name, type, category) {{
             document.getElementById("editMac").value = mac;
