@@ -1,6 +1,6 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-06, ~17:10 CDT (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-06, ~17:23 CDT (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
@@ -17,28 +17,35 @@
 ## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
 **Public repo (`/opt/nemesis`) is fully clean and pushed.**
-- `origin/main` HEAD == local HEAD == `db9e0c4`, confirmed by direct hash comparison
+- `origin/main` HEAD == local HEAD == `272db73`, confirmed by direct hash comparison
   (`git rev-parse HEAD` / `git rev-parse origin/main`), not inferred.
-- **Zero unpushed commits.** Working tree has exactly ONE file left:
-  `docs/roadmap/venue-guest-network.md`, still foreign WIP, still not Window 2's — see
-  below. Nothing else pending as of this write.
+- **Zero unpushed commits.** Working tree has `docs/roadmap/venue-guest-network.md`
+  (foreign WIP, still not Window 2's) plus **Window 3's DHCP work continuing live**:
+  `modules/dhcp/module.py`, `modules/dhcp/manifest.json` (being brought current —
+  see the staleness this window flagged, below), `alert_manager/test_dhcp_module.py`
+  all modified again. Not reviewed, not staged, not touched — re-run `git status`
+  yourself before trusting this list.
 - If power drops right now, **nothing of Window 2's is lost or half-committed.**
-- **Latest actions — two atomic commits, staged with extra care because Window 1 and
-  Window 3 had zero-overlap uncommitted work in the shared tree simultaneously** (a plain
-  `git commit` takes the whole index, not just what one window intends):
-  `aa6916c` — Window 3's DHCP module rewrite (`modules/dhcp/module.py` +
-  `alert_manager/test_dhcp_module.py`, 56/56, verified live; `git show --stat` confirmed
-  it touches exactly those two paths). `db9e0c4` — Window 1's error-code-system wiring
-  (`nemesis_errors.py`, `database.py`, `dashboard.py`, `modules/tickets/module.py`,
-  `PUNCHLIST.md` — `git show --stat` confirmed exactly those five paths, nothing from
-  the DHCP work). **A commit hash Window 3 had referenced for their DHCP work
-  (`7c2719a`) does not exist in this repo — treated as an uncommitted-until-now
-  delivery, not something already landed; do not go looking for it.**
-- Also found and flagged, not fixed: `modules/dhcp/manifest.json` is now stale — still
-  describes the OLD Pi-hole-API-wrapper behavior and lists `PIHOLE_IP`/`PIHOLE_PASSWORD`
-  config keys the rewritten module doesn't use. Out of scope for Window 2 to edit
-  (code content); owed to whichever window owns that module next.
-- Prior actions, still current: `3f4b933` (ADR 0001 `error_*` reservation) and the four
+- **Latest action:** `272db73` — Window 1's error-code-system follow-up, one atomic
+  commit across 7 files (`nemesis_errors.py`'s `make_recorder()` generalizing the
+  tickets-module pilot into a shared helper; 4 new retrofit sites in `dashboard.py`,
+  `hw_monitor.py`, `watchdog.py`; a real `devices`-table schema-drift fix plus new
+  `reconcile_dhcp_hostnames()` in `database.py`). 73/73, verified live. **Staged with
+  the same care as the prior commit** — Window 3's DHCP files were live in the same
+  tree throughout; `git show --stat` confirmed exactly those 7 paths, nothing from
+  `modules/dhcp/*` or `test_dhcp_module.py`. `PUNCHLIST.md` was named in the request
+  alongside these 7 but had no pending diff — flagged, not silently skipped, same as
+  last time this happened.
+- Prior actions, still current, same staging-care pattern: `aa6916c` (Window 3's DHCP
+  module rewrite, 56/56) and `db9e0c4` (Window 1's initial error-code-system wiring
+  across 5 paths), both `git show --stat`-verified isolated at the time. **A commit
+  hash Window 3 had referenced for their DHCP work (`7c2719a`) does not exist in this
+  repo** — treated as an uncommitted-until-now delivery, not something already landed.
+- Also found and flagged, not fixed (as of the `272db73` review — may already be in
+  progress per the live DHCP files above): `modules/dhcp/manifest.json` was stale,
+  still describing the OLD Pi-hole-API-wrapper behavior and `PIHOLE_IP`/
+  `PIHOLE_PASSWORD` config keys the rewritten module doesn't use.
+- Further back, still current: `3f4b933` (ADR 0001 `error_*` reservation) and the four
   commits before it landing the rest of Window 1's held work that day:
   `35d3660` (`nemesis_errors.py` initial build — structured error-code system, 57/57),
   `2a24803` (QUIC static-policy block artifacts — `.nft`/`.service`/verify script),
