@@ -1,157 +1,196 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-04 (Window 2)**. Overwritten each closeout (latest state wins).
+> Last updated **2026-08-05 (Window 2)**. Overwritten each closeout (latest state wins).
 > Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
 > live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
 >
 > Written to stand on its own — the operator may or may not be back tomorrow. Full detail
-> behind every claim below: `docs/handoff/supplements/2026-08-04-001.md` (curated) and
-> `docs/handoff/worklog/2026-08-04-001.md` (raw, reconstructed from git log at closeout —
-> see the discipline-gap note in §6).
+> behind every claim below: `docs/handoff/supplements/2026-08-05-001.md` (curated) and
+> `docs/handoff/worklog/2026-08-05-001.md` (raw, reconstructed from git log at closeout —
+> see the discipline-gap note in §6, same gap as 2026-08-04, not yet resumed).
 
 ---
 
 ## 1. Live in production right now — verified, not assumed
 
-- **`origin/main` is at `5330220`** as of this writing (confirmed `HEAD == origin/main` via
-  fresh fetch). 78 commits landed and pushed today.
-- **Production is confirmed restarted and caught up to `5330220`.** `dashboard.service`
-  `ActiveEnterTimestamp` is `2026-08-04 18:06:51`, after the day's last commit (`17:54:20`).
-  Verified directly against the live DB, not inferred from the restart alone: `agent_devices`
-  now has the `attestation_state` column, and a `settings` table exists (empty — no operator
-  override written yet, expected). Proper pre-restart snapshots were taken each time
-  (`1647-pre-attestation-migration`, `1716-pre-dashboard-ai-restart`,
-  `1756-pre-ai-fix-restart`, `1806-pre-integrity-watch-enable`).
-- **Tier 1 agent self-attestation is live end to end**: schema (`7b45bfd`), agent-side
-  manifest scaffold (`12d58fe`), server-side signing/recording with a real round-trip proof
-  (`9004bb4`), and dispatcher wiring + a self-sustaining manifest queue (`4133dd9`). Explicit
-  honest-limitation framing carried into both the code and the docs: this catches an
-  unsophisticated tamperer and accidental corruption, NOT a knowledgeable attacker who
-  replaces the attestation code along with everything else — that's Tier 2's job, unbuilt.
-- **`agent_remote_observe_every_n` is live end to end**: the core `settings` table
-  (`524646b`, the first live-adjustable core knob — previously all core config was
-  `/etc/nemesis.env`-only, root+restart required), the observation layer itself (process
-  enumeration + UDP attribution, `3fe91c3`), and the Settings UI to change it (`1633d29`).
-  Real measurement on this host: 598 processes visible, 399 with `exe()` denied; 33 UDP
-  sockets, ~25 attributable — the visibility-accounting property (report what could NOT be
-  seen, never omit it silently) is the load-bearing design point.
-- **A model-drift bug affecting every AI call site in the product is fixed** (`d151dc3`):
-  `claude-opus-5` runs adaptive thinking ON BY DEFAULT (unlike opus-4-7/4-8), so
-  `msg.content[0]` could be a `ThinkingBlock` with no `.text`, silently breaking chat, Layer C
-  verdicts, and anomaly analysis alike while the API itself returned HTTP 200. Confirmed via
-  tree-wide grep this was the only `.content[0]` indexing site and the only
-  `messages.create()` call site in the whole codebase — the fix covers the entire product.
-- **The shared contextual chat widget is now on all four intended surfaces**: alert modal and
-  malware findings (`ce91f1e`), anomaly incidents and community queue (`5330220`). One shared
-  cost-disclosure implementation instead of four independent copies that could drift; each
-  surface's anchor loader also gained "Path 1 auto-context" (live DB state read at ask-time,
-  not just what was true when the alert/finding/incident fired).
-- **Layer C AI verdict is wired for real** (`ce91f1e`): `manifest.json` had advertised
-  `ai_verdict_enabled` since 1.0.0 while `scan_file()` never called `ai_engine` at all — the
-  setting read as enabling a feature that did not exist. Now wired: heuristic findings only,
-  gated by score, cached on file hash, and never acting (quarantine has no restore path, so
-  the verdict is evidence-only, pinned at authority L1).
-- **Two security fixes, found during review and patched same-session**: back-forward cache
-  was replaying a typed password on authenticated pages (`29a9ca5`); stored XSS in
-  `modules/integrity_watch`'s `get_dashboard_card()` via unescaped agent-supplied
-  `device_id`/`signal`/`detail` (`90cbd9f`, `html.escape(quote=True)` applied matching the
-  existing convention, new test added).
-- **A long AI-engine cost/pricing/authority chain is live**: cost display was undercounting
-  spend by up to ~13x, now fixed (`3548e40`); per-model pricing rates (`4488584`); monthly
-  dollar spend cap + subscription-price comparison (`845ac8b`); pricing change-detection,
-  notify-never-auto-write (`ac824d4`); spend-cap Settings UI (`ba499bb`); pricing-drift
-  scheduler/banner (`b283ef3`); graduated-authority foundations, `effective_ceiling()`
-  (`9f0c217`); `_ACTIVE_MODEL` bumped `claude-sonnet-4-6` → `claude-sonnet-5` (`110239f`,
-  isolated as its own commit for a clean revert path), matching the string CLAUDE.md itself
-  had flagged as suspected-stale.
+- **`origin/main` is at `f30126c`** as of this writing (confirmed `HEAD == origin/main` via
+  fresh fetch). 26 commits landed and pushed today, all from Window 2, none reverted.
+- **Production is confirmed restarted and caught up to `f30126c`.** `dashboard.service`
+  `ActiveEnterTimestamp` is `2026-08-05 18:57:04`, well after today's last commit
+  (`15:54:20`). The service's `WorkingDirectory`/`ExecStart` run directly against
+  `/opt/nemesis` (no separate deploy copy), so the restart picked up everything through
+  `f30126c`. Startup log confirms all 7 modules loaded clean, zero errors/tracebacks in the
+  journal since restart (checked directly, not inferred from the restart alone). Note: this
+  restart was **not performed by Window 2** — no state-changing action was taken in this
+  session; it happened between sessions, presumably Window 1 or the operator directly.
+- **Verified live against the running system, not just claimed:**
+  - `settings.degraded_ingest_offset.updated_at` reads `2026-08-05T19:03:04` — genuinely
+    local-format (not UTC), confirming the timestamp fix (`31a9bbf`) is live and the sweep is
+    actively running post-restart.
+  - Zero `WOULD DENY` namespace-guard lines in the journal since restart — the `scan_tasks`
+    grant fix (`d636f2e`, landed earlier today's predecessor session) is holding clean.
+  - Alert `1000002`'s stored row now reads `risk_level=MEDIUM` with a real, readable
+    explanation — the poisoned CRITICAL→LOW→UNKNOWN chain from earlier today is confirmed
+    repaired in the live DB, not just claimed in a commit message. The explanation text
+    contains a real LAN address, which is **correct, not a leak**: pseudonymization tokenizes
+    only the outbound prompt to the external model; the stored, operator-facing explanation
+    is deliberately resolved back to real addresses for readability. **Not independently
+    re-verified end-to-end against a fresh live call since deploy** (would require billing a
+    real analysis) — the design and the unit/AST-level wiring proof are solid (51/51 +
+    29/29 tests), but a live production round-trip of the pseudonymization path specifically
+    has not been observed by this window.
+  - `alert_manager/test_quarantine.py`: 38 passed, 14 failed — consistent with the
+    pre-existing, already-tracked 8-day-old regression (PUNCHLIST, unrelated to today's
+    work). No new failures introduced today.
+- **Total code lines: 65,960** (`find`+`wc -l` across `.py/.js/.html/.css/.sh`, excluding
+  `__pycache__`/`.git`).
 
-## 2. Open items to pick up first, in priority order
+## 2. What shipped today (26 commits, one continuous Window 2 session)
 
-1. **Installer token revocation — still not built, carried forward unchanged.** `revoked` is
-   enforced on read but no route writes it for an issued-but-not-yet-enrolled installer
-   token. Distinct from device revoke/re-approve (`60521bb`, already-enrolled devices),
-   which is live.
-2. **Three agent-defect PUNCHLIST entries added today, all still genuinely open** — the new
-   observation layer (`3fe91c3`) is a NEW parallel capability, not a fix to these specific
-   functions (verified directly: `_network_connections()`, `_top_processes()`,
-   `_detect_connection_type()` in `nemesis_agent/modules/security.py`/`agent.py` are
-   untouched by today's observation-layer commit):
-   - `_network_connections()` filters on `status == 'ESTABLISHED'`, which excludes ALL UDP
-     from the agent's (older) connection reporting path. Separate from the new observation
-     layer's own UDP enumeration.
-   - `_top_processes()` is a top-10-by-CPU sample, not real enumeration — same caveat, the
-     new `_enumerate_processes()` is a separate, additional capability.
-   - `_detect_connection_type()` is IPv4-only.
-3. **Credential rotation — operator's, not code work. Still deferred, not forgotten.** Six
-   credentials remain exposed from an over-broad-grep transcript leak on 2026-08-02. Snapshot
-   ready and untouched at
-   `/run/media/<user>/storage/nemesis-state-backups/2026-08-02-1329-pre-credential-rotation/`.
-4. **Concurrency Phase 3 — deferred by agreement.** ~28 lower-severity race findings remain in
-   the private audit; unchanged from prior days.
+Full detail in the supplement. Headline sequence, roughly in dependency order:
 
-## 3. Resolved today, carried forward from 2026-08-03's HANDOFF
+1. **IPv6 connection-type fix** (`41ba66f`) + PUNCHLIST closure — Window 1's step 4/5 of the
+   observation-layer foundation, dual-stack `_detect_connection_type()`.
+2. **`scan_tasks` namespace grant** (`d636f2e`) — closed a drift gap in `hw_monitor`'s write
+   grant, plus a new PUNCHLIST entry for the unrelated 8-day-red `test_quarantine.py`,
+   found as collateral discovery during that audit.
+3. **Chat-widget rescue arc** — three real, sequential defects behind "chat looks broken":
+   duplicate `id="nemChatSection"` DOM collision (`dd32ccb`), a literal-newline
+   `SyntaxError` silently killing the entire chat IIFE (`a5c7137` — the ACTUAL root cause,
+   found after the duplicate-id fix alone didn't restore chat), and a `sqlite3.Row` gap on
+   the alert anchor loader (`940b1a6`). Plus two features once chat worked: copyable
+   answers/fenced code blocks (`746d522`) and Enter-to-submit (`2129331`).
+4. **The analyze-alert chain — three real, sequential defects**, same "fix one, find the
+   next" shape as the chat arc:
+   - Off-by-one display indices + the SAME off-by-one in the gate itself, the latter
+     deliberately held for a cost decision before fixing (`9521346`, then the gate
+     correction after operator approval).
+   - Empty deep-linked alert body (`8f227a4`) — the deep-link path had ALWAYS passed
+     `raw=""`; once the gate started working, this billed the AI to analyze nothing and
+     poisoned `alerts.explanation` + `risk_level` for rule `1000002` (CRITICAL→UNKNOWN).
+   - Fenced JSON in the model's reply (`f8c116f`) — a *correct* MEDIUM answer wrapped in
+     ` ```json ` broke `json.loads()`, and the fallback hardcoded `risk_level="UNKNOWN"`
+     straight over a stored CRITICAL. Fixed with a fence-tolerant parser and `COALESCE`
+     write-back so a parse failure can never again downgrade a real severity.
+5. **ADR 0019 Phase 2 — enforcement-visibility panel** (`31a9bbf`), landed together with
+   the local-time timestamp fix it structurally depends on (a UTC/local mismatch that
+   nothing had read yet — the panel is the first reader, and would have shown a permanent
+   false-degraded on any host until both landed in the same commit). Includes a
+   self-caught bug: a future-dated heartbeat (exactly what the pre-fix UTC stamp produced)
+   read as HEALTHY with no lower bound on the age check.
+6. **`/firewall-db` Analyze link** (`6358b5d`) + a new PUNCHLIST entry for the GET route it
+   surfaced as now-consequential (`/api/analyze/<rule_id>` has no `methods=`, so it's a
+   GET-that-spends-money — auth-gated, not urgent, but flagged).
+7. **Malware-detection/AI-analysis completeness audit** (Window 1, private handoff `c5f7a1c`
+   in `~/work/nemesis-internal`) surfaced two real findings that Window 2 verified against
+   code and filed to the PUBLIC PUNCHLIST for the first time this session (they had NOT
+   actually reached the public repo despite being recorded as "decided" in the private
+   handoff — see §6 for the process gap this exposed):
+   - Layer D (local ML classifier) declared in three places (module header, `LAYERS` list,
+     UI legend colour) with zero implementation anywhere else — an honesty gap, not a build
+     gap; fix is dropping it from the enumeration/legend, not building Layer D.
+   - `/api/analyze/<rule_id>` sending real source/destination IPs externally with no
+     redaction — decision recorded (pseudonymize to `host-A`/`host-B` tokens), build queued
+     behind UDP work at the time it was filed.
+8. **Pseudonymization built and shipped same day** (`f743b9a`) — new module
+   `alert_manager/nemesis_pseudonymize.py`, wired into `analyze_alert()`. Both substring
+   hazards (outbound address-inside-address, inbound token-inside-token) handled by a
+   single boundary-anchored regex pass, tested with a 27-address rollover to force the
+   collision case. Deliberately NOT a `redact.py` extension — a secrets scrubber and a
+   PII pseudonymizer have different correctness conditions. 51/51 tests, plus this
+   window's own adversarial probes beyond the suite (comma-separated lists, CIDR suffixes,
+   IPv4-mapped-IPv6-with-port, an invalid octet) — all clean. Also surfaced and disclosed a
+   SEPARATE, un-fixed exposure: `enrich_ip()` still sends the real source IP to AbuseIPDB
+   and ipinfo.io on the same route (pseudonymization can't help — the lookup IS the
+   address). Filed to PUNCHLIST explicitly so the two exposures aren't conflated.
 
-- **The four previously-held PUNCHLIST entries are now committed** (were sitting uncommitted
-  in the working tree per explicit operator instruction as of yesterday's closeout) —
-  `9cb444b`/`353ce11`/`35af42b`/`8ae6b60`. Documentation-only commits (pure `PUNCHLIST.md`
-  additions, no code): the install-retry disown gap was reviewed and confirmed already fixed
-  by `edc6133`; the other three (uninstall leaves agent state behind, a revoked device cannot
-  learn it was revoked, provenance should be recorded incrementally) remain open findings,
-  not yet fixed — only their "held, uncommitted" state was resolved today.
+## 3. Open items to pick up first, in priority order
 
-## 4. Rule 10 disclosure work today
+1. **`enrich_ip()` external IP exposure (AbuseIPDB/ipinfo.io)** — disclosed in
+   `/diagnostics`, not yet fixed. Operator wants a user-initiated "Report with real
+   address" confirmation flow rather than automatic transmission; design note in
+   PUNCHLIST about needing a stated default for the un-chosen case.
+2. **Layer D honesty fix** — small, mechanical: drop `"ml"` from `LAYERS` and the UI
+   colour legend in `modules/malware_detection/module.py`. Not done yet.
+3. **Cache-hit token skew** (pseudonymization) — narrow, documented, not fixed: an
+   `ai_cache` hit resolves against a token map computed fresh from today's row, so
+   `host-A` could resolve to the wrong address if `src_ip`/`dst_ip` changed since the
+   reply was cached.
+4. **Installer token revocation** — still not built, carried forward unchanged from
+   prior days.
+5. **Three agent-defect PUNCHLIST items** (UDP exclusion in `_network_connections()`,
+   top-10 sampling in `_top_processes()`, IPv4-only `_detect_connection_type()` in the
+   OLDER agent-side function — distinct from the observation-layer fix that shipped
+   today) — carried forward, still open.
+6. **`test_quarantine.py`** — RED for 8+ days now (was 8, is likely 9-10 by the time this
+   is read), fix is known (routes hardened to POST, test still issues GET), not yet done.
+7. **Credential rotation** — operator's call, not code work, carried forward unchanged.
+8. **Concurrency Phase 3** — deferred by agreement, unchanged.
 
-Source: `~/work/nemesis-internal/scoping-and-estimates/scope-update-input-for-window2-2026-08-04.md`.
-Applied the established "confirmed middle path": existence of a gap/finding stays public,
-detailed/honest-limitation language stays Rule-10-held (local+usb only). Six roadmap docs
-touched (QUIC/HTTP-3, Tier 3 new dependencies, memory-injection status split, agent-rebuild
-activation, new `udp-default-deny-scoping.md`) plus three PUNCHLIST entries (see §2.2).
-**Mid-session the operator directly resolved the Tier 3 vs. memory-injection ownership
-question** (Tier 3 owns local action on the executing-payload case; memory-injection stays
-server-side evidence-only) — applies ADR 0009 §3's existing ambiguous-signal rule, recorded
-in both docs, explicitly stated as not needing further Rule 10 review since it closes an
-already-public question.
+## 4. Rule 10 / disclosure notes today
+
+- The `/diagnostics` redaction-scope disclosure (`cb00d4a`, later rewritten by `f743b9a`'s
+  wiring) is a straightforward honesty fix — public by default, no held content.
+- The QUIC/nftables static-policy-table ADR question that appeared in the working tree late
+  in the session (uncommitted, another window's — see §6) records its own Rule 10 check
+  inline: "architecture and the standards-track RFC 9001 detail are not new disclosure, the
+  public roadmap already describes the detection approach." Not evaluated independently by
+  Window 2 since it was never handed off as a task this session — flagging its existence
+  here only so it isn't lost.
 
 ## 5. Blocked on a decision — the operator's calls
 
-1. **Credential rotation** — see §2.3.
-2. **`install.sh`'s Rule-10 disclosure gap** — carried forward, still unfixed.
-3. **`known-limitations/` still has zero version control** — carried forward.
-4. **`l3-tier2-tls-interception`'s GitHub remote** — still open, deliberately left for the
-   operator.
-5. **Concurrency Phase 3 timing** — unchanged from prior days.
-6. **Game-server hosting (inbound DMZ)** — parked behind an unmade architecture decision
-   (does Nemesis become the gateway?), captured in `udp-default-deny-scoping.md` today, not
-   actioned.
+1. **`enrich_ip()` external-transmission UX** — confirmation-dialog design (§3.1).
+2. **Cache-hit token skew fix** — whether/when to build the sentinel-style fix.
+3. **Installer token revocation, credential rotation, Concurrency Phase 3** — all
+   carried forward unchanged from prior days.
+4. **QUIC/nftables static-policy table** — operator decision recorded as already taken
+   (2026-08-05, per the uncommitted PUNCHLIST addition) but the commit implementing/
+   documenting it was never handed to Window 2 this session; carried forward as an open
+   item to close out cleanly next session.
 
 ## 6. Known issues/gaps, not yet fixed
 
-- Installer token revocation, the three agent-defect PUNCHLIST items, credential rotation,
-  concurrency Phase 3 — see §2.
-- **Discipline gap, this session**: no live worklog was appended during the day — both
-  `worklog/2026-08-04-001.md` and this file's predecessor material were reconstructed
-  retroactively from `git log` at closeout. Git log is authoritative so nothing is lost, but
-  Rule 9's live-worklog intent (surviving a mid-session compaction/crash without a closeout)
-  was not met today. Resume the append-as-you-go habit next session.
-- Everything else carried forward unchanged from prior HANDOFFs unless stated resolved above:
-  the Rule-8 username finding (`9ffac56`), three unrelated temporary sudoers grants,
+- **Live worklog discipline gap, again.** Same as 2026-08-04: no live worklog was appended
+  during the day. `worklog/2026-08-05-001.md` is reconstructed from `git log` at closeout.
+  Git log is authoritative so nothing is lost, but the point of a live worklog (surviving a
+  mid-session compaction or crash without a closeout) was not met today either. Two days
+  running now — worth treating as a pattern, not a one-off.
+- **A real process gap surfaced today, worth carrying forward explicitly.** Window 1's
+  private-mirror handoff (`~/work/nemesis-internal`, commit `c5f7a1c`) recorded an operator
+  decision ("pseudonymize to host-A/host-B tokens... build queued behind UDP") as though it
+  were captured — but that decision had never actually reached the public `PUNCHLIST.md`.
+  When Window 2 was asked to "verify these landed correctly," they had not: the private
+  handoff commit and a public PUNCHLIST entry are two different things, and this is at
+  least the second time this session that boundary blurred (see the QUIC/nftables item in
+  §5.4, which has the identical shape — "decision already taken" recorded somewhere that
+  is not yet the public PUNCHLIST). Worth a explicit habit check across windows: a decision
+  recorded in a private handoff is not "landed" until it's in the artifact that's actually
+  supposed to hold it.
+- Everything else carried forward unchanged from prior HANDOFFs unless stated resolved
+  above: the Rule-8 username finding (`9ffac56`), three unrelated temporary sudoers grants,
   `NEMESIS_AGENT_EXE`'s real home path, `migrate_to_opt.sh` fragility, missing ADR for the
   `/opt` relocation, `backupproc.md` unconfirmed for current layout, ADR 0015 vs.
-  venue-guest-network tension, no hardware baseline (gauge VM provides real measured data
-  toward one), legal review not started, ruleset-rollback residual (bounded, fix deferred).
+  venue-guest-network tension, no hardware baseline, legal review not started, ruleset-
+  rollback residual (bounded, fix deferred).
+- **Two new parked roadmap stubs appeared today, uncommitted, not Window 2's** — `docs/
+  roadmap/device-coverage-tier-indicator.md` and `docs/roadmap/ipv6-rogue-router-
+  detection.md`. Both self-declare `Status: parked (capture-only)`, captured 2026-08-05.
+  Left untouched all session (not handed off as tasks); flagging so they're not lost.
+- **`docs/roadmap/venue-guest-network.md`** — still modified, uncommitted, all session,
+  every session this week. Still not Window 2's to touch absent an explicit handoff.
 
 ## 7. Cross-references
 
-- `docs/handoff/supplements/2026-08-04-001.md` — curated narrative for today.
-- `docs/handoff/worklog/2026-08-04-001.md` — raw log (reconstructed at closeout, see §6).
-- `PUNCHLIST.md` — three new agent-defect entries (§2.2), installer token revocation, and
-  everything carried forward.
-- `docs/roadmap/udp-default-deny-scoping.md` — new file today.
-- `docs/roadmap/adr-0009-l3-tier3-local-triggers-scope.md`,
-  `docs/roadmap/memory-injection-detection-design.md` — ownership question resolved (§4).
-- `~/work/nemesis-internal/scoping-and-estimates/scope-update-input-for-window2-2026-08-04.md`
-  — source material for today's Rule 10 pass.
-- Prior day: `docs/handoff/supplements/2026-08-03-001.md`.
+- `docs/handoff/supplements/2026-08-05-001.md` — curated narrative for today.
+- `docs/handoff/worklog/2026-08-05-001.md` — raw log (reconstructed at closeout, see §6).
+- `PUNCHLIST.md` — Layer D, `enrich_ip()` exposure, cache-hit token skew, GET-that-spends-
+  money, `test_quarantine.py`, plus the four closed-today entries (d1c23d7, analyze_alert
+  gate, anomaly device-list, Enter-to-submit, pseudonymization).
+- `~/work/nemesis-internal/handoff/2026-08-05-window1-handoff.md` — Window 1's full
+  session detail, including the malware-detection/AI-analysis completeness audit this
+  session's PUNCHLIST entries were sourced from.
+- Prior day: `docs/handoff/supplements/2026-08-04-001.md`.
 
 ## Topology (durable, unchanged from prior handoffs)
 - `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`), LAN-scoped
@@ -160,8 +199,7 @@ already-public question.
   agent endpoint, ThreadingHTTPServer + token-bucket pacing (`MAX_BUCKETS=256` live).
 - `:5002` agent command listener — localhost-bound + unauthenticated. Rotation and attestation
   manifest delivery are deliberately never routed through this listener's dispatcher —
-  handled only on the signature-verified path (confirmed live today for attestation, same
-  pattern as rotation).
+  handled only on the signature-verified path.
 - `nemesis-fwd` — Unix-socket privileged helper, peers: dashboard, alert-watcher,
   `fail2ban` (narrow: `block_ip`/`deny_ip` only, cannot release), `write_env`/
   `restart_dashboard` ops (dashboard peer only).
