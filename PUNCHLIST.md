@@ -2905,3 +2905,34 @@ this entry is the proposal, not the implementation.
       list sitting next to a populated severity card. Re-verified against live code
       2026-08-06 immediately before filing — line numbers and the already-fixed sibling
       function were confirmed today, not carried over from the prior session's memory.
+
+- [ ] **`audit_log.ts` mixes ISO-`T` and space-separated timestamps, so string ordering
+      does not match chronological ordering. This is ACTIVE, not theoretical — measured
+      2026-08-06 against the live table.**
+    - [ ] **Measured:** 175 rows — 140 ISO-`T` (`2026-08-05T09:15:52.075279`), 35
+          space-separated (`2026-08-05 11:04:15`). Five distinct dates contain both.
+    - [ ] **The defect made concrete:** on 2026-08-05, `SELECT ... ORDER BY ts` reports the
+          day beginning at `11:04:15` with a firewall block. The day actually began at
+          `09:15:52`. Space (0x20) sorts before `T` (0x54), so every space-separated row of
+          a given day sorts ahead of every ISO-`T` row of that same day regardless of time.
+    - [ ] **Worse, the two formats are not separate event streams — they are two halves of
+          the same operator actions.** On 2026-07-31, `fw_deny_ip` (nemesis_fwd) at
+          `11:19:48` and `block` (dashboard `_audit`) at `11:19:48.150060` are one action
+          recorded by two writers 150ms apart. String ordering scatters the pair.
+    - [ ] **Writers:** 3 of 4 use `datetime.now().isoformat()` — `dashboard.py:2534`
+          (`_audit`), `core/manage.py:118`, and `alert_manager/degraded_ingest.py:291`
+          (preserves the journal's own ISO-`T`). The single outlier is
+          `alert_manager/nemesis_fwd.py:640`, `time.strftime("%Y-%m-%d %H:%M:%S")`.
+          **ISO-`T` is the house norm and predates the outlier by a month** (earliest ISO-`T`
+          row 2026-06-28; earliest space row 2026-07-28).
+    - [ ] **Nothing currently orders `audit_log` by `ts`** — verified by grep; the only
+          `ORDER BY ts` sites are on `diagnostics_connectivity_samples`. So this is a latent
+          *consumer* bug on live-wrong *data*: the first person to write the obvious
+          `ORDER BY ts DESC` for an audit-trail view gets a silently mis-ordered answer.
+    - [ ] **Migration hazard to respect:** `degraded_ingest._is_duplicate()`
+          (`degraded_ingest.py:190`) dedupes on exact `ts` string equality against the
+          journal's value. Rewriting historical `ts` values would break that match, so a
+          backfill and the ingest offset have to be considered together, not separately.
+    - [ ] Full recommendation (normalize forward via a shared helper; fold in the
+          timezone-awareness decision rather than touching the audit trail twice) delivered
+          to the operator 2026-08-06 — decision is his, not filed as a chosen fix here.
