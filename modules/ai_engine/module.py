@@ -2020,10 +2020,27 @@ def _chat_widget_markup() -> str:
     return (
         '<div id="nemChatSection" style="display:none;margin-top:18px;'
         'border-top:1px solid #333;padding-top:14px">'
-        '<div style="display:flex;justify-content:space-between;align-items:center;'
-        'margin-bottom:8px">'
+        # The header doubles as the DRAG HANDLE once unpinned, hence the id.
+        # Unpin/Pin-back are two buttons rather than one toggle: a single button
+        # whose meaning depends on state has to be read before it can be used,
+        # and only one of these is ever visible at a time anyway.
+        '<div id="nemChatHeader" style="display:flex;'
+        'justify-content:space-between;align-items:center;'
+        'margin-bottom:8px;gap:8px">'
         '<strong style="color:#00d4ff;font-size:0.95em">Ask about this finding</strong>'
+        '<span style="display:flex;align-items:center;gap:8px">'
         '<span id="nemChatTurnsLeft" style="font-size:0.78em;color:#888"></span>'
+        '<button id="nemChatUnpinBtn" onclick="nemChatUnpin()" '
+        'title="Detach into a movable, resizable panel" '
+        'style="background:transparent;color:#9fb3d1;border:1px solid #2a3f5f;'
+        'padding:2px 8px;border-radius:3px;cursor:pointer;font-size:0.75em">'
+        '&#9744; Unpin</button>'
+        '<button id="nemChatRepinBtn" onclick="nemChatRepin()" '
+        'title="Put the panel back inline" '
+        'style="display:none;background:transparent;color:#9fb3d1;'
+        'border:1px solid #2a3f5f;padding:2px 8px;border-radius:3px;'
+        'cursor:pointer;font-size:0.75em">&#9635; Pin back</button>'
+        '</span>'
         '</div>'
         # Always-on, non-dismissible cost notice.
         '<div style="background:#1a1f36;border:1px solid #2a3f5f;border-radius:4px;'
@@ -2117,6 +2134,60 @@ def get_chat_js() -> str:
         'var b=el("nemChatAskBtn");'
         'if(b&&!b.disabled&&window.nemChatAsk)window.nemChatAsk();'
         '}});}'
+        # ── Drag, resize-persist and viewport-clamp ──────────────────────────
+        # Bound HERE for the same reason the Enter handler above is: this is the
+        # single branch that creates the node, so these attach exactly once no
+        # matter how often ensureWidget() is called.
+        #
+        # Pointer events, not mouse events: one code path covers mouse, touch and
+        # pen. setPointerCapture keeps the drag alive when the cursor outruns the
+        # header -- without it a fast drag drops the panel mid-motion.
+        #
+        # FLOAT is a `var` declared further down and is therefore UNDEFINED at the
+        # moment ensureWidget() first runs. That is safe and deliberate: only the
+        # handler BODIES read it, and they run on user interaction long after the
+        # IIFE has finished. `!FLOAT` on undefined is also correctly falsy, so a
+        # drag before the first unpin is ignored rather than throwing.
+        'var _hdr=el("nemChatHeader");'
+        'if(_hdr&&window.PointerEvent){'
+        '_hdr.addEventListener("pointerdown",function(e){'
+        'if(!FLOAT)return;'
+        # Let the header's own buttons work: a pointerdown on Pin back must not
+        # start a drag, or the button never receives its click.
+        'if(e.target&&e.target.closest&&e.target.closest("button"))return;'
+        'var sec=el("nemChatSection");if(!sec)return;'
+        'var r=sec.getBoundingClientRect();'
+        'var dx=e.clientX-r.left,dy=e.clientY-r.top;'
+        'function mv(ev){sec.style.left=(ev.clientX-dx)+"px";'
+        'sec.style.top=(ev.clientY-dy)+"px";}'
+        'function up(){'
+        '_hdr.removeEventListener("pointermove",mv);'
+        '_hdr.removeEventListener("pointerup",up);'
+        '_hdr.removeEventListener("pointercancel",up);'
+        'fclamp(sec);'
+        'var st=fstate();st.left=parseInt(sec.style.left,10);'
+        'st.top=parseInt(sec.style.top,10);fsave(st);}'
+        'try{_hdr.setPointerCapture(e.pointerId);}catch(err){}'
+        '_hdr.addEventListener("pointermove",mv);'
+        '_hdr.addEventListener("pointerup",up);'
+        # pointercancel fires when the browser steals the gesture (scroll,
+        # context menu). Without it the move handler would stay bound and the
+        # panel would follow the cursor with no button held.
+        '_hdr.addEventListener("pointercancel",up);'
+        'e.preventDefault();'
+        '});}'
+        # CSS `resize:both` does NOT fire the window resize event, so a
+        # ResizeObserver is the only way to notice the user dragging the corner.
+        # Guarded rather than assumed present -- an older browser simply loses
+        # size persistence and log re-sizing, not the feature.
+        'var _sec0=el("nemChatSection");'
+        'if(_sec0&&window.ResizeObserver){'
+        'new ResizeObserver(function(){'
+        'var s=el("nemChatSection");if(!s||!FLOAT)return;'
+        'fsizelog(s);var st=fstate();st.w=s.offsetWidth;st.h=s.offsetHeight;fsave(st);'
+        '}).observe(_sec0);}'
+        'window.addEventListener("resize",function(){'
+        'var s=el("nemChatSection");if(s&&FLOAT){fclamp(s);fsizelog(s);}});'
         'return true;'
         '}'
         'if(!ensureWidget()){'
@@ -2225,6 +2296,138 @@ def get_chat_js() -> str:
         'sec.style.display="block";OPTS=st.models||null;meta(st);tierUI();'
         '}).catch(function(){});'
         '};'
+        # ⚠ NAMING: this `TIER` is the MODEL tier — "standard" | "advanced",
+        # which Anthropic model a chat question is billed against. It is NOT the
+        # EXPLANATION tier ("beginner" | "intermediate" | "pro") that
+        # static/tier.js stores in localStorage under `explanationTier` and that
+        # every user-facing string in the dashboard is written against, including
+        # the per-tier AI alert explanations added 2026-08-06
+        # (dashboard.py `_EXPLANATION_TIERS`).
+        #
+        # Two unrelated axes, one identifier apart, in code that sits side by
+        # side: a chat surface can be on the ADVANCED model while its reader is
+        # on the BEGINNER explanation tier, and neither constrains the other.
+        # Named here rather than renamed because `TIER` is closed over by
+        # tierUI()/nemChatRaise()/nemChatLower() in this same concatenated string
+        # — a rename is a mechanical change to string-built JS with no compiler
+        # to catch a miss, which is a poor trade for a comment's worth of clarity.
+        #
+        # ── UNPIN: float the SAME node, in the SAME document ─────────────────
+        #
+        # PUNCHLIST backlog (2026-08-05): "unpin the chat widget into a separate,
+        # user-resizable popup window" -- the fixed-size embedded area feels
+        # cramped. Scoped 2026-08-06 as three options; this is Option 2.
+        #
+        # WHY NOT A REAL window.open() POPUP. `appendChild` cannot move a node
+        # between documents, so the relocation mechanism below would not merely
+        # need extending -- it would not apply at all. Worse, every control in
+        # this widget is an inline `onclick="nemChatAsk()"`, which resolves
+        # against the POPUP's globals, where nemChatAsk/TIER/OPTS do not exist.
+        # Each button would silently become a no-op: the exact failure shape the
+        # single-instance design was introduced to fix (5330220), arriving from a
+        # new direction. And `ensureWidget()` -- the backstop for a destroyed
+        # node -- would fire in the opener and mint a SECOND widget while the
+        # first lived in the popup, recreating the duplicate-instance state.
+        #
+        # So this floats the existing node instead: position:fixed on <body>,
+        # CSS `resize:both`, header as a drag handle. The single-instance
+        # invariant, every handler, the shared cost display and ensureWidget()
+        # are all untouched, because nothing crosses a document boundary. It
+        # cannot leave the tab -- the accepted trade, and a narrow one, since the
+        # chat is anchored to a finding that is being viewed on this page.
+        'var FLOAT=false,HOST=null,FKEY="nemChatFloat";'
+        # Geometry persists so the panel reopens where it was left. A corrupt or
+        # unreadable value returns {} and every read below falls back to a
+        # default, rather than throwing and taking the widget down with it.
+        'function fstate(){try{return JSON.parse(localStorage.getItem(FKEY)||"{}")||{};}catch(e){return {};}}'
+        'function fsave(o){try{localStorage.setItem(FKEY,JSON.stringify(o));}catch(e){}}'
+        # Keep the panel reachable. Without this a panel left near the right edge
+        # of a wide monitor is stranded off-screen on a laptop -- present in the
+        # DOM, impossible to drag back, and indistinguishable from "the unpin
+        # button did nothing".
+        'function fclamp(sec){'
+        'var l=parseInt(sec.style.left,10),t=parseInt(sec.style.top,10);'
+        'if(isNaN(l))l=0;if(isNaN(t))t=0;'
+        'var maxL=Math.max(0,window.innerWidth-sec.offsetWidth);'
+        'var maxT=Math.max(0,window.innerHeight-sec.offsetHeight);'
+        'sec.style.left=Math.min(Math.max(0,l),maxL)+"px";'
+        'sec.style.top=Math.min(Math.max(0,t),maxT)+"px";'
+        '}'
+        # The log has a fixed 230px cap inline, so a taller panel would grow its
+        # chrome and leave the transcript the same size -- resizing would look
+        # broken. A RATIO rather than measured arithmetic: subtracting measured
+        # chrome height is exact until any control wraps, and then it is silently
+        # wrong. This is always sane at every size, which matters more here than
+        # pixel fidelity.
+        'function fsizelog(sec){var lg=el("nemChatLog");if(!lg)return;'
+        'lg.style.maxHeight=FLOAT?(Math.max(80,Math.round(sec.clientHeight*0.45))+"px"):"230px";}'
+        'function fbtns(){'
+        'var u=el("nemChatUnpinBtn"),p=el("nemChatRepinBtn"),h=el("nemChatHeader");'
+        'if(u)u.style.display=FLOAT?"none":"";'
+        'if(p)p.style.display=FLOAT?"":"none";'
+        'if(h)h.style.cursor=FLOAT?"move":"default";'
+        '}'
+        # z-index 1500 sits above .modal/.db-modal (1000) so the panel is usable
+        # over an open alert modal -- the main reason to unpin at all -- and below
+        # the toast (2000), which must never be covered.
+        #
+        # `display` is deliberately NOT set here: nemChatInit owns it (none while
+        # loading, block once available), and writing it from this path would
+        # race that and show an empty panel.
+        'function fapply(sec){var st=fstate();'
+        'sec.style.position="fixed";sec.style.zIndex="1500";'
+        'sec.style.width=(st.w||420)+"px";sec.style.height=(st.h||460)+"px";'
+        'sec.style.left=(st.left!=null?st.left:Math.max(0,window.innerWidth-460))+"px";'
+        'sec.style.top=(st.top!=null?st.top:80)+"px";'
+        'sec.style.resize="both";sec.style.overflow="auto";'
+        'sec.style.background="#16213e";sec.style.border="1px solid #2a3f5f";'
+        'sec.style.borderRadius="6px";sec.style.boxShadow="0 8px 28px rgba(0,0,0,0.55)";'
+        'sec.style.padding="12px";sec.style.boxSizing="border-box";'
+        'sec.style.minWidth="300px";sec.style.minHeight="260px";'
+        'sec.style.marginTop="0";sec.style.borderTop="1px solid #2a3f5f";'
+        'fclamp(sec);fsizelog(sec);}'
+        # Restore the three inline values from the original markup explicitly
+        # rather than blanking them: they are part of how the widget looks INLINE,
+        # so clearing them all would repin into a subtly different widget.
+        'function fclear(sec){'
+        '["position","left","top","width","height","zIndex","resize","overflow",'
+        '"background","border","borderRadius","boxShadow","padding","boxSizing",'
+        '"minWidth","minHeight"].forEach(function(p){sec.style[p]="";});'
+        'sec.style.marginTop="18px";sec.style.borderTop="1px solid #333";'
+        'sec.style.paddingTop="14px";fsizelog(sec);}'
+        'window.nemChatUnpin=function(){var sec=el("nemChatSection");if(!sec)return;'
+        'FLOAT=true;'
+        # Park on <body> before floating. position:fixed inside an ancestor with
+        # a transform/filter resolves against THAT ancestor, not the viewport --
+        # so a panel left inside a module card could land somewhere unexpected.
+        # <body> is also the widget's existing safe home on close.
+        'if(document.body&&sec.parentNode!==document.body)document.body.appendChild(sec);'
+        'fapply(sec);fbtns();var st=fstate();st.on=true;fsave(st);};'
+        'window.nemChatRepin=function(){var sec=el("nemChatSection");if(!sec)return;'
+        'FLOAT=false;fclear(sec);fbtns();'
+        # Back into the container it was last attached to -- but only if that node
+        # is still in the document. Surfaces rebuild their own containers, so a
+        # remembered HOST can be detached, and appending into it would move the
+        # only widget somewhere invisible. Falling back to <body> is the same
+        # parking rule nemChatClose already relies on.
+        'if(HOST&&document.body&&document.body.contains(HOST))HOST.appendChild(sec);'
+        'else if(document.body)document.body.appendChild(sec);'
+        'var st=fstate();st.on=false;fsave(st);};'
+        # Re-float on load if the panel was left unpinned. Deliberately NOT done
+        # inside ensureWidget(): that runs at line-1 of this IIFE, BEFORE the
+        # window.nemChatUnpin assignment above has executed, so calling it from
+        # there would throw on `undefined is not a function`.
+        #
+        # The `else fbtns()` branch is not cosmetic -- without it a pinned widget
+        # never initialises its buttons, and Unpin would render hidden.
+        'function frestore(){var sec=el("nemChatSection");if(!sec)return;'
+        'if(fstate().on&&window.nemChatUnpin)window.nemChatUnpin();else fbtns();}'
+        # ensureWidget registered its own DOMContentLoaded listener earlier in
+        # this IIFE, so on a still-loading document it runs FIRST and the node
+        # exists by the time frestore is called. Listener order is registration
+        # order, and that ordering is what makes this correct.
+        'if(document.readyState==="loading"){'
+        'document.addEventListener("DOMContentLoaded",frestore);}else{frestore();}'
         # Relocate the single widget into whichever container is open. Surfaces
         # that expand rows in place (malware findings, queue items) can have
         # several open at once; moving one widget keeps a single DOM instance and
@@ -2233,7 +2436,18 @@ def get_chat_js() -> str:
         'ensureWidget();'
         'var sec=el("nemChatSection");'
         'if(!sec||!container)return;'
-        'if(sec.parentNode!==container)container.appendChild(sec);'
+        # Remembered even while floating, so Pin back has somewhere to return to.
+        'HOST=container;'
+        # WHILE FLOATING THE PANEL DOES NOT MOVE. Appending it into the container
+        # would yank a panel the user deliberately positioned back inline the
+        # moment they opened another finding -- which reads as the unpin having
+        # been silently undone. It stays put and simply re-points at the new
+        # surface, which is the whole value of an unpinned panel.
+        # fapply() re-runs because a container may have been rebuilt underneath it.
+        'if(FLOAT){'
+        'if(document.body&&sec.parentNode!==document.body)document.body.appendChild(sec);'
+        'fapply(sec);'
+        '}else if(sec.parentNode!==container)container.appendChild(sec);'
         'window.nemChatInit(surface,rowId);'
         '};'
         'window.nemChatClose=function(){'
