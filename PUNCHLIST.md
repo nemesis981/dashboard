@@ -2571,16 +2571,20 @@ this entry is the proposal, not the implementation.
       it far easier to trigger many analyses in a row than the current active-only surface
       does. Decide the spend-gating story before wiring, not after.
 
-- [ ] **BACKLOG IDEA (not scoped, do not build): "unpin" the chat widget into a separate,
-  user-resizable popup window.** Feature request, not a bug — the fixed-size embedded chat area
-  (`#nemChatSection`) works well for some users but feels cramped for others.
-    - [ ] **Shape:** an "unpin" affordance next to the existing widget controls that opens the
-      chat in its own popup/window, sized and positioned by the user, as an alternative to the
-      inline embedded view rather than a replacement for it.
-    - [ ] **Not scoped for immediate build** — same backlog status as the descoped
-      `/firewall-db` one-shot AI-analysis panel entry above. Captured per Rule 7 so it is not
-      silently re-discovered or silently built.
-    - [ ] Requested by the operator, 2026-08-05.
+- [x] **[DONE 2026-08-06] "Unpin" the chat widget into a movable, resizable panel.** Feature
+  request, not a bug — the fixed-size embedded chat area (`#nemChatSection`) works well for
+  some users but feels cramped for others. Shipped `1f75ae6`.
+    - [x] **Shape actually built differs from the original proposal, deliberately.** This entry
+      originally proposed a real `window.open()` popup. Built instead: the SAME DOM node floated
+      via `position:fixed` in the same document (drag handle, `resize:both` + `ResizeObserver`,
+      viewport-clamped, geometry persisted in `localStorage`). A real popup was evaluated and
+      rejected at build time — `appendChild` cannot move a node between documents, and every
+      control here is an inline `onclick` resolving against this document's globals, so a popup
+      would turn each button into a silent no-op and `ensureWidget()`'s backstop would mint a
+      second widget in the opener, recreating the duplicate-instance bug the single-instance
+      design (`5330220`) exists to prevent. The float approach delivers the same user-facing
+      value (bigger, user-positioned, user-resized) without crossing a document boundary.
+    - [x] Requested by the operator, 2026-08-05. Built by Window 3, 2026-08-06.
 
 - [ ] **`analyze_alert()`'s early-return gate reads `priority`, so the AI is never called
   for any alert.** `dashboard.py` — `SELECT * FROM alerts` column order is
