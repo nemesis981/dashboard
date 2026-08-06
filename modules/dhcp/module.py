@@ -60,23 +60,55 @@ unavailable — but a gap in the ledger must never be silent either.
 
 import json
 import logging
+from datetime import datetime
 import os
 import re
 import shutil
 import socket
 import subprocess
+import threading
 import tempfile
 
-from modules import NemesisModule
+from modules import NemesisModule, get_data_manager
 
 try:  # import shape differs by caller PYTHONPATH
     import nemesis_errors
+    import database
 except ImportError:  # pragma: no cover
     from alert_manager import nemesis_errors  # type: ignore
+    from alert_manager import database  # type: ignore
 
 log = logging.getLogger("nemesis.dhcp")
 
+
+def _dm_conn():
+    """DB access via the Data Manager (ADR 0006), never a bare `get_db()`.
+
+    `modules_loader` REFUSES to load a module that calls `get_db()` — statically,
+    before any of its code runs. Verified the hard way 2026-08-06: an earlier
+    revision used `self.get_db()` and the loader rejected the whole module.
+    """
+    return get_data_manager().connect(MODULE_NAME)
+
+
+def _now_iso():
+    """Local ISO timestamp, matching the convention every sibling table uses.
+
+    Deliberately not `datetime.utcnow()`: ADR 0004 settled on local ISO for this
+    database, and login_events already had to be migrated once for drifting from
+    it (its column DEFAULT was SQLite's UTC `datetime('now')` while every Python
+    writer used local time, giving the same event two timestamps five hours
+    apart).
+    """
+    return datetime.now().isoformat(timespec="seconds")
+
 MODULE_NAME = "dhcp"
+
+#: How often the lease->inventory sync runs while serving. Leases change on human
+#: timescales (a device joining), so a tight loop would burn cycles re-reading an
+#: unchanged file. 60s bounds how long a newly-joined device stays unnamed in the
+#: inventory without making the loop a busy-wait.
+SYNC_INTERVAL_SECONDS = 60
 
 # ── DHCP authority: a three-way, OPERATOR-FACING choice ──────────────────────
 #
@@ -226,32 +258,42 @@ def ensure_codes_registered(conn):
 
 
 def _record(code, context=None, conn=None):
-    """Record one occurrence, degrading LOUDLY when the error system is absent.
+    """Record one occurrence, degrading LOUDLY when recording is impossible.
 
-    Two realities this has to survive without taking DHCP down with it:
+    DELEGATES to `nemesis_errors.record_error_best_effort()` rather than
+    reimplementing it. An earlier version of this function hand-rolled the
+    never-raise behaviour because that function did not exist yet; it landed in
+    `db9e0c4`, so this now calls it. Two implementations of "record without
+    raising" is exactly the drift this codebase keeps having to undo.
 
-    * **Pure-function callers have no connection.** `check_preconditions()` is
-      used by tests and by callers that have not opened a DB. With `conn=None`
-      the occurrence is logged and explicitly reported as not persisted.
-    * **The error system may not be wired yet.** `nemesis_errors` ships its own
-      DDL but nothing calls `init_error_tables()` in core init as of 2026-08-06,
-      so the `error_*` tables may not exist. A missing table must not stop DHCP.
+    Its contract is the one this module needs, for the reason its own docstring
+    gives: almost every call site here is already inside an `except:`, and a
+    recording failure that raised would REPLACE the original fault with the
+    error system's own — handing the operator the wrong exception entirely.
 
-    In both cases the failure is logged AND the fact that it was not persisted is
-    stated. That distinction matters: "recorded" and "logged because recording
-    was impossible" must never look the same to whoever reads the journal later,
-    or the ledger will appear to have gaps it cannot explain.
+    The one thing still handled here is `conn=None`. Pure callers
+    (`check_preconditions()`, tests) have no database, and the upstream function
+    reasonably requires one. A missing connection is logged and explicitly
+    reported as not persisted.
+
+    **"Recorded" and "logged because recording was impossible" must never look
+    the same** to whoever reads the journal later, or the ledger appears to have
+    gaps it cannot account for.
     """
     if conn is None:
-        log.error("[%s] %s | not persisted (no DB connection at this call site)",
+        log.error("[%s] %s | NOT PERSISTED (no DB connection at this call site)",
                   code, context)
         return None
-    try:
-        return nemesis_errors.record_error(conn, code, context=context)
-    except Exception as e:  # noqa: BLE001 — reported, never swallowed
-        log.error("[%s] %s | NOT PERSISTED — error system unavailable (%s)",
-                  code, context, e)
-        return None
+    rid = nemesis_errors.record_error_best_effort(
+        conn, code, context=context, logger=log)
+    if rid is None:
+        # The upstream helper already logged the cause. This line states the
+        # consequence in this module's own terms, so a journal reader sees that
+        # a DHCP failure went unrecorded rather than only that the error system
+        # had a problem.
+        log.error("[%s] %s | NOT PERSISTED (error system could not record it)",
+                  code, context)
+    return rid
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -377,6 +419,105 @@ class DhcpConfig:
             out.extend(scope.render())
         out.append("")
         return "\n".join(out)
+
+
+# ── Declarative interface addressing + service unit ──────────────────────────
+#
+# ⚠ THE BOOT DEADLOCK THIS EXISTS TO AVOID. `systemd-networkd-wait-online` can
+# block FOREVER on an interface whose only possible DHCP server is on the same
+# box — the interface waits for a lease, the lease waits for the DHCP service,
+# and the DHCP service waits for the boot that the interface is blocking. It
+# takes the whole machine down, not just DHCP, and it fails at boot: the hardest
+# time to debug, on a headless appliance, with no network to reach it by.
+#
+# Two independent things break the cycle, and BOTH are required:
+#   1. `optional: true` in the netplan stanza — tells wait-online not to block on
+#      this interface at all. This is the direct fix.
+#   2. A STATIC address, applied declaratively at network-config time. The
+#      interface must never need a lease to come up.
+#
+# The module NEVER runs `ip addr add` at service start. Its precondition check
+# instead ASSERTS the address is already present (see `check_preconditions`) and
+# refuses to start if it is not — because an absent address means the
+# declarative config did not apply, and serving DHCP from an unaddressed
+# interface is worse than not serving at all.
+
+NETPLAN_PATH = "/etc/netplan/60-nemesis-dhcp.yaml"
+UNIT_PATH = "/etc/systemd/system/%s.service" % SERVICE_NAME
+
+
+def render_netplan(interface, address, prefix_len):
+    """Netplan stanza pinning a static address on a served interface.
+
+    `dhcp4: false` because this interface is where Nemesis SERVES DHCP — asking
+    it to also be a DHCP client there would have it try to lease an address from
+    itself.
+    """
+    if not interface or not address:
+        raise DhcpConfigError(
+            "refusing to render netplan: interface and address are both required")
+    return (
+        "# Generated by the Nemesis dhcp module — DO NOT EDIT BY HAND.\n"
+        "#\n"
+        "# `optional: true` is load-bearing, not tidiness: without it\n"
+        "# systemd-networkd-wait-online blocks the entire boot waiting for an\n"
+        "# interface whose only DHCP server is this machine — a circular wait\n"
+        "# that never resolves and takes the whole box down with it.\n"
+        "#\n"
+        "# `dhcp4: false` because Nemesis SERVES DHCP on this interface; a client\n"
+        "# here would be trying to lease an address from itself.\n"
+        "network:\n"
+        "  version: 2\n"
+        "  ethernets:\n"
+        "    %s:\n"
+        "      dhcp4: false\n"
+        "      dhcp6: false\n"
+        "      optional: true\n"
+        "      addresses:\n"
+        "        - %s/%s\n" % (interface, address, prefix_len)
+    )
+
+
+def render_systemd_unit(conf_path=CONF_PATH):
+    """The unit for our own dnsmasq instance.
+
+    `After=network.target` and deliberately NOT `network-online.target`: waiting
+    for the network to be "online" is the other half of the deadlock above, since
+    this service is what would make it online.
+
+    `ExecReload` sends SIGHUP, which is how a device's tier assignment changes —
+    dnsmasq re-reads `dhcp-hostsfile` without dropping existing leases. A restart
+    would be both unnecessary and disruptive to every device holding a lease.
+    """
+    return (
+        "# Generated by the Nemesis dhcp module — DO NOT EDIT BY HAND.\n"
+        "[Unit]\n"
+        "Description=Nemesis DHCP server (dnsmasq, DHCP-only)\n"
+        "Documentation=file://%s\n"
+        "After=network.target\n"
+        "# NOT network-online.target -- see the boot-deadlock note in module.py.\n"
+        "\n"
+        "[Service]\n"
+        "Type=simple\n"
+        "ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --conf-file=%s\n"
+        "ExecReload=/bin/kill -HUP $MAINPID\n"
+        "Restart=on-failure\n"
+        "RestartSec=5\n"
+        "# :67 is privileged and DHCP needs raw access to answer broadcasts.\n"
+        "# Granted narrowly rather than running unconfined as root.\n"
+        "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN\n"
+        "CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN\n"
+        "NoNewPrivileges=true\n"
+        "ProtectSystem=strict\n"
+        "ProtectHome=true\n"
+        "PrivateTmp=true\n"
+        "# The only paths it may write: its lease file and its runtime dir.\n"
+        "ReadWritePaths=%s\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=multi-user.target\n"
+        % (conf_path, conf_path, os.path.dirname(LEASE_PATH))
+    )
 
 
 # ── Validation gate ──────────────────────────────────────────────────────────
@@ -626,6 +767,12 @@ class Module(NemesisModule):
     def __init__(self, manifest: dict):
         super().__init__(manifest)
         self._cfg = self._load_config()
+        self._stop_evt = threading.Event()
+        self._thread = None
+        #: Why serving is not running, when it is not. Surfaced on the dashboard
+        #: card so a failed start explains itself instead of the module simply
+        #: appearing inert.
+        self._last_error = None
 
     # -- config ------------------------------------------------------------
 
@@ -670,7 +817,7 @@ class Module(NemesisModule):
         visible rather than silent.
         """
         try:
-            conn = self.get_db()
+            conn = _dm_conn()
             ensure_codes_registered(conn)
             return conn
         except Exception as e:  # noqa: BLE001
@@ -691,8 +838,28 @@ class Module(NemesisModule):
     # -- lifecycle ---------------------------------------------------------
 
     def start(self) -> None:
+        """Bring the module up. MUST NOT raise, and MUST NOT block.
+
+        ⚠ BOTH CONSTRAINTS COME FROM THE LOADER, verified 2026-08-06 rather than
+        assumed:
+
+        * `modules_loader._load_module()` calls `instance.start()` **inline**
+          during dashboard boot, so anything that blocks here stalls the whole
+          dashboard from starting.
+        * Its caller wraps load in `except Exception: log.exception("failed to
+          load %s")`. So a raise does not surface as a DHCP problem — **the
+          module silently does not load at all**: no dashboard card, no status,
+          no explanation. An earlier version of this method raised on
+          precondition failure and would have vanished exactly that way.
+
+        So an operational failure (preconditions unmet, daemon refused to start)
+        is RECORDED and stored in `self._last_error`, and the module stays
+        loaded to report it. A module that can explain why it is not serving is
+        worth more than one that disappears.
+        """
         conn = self._err_conn()
         mode = self.mode
+        self._last_error = None
 
         # Modes 2 and 3 are not "the module is broken" — they are supported
         # configurations in which Nemesis deliberately does not serve leases.
@@ -706,6 +873,20 @@ class Module(NemesisModule):
                      "; ".join(caps["degraded"]) or "nothing")
             return
 
+        try:
+            self._start_serving(conn)
+        except (DhcpConfigError, PreconditionFailed, RuntimeError) as e:
+            # Already recorded as a structured code by the raising site. Kept
+            # here so the dashboard card can say WHY, and swallowed so the
+            # module stays loaded (see the docstring).
+            self._last_error = str(e)
+            log.error("dhcp: not serving — %s", e)
+            return
+
+        self._start_sync_thread()
+
+    def _start_serving(self, conn):
+        """Validate, apply config, start the daemon. Raises on any failure."""
         ok, detail = selftest_validator()
         if not ok:
             _record(E_CONFIG_INVALID, context={"selftest": detail}, conn=conn)
@@ -745,7 +926,58 @@ class Module(NemesisModule):
         log.info("dhcp: started %s on %s", SERVICE_NAME,
                  ", ".join(self._cfg.get("interfaces", [])))
 
+    # -- lease sync loop ---------------------------------------------------
+
+    def _start_sync_thread(self):
+        """Spawn the periodic lease->inventory sync.
+
+        On this module's OWN lifecycle rather than `device_scanner`'s cycle or a
+        separate timer unit (Window 1's recommendation, 2026-08-06). The reason
+        is blast radius: `device_scanner`'s loop has no exception handling and
+        runs on a tight restart cycle, so folding a DHCP-sync failure into it
+        would turn a 5-minute scanner into a crash-restart hot loop instead of
+        degrading quietly. Here, a sync failure costs one skipped cycle.
+        """
+        self._stop_evt.clear()
+        self._thread = threading.Thread(
+            target=self._sync_loop, name="dhcp-lease-sync", daemon=True)
+        self._thread.start()
+        log.info("dhcp: lease sync every %ds", SYNC_INTERVAL_SECONDS)
+
+    def _sync_loop(self):
+        """Sync leases, then promote hostnames. Survives its own failures.
+
+        Per-cycle try/except, matching `anomaly_detection`'s loop: one bad cycle
+        must not kill the thread, because a dead sync thread and an idle one are
+        indistinguishable from outside — the exact silent-failure shape this
+        codebase keeps finding.
+
+        `Event.wait()` rather than `sleep()` so `stop()` interrupts immediately
+        instead of waiting out a full interval.
+        """
+        while not self._stop_evt.is_set():
+            try:
+                conn = _dm_conn()
+                try:
+                    self.sync_leases(conn)
+                finally:
+                    conn.close()
+                # ⚠ DELIBERATELY on core's OWN connection, not the one above.
+                # This module's Data Manager namespace grants `dhcp_leases` and
+                # nothing else, so an `UPDATE devices` issued through it is
+                # REFUSED at runtime. That refusal is the ADR 0001 boundary
+                # being enforced rather than merely documented — core opens its
+                # own connection to write the table core owns.
+                database.reconcile_dhcp_hostnames()
+            except Exception:
+                log.exception("dhcp: lease sync cycle failed")
+            self._stop_evt.wait(SYNC_INTERVAL_SECONDS)
+
     def stop(self) -> None:
+        self._stop_evt.set()
+        if self._thread:
+            self._thread.join(timeout=10)
+            self._thread = None
         r = subprocess.run(["systemctl", "stop", SERVICE_NAME],
                            capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
@@ -799,6 +1031,77 @@ class Module(NemesisModule):
             "interfaces": self._cfg.get("interfaces", []),
             "degraded": caps["degraded"],
         }
+
+    # -- lease capture: the module's side of the ADR 0001 boundary ----------
+
+    def init_lease_table(self, conn):
+        """DDL for `dhcp_leases` — this module's OWN table.
+
+        Prefixed, therefore module-owned and writable by this module under ADR
+        0001's write-own/read-any rule. The core `devices` table is NOT writable
+        from here; `database.reconcile_dhcp_hostnames()` is the only thing that
+        promotes an observation from this table into the shared inventory.
+
+        This table IS the interface between the two sides. Keeping it explicit
+        means the module can be disabled, replaced, or run in a mode that never
+        serves a lease, without any of that reaching the inventory's schema.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dhcp_leases (
+                mac        TEXT PRIMARY KEY,
+                ip         TEXT,
+                hostname   TEXT,
+                expiry     TEXT,
+                first_seen TEXT,
+                last_seen  TEXT
+            )
+        """)
+        conn.commit()
+
+    def sync_leases(self, conn=None):
+        """Read the lease file into `dhcp_leases`. Returns a summary.
+
+        Upserts on MAC. `first_seen` is preserved across updates — it is the
+        only record of when a device was first observed on the network, and
+        overwriting it on every renewal would silently destroy that.
+
+        Hostnames are stored EXACTLY as the client sent them. Normalisation
+        belongs to whatever displays or classifies them; storing a cleaned-up
+        value would discard what was actually observed, which is the thing worth
+        keeping.
+
+        Does nothing in modes where Nemesis serves no leases — there is no lease
+        file to read, and inventing one would misreport the network.
+        """
+        if not mode_capabilities(self.mode)["serves_dhcp"]:
+            return {"served": False, "seen": 0, "written": 0}
+
+        own = conn is None
+        if own:
+            conn = _dm_conn()
+        try:
+            self.init_lease_table(conn)
+            leases = self.read_leases()
+            now = _now_iso()
+            written = 0
+            for lease in leases:
+                mac = (lease.get("mac") or "").lower()
+                if not mac:
+                    continue
+                conn.execute(
+                    "INSERT INTO dhcp_leases (mac, ip, hostname, expiry, "
+                    "first_seen, last_seen) VALUES (?,?,?,?,?,?) "
+                    "ON CONFLICT(mac) DO UPDATE SET "
+                    "  ip=excluded.ip, hostname=excluded.hostname, "
+                    "  expiry=excluded.expiry, last_seen=excluded.last_seen",
+                    (mac, lease.get("ip"), lease.get("hostname"),
+                     lease.get("expiry"), now, now))
+                written += 1
+            conn.commit()
+            return {"served": True, "seen": len(leases), "written": written}
+        finally:
+            if own:
+                conn.close()
 
     def read_leases(self):
         """Parse the lease file. Absent file is an empty list, not an error.

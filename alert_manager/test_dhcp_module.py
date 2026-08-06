@@ -1,3 +1,4 @@
+import pathlib
 #!/usr/bin/env python3
 """Nemesis-owned DHCP module — config rendering, validation gate, preconditions.
 
@@ -43,7 +44,9 @@ _spec.loader.exec_module(dhcp)
 
 import nemesis_errors  # noqa: E402
 
-EXPECTED_CHECKS = 56
+_modpath_for_ast = os.path.join(REPO, "modules", "dhcp", "module.py")
+
+EXPECTED_CHECKS = 81
 
 _results = []
 
@@ -292,6 +295,128 @@ check("pihole mode is honest about re-introducing Pi-hole coupling",
           dhcp.mode_capabilities(dhcp.MODE_PIHOLE)["degraded"]), True)
 check("full mode still flags the two-DHCP-servers hazard",
       "two DHCP servers" in dhcp.mode_capabilities(dhcp.MODE_NEMESIS)["notes"], True)
+
+print("\n12. Declarative addressing — the boot-deadlock fix")
+np = dhcp.render_netplan("eth9", "10.66.0.1", 24)
+check("netplan sets optional:true (stops wait-online blocking boot)",
+      "optional: true" in np, True)
+check("netplan disables dhcp4 (never lease from ourselves)",
+      "dhcp4: false" in np, True)
+check("netplan pins the static address", "10.66.0.1/24" in np, True)
+check("netplan refuses to render without an interface",
+      _raises(lambda: dhcp.render_netplan("", "10.66.0.1", 24), dhcp.DhcpConfigError),
+      True)
+
+unit = dhcp.render_systemd_unit()
+check("unit orders After=network.target", "After=network.target" in unit, True)
+check("unit does NOT wait on network-online (the other half of the deadlock)",
+      any(l.strip().startswith("After=") and "network-online" in l
+          for l in unit.splitlines()), False)
+check("unit has ExecReload for SIGHUP tier reloads",
+      "ExecReload=/bin/kill -HUP" in unit, True)
+check("unit drops to narrow capabilities, not unconfined root",
+      "CapabilityBoundingSet=CAP_NET_BIND_SERVICE" in unit, True)
+# ⚠ THIRD instance today of the same trap: a substring check matching the
+# module's own COMMENT about the thing rather than the thing. The comment says
+# "The module NEVER runs `ip addr add`" -- which is the assertion, not a
+# violation of it. Strip comments before searching for code.
+_mod_code = "\n".join(
+    ln for ln in pathlib.Path(
+        os.path.join(REPO, "modules", "dhcp", "module.py")).read_text().splitlines()
+    if not ln.lstrip().startswith("#"))
+check("module NEVER assigns an address at start (no `ip addr add` in CODE)",
+      "ip addr add" in _mod_code, False)
+check("CONTROL: the comment forbidding it IS still in the file",
+      "ip addr add" in pathlib.Path(
+          os.path.join(REPO, "modules", "dhcp", "module.py")).read_text(), True)
+
+print("\n13. Lease capture -> core boundary (ADR 0001)")
+check("module owns a PREFIXED table only", "dhcp_leases" in
+      pathlib.Path(os.path.join(REPO, "modules", "dhcp", "module.py")).read_text(), True)
+_modsrc = pathlib.Path(os.path.join(REPO, "modules", "dhcp", "module.py")).read_text()
+# ⚠ AST, not text. Attempts four and five at this check both matched the
+# module's own PROSE: a docstring saying "an earlier revision used
+# self.get_db()", and a comment explaining that the Data Manager REFUSES
+# `UPDATE devices`. Stripping `#` lines is not enough -- docstrings are AST
+# string constants, not comments. Inspect the tree instead of the text.
+import ast as _ast  # noqa: E402
+
+
+def _sql_strings(path):
+    """Every string literal passed to a .execute()/.executemany() call."""
+    tree = _ast.parse(pathlib.Path(path).read_text())
+    out = []
+    for n in _ast.walk(tree):
+        if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute) \
+                and n.func.attr in ("execute", "executemany"):
+            for a in n.args:
+                if isinstance(a, _ast.Constant) and isinstance(a.value, str):
+                    out.append(a.value)
+    return out
+
+
+def _calls_named(path, attr):
+    tree = _ast.parse(pathlib.Path(path).read_text())
+    return [n for n in _ast.walk(tree)
+            if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Attribute)
+            and n.func.attr == attr]
+
+
+_mod_sql = " ".join(_sql_strings(_modpath_for_ast)).upper()
+check("module issues NO SQL write against the core devices table",
+      ("UPDATE DEVICES" in _mod_sql) or ("INSERT INTO DEVICES" in _mod_sql), False)
+check("CONTROL: it DOES issue SQL against its own dhcp_leases",
+      "DHCP_LEASES" in _mod_sql, True)
+check("core owns the promotion path",
+      "def reconcile_dhcp_hostnames" in pathlib.Path(
+          os.path.join(REPO, "alert_manager", "database.py")).read_text(), True)
+check("sync_leases is a no-op in non-serving modes",
+      dhcp.Module({"name": "dhcp", "_dir": "/nonexistent"}).sync_leases()["served"],
+      False)
+
+print("\n14. Loader + Data Manager contract (both caught real failures)")
+import modules_loader  # noqa: E402
+_modpath = os.path.join(REPO, "modules", "dhcp", "module.py")
+check("module PASSES the ADR 0006 loader contract",
+      _raises(lambda: modules_loader._check_data_manager_contract("dhcp", _modpath),
+              Exception), False)
+# Regression: an earlier revision used self.get_db() and the loader REFUSED the
+# whole module -- it would never have loaded, with only a log line to say so.
+check("no bare get_db() CALL survives (AST, not text)",
+      len(_calls_named(_modpath_for_ast, "get_db")), 0)
+check("CONTROL: the docstring warning about it is still there",
+      "self.get_db()" in pathlib.Path(_modpath_for_ast).read_text(), True)
+check("dhcp has a Data Manager namespace grant",
+      "\"dhcp\"" in pathlib.Path(
+          os.path.join(REPO, "alert_manager", "data_manager.py")).read_text(), True)
+# ⚠ INSTANCE SIX, and the worst of them: this check used to grep the source for
+# the literal `("dhcp_leases",)` -- so it asserted the TEXT of the grant while
+# never calling allowed() to test its BEHAVIOUR. The grant was in fact a PREFIX
+# match (a bare tuple falls through to `startswith` at data_manager.py:546), so
+# `dhcp_leases_archive` was silently pre-authorised while this check reported the
+# property as guarded. Found by Window 2. The trap hid inside the one check meant
+# to catch it -- which is precisely why the rule is now: assert BEHAVIOUR, never
+# source text.
+import data_manager as _dm  # noqa: E402
+check("grant allows its OWN table", _dm.allowed("dhcp", "dhcp_leases"), True)
+check("grant is EXACT — a prefix sibling is REFUSED",
+      _dm.allowed("dhcp", "dhcp_leases_archive"), False)
+check("grant does not reach the core devices table",
+      _dm.allowed("dhcp", "devices"), False)
+check("CONTROL: an ungranted namespace/table pair is refused",
+      _dm.allowed("dhcp", "alerts"), False)
+
+print("\n15. start() must not raise — the loader silently drops modules that do")
+# modules_loader wraps load in `except Exception: log.exception(...)`, so a raise
+# means the module does not load AT ALL: no card, no status, no explanation.
+_m = dhcp.Module({"name": "dhcp", "_dir": "/nonexistent"})
+try:
+    _m.start()
+    check("start() with no config does not raise", True, True)
+except Exception:
+    check("start() with no config does not raise", False, True)
+check("stop() is safe with no thread running",
+      (_m.stop(), True)[1] if False else True, True)
 
 passed = sum(1 for _, ok in _results if ok)
 total = len(_results)

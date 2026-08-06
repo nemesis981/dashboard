@@ -1,15 +1,34 @@
 {
   "name": "dhcp",
-  "display_name": "DHCP Server (Pi-hole)",
-  "version": "1.0.0",
-  "description": "Activates Pi-hole's built-in DHCP server so Nemesis hands out IP addresses on your network instead of your Eero. Gives you per-device lease visibility and DNS-level tracking for every device the moment it connects.",
+  "display_name": "DHCP Server",
+  "version": "2.0.0",
+  "description": "Controls which system hands out IP addresses on your network. Nemesis can serve DHCP itself (its own dnsmasq instance, separate from Pi-hole), defer to Pi-hole, or leave DHCP entirely to your router. Serving it directly is what allows device names to be captured as devices join, and is a prerequisite for putting devices on separate network segments.",
   "category": "network",
   "provides_dashboard_card": true,
-  "requires_background_service": false,
-  "config_keys": ["PIHOLE_IP", "PIHOLE_PASSWORD"],
+  "requires_background_service": true,
+  "config_keys": [],
+  "settings": {
+    "mode": {
+      "type": "choice",
+      "default": "provider",
+      "choices": ["nemesis", "pihole", "provider"],
+      "label": "Which system serves DHCP?",
+      "help": "Changing this does not reconfigure your router. Whichever option you pick, make sure exactly ONE system on your network is serving DHCP.",
+      "choice_labels": {
+        "nemesis": "Nemesis serves DHCP",
+        "pihole": "Pi-hole serves DHCP",
+        "provider": "Your router or ISP gateway serves DHCP (default)"
+      },
+      "choice_help": {
+        "nemesis": "Full capability. Nemesis runs its own dnsmasq instance for DHCP only; Pi-hole keeps DNS and blocking. Device names are captured as devices join, and devices can be assigned to network segments. REQUIRES you to turn DHCP off on your router first.",
+        "pihole": "Nemesis does not serve leases. DEGRADED: no device tiering at lease time, network segmentation unavailable, and device names are polled from Pi-hole's API rather than captured as devices join. Useful as a fallback.",
+        "provider": "Nemesis does not touch DHCP at all. DEGRADED: no device-name capture, no device tiering, and network segmentation is unavailable regardless of your network hardware. The right choice when your router cannot be taken out of DHCP duty, which is common with ISP-supplied equipment."
+      }
+    }
+  },
   "enabled_by_default": false,
   "confirmation_required": true,
-  "confirmation_message": "Enabling DHCP takeover makes this machine the DHCP server for your entire network. Before enabling, you MUST disable DHCP on your Eero (or other router). Running two DHCP servers at the same time will cause IP conflicts and connectivity failures for every device on your network.",
-  "apt_deps": [],
+  "confirmation_message": "This controls which system hands out IP addresses on your network.\n\nIf you select 'Nemesis serves DHCP', you MUST first turn DHCP off on your router. Two DHCP servers running at the same time cause address conflicts and connectivity failures for every device on the network.\n\nThe other two options do not change your network — they tell Nemesis to stay out of DHCP, and the module will explain which features are unavailable as a result.",
+  "apt_deps": ["dnsmasq-base"],
   "pip_deps": []
 }

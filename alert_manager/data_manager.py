@@ -76,6 +76,22 @@ NAMESPACES = {
     "malware_detection":  ("malware_",),
     "diagnostics":        ("diagnostics_",),
 
+    # EXACT table grant. This module writes exactly one table -- observed
+    # leases -- and a prefix grant would let it silently acquire more as it
+    # grows, including tables that do not exist yet. It notably must NOT be able to write `devices`:
+    # that is core-owned (ADR 0001), and promotion of a lease hostname into the
+    # inventory happens in `database.reconcile_dhcp_hostnames()` on core's own
+    # connection. This grant is what makes that boundary enforced rather than
+    # merely intended -- a stray `UPDATE devices` from here is refused at runtime.
+    # DICT form, not a bare tuple — the distinction is load-bearing and this
+    # entry originally got it wrong. `allowed()` treats a plain tuple as a list of
+    # PREFIXES (`table.startswith(p)`), so `("dhcp_leases",)` silently
+    # pre-authorised `dhcp_leases_archive`, `dhcp_leases_anything` — every future
+    # table sharing that stem — while the comment above it claimed to be an exact
+    # grant. Exact-match semantics exist ONLY in the dict form. Matches the
+    # `integrity_watch` precedent, which uses it for exactly this precision.
+    "dhcp":               {"tables": ("dhcp_leases",)},
+
     # An EXPLICIT table list, not an `integrity_` prefix grant, and deliberately
     # so: this module exists to cross-check agent-reported scan activity, and a
     # prefix grant would let it silently acquire new writable tables as it grows.
