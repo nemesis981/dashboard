@@ -1,6 +1,6 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-06, ~14:50 CDT (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-06, ~15:05 CDT (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
@@ -17,12 +17,21 @@
 ## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
 **Public repo (`/opt/nemesis`) is fully clean and pushed.**
-- `origin/main` HEAD == local HEAD == `13239ea`, confirmed by direct hash comparison
+- `origin/main` HEAD == local HEAD == `3f4b933`, confirmed by direct hash comparison
   (`git rev-parse HEAD` / `git rev-parse origin/main`), not inferred.
-- **Zero unpushed commits.** Working tree has exactly ONE modified file:
-  `docs/roadmap/venue-guest-network.md` — this is **foreign WIP, not Window 2's**,
-  confirmed independently by Window 1, Window 3, and this window all day. Leave it alone.
+- **Zero unpushed commits.** Working tree has ONE file that's Window 2's business
+  (`docs/roadmap/venue-guest-network.md`, still foreign WIP, still not mine — see below)
+  plus a growing set of **Window 1 in-progress files, NOT yet explained in any handoff
+  this window has read**: `install.sh` and `modules/dhcp/module.py` modified;
+  `alert_manager/nemesis_errors.py`, `alert_manager/test_dhcp_module.py`,
+  `config/nftables/`, `scripts/deploy-quic-block.sh` untracked. Observed via `git status`
+  only — not reviewed, not staged, not touched. Matches Window 1's error-code-system
+  build (see the ADR 0001 note just below) plus what looks like DHCP-module and QUIC-block
+  work; **do not trust this list as current, re-run `git status` yourself.**
 - If power drops right now, **nothing of Window 2's is lost or half-committed.**
+- **Latest action:** `3f4b933` — added one line to ADR 0001 reserving the `error_*` table
+  prefix as CORE-owned (not a module namespace), at Window 1's request, needed for the
+  error-code-system build to land correctly under the existing prefix convention.
 
 **Production (`/opt/nemesis`, the live box) is caught up and verified healthy.**
 - `dashboard` service restarted **11:34:24 CDT**, running code == `0ee0c57` at that time
@@ -38,12 +47,12 @@
 - **All six services report `active` right now** (checked via `systemctl is-active`
   moments before this write).
 - Production `HEAD` was `0ee0c57` as of the last direct check (Window 3, before standing
-  down) — **five commits behind current `origin/main` (`13239ea`)**: the CLAUDE.md
-  VM-rename fix and the chat-popup PUNCHLIST closure landed AFTER that last production
-  check and have NOT triggered a restart (they're docs-only — nothing to serve
-  differently). **No code-behavior gap exists** between what's committed and what's
-  running; the 5-commit gap is entirely docs/PUNCHLIST/rev-bump content already covered
-  in "what shipped" below.
+  down) — **eight commits behind current `origin/main` (`3f4b933`)**: HANDOFF.md updates,
+  the worklog, the CLAUDE.md VM-rename fix, the chat-popup PUNCHLIST closure, and the
+  ADR 0001 `error_*` reservation, all landed AFTER that last production check and NONE
+  need a restart (docs-only — nothing to serve differently). **No code-behavior gap
+  exists** between what's committed and what's running; the gap is entirely
+  docs/PUNCHLIST/ADR content already covered in "what shipped" below.
 
 **What is mid-flight RIGHT NOW, and it is NOT in this repo:**
 Window 1 is actively working on a **separate VM** (`Nemesis Appliance Gateway`, renamed
