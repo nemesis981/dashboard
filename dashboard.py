@@ -2506,13 +2506,28 @@ def get_device_name(mac, ip):
         log.exception("get_device_name failed for mac=%s ip=%s: %s", mac, ip, e)
         return (ip, "Unknown", 0)
 
-#: Columns added by scripts/migrate_device_categories.py. Selected only when
-#: present, so this function works BOTH before and after the migration runs.
+#: Optional `devices` columns that CATEGORISATION consumes. Selected only when
+#: present, so this function works BOTH before and after a migration runs.
 #: That is deliberate: code deploy and schema migration are separate,
 #: separately-approved steps here, and either order must leave a working
 #: dashboard. Selecting an absent column would raise and `except` would return
 #: [] — an empty device list that looks exactly like "no devices found".
-_DEVICE_CATEGORY_COLUMNS = ("vendor", "category_override", "category_source")
+#:
+#: `hostname` is here for `nemesis_device_category`'s iOS branch, which reads
+#: `device.get("hostname")`. It is NOT from the categories migration — it is
+#: added by `init_devices_table()` and populated by
+#: `database.reconcile_dhcp_hostnames()` when the DHCP module runs in `nemesis`
+#: mode. It was MISSING from this tuple until 2026-08-06, which meant the column
+#: was never SELECTed, never reached the entry dict, and the iOS branch could not
+#: fire no matter what the DHCP module wrote. The column existing is not the same
+#: as the feature working, and the gap was invisible because a device with an iOS
+#: hostname still got a confident (wrong) category from another signal rather
+#: than an obviously-missing one.
+#:
+#: ADDING A COLUMN HERE IS NOT SUFFICIENT ON ITS OWN — it must also be copied
+#: into the `entry` dict below, which is the thing `classify()` actually reads.
+_DEVICE_CATEGORY_COLUMNS = ("vendor", "category_override", "category_source",
+                            "hostname")
 
 
 def _devices_table_columns(conn):
@@ -2552,6 +2567,10 @@ def get_network_devices():
                 "offline": False,
                 "category_override": row.get("category_override"),
                 "category_source": row.get("category_source"),
+                # Consumed by nemesis_device_category's iOS branch. `.get()`, not
+                # `[...]`, because the column is optional above and this dict is
+                # built from whatever was actually SELECTed.
+                "hostname": row.get("hostname"),
             }
             # has_agent is NOT passed yet. Correlating a `devices` row to an
             # enrolled agent needs a join that does not exist: `devices` is

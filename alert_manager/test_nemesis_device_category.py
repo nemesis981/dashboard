@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nemesis_device_category as dc  # noqa: E402
 
-EXPECTED_CHECKS = 62
+EXPECTED_CHECKS = 67
 
 passed = 0
 failed = 0
@@ -222,6 +222,69 @@ check("classify always returns a legal category",
           ({}, None, "x", {"device_type": "???"}, {"vendor": "nobody"})))
 check("classify always returns a non-empty reason",
       all(bool(dc.classify(d)[1]) for d in ({}, None, {"vendor": "Eero"})))
+
+
+# ── PIPELINE CONTRACT: every signal classify() reads must be DELIVERED ───────
+# THE BUG THIS EXISTS TO CATCH (found live 2026-08-06, after `devices.hostname`
+# was added by the DHCP work):
+#
+#   `classify()` read `device.get("hostname")` and worked perfectly. The column
+#   existed. The DHCP module populated it. And the feature was still completely
+#   dead — because `dashboard.get_network_devices()` never SELECTed the column
+#   and never put it in the dict it passes to `classify()`. Every classifier test
+#   in this file passed throughout, because the classifier was never the problem.
+#
+# The failure was INVISIBLE rather than loud: a device with an iOS hostname did
+# not come back "uncategorised", it came back confidently categorised as
+# something else from a weaker signal. So neither the UI nor any existing test
+# could show that a signal was missing.
+#
+# This check reads BOTH SIDES STATICALLY and asserts they agree: every key
+# `classify()` pulls out of its device mapping must appear as a key in the dict
+# literal `get_network_devices()` builds. It needs no database and does not
+# import dashboard (which pulls in the whole app), so it is cheap enough to keep
+# in this suite.
+print("\n[pipeline] every signal classify() reads is actually delivered")
+import ast as _ast, pathlib as _pl
+
+_src = _pl.Path(__file__).resolve().parent.parent / "dashboard.py"
+_tree = _ast.parse(_src.read_text(errors="replace"))
+_fn = next((n for n in _ast.walk(_tree)
+            if isinstance(n, _ast.FunctionDef) and n.name == "get_network_devices"), None)
+check("get_network_devices() found in dashboard.py", _fn is not None)
+
+_delivered = set()
+if _fn:
+    for _n in _ast.walk(_fn):
+        if isinstance(_n, _ast.Dict):
+            for _k in _n.keys:
+                if isinstance(_k, _ast.Constant) and isinstance(_k.value, str):
+                    _delivered.add(_k.value)
+
+# What classify() actually reads, parsed from THIS module's source rather than
+# hardcoded — so a newly-added signal is covered automatically instead of
+# needing someone to remember to extend a list here.
+_cat_src = _pl.Path(dc.__file__).read_text(errors="replace")
+_cat_fn = next((n for n in _ast.walk(_ast.parse(_cat_src))
+                if isinstance(n, _ast.FunctionDef) and n.name == "classify"), None)
+_read = set()
+for _n in _ast.walk(_cat_fn):
+    if (isinstance(_n, _ast.Call) and isinstance(_n.func, _ast.Attribute)
+            and _n.func.attr == "get" and _n.args
+            and isinstance(_n.args[0], _ast.Constant)
+            and isinstance(_n.args[0].value, str)):
+        _read.add(_n.args[0].value)
+
+check("classify() reads a non-empty set of signals (control: parser works)",
+      len(_read) >= 4, f"found {sorted(_read)}")
+check("hostname is among the signals classify() reads", "hostname" in _read)
+_missing = _read - _delivered
+check("EVERY signal classify() reads is delivered by get_network_devices()",
+      not _missing, f"NOT delivered: {sorted(_missing)}")
+# Control: the check must be able to FAIL. If _delivered were empty (parser
+# broken) the assertion above would report everything missing, not pass silently.
+check("CONTROL get_network_devices() delivers a non-empty dict (parser works)",
+      len(_delivered) >= 5, f"found {sorted(_delivered)}")
 
 
 print("\n" + "=" * 58)
