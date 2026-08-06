@@ -364,6 +364,37 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
         return 0
 
 
+
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Registered lazily on first use rather than at import: this module is loaded by
+# modules_loader BEFORE the error tables are guaranteed to exist, and a failed
+# registration at import time would take the whole module down for a diagnostic
+# facility. Registration is idempotent, so first-use is safe and cheap.
+_ERR_REGISTERED = False
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _ERR_REGISTERED
+    try:
+        import nemesis_errors
+    except Exception:
+        return None
+    try:
+        conn = get_data_manager().connect("tickets")
+        if not _ERR_REGISTERED:
+            nemesis_errors.init_error_tables(conn)
+            nemesis_errors.register_error_code(
+                conn, "E-TICKETS-001", "tickets",
+                "open-ticket count DB read failed; 0 returned as a real count",
+                "MEDIUM", error_class="db-read-empty-default")
+            _ERR_REGISTERED = True
+        return nemesis_errors.record_error_best_effort(conn, code, context=context,
+                                                       logger=log)
+    except Exception:
+        return None
+
+
 def get_open_ticket_count() -> int:
     try:
         _init_db()
@@ -373,7 +404,21 @@ def get_open_ticket_count() -> int:
         ).fetchone()[0]
         conn.close()
         return int(n)
-    except Exception:
+    except Exception as exc:
+        # E-TICKETS-001 — the textbook `db-read-empty-default`: returning 0 here
+        # is INDISTINGUISHABLE from "there genuinely are no open tickets", and
+        # the dashboard renders it as a real count either way. The 0 return is
+        # KEPT deliberately (callers expect an int and a raise here would break
+        # the card), but the failure is now recorded rather than discarded.
+        #
+        # best_effort, not record_error: we are inside the handler for a DB read
+        # that just failed, so the write may fail too — and raising here would
+        # replace this failure with the error system's own.
+        try:
+            _errors_record("E-TICKETS-001", {"fn": "get_open_ticket_count",
+                                             "error": f"{type(exc).__name__}: {exc}"})
+        except Exception:
+            pass
         return 0
 
 

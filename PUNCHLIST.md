@@ -3093,3 +3093,38 @@ this entry is the proposal, not the implementation.
           stale page. Re-testing after the deploy is what resolved it. A UI bug report taken
           before the fix is live reads exactly like a real defect — confirm what build the
           page was actually serving before scoping any UI investigation.
+
+- [ ] **Silent exception-swallow sites — retrofit to the error-code system, incrementally.**
+      Filed 2026-08-06 (Window 1) alongside the `nemesis_errors` build. These are the
+      `except ...: pass` sites where a failure produces no record anywhere — the exact shape
+      the error-code system exists to replace, and a concrete instance of CLAUDE.md's
+      standing "a failed read must surface as an explicit failure state, never as a default
+      value" practice.
+    - [ ] **Measured count: 149 sites across 40 files** (re-counted 2026-08-06 — an earlier
+          in-session figure of "158" was wrong; this is the verified number). Detector: a
+          line matching `except <anything>:` whose body is exactly `pass`, either same-line
+          or on the following line.
+    - [ ] **Zero are the same-line `except: pass` form, and zero use a truly bare `except:`.**
+          Worth stating because it changes the remediation: this is not a codebase full of
+          careless catch-alls. The breakdown is **96 broad `except Exception:`** and **53
+          genuinely specific** (`OSError` 13, `ValueError` 8, `(TypeError, …)` 8,
+          `FileNotFoundError` 7, `sqlite3.Error` 2, and a tail of others).
+    - [ ] Concentration: `dashboard.py` 39, `nemesis_agent/installer_gui.py` 14,
+          `core_module/hw_monitor/hw_monitor.py` 10, `nemesis_agent/uninstaller_gui.py` 9,
+          `modules/malware_detection/module.py` 8, `alert_manager/nemesis_fwd.py` 6.
+    - [ ] **NOT a mechanical sweep — do not script this.** A large share of the 53 specific
+          handlers are legitimately-empty by design (optional-file reads, best-effort UI
+          cleanup, `queue.Empty` polling, `KeyboardInterrupt` on shutdown). Converting those
+          to recorded errors would generate noise and devalue the ledger. Each site needs a
+          judgment call: is this failure something an operator would ever want to know
+          happened? Only then does it get a code.
+    - [ ] **Prioritise the 96 broad `except Exception:` sites**, and within those the ones on
+          a data path (a read that returns a default, a count that falls back to 0) over ones
+          on a presentation path. Those are the ones that produce a plausible-looking wrong
+          answer rather than a visibly missing one.
+    - [ ] **Use `record_error_best_effort()`, not `record_error()`, at these sites.** They are
+          already in a failure handler; a raising error-recorder would replace the original
+          exception with a second one and lose the actual fault. That is why the best-effort
+          variant exists.
+    - [ ] Seeded already (2026-08-06): `modules/tickets/module.py` `get_open_ticket_count()`
+          records `E-TICKETS-001` and still returns 0 — the reference shape for the rest.

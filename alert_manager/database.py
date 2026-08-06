@@ -266,6 +266,28 @@ def init_devices_table():
     finally:
         conn.close()
 
+def init_error_tables():
+    """Create the structured error-code tables (ADR 0001 core-owned `error_*`).
+
+    CANONICAL DDL LIVES IN `nemesis_errors._DDL`, not here — this is the core
+    startup hook that calls it, mirroring how `init_devices_table()` works. Per
+    the standing rule there is exactly ONE CREATE per table in the repo; a second
+    copy here is what would drift.
+
+    Called at dashboard startup AND create-before-write by each recording call
+    site. That duplication is deliberate and matches the `devices`/`quarantines`
+    precedent: there is no systemd ordering between the dashboard and the other
+    services, so whichever process reaches the DB first must be able to create
+    what it needs.
+    """
+    import nemesis_errors
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        nemesis_errors.init_error_tables(conn)
+    finally:
+        conn.close()
+
+
 def init_audit_log_table():
     """Canonical DDL for `audit_log` (per-action attribution, append-only).
 

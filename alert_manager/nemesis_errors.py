@@ -249,6 +249,42 @@ def record_error(conn, code, context=None, snapshot_id=None, actor=None):
     return cur.lastrowid
 
 
+def record_error_best_effort(conn, code, context=None, snapshot_id=None,
+                             actor=None, logger=None):
+    """`record_error()` that NEVER raises. For use INSIDE an exception handler.
+
+    WHY THIS EXISTS AS A SEPARATE FUNCTION, and why the plain one stays loud:
+
+    Most of these call sites are failures of a DB read — which means the very
+    database we would write the error record into may be the thing that just
+    failed. If recording then raised, it would REPLACE the original exception
+    with a different one, and the operator would be handed the error system's
+    failure instead of the actual fault. That is strictly worse than not
+    recording at all.
+
+    So: `record_error()` stays loud, because an unregistered code is a
+    programming error that should surface during development. This variant is
+    for production call sites already inside `except:`, where masking the
+    original failure is the greater harm.
+
+    Returns the occurrence id, or None if it could not record. **None means
+    "not recorded" — it is never confused with a real id**, and the caller is
+    free to ignore it, which is the normal case.
+    """
+    try:
+        return record_error(conn, code, context=context,
+                            snapshot_id=snapshot_id, actor=actor)
+    except Exception as exc:                      # noqa: BLE001 - deliberate
+        # Log, never re-raise. A warning here is the honest signal that error
+        # RECORDING degraded, distinct from the failure being recorded.
+        if logger is not None:
+            try:
+                logger.warning("error-code recording failed for %s: %s", code, exc)
+            except Exception:
+                pass
+        return None
+
+
 def add_cause(conn, cause_description, code=None, error_class=None,
               status=STATUS_CONFIRMED, check_ref=None):
     """Add a ledger cause at EXACTLY ONE level — code or class, never both.

@@ -99,7 +99,7 @@ import database          # module handle: canonical DDL owner (init_audit_log_ta
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table, init_recovery_codes_table,
-                      init_settings_table)
+                      init_settings_table, init_error_tables)
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append,
@@ -121,6 +121,10 @@ init_users_table()
 init_login_events_table()
 init_recovery_codes_table()
 init_enrollment_tokens_table()
+# Structured error codes (ADR 0001 core-owned `error_*`). Canonical DDL in
+# alert_manager/nemesis_errors.py; created here at startup so every service and
+# module can record from first use rather than each re-creating them.
+init_error_tables()
 # Self-heal the core `devices` table (LAN-scan inventory) before any unguarded
 # device reads in the routes. Canonical DDL in database.init_devices_table();
 # also created create-before-write by the device_scanner. Dual-safety-net,
