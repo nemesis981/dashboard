@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nemesis_device_category as dc  # noqa: E402
 
-EXPECTED_CHECKS = 56
+EXPECTED_CHECKS = 62
 
 passed = 0
 failed = 0
@@ -173,6 +173,22 @@ for dtype in ("Smart Home", "Entertainment", "Printer", "Camera"):
     check(f"device_type {dtype!r}", cat({"device_type": dtype}) == dc.IOT)
 check("an appliance vendor", cat({"vendor": "Sonos Inc"}) == dc.IOT)
 check("a printer vendor", cat({"vendor": "Brother Industries"}) == dc.IOT)
+# Added 2026-08-06 from real observed vendors, each identified by the operator.
+check("Sony (TV)", cat({"vendor": "Sony Corporation"}) == dc.IOT)
+check("Select Comfort (smart bed)", cat({"vendor": "Select Comfort"}) == dc.IOT)
+check("Microsoft (Xbox)", cat({"vendor": "Microsoft Corporation"}) == dc.IOT)
+# The known over-match, pinned so it is a DOCUMENTED behaviour rather than a
+# surprise: a Hyper-V guest's NIC also resolves to Microsoft and will land in
+# IoT. Recorded as the expected outcome, with the override as the remedy.
+check("KNOWN OVER-MATCH: a Hyper-V NIC also lands in IoT",
+      cat({"vendor": "Microsoft Corporation", "device_type": "Unknown"}) == dc.IOT)
+check("  ...and an override rescues it",
+      cat({"vendor": "Microsoft Corporation", "category_override": "non_agent"}) == dc.NON_AGENT)
+# CONTROL: an unidentified vendor must still NOT be swept into IoT. This is the
+# 'New Concepts Development Corp' case — left uncategorised deliberately rather
+# than guessed at (operator decision 2026-08-06).
+check("CONTROL an unrecognised vendor stays Non-agent",
+      cat({"vendor": "New Concepts Development Corp"}) == dc.NON_AGENT)
 # CONTROL: a plain computer must NOT be swept into IoT.
 check("CONTROL a Desktop is not IoT", cat({"device_type": "Desktop"}) != dc.IOT)
 

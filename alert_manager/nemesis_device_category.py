@@ -80,6 +80,18 @@ _IOT_VENDORS = (
     "philips", "signify", "tp-link", "wyze", "shelly", "espressif", "sonoff",
     "lifx", "wemo", "belkin", "hue", "arlo", "eufy", "roborock", "irobot",
     "brother", "canon", "epson", "hp inc", "hewlett", "lexmark", "samsung electro",
+    # Added 2026-08-06 from vendors observed on a real network and identified by
+    # the operator. Each is a deliberate call, not a guess:
+    "sony",             # TV
+    "select comfort",   # smart bed
+    # ⚠ MICROSOFT IS THE BROADEST ENTRY IN THIS LIST AND THE MOST LIKELY TO
+    # MIS-FIRE. It was added for an Xbox, but Microsoft's OUIs also cover Surface
+    # devices, Windows machines with Microsoft-branded NICs, and — the one most
+    # likely to surprise — Hyper-V virtual NICs (00:15:5D), which would put every
+    # Hyper-V guest in IoT. Kept because the operator identified the real device
+    # and the override exists precisely for the exceptions, but if this list ever
+    # grows a false-positive problem, start here.
+    "microsoft",
 )
 _GATEWAY_VENDORS = ("eero", "ubiquiti", "netgear", "asus", "linksys", "mikrotik",
                     "cisco", "aruba", "unifi", "zyxel", "draytek", "pfsense")
