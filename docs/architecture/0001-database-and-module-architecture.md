@@ -175,6 +175,9 @@ the drift in the first place.
    core tables (`alerts`, `devices`, `hw_*`, `scan_*`, `quarantines`, `modules_enabled`, …).
    (`diagnostics_*` added 2026-06-28 for the connectivity-watcher module — see
    `docs/specs/diagnostics-connectivity-watcher.md`.)
+   **`error_*` is reserved as CORE-owned, not a module namespace** (added 2026-08-06 for the
+   error-code system) — it is cross-cutting like `audit_log`, and would otherwise misread as
+   claiming module ownership under this same prefix convention.
 3. **Write-own / read-any.** A module may `SELECT`/join across any table (cross-module
    reads are allowed and expected), but only `INSERT/UPDATE/DELETE/CREATE` its **own**
    prefixed tables.
