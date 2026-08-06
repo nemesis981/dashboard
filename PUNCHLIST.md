@@ -2989,3 +2989,27 @@ this entry is the proposal, not the implementation.
           so "sweep" means what it says. Either is a rule-design change, not a threshold tweak.
     - [ ] Investigated by Window 1, 2026-08-06, read-only: rule text, `fast.log` port
           distribution (direction-checked), `devices`, `quarantines`, and the live listener set.
+
+- [ ] **`install.sh` detects the network interface via the DEFAULT ROUTE, so on any box
+      with a VPN default route it configures Suricata to monitor the VPN interface
+      instead of the LAN.** Found 2026-08-06 while wiring host-defence rule deployment.
+    - [ ] `install.sh:122` sets `DETECTED_IFACE` from `ip route get 8.8.8.8 | grep -oP
+          'dev \K\S+'`, and `:129` sets `DETECTED_IP` from the `src` of the same route.
+          `install_suricata()` then writes that interface into `suricata.yaml`'s
+          `af-packet` section.
+    - [ ] **Measured on the dev box:** internet routes leave via the tailnet interface
+          (its own routing table), so that derivation returns the TAILNET interface and
+          address — while Suricata is in fact monitoring the LAN interface, because that
+          was corrected by hand at some point. A fresh install would not get that
+          correction.
+    - [ ] **Why it matters and why it is quiet:** Suricata bound to a VPN interface sees
+          none of the LAN traffic the host-defence rules exist to detect. The install
+          succeeds, the service runs, the dashboard looks healthy — and the box is blind
+          to exactly the scans the rules were added for. Nothing reports an error.
+    - [ ] **Fix direction (not built):** choose the interface by which one carries the
+          LAN/`HOME_NET`-facing address, not by the default route; or prompt when the two
+          disagree. `scripts/deploy-suricata-rules.sh` already contains the safer
+          derivation (enumerate every non-loopback address, then cross-check against the
+          interface Suricata is actually configured to monitor) — reuse that shape.
+    - [ ] Deliberately NOT fixed alongside the rule work: one variable at a time, and this
+          changes install-time behaviour for every user rather than a detection rule.
