@@ -90,11 +90,48 @@
 # note that the yaml is root-owned, shared with the entire stock ruleset, and
 # outside this repo, which is why the duplication was judged the smaller risk.
 # test_local_rules.py pins both copies, so a drift between them fails the suite.
+#
+# ── @NEMESIS_HOST@: why rules 1-3 exclude THIS HOST as a source ──────────────
+# ADDED 2026-08-06, a SECOND false positive, separate from the port one above and
+# larger by volume. Measured on the live box:
+#   * 926 of rule 1000001's hits had the NEMESIS BOX ITSELF as the source
+#   * ALL 1,160 of rule 1000003's hits were this box's OUTBOUND connections to
+#     other LAN devices' :80/:443
+# In both cases Nemesis's own device-scanner, sweeping the LAN exactly as it is
+# designed to, tripped Nemesis's own host-defence rules.
+#
+# Root cause is different from the port false positive and needed a different fix.
+# These rules are named "against Nemesis host" but their DESTINATION is all of
+# $HOME_NET, so they fire on scans against ANY LAN device -- including scans
+# performed BY this host. Excluding this host as a SOURCE removes the self-noise
+# while KEEPING that wider coverage: another LAN device scanning a third device
+# (lateral movement) is still detected. Narrowing the destination to this host
+# instead would have been the other option; it was NOT taken, because it would
+# silently drop that lateral-movement coverage. Flagged as a design note: the rule
+# NAMES still describe a narrower scope than what they actually watch.
+#
+# WHY A BUILD-TIME PLACEHOLDER AND NOT A suricata.yaml ADDRESS-GROUP. The host's
+# address differs per install, so it cannot be committed (Rule 8). The obvious
+# alternative -- an $NEMESIS_HOST address-group in suricata.yaml -- was rejected on
+# FAILURE DIRECTION, which is the deciding argument:
+#   * yaml var missing/renamed -> the rules DO NOT LOAD -> detection silently OFF.
+#     That is the exact failure this file already nearly shipped once.
+#   * placeholder left unsubstituted -> the rules do not parse -> caught by
+#     `suricata -T` in scripts/deploy-suricata-rules.sh, which REFUSES to deploy.
+#   * substituted address goes stale (e.g. DHCP move) -> the exclusion stops
+#     matching -> the self-noise comes BACK. Fails toward NOISE, never toward
+#     blindness. That is the only acceptable direction for a detection rule.
+# It also keeps the grant surface smaller: deploying rules needs write access to
+# this file alone, not to the shared engine config.
+#
+# The placeholder is substituted at deploy/install time from the detected primary
+# address. The repo copy must NEVER contain a real address -- test_local_rules.py
+# asserts that.
 
 # ── 1. Horizontal SYN sweep -- moderate. P2 -> alerts, no auto-quarantine.
 #      Destination excludes this host's own service ports (see the note above):
 #      SYNs to advertised services are normal client traffic, not breadth.
-alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
+alert tcp !@NEMESIS_HOST@ any -> $HOME_NET ![22,53,80,443,5000,5001] (\
     msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (moderate)"; \
     flow:to_server; \
     flags:S,12; \
@@ -116,7 +153,7 @@ alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
 #      presented to its user as "the internet is broken", with the cause buried in
 #      a firewall rule. That adjacency is why the scoping fix belongs HERE and not
 #      only in a threshold.
-alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
+alert tcp !@NEMESIS_HOST@ any -> $HOME_NET ![22,53,80,443,5000,5001] (\
     msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (aggressive)"; \
     flow:to_server; \
     flags:S,12; \
@@ -128,7 +165,7 @@ alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
 # ── 3. Service-port probe concentration against Nemesis's own listeners.
 #      :22 (ssh), :5000 (dashboard), :5001 (hw-monitor), :443/:80 (nginx).
 #      Lower count -- these ports specifically should not see sweep behaviour.
-alert tcp any any -> $HOME_NET [22,80,443,5000,5001] (\
+alert tcp !@NEMESIS_HOST@ any -> $HOME_NET [22,80,443,5000,5001] (\
     msg:"NEMESIS Host-defence: repeated probes against Nemesis service ports"; \
     flow:to_server; \
     flags:S,12; \

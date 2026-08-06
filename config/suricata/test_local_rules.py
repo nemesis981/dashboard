@@ -39,10 +39,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 NEW_RULES = os.path.join(HERE, "local.rules")
 SYS_YAML = "/etc/suricata/suricata.yaml"
 
-SRC = "192.168.56.99"     # synthetic "client"/"attacker"
-DST = "192.168.56.10"     # synthetic Nemesis host (must be inside HOME_NET)
+SRC = "192.168.56.99"        # synthetic "client"/"attacker"
+DST = "192.168.56.10"        # synthetic Nemesis host (must be inside HOME_NET)
+NEMESIS_HOST = DST           # substituted for @NEMESIS_HOST@ in the rules
+OTHER_LAN = "192.168.56.77"  # a third LAN device, for the self-scan cases
 
-EXPECTED_CHECKS = 15
+EXPECTED_CHECKS = 24
 
 passed = 0
 failed = 0
@@ -159,6 +161,29 @@ def run_suricata(rules_path, pcap_path, workdir, expect_sids=(1000001, 1000002, 
     return sids, proc
 
 
+PLACEHOLDER = "@NEMESIS_HOST@"
+
+
+def substituted(workdir, name="new.rules"):
+    """The repo rules with @NEMESIS_HOST@ resolved, as the deploy script does.
+
+    The committed file is a TEMPLATE and deliberately does not parse on its own —
+    the host address differs per install and must never be committed (Rule 8).
+    Tests therefore substitute exactly the way scripts/deploy-suricata-rules.sh
+    does, so what is verified here is what gets deployed.
+    """
+    with open(NEW_RULES) as fh:
+        text = fh.read()
+    if PLACEHOLDER not in text:
+        raise RuleLoadError(
+            f"{PLACEHOLDER} missing from local.rules — either the template was "
+            f"broken, or a REAL address was committed in its place (Rule 8).")
+    path = os.path.join(workdir, name)
+    with open(path, "w") as fh:
+        fh.write(text.replace(PLACEHOLDER, f"[{NEMESIS_HOST}]"))
+    return path
+
+
 def old_rules_file(workdir):
     """The pre-fix rules: same file with the service-port exclusion removed.
 
@@ -167,7 +192,9 @@ def old_rules_file(workdir):
     """
     with open(NEW_RULES) as fh:
         text = fh.read()
+    text = text.replace(PLACEHOLDER, f"[{NEMESIS_HOST}]")
     old = text.replace("$HOME_NET ![22,53,80,443,5000,5001]", "$HOME_NET any")
+    old = old.replace(f"alert tcp ![{NEMESIS_HOST}] any", "alert tcp any any")
     if old == text:
         # The exclusion is what this whole suite verifies. If the pattern no
         # longer appears, the control silently becomes a copy of the new rules
@@ -192,6 +219,7 @@ def main():
 
     work = tempfile.mkdtemp(prefix="nem-rules-test-")
     old = old_rules_file(work)
+    new = substituted(work)
 
     # CONTROL ON THE HARNESS ITSELF: prove the old file really differs from the
     # new one. If the substitution silently failed, every "old rules" control
@@ -212,6 +240,30 @@ def main():
     check("the two exclusion lists are IDENTICAL (no drift)",
           len(set(excls)) == 1, f"{set(excls)}")
 
+    # RULE 8 GUARD: the committed template must never carry a real HOST address.
+    # Allowed: the generic RFC1918 NETWORK bases quoted in the header comment to
+    # illustrate the stock HOME_NET, and the documented 192.168.56.x lab range.
+    # Anything else is a leaked address — this is how a real LAN address was
+    # caught on its way into the public repo earlier the same day.
+    ALLOWED = {"192.168.0.0", "10.0.0.0", "172.16.0.0", "100.64.0.0", "0.0.0.0"}
+
+    def leaked(text):
+        return [ip for ip in re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", text)
+                if ip not in ALLOWED and not ip.startswith("192.168.56.")]
+
+    check("the committed rules carry NO real host address", not leaked(rule_text),
+          f"found {leaked(rule_text)}")
+    # CONTROL: prove the guard can actually fail. A leak-check that cannot detect
+    # a planted address is the same non-measurement this suite exists to reject.
+    check("CONTROL the leak guard DOES catch a planted address",
+          leaked("# staging note: box at 10.99.99.99") == ["10.99.99.99"])
+    check("the committed rules use the @NEMESIS_HOST@ placeholder",
+          PLACEHOLDER in rule_text)
+    # All three self-noise rules must carry the source exclusion.
+    check("rules 1-3 all exclude this host as a source",
+          rule_text.count(f"alert tcp !{PLACEHOLDER} any") == 3,
+          f"found {rule_text.count(f'alert tcp !{PLACEHOLDER} any')}")
+
     # ── Case 1: the false positive — 150 SYNs to :53 only ────────────────────
     print("\n[Case 1] the real false positive: 150 SYNs to :53 (this host's own DNS)")
     fp = os.path.join(work, "fp.pcap")
@@ -223,7 +275,7 @@ def main():
     check("CONTROL old rules also trip the moderate sweep rule",
           1000001 in sids_old, f"sids={sorted(set(sids_old))}")
 
-    sids_new, _ = run_suricata(NEW_RULES, fp, os.path.join(work, "c1new"))
+    sids_new, _ = run_suricata(new, fp, os.path.join(work, "c1new"))
     check("FIXED: aggressive sweep (1000002) no longer fires on DNS traffic",
           1000002 not in sids_new, f"sids={sorted(set(sids_new))}")
     check("FIXED: moderate sweep (1000001) no longer fires either",
@@ -235,7 +287,7 @@ def main():
     ports = [p for p in range(10000, 10400) if p not in (22, 53, 80, 443, 5000, 5001)][:150]
     write_pcap(scan, [syn_packet(SRC, DST, 40000 + i, p) for i, p in enumerate(ports)])
 
-    sids_new, _ = run_suricata(NEW_RULES, scan, os.path.join(work, "c2new"))
+    sids_new, _ = run_suricata(new, scan, os.path.join(work, "c2new"))
     check("aggressive sweep (1000002) STILL fires on a real scan",
           1000002 in sids_new, f"sids={sorted(set(sids_new))}")
     check("moderate sweep (1000001) STILL fires on a real scan",
@@ -249,7 +301,7 @@ def main():
     mports = [22, 53, 80, 443, 5000, 5001] * 5 + list(range(20000, 20120))
     write_pcap(mixed, [syn_packet(SRC, DST, 40000 + i, p) for i, p in enumerate(mports)])
 
-    sids_new, _ = run_suricata(NEW_RULES, mixed, os.path.join(work, "c3new"))
+    sids_new, _ = run_suricata(new, mixed, os.path.join(work, "c3new"))
     check("a mixed scan is still caught (aggressive)", 1000002 in sids_new,
           f"sids={sorted(set(sids_new))}")
     check("a mixed scan is still caught (moderate)", 1000001 in sids_new,
@@ -260,7 +312,7 @@ def main():
     svc = os.path.join(work, "svc.pcap")
     write_pcap(svc, [syn_packet(SRC, DST, 40000 + i, 80) for i in range(40)])
 
-    sids_new, _ = run_suricata(NEW_RULES, svc, os.path.join(work, "c4new"))
+    sids_new, _ = run_suricata(new, svc, os.path.join(work, "c4new"))
     check("1000003 fires on repeated probes to :80", 1000003 in sids_new,
           f"sids={sorted(set(sids_new))}")
     check("  and the sweep rules correctly stay silent on it",
@@ -271,7 +323,7 @@ def main():
     print("\n[Case 5] below-threshold traffic stays quiet")
     quiet = os.path.join(work, "quiet.pcap")
     write_pcap(quiet, [syn_packet(SRC, DST, 40000 + i, 20000 + i) for i in range(5)])
-    sids_new, _ = run_suricata(NEW_RULES, quiet, os.path.join(work, "c5new"))
+    sids_new, _ = run_suricata(new, quiet, os.path.join(work, "c5new"))
     check("5 SYNs across 5 ports trips nothing", not sids_new,
           f"sids={sorted(set(sids_new))}")
 
@@ -284,9 +336,52 @@ def main():
         p[47] = 0x00      # TCP flags byte -> NULL scan
         pkts.append(bytes(p))
     write_pcap(null, pkts)
-    sids_new, _ = run_suricata(NEW_RULES, null, os.path.join(work, "c6new"))
+    sids_new, _ = run_suricata(new, null, os.path.join(work, "c6new"))
     check("NULL-flag scan (1000004) still fires", 1000004 in sids_new,
           f"sids={sorted(set(sids_new))}")
+
+    # ── Case 7: THE SELF-SCAN false positive (926 + 1,160 real hits) ─────────
+    # Nemesis's own device-scanner sweeping the LAN tripped its own rules. The
+    # traffic is genuinely sweep-shaped, so the ONLY thing distinguishing it is
+    # the source — which is why this needed a different fix from the port one.
+    print("\n[Case 7] this host scanning the LAN must not trip its own rules")
+    selfscan = os.path.join(work, "selfscan.pcap")
+    sports = [p for p in range(11000, 11400)
+              if p not in (22, 53, 80, 443, 5000, 5001)][:150]
+    write_pcap(selfscan, [syn_packet(NEMESIS_HOST, OTHER_LAN, 40000 + i, p)
+                          for i, p in enumerate(sports)])
+    sids_new, _ = run_suricata(new, selfscan, os.path.join(work, "c7new"))
+    check("FIXED: the host's own LAN sweep no longer fires", not sids_new,
+          f"sids={sorted(set(sids_new))}")
+
+    # CONTROL: byte-identical traffic from ANY OTHER source MUST still fire.
+    # Without this, "no alert" above would equally describe a rule set that
+    # stopped detecting sweeps altogether.
+    other = os.path.join(work, "otherscan.pcap")
+    write_pcap(other, [syn_packet(SRC, OTHER_LAN, 40000 + i, p)
+                       for i, p in enumerate(sports)])
+    sids_new, _ = run_suricata(new, other, os.path.join(work, "c7ctl"))
+    check("CONTROL the SAME scan from another host still fires",
+          1000002 in sids_new and 1000001 in sids_new,
+          f"sids={sorted(set(sids_new))}")
+
+    # CONTROL: and it DID fire under the old rules — proving the pcap is
+    # sweep-shaped and that this case reproduces the real false positive.
+    sids_old, _ = run_suricata(old, selfscan, os.path.join(work, "c7old"))
+    check("CONTROL the self-scan DID fire under the old rules",
+          1000001 in sids_old, f"sids={sorted(set(sids_old))}")
+
+    # ── Case 8: rule 1000003's self-noise (all 1,160 hits) ───────────────────
+    print("\n[Case 8] this host's own outbound :80/:443 must not trip rule 3")
+    selfsvc = os.path.join(work, "selfsvc.pcap")
+    write_pcap(selfsvc, [syn_packet(NEMESIS_HOST, OTHER_LAN, 40000 + i, 80)
+                         for i in range(40)])
+    sids_new, _ = run_suricata(new, selfsvc, os.path.join(work, "c8new"))
+    check("FIXED: the host's own outbound :80 no longer fires 1000003",
+          1000003 not in sids_new, f"sids={sorted(set(sids_new))}")
+    sids_old, _ = run_suricata(old, selfsvc, os.path.join(work, "c8old"))
+    check("CONTROL it DID fire under the old rules", 1000003 in sids_old,
+          f"sids={sorted(set(sids_old))}")
 
     shutil.rmtree(work, ignore_errors=True)
 
