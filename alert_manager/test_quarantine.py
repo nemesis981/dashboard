@@ -15,14 +15,25 @@ are used and cleaned up before and after each scenario.
 The dashboard service must be reachable at http://127.0.0.1:5000 for the HTTP
 checks. The alert-watcher service does NOT need to be running -- this script
 calls handle_line() and expiry_sweep() in-process.
+
+AUTHENTICATION: every dashboard route this suite calls is auth-gated (none of
+them appear in dashboard.py's _AUTH_EXEMPT), so the HTTP half needs a logged-in
+session. Pass --username/--password, or set NEMESIS_TEST_USER /
+NEMESIS_TEST_PASSWORD. No dashboard credential is stored anywhere in the repo,
+and local-config.md records the production host as "reference only, no stored
+password" -- so an unattended run legitimately has none. Without credentials the
+HTTP checks report as SKIPPED and the suite exits 3 (incomplete), never 0: a
+check that could not run is not a check that passed.
 """
 
 import argparse
+import http.cookiejar
 import json
 import os
 import sqlite3
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
 
@@ -72,6 +83,7 @@ RULE_IDS = {"confirm": "9999991", "lift": "9999992", "expire": "9999993"}
 
 passed = 0
 failed = 0
+skipped = 0
 
 
 def check(name, cond, detail=""):
@@ -84,6 +96,21 @@ def check(name, cond, detail=""):
     else:
         failed += 1
     return cond
+
+
+def skip(name, reason):
+    """Record a check that did NOT run, as its own state — never as a pass.
+
+    A check that cannot run is not a check that succeeded. Counting it as either
+    a pass or a failure loses the distinction the reader needs: `failed=0` has to
+    mean "everything was measured and held", not "some of it was never asked".
+    The exit code in main() treats a skip as an incomplete run for the same
+    reason.
+    """
+    global skipped
+    skipped += 1
+    print(f"  [SKIP] {name}  ({reason})")
+    return False
 
 
 def fake_line(rule_id, ip=TEST_IP):
@@ -125,20 +152,114 @@ def fake_line(rule_id, ip=TEST_IP):
             f"{ip}:55555 -> 192.168.1.10:443")
 
 
-def http_get(path):
+# ── HTTP layer ───────────────────────────────────────────────────────────────
+#
+# Two defects lived in the previous four-line version of this section, and both
+# are the same family: an instrument that could only ever return one answer.
+#
+# 1. It followed redirects. Every route this suite exercises is auth-gated
+#    (absent from dashboard.py's _AUTH_EXEMPT, gate at `_enforce_setup_and_auth`),
+#    and the gate answers an unauthenticated request with a 302 to /login.
+#    urllib.request.urlopen follows that by default, so the LOGIN PAGE arrived
+#    as a 200 and `check("/api/quarantines status=200", status == 200)` PASSED
+#    on it — three green checks, in three scenarios, measuring nothing but the
+#    existence of a login form. Measured 2026-08-06.
+# 2. It only ever issued GET. The confirm/lift routes were hardened to
+#    methods=["POST"] on 2026-07-28 (8c8bce9) and have returned 405 ever since.
+#
+# Fixing (2) alone would not have turned a single check green: a POST from an
+# unauthenticated client is still 302'd to /login, so `success=true` and both DB
+# transitions stay red. The method and the session had to be fixed together.
+#
+# Hence both halves below: an opener that does NOT chase redirects, so a 302
+# surfaces as a 302 and reads as the result it is; and json_response(), which
+# requires a 200 to actually carry the ROUTE's JSON rather than any 200-shaped
+# page that happens to come back.
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface a redirect instead of chasing it.
+
+    The auth gate's 302 is a RESULT this suite needs to see, not an obstacle to
+    route around. Returning None here makes urllib raise HTTPError(302), which
+    the callers below report as the status.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_cookies = http.cookiejar.CookieJar()
+_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(_cookies), _NoRedirect)
+
+# Set by authenticate() and ONLY by a positively-verified login. It gates the
+# auth-dependent checks; nothing infers it from a status code alone.
+AUTHENTICATED = False
+
+
+def http_request(path, method="GET", data=None):
+    """One request on the shared (cookie-carrying) session. Never follows redirects."""
+    body = urllib.parse.urlencode(data).encode() if data else None
+    req = urllib.request.Request(DASHBOARD + path, data=body, method=method)
     try:
-        with urllib.request.urlopen(DASHBOARD + path, timeout=5) as r:
-            return r.status, r.read().decode("utf-8")
+        with _opener.open(req, timeout=5) as r:
+            return r.status, r.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode("utf-8", errors="replace")
 
 
-def http_json(path):
-    status, body = http_get(path)
+def http_get(path):
+    return http_request(path)
+
+
+def json_response(path, method="GET", data=None):
+    """(status, parsed) where `parsed` is non-None ONLY for real JSON from the route.
+
+    An HTML page — the login form especially — parses as None, so a caller
+    asserting on `parsed` cannot be satisfied by the auth gate the way a bare
+    status check could.
+    """
+    status, body = http_request(path, method=method, data=data)
     try:
         return status, json.loads(body)
     except (json.JSONDecodeError, TypeError):
         return status, None
+
+
+def authenticate(username, password):
+    """Log the shared session in. Returns True only on POSITIVELY verified auth.
+
+    Verified in both directions, because a one-directional check here would be
+    the same non-measurement this module already shipped once: first confirm the
+    session is genuinely unauthenticated (the gate 302s), then log in, then
+    confirm the SAME request now returns the route's own JSON. Without the
+    before-half, a dashboard with the gate disabled would look like a successful
+    login; without the after-half, any 200 would.
+    """
+    global AUTHENTICATED
+
+    before, _ = http_request("/api/quarantines")
+    if before != 302:
+        print(f"  [WARN] pre-login control: expected 302 from the auth gate, got {before}. "
+              f"Not treating this run as authenticated — the gate is not behaving as "
+              f"this check assumes, so a later 200 would prove nothing.")
+        return False
+
+    status, _ = http_request("/login", method="POST",
+                             data={"username": username, "password": password})
+    if status not in (200, 302):
+        print(f"  [WARN] login POST returned {status}")
+        return False
+
+    after, parsed = json_response("/api/quarantines")
+    if after == 200 and isinstance(parsed, dict) and "quarantines" in parsed:
+        AUTHENTICATED = True
+        return True
+
+    print(f"  [WARN] login did not take: /api/quarantines returned {after} "
+          f"{'(HTML, not JSON — still the login page)' if parsed is None else ''}")
+    return False
 
 
 def db_row(query, params=()):
@@ -235,8 +356,21 @@ def inject_and_verify(rule_id, calls):
     check("ufw_insert_top called once", len(calls["ufw_insert"]) == 1, repr(calls["ufw_insert"]))
     check("email sent once", len(calls["emails"]) == 1, repr(calls["emails"]))
 
-    status, data = http_json("/api/quarantines")
-    check("/api/quarantines status=200", status == 200, str(status))
+    if not AUTHENTICATED:
+        for name in ("/api/quarantines returns the route's JSON",
+                     "quarantine appears in /api/quarantines",
+                     "dashboard ip=test_ip",
+                     "dashboard minutes_remaining ~60",
+                     "test_ip appears in banner on /"):
+            skip(name, "no authenticated session — pass --username/--password")
+        return qid
+
+    status, data = json_response("/api/quarantines")
+    # Asserts on the parsed body, not just the status: a 200 alone was
+    # satisfiable by the login page (see the HTTP layer note above).
+    check("/api/quarantines returns the route's JSON",
+          status == 200 and isinstance(data, dict) and "quarantines" in data,
+          f"status={status} parsed={'None (HTML)' if data is None else type(data).__name__}")
     items = (data or {}).get("quarantines", []) if isinstance(data, dict) else []
     ours = next((x for x in items if x["rule_id"] == rule_id), None)
     check("quarantine appears in /api/quarantines", ours is not None)
@@ -246,8 +380,9 @@ def inject_and_verify(rule_id, calls):
               55 <= ours.get("minutes_remaining", 0) <= 60,
               str(ours.get("minutes_remaining")))
 
-    _, body = http_get("/")
-    check("test_ip appears in banner on /", TEST_IP in body)
+    status, body = http_get("/")
+    check("test_ip appears in banner on /", status == 200 and TEST_IP in body,
+          f"status={status}")
 
     return qid
 
@@ -261,13 +396,23 @@ def scenario_confirm(live):
         qid = inject_and_verify(rule_id, calls)
         if qid is None:
             return
-        status, data = http_json(f"/api/quarantine/{qid}/confirm")
-        check("confirm endpoint status=200", status == 200, str(status))
-        check("confirm success=true", isinstance(data, dict) and data.get("success") is True)
-        a = db_row("SELECT action FROM alerts WHERE rule_id=?", (rule_id,))
-        check("alerts.action=block after confirm", a and a[0] == "block", repr(a))
-        q = db_row("SELECT status FROM quarantines WHERE id=?", (qid,))
-        check("quarantine.status=confirmed", q and q[0] == "confirmed", repr(q))
+        if not AUTHENTICATED:
+            for name in ("confirm endpoint status=200", "confirm success=true",
+                         "alerts.action=block after confirm",
+                         "quarantine.status=confirmed"):
+                skip(name, "no authenticated session — pass --username/--password")
+        else:
+            # POST, not GET: hardened to methods=["POST"] on 2026-07-28 (8c8bce9).
+            status, data = json_response(f"/api/quarantine/{qid}/confirm", method="POST")
+            check("confirm endpoint status=200", status == 200, str(status))
+            check("confirm success=true",
+                  isinstance(data, dict) and data.get("success") is True, repr(data)[:120])
+            a = db_row("SELECT action FROM alerts WHERE rule_id=?", (rule_id,))
+            check("alerts.action=block after confirm", a and a[0] == "block", repr(a))
+            q = db_row("SELECT status FROM quarantines WHERE id=?", (qid,))
+            check("quarantine.status=confirmed", q and q[0] == "confirmed", repr(q))
+        # Independent of the HTTP session: counts an in-process monkeypatch, so it
+        # stays a real check even on an unauthenticated run.
         check("ufw_delete NOT called by confirm", len(calls["ufw_delete"]) == 0)
     finally:
         restore(saved)
@@ -283,17 +428,45 @@ def scenario_lift(live):
         qid = inject_and_verify(rule_id, calls)
         if qid is None:
             return
-        status, data = http_json(f"/api/quarantine/{qid}/lift")
+        if not AUTHENTICATED:
+            for name in ("lift endpoint status=200", "lift success=true",
+                         "alerts.action=pending after lift",
+                         "quarantine.status=lifted"):
+                skip(name, "no authenticated session — pass --username/--password")
+            return
+        # POST, not GET: hardened to methods=["POST"] on 2026-07-28 (8c8bce9).
+        status, data = json_response(f"/api/quarantine/{qid}/lift", method="POST")
+
+        # The dashboard runs in a SEPARATE process, so this suite's in-process
+        # monkeypatching does not reach its firewall calls. lift() asks
+        # nemesis-fwd to remove the rule with a per-action credential, and on
+        # refusal it returns an error and deliberately leaves the DB untouched —
+        # showing a lifted quarantine whose ufw rule is still installed would be
+        # worse than refusing. That refusal is CORRECT product behaviour, not a
+        # test failure, so it is reported as its own outcome. Asserting
+        # status=200 through it would make this suite red whenever the box has no
+        # firewall credential, which is the normal state for an operator run.
+        kind = data.get("kind") if isinstance(data, dict) else None
+        if kind in ("credential_denied", "admin_denied", "locked_out",
+                    "unavailable", "peer_denied"):
+            check("lift endpoint reached and failed CLOSED (no credential)",
+                  status in (401, 403, 423, 503), f"status={status} kind={kind}")
+            q = db_row("SELECT status FROM quarantines WHERE id=?", (qid,))
+            check("quarantine NOT lifted when the firewall refused",
+                  q and q[0] == "active", repr(q))
+            for name in ("lift success=true", "alerts.action=pending after lift",
+                         "quarantine.status=lifted"):
+                skip(name, f"firewall refused the unblock ({kind}) — "
+                           f"the lift path cannot be exercised without a credential")
+            return
+
         check("lift endpoint status=200", status == 200, str(status))
-        check("lift success=true", isinstance(data, dict) and data.get("success") is True)
+        check("lift success=true",
+              isinstance(data, dict) and data.get("success") is True, repr(data)[:120])
         a = db_row("SELECT action FROM alerts WHERE rule_id=?", (rule_id,))
         check("alerts.action=pending after lift", a and a[0] == "pending", repr(a))
         q = db_row("SELECT status FROM quarantines WHERE id=?", (qid,))
         check("quarantine.status=lifted", q and q[0] == "lifted", repr(q))
-        # The dashboard runs in a separate process, so our in-process monkeypatch
-        # of firewall.ufw_delete does NOT reach it. The dashboard's ufw_ok field
-        # reports whether its own ufw_delete succeeded; expect False under the
-        # default non-root, non-NOPASSWD context. DB transitions are the canonical signal.
         if isinstance(data, dict):
             for k in ("ufw_ok", "ufw_rc"):
                 if k in data:
@@ -352,22 +525,44 @@ def main():
                     help="actually invoke ufw insert/delete (requires root)")
     ap.add_argument("--scenario", choices=["confirm", "lift", "expire", "all"],
                     default="all")
+    ap.add_argument("--username", default=os.environ.get("NEMESIS_TEST_USER"),
+                    help="dashboard login for the auth-gated HTTP checks "
+                         "(or set NEMESIS_TEST_USER)")
+    ap.add_argument("--password", default=os.environ.get("NEMESIS_TEST_PASSWORD"),
+                    help="dashboard password (or set NEMESIS_TEST_PASSWORD). No "
+                         "credential is stored in the repo or in local-config.md, "
+                         "so the HTTP checks are SKIPPED unless one is supplied.")
     args = ap.parse_args()
 
     if args.live and os.geteuid() != 0:
         print("--live requires root (re-run with sudo)", file=sys.stderr)
         sys.exit(2)
 
-    # Pre-flight: dashboard must be reachable
+    # Pre-flight: dashboard must be reachable. A 302 to /login is a perfectly
+    # good liveness answer here — it proves the app is up and routing. What it
+    # must NOT do is pass silently as evidence that the API itself works, which
+    # is what the old redirect-following version of this check did.
     try:
         status, _ = http_get("/api/stats")
-        if status != 200:
+        if status not in (200, 302):
             print(f"dashboard /api/stats returned {status}; is the service running?",
                   file=sys.stderr)
             sys.exit(2)
     except Exception as e:
         print(f"cannot reach dashboard at {DASHBOARD}: {e}", file=sys.stderr)
         sys.exit(2)
+
+    if args.username and args.password:
+        if authenticate(args.username, args.password):
+            print(f"authenticated to {DASHBOARD} as {args.username}")
+        else:
+            print("authentication FAILED — the auth-gated HTTP checks will be "
+                  "skipped, not silently passed", file=sys.stderr)
+    else:
+        print("no credentials supplied: the auth-gated HTTP checks will be SKIPPED.\n"
+              "  Every route this suite calls is behind the login gate, so without a\n"
+              "  session they cannot be measured. Pass --username/--password (or set\n"
+              "  NEMESIS_TEST_USER / NEMESIS_TEST_PASSWORD) for a complete run.")
 
     alert_watcher.init_quarantines_db()
 
@@ -379,8 +574,20 @@ def main():
         scenario_expire(args.live)
 
     print(f"\n{'=' * 50}")
-    print(f"Total: {passed} passed, {failed} failed")
-    sys.exit(0 if failed == 0 else 1)
+    print(f"Total: {passed} passed, {failed} failed, {skipped} skipped")
+
+    # Three outcomes, deliberately not two. A run with skips is INCOMPLETE, and
+    # exiting 0 on it would let "no failures" be read as "the quarantine flow is
+    # verified" when the entire dashboard half of it was never exercised.
+    if failed:
+        print("RESULT: FAILED")
+        sys.exit(1)
+    if skipped:
+        print(f"RESULT: INCOMPLETE — {skipped} checks did not run. "
+              f"Supply credentials for a full pass.")
+        sys.exit(3)
+    print("RESULT: all checks passed")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
