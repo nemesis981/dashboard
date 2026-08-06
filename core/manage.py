@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(_ROOT, "alert_manager"))
 
 import bcrypt
 import database                      # alert_manager/database.py (provides DB_PATH + init_users_table)
+import nemesis_timestamp             # alert_manager/nemesis_timestamp.py (canonical audit_log.ts)
 from core import passphrase
 
 USAGE = """Nemesis admin recovery CLI
@@ -116,7 +117,7 @@ def _audit(action: str, target: str):
         try:
             conn.execute(
                 "INSERT INTO audit_log (ts, rule_id, ip, action, user) VALUES (?,?,?,?,?)",
-                (datetime.now().isoformat(), target, None, action, _actor()),
+                (nemesis_timestamp.now(), target, None, action, _actor()),
             )
             conn.commit()
         finally:

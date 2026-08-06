@@ -54,6 +54,8 @@ import os
 import sqlite3
 from datetime import datetime
 
+import nemesis_timestamp  # canonical audit_log.ts — see canonical_ts() below
+
 log = logging.getLogger("nemesis.degraded_ingest")
 
 DEGRADED_LOG = os.environ.get("NEMESIS_DEGRADED_LOG",
@@ -182,15 +184,44 @@ def map_record(rec):
     return None
 
 
+def canonical_ts(row_ts):
+    """The journal's timestamp in canonical form, or VERBATIM if unparseable.
+
+    The journal records an event's ORIGINAL time, which is why this path stamps
+    the record's own timestamp rather than `now()` like the other three audit_log
+    writers — an ingested row is a historical reconstruction, not a new event.
+    Canonicalising it only changes the FORMAT (separator + explicit offset), never
+    the instant: `nemesis_timestamp.normalize` reads a naive value as local and
+    attaches the offset that applied on that date.
+
+    Unparseable input is kept EXACTLY as it arrived (`default=row_ts`) rather than
+    dropped or replaced. A timestamp we cannot read is still evidence; substituting
+    a parseable-looking one would be the failure this repo keeps cataloguing — a
+    legal-looking value standing in for a real measurement.
+    """
+    return nemesis_timestamp.normalize(row_ts, default=row_ts)
+
+
 def _already_present(conn, row):
     """Duplicate check on the natural key. IFNULL so NULL columns compare equal —
     `NULL = NULL` is NULL in SQL, so a plain `=` would never match a row with a
-    NULL ip and every re-scan would duplicate watcher events."""
+    NULL ip and every re-scan would duplicate watcher events.
+
+    MATCHES BOTH THE RAW AND THE CANONICAL ts, and that is load-bearing. Rows
+    ingested before 2026-08-06 carry the journal's raw timestamp; rows ingested
+    after carry the canonical form of the same instant. Comparing only the
+    canonical form would fail to recognise a pre-existing row and re-insert every
+    historical event the day the offset is ever reset — idempotency was PROVEN in
+    production against the raw form, and this keeps that guarantee across the
+    format change instead of quietly narrowing it.
+    """
+    raw = row["ts"]
+    canon = canonical_ts(raw)
     cur = conn.execute(
-        "SELECT 1 FROM audit_log WHERE ts=? AND action=? "
+        "SELECT 1 FROM audit_log WHERE ts IN (?, ?) AND action=? "
         "AND IFNULL(request_id,'')=IFNULL(?,'') AND IFNULL(ip,'')=IFNULL(?,'') "
         "LIMIT 1",
-        (row["ts"], row["action"], row["request_id"], row["ip"]))
+        (raw, canon, row["action"], row["request_id"], row["ip"]))
     return cur.fetchone() is not None
 
 
@@ -290,8 +321,8 @@ def ingest_once(conn_factory, path=None, offset_conn_factory=None):
             conn.execute(
                 "INSERT INTO audit_log(ts, request_id, ip, action, user) "
                 "VALUES (?,?,?,?,?)",
-                (row["ts"], row["request_id"], row["ip"], row["action"],
-                 row["user"]))
+                (canonical_ts(row["ts"]), row["request_id"], row["ip"],
+                 row["action"], row["user"]))
             counts["ingested"] += 1
 
         conn.commit()

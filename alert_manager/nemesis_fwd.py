@@ -58,6 +58,7 @@ from datetime import datetime, timedelta
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 import nemesis_paths  # noqa: E402
+import nemesis_timestamp  # noqa: E402
 import data_manager  # noqa: E402
 
 try:
@@ -637,8 +638,12 @@ def audit(action, actor, ip=None, detail=None):
     try:
         guard = _dm().connect("nemesis_fwd")
         guard.execute(
+            # Was time.strftime("%Y-%m-%d %H:%M:%S") — the ONE writer of this
+            # table that used a space separator, which made `ORDER BY ts`
+            # non-chronological on any day both writers touched (measured on 5
+            # dates, 2026-08-06). Canonical form now comes from the shared helper.
             "INSERT INTO audit_log(ts, request_id, ip, action, user) VALUES (?,?,?,?,?)",
-            (time.strftime("%Y-%m-%d %H:%M:%S"), detail, ip, action, actor))
+            (nemesis_timestamp.now(), detail, ip, action, actor))
         guard.commit()
         return True
     except Exception as exc:

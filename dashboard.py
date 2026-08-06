@@ -2530,9 +2530,14 @@ def _audit(action, rule_id=None, ip=None):
         conn = _dm_conn()   # §9 batch 4 (_audit)
         try:
             c = conn.cursor()
+            # Canonical timestamp via the one shared helper (see
+            # alert_manager/nemesis_timestamp.py). Lazy import, matching the
+            # nemesis_pseudonymize / nemesis_severity precedent for reaching an
+            # alert_manager sibling from here.
+            import nemesis_timestamp as _ts
             c.execute(
                 "INSERT INTO audit_log (ts, rule_id, ip, action, user) VALUES (?, ?, ?, ?, ?)",
-                (datetime.now().isoformat(), rule_id, ip, action, user),
+                (_ts.now(), rule_id, ip, action, user),
             )
             conn.commit()
         finally:

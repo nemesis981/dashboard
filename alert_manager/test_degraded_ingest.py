@@ -40,7 +40,7 @@ sys.path.insert(0, HERE)
 
 import degraded_ingest as di
 
-EXPECTED_CHECKS = 27
+EXPECTED_CHECKS = 33
 
 _results = []
 
@@ -126,8 +126,22 @@ def main():
     check("  its original actor is preserved", lost[0][3], "fail2ban")
     check("  its original target ip is preserved", lost[0][2], "203.0.113.60")
     check("  its original request_id is preserved", lost[0][4], "test-1")
-    check("  its original timestamp is preserved, not now()",
-          lost[0][0], "2026-07-30T13:45:07")
+    # The stored form is CANONICAL as of 2026-08-06 (T separator + explicit UTC
+    # offset, via nemesis_timestamp) while the journal's own value is naive. Only
+    # the FORMAT changed — asserting the instant rather than the string is both
+    # the accurate check and a stronger one, since it would still catch a
+    # timestamp that was silently shifted rather than merely re-rendered.
+    check("  its original timestamp is preserved as the same INSTANT",
+          datetime.fromisoformat(lost[0][0]),
+          datetime.fromisoformat("2026-07-30T13:45:07").astimezone())
+    check("  ...stored in canonical offset-aware form",
+          di.nemesis_timestamp.is_canonical(lost[0][0]), True)
+    # CONTROL: the whole point of the original check. A reconstruction stamped
+    # with now() would still be "a valid timestamp" and would pass every check
+    # above except this one.
+    check("  CONTROL: it is historical, NOT now()",
+          (datetime.now().astimezone()
+           - datetime.fromisoformat(lost[0][0])).days > 1, True)
 
     tamper = [x for x in got if x[1] == "fw_table_tampered"]
     check("watcher tamper event maps to fw_table_tampered", len(tamper), 1)
@@ -151,6 +165,32 @@ def main():
     check("a full re-scan with NO offset still duplicates nothing",
           r3["duplicate"], 2)
     check("CONTROL still exactly two rows after the re-scan", len(rows(db)), 2)
+
+    # ── dedupe across the 2026-08-06 format change ───────────────────────────
+    # THE PRODUCTION CASE, and the one the checks above CANNOT reach: rows
+    # ingested before 2026-08-06 hold the journal's RAW naive timestamp, while
+    # ingest now writes the canonical offset-aware form of the same instant.
+    # Matching only the canonical form would fail to recognise those rows and
+    # re-insert every historical event the day the offset is ever reset. The
+    # checks above dedupe canonical-against-canonical, so they would pass even
+    # if that were broken.
+    print("\ndedupe still recognises rows stored in the PRE-2026-08-06 raw format")
+    db3 = make_db()
+    conn = sqlite3.connect(db3)
+    conn.execute("INSERT INTO audit_log (ts, action, ip, user, request_id) "
+                 "VALUES (?,?,?,?,?)",
+                 (REC_LOST_AUDIT["ts"],           # raw, naive — the old form
+                  "fw_block_ip", "203.0.113.60", "fail2ban", "test-1"))
+    conn.commit()
+    conn.close()
+    check("CONTROL the pre-existing row is in the RAW form",
+          di.nemesis_timestamp.is_canonical(rows(db3)[0][0]), False)
+    write_journal(jp, [REC_LOST_AUDIT])
+    r4 = di.ingest_once(factory(db3), jp)
+    check("the same event in canonical form is seen as a DUPLICATE",
+          r4["duplicate"], 1)
+    check("  and nothing was inserted", r4["ingested"], 0)
+    check("  CONTROL audit_log still holds exactly one row", len(rows(db3)), 1)
 
     # ── failure must not look like success ───────────────────────────────────
     print("\nan unreadable input raises rather than reporting zero")
