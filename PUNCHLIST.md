@@ -3013,3 +3013,21 @@ this entry is the proposal, not the implementation.
           interface Suricata is actually configured to monitor) — reuse that shape.
     - [ ] Deliberately NOT fixed alongside the rule work: one variable at a time, and this
           changes install-time behaviour for every user rather than a detection rule.
+
+- [ ] **The host-defence rule NAMES claim a narrower scope than the rules actually watch.**
+      Design-honesty item, filed 2026-08-06; not a defect in behaviour.
+    - [ ] Every rule is titled "... against Nemesis host", but their destination is
+          `$HOME_NET` — the whole LAN — so they fire on scans against ANY LAN device, not
+          just this host. That mismatch is what made the self-scan false positive read as
+          an attack for a week: alerts said "against Nemesis host" while describing this
+          box scanning other devices.
+    - [ ] **This is deliberate and was KEPT.** Narrowing the destination to the host itself
+          was considered as the fix for the self-scan noise and rejected: it would silently
+          drop lateral-movement coverage (one LAN device scanning another), which is real
+          value the rules provide today by accident of their scope.
+    - [ ] **What is owed is a naming/description decision, not a rule change** — either
+          rename to reflect LAN-wide scope, or split into two rule families (host-targeted
+          vs. LAN-wide) with distinct messages so an operator can tell which they are
+          looking at from the alert text alone.
+    - [ ] Related: the source-exclusion fix (2026-08-06) means these rules no longer fire
+          on this host's own scanning, so the remaining alerts are genuinely third-party.
