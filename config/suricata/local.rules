@@ -1,0 +1,179 @@
+# Nemesis host-self-defence — local rules
+# Staged 2026-07-29 (Window 3). NOT DEPLOYED — hold for morning review.
+#
+# Addresses the adversarial-test finding (docs/testing/adversarial-test-2026-07-29.md)
+# that full port scans against the Nemesis host itself ran for 4 hours with zero
+# detection. Response is handled by alert_watcher -> nemesis_fwd block_ip/deny_ip;
+# no new nemesis_fwd op is required.
+#
+# ── HOME_NET scoping (deliberate) ────────────────────────────────────────────
+# /etc/suricata/suricata.yaml has the stock default:
+#     HOME_NET:     "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+#     EXTERNAL_NET: "!$HOME_NET"
+# so EXTERNAL_NET excludes ALL RFC1918. A LAN-internal attacker -- a compromised
+# agent on the LAN subnet, or a lab host on 192.168.56.0/24 -- is INSIDE HOME_NET
+# and would never match an "$EXTERNAL_NET -> $HOME_NET" rule.
+#
+# These rules therefore use "any -> $HOME_NET", NOT "$EXTERNAL_NET -> $HOME_NET".
+# That is the correct fix at rule scope. Do NOT narrow HOME_NET in suricata.yaml
+# to force the same effect: HOME_NET is consumed by the entire stock ruleset, and
+# redefining it silently changes the directionality of every other rule loaded.
+# See the audit report for the full reasoning.
+#
+# ── What these actually count ────────────────────────────────────────────────
+# Suricata's `threshold`/`detection_filter` count MATCHING EVENTS per tracking
+# key -- they cannot count DISTINCT destination ports. A horizontal sweep is
+# therefore approximated as "many bare SYNs from one source in a short window".
+# flags:S,12 matches SYN with CWR/ECE masked off and, critically, WITHOUT ACK,
+# so established-connection traffic and SYN/ACK replies do not feed the counter.
+# This is an approximation, documented as such -- not a distinct-port counter.
+#
+# SID range 1000000-1999999 is the reserved local/user range.
+#
+# ── Why the sweep rules exclude this host's own service ports ────────────────
+# ADDED 2026-08-06, after a week-long FALSE POSITIVE. Rule 1000002 fired 161
+# times against a known, trusted LAN laptop. Every one of the 7,040 connections
+# behind those alerts went to port 53 -- and to NO other port. This host runs
+# pihole-FTL and IS the LAN's DNS server, so that laptop was doing exactly what
+# every client on the network is supposed to do.
+#
+# The approximation above is what broke: rate stands in for breadth, and a single
+# port that legitimately receives a high SYN rate is indistinguishable from a
+# sweep to a pure counter. The alert text said "sweep" while the logic measured
+# only rate, so the alert misdescribed what had actually fired.
+#
+# THE FIX IS SCOPE, NOT THRESHOLD. Raising the count would only postpone the same
+# false positive (the observed rate was already >100/60s and rising: 10 -> 60 ->
+# 91 alerts/day over three days) while making real sweeps harder to catch. What
+# restores each rule's INTENT is excluding the ports this host advertises:
+# traffic to an advertised service is, by definition, not evidence of breadth.
+#
+# This loses no sweep coverage. A real horizontal scan touches hundreds or
+# thousands of ports, so removing seven from the counter leaves it far above
+# threshold -- proven in test_local_rules.py, where a 150-port scan still trips
+# BOTH sweep rules with these exclusions active.
+#
+# Concentration ON those service ports is not unmonitored -- that is rule 3's
+# entire job, at a deliberately lower count. This change hands the service-port
+# case to the rule designed for it instead of having rules 1/2 answer for both.
+#
+# :53 IS DELIBERATELY *NOT* ADDED TO RULE 3. Rule 3 exists for ports that should
+# never see sustained connection volume; :53 on a DNS server sees exactly that,
+# all day, from every client. Adding it would recreate this false positive at a
+# LOWER threshold (count 15). Detecting DNS abuse needs a query-content or
+# volume-anomaly signal, not a SYN counter -- that is a separate capability and
+# is NOT claimed here.
+#
+# NO SILENT GAPS -- the list is chosen so every excluded port is still covered
+# somewhere, or is documented as deliberately uncovered:
+#   22,80,443,5000,5001  -> covered by rule 3 (service-port concentration)
+#   53                   -> deliberately covered by NEITHER, for the reason above
+# :8080 is intentionally NOT excluded even though this host listens on it. It has
+# zero observed legitimate volume, so it cannot produce this false positive, and
+# leaving it in the sweep counter keeps coverage rather than opening a hole to
+# match a tidier-looking list. 631/CUPS, 1716/KDE-Connect and 9050 stay in for the
+# same reason plus a stronger one: they are not Nemesis services, and probing them
+# IS worth an alert.
+#
+# THE LIST IS WRITTEN OUT IN FULL IN BOTH RULES, DELIBERATELY. The obvious DRY
+# form is a variable — but `portvar` is SNORT syntax, and Suricata resolves rule
+# variables ONLY from suricata.yaml's `vars: port-groups:`. Tried first, 2026-08-06:
+# Suricata rejected `portvar` with "no rule options" and then failed BOTH sweep
+# rules with 'Variable "NEMESIS_SVC_PORTS" is not defined in configuration file'.
+#
+# THAT FAILURE MODE IS THE REASON THIS COMMENT EXISTS. An unparseable rule does
+# not degrade loudly — it simply never loads, so the engine runs with sweep
+# detection SILENTLY OFF while the false-positive test still "passes" (no alerts
+# is, after all, exactly what a suppressed false positive looks like). Caught only
+# because test_local_rules.py also asserts a real scan STILL fires. Do not
+# reintroduce a variable here without moving it into suricata.yaml — and if you do,
+# note that the yaml is root-owned, shared with the entire stock ruleset, and
+# outside this repo, which is why the duplication was judged the smaller risk.
+# test_local_rules.py pins both copies, so a drift between them fails the suite.
+
+# ── 1. Horizontal SYN sweep -- moderate. P2 -> alerts, no auto-quarantine.
+#      Destination excludes this host's own service ports (see the note above):
+#      SYNs to advertised services are normal client traffic, not breadth.
+alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
+    msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (moderate)"; \
+    flow:to_server; \
+    flags:S,12; \
+    threshold:type both, track by_src, count 30, seconds 60; \
+    classtype:attempted-recon; \
+    priority:2; \
+    sid:1000001; rev:2;)
+
+# ── 2. Horizontal SYN sweep -- aggressive. P1 -> eligible for auto-quarantine.
+#      Deliberately a separate rule rather than a second threshold on rule 1:
+#      the auto-quarantine gate keys off priority, so the aggressive case needs
+#      its own P1 sid.
+#      Destination excludes the service ports -- SEE THE NOTE ABOVE. This rule
+#      is priority:1, and the auto-quarantine gate
+#      (core_module/alert_watcher/alert_watcher.py) keys off
+#      `priority == 1 and threat == "CRITICAL"`. Before this change the product's
+#      highest-volume false positive sat ONE severity rung from auto-firewalling a
+#      trusted household device off the LAN's own DNS server -- which would have
+#      presented to its user as "the internet is broken", with the cause buried in
+#      a firewall rule. That adjacency is why the scoping fix belongs HERE and not
+#      only in a threshold.
+alert tcp any any -> $HOME_NET ![22,53,80,443,5000,5001] (\
+    msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (aggressive)"; \
+    flow:to_server; \
+    flags:S,12; \
+    threshold:type both, track by_src, count 100, seconds 60; \
+    classtype:attempted-recon; \
+    priority:1; \
+    sid:1000002; rev:2;)
+
+# ── 3. Service-port probe concentration against Nemesis's own listeners.
+#      :22 (ssh), :5000 (dashboard), :5001 (hw-monitor), :443/:80 (nginx).
+#      Lower count -- these ports specifically should not see sweep behaviour.
+alert tcp any any -> $HOME_NET [22,80,443,5000,5001] (\
+    msg:"NEMESIS Host-defence: repeated probes against Nemesis service ports"; \
+    flow:to_server; \
+    flags:S,12; \
+    threshold:type both, track by_src, count 15, seconds 60; \
+    classtype:attempted-recon; \
+    priority:2; \
+    sid:1000003; rev:1;)
+
+# ── 4-6. NULL / FIN / XMAS stealth scans -- classic nmap -sN/-sF/-sX.
+#      THREE rules, not one: Suricata's `flags:` cannot express OR, and the
+#      trailing ",12" masks CWR/ECE off so those bits never break a match.
+#      `flags:F,12` means FIN set and every other flag (bar CWR/ECE) CLEAR --
+#      which is what makes it a scan probe rather than a normal FIN teardown
+#      (teardown always carries ACK, so it cannot match here).
+#      `threshold:type both` rather than `detection_filter`: both suppress until
+#      the rate is sustained, but detection_filter then alerts on EVERY further
+#      packet -- measured at 30 alerts for a 40-packet scan, each of which would
+#      become an alert_watcher DB write. `type both` caps it at one alert per
+#      source per window. Same detection, ~30x less alert pressure.
+#      No `flow:` keyword: these are stateless probes with no established flow,
+#      and requiring flow direction suppressed the match entirely in testing.
+
+# 4. NULL scan -- no flags set at all (nmap -sN).
+alert tcp any any -> $HOME_NET any (\
+    msg:"NEMESIS Host-defence: NULL-flag stealth scan against Nemesis host"; \
+    flags:0; \
+    threshold:type both, track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; \
+    priority:2; \
+    sid:1000004; rev:1;)
+
+# 5. FIN scan -- FIN only, no ACK (nmap -sF).
+alert tcp any any -> $HOME_NET any (\
+    msg:"NEMESIS Host-defence: FIN-flag stealth scan against Nemesis host"; \
+    flags:F,12; \
+    threshold:type both, track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; \
+    priority:2; \
+    sid:1000005; rev:1;)
+
+# 6. XMAS scan -- FIN+PSH+URG (nmap -sX).
+alert tcp any any -> $HOME_NET any (\
+    msg:"NEMESIS Host-defence: XMAS-flag stealth scan against Nemesis host"; \
+    flags:FPU,12; \
+    threshold:type both, track by_src, count 10, seconds 60; \
+    classtype:attempted-recon; \
+    priority:2; \
+    sid:1000006; rev:1;)
