@@ -2812,3 +2812,45 @@ this entry is the proposal, not the implementation.
       malware detection could be called done. It cannot: Layer A+B is shippable and
       useful, but the four-layer description the product gives of itself is not accurate
       today.
+
+- [ ] **ADR needed: does Nemesis get a static-policy nft table?** Piece K (the QUIC-specific
+  block) has no home. The validated rule is nftables, but neither existing surface can take
+  it: `ufw` would mean re-deriving byte-offset matching as an iptables `u32` expression and
+  discarding the measurement, and ADR 0019's `nemesis_enforce` table forbids it outright —
+  that table is DERIVED from ufw's live state and its single-authority constraint exists
+  precisely to stop independent population. So a third surface is proposed, and per
+  `CLAUDE.md`'s prohibition on ad-hoc `nft` outside the chokepoint, that needs deciding
+  deliberately rather than by a commit.
+    - [ ] **Operator decision already taken (2026-08-05):** separate static-policy table,
+      distinct from both. **Rule 10 checked — public by default**: the architecture and the
+      standards-track RFC 9001 detail are not new disclosure, and the public roadmap already
+      describes the detection approach.
+    - [ ] **Technical input for whoever authors it, so it is not re-derived:**
+        - Keep the validated rule VERBATIM, do not re-derive:
+          `udp dport 443 @th,64,8 & 0xc0 == 0xc0 @th,72,32 { 0x00000001, 0x6b3343cf }`
+          (long-header form + fixed bit, then the version field). Measured **0/24 false
+          positives** against real protocol shapes plus an adversarial near-miss crafted to
+          defeat header-form matching alone.
+        - **`reject with icmpx type port-unreachable`** — never `drop`, never `reject with
+          icmp`. In an `inet` table nft silently adds `meta nfproto ipv4` to the latter, the
+          rule then misses all IPv6 QUIC, and the counter sits at 0 while handshakes pass —
+          which reads as "the mechanism does not work". `icmpx` is the only form covering
+          both families.
+        - `nemesis_enforce` occupies priority **-300** (input/forward) and **-175** (output).
+          A new table must not collide.
+        - The table will not survive a reboot — nft state is kernel-only. It needs a boot
+          unit, the lesson `nemesis-fw-enforce.service` already paid for.
+    - [ ] **Hook choice is the ADR's central decision.** The `forward` hook is the real
+      feature; `output` only protects the appliance itself. **The gateway decision was taken
+      2026-08-05 (Nemesis WILL become the gateway)**, so `forward` is now the correct target
+      — but it matches nothing until that role is actually deployed (`ip_forward=0` and
+      FORWARD chains at 0 packets on the current bridged-peer topology). An enforcement rule
+      that has never matched a packet in production is indistinguishable from a broken one,
+      so whatever ships must state plainly what it is and is not doing yet.
+    - [ ] **Two caveats to carry into the ADR, both operator-confirmed:** QUIC v2
+      (`0x6b3343cf`) is in the match set but was **never observed on the wire** — v1 is
+      proven, v2 is not. And **Safari fallback is unverified** — the fleet has 14 VMs and
+      zero macOS, and provisioning macOS virtualisation was judged not worth it for this
+      alone. Firefox must be measured, not assumed.
+    - [ ] Raised by Window 1, 2026-08-05. **ADRs are Window 2's to author** — this entry is
+      the technical input, not the ADR. Next free number is 0022.
