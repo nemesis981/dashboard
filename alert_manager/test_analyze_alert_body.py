@@ -46,7 +46,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 sys.path.insert(0, REPO)
 
-EXPECTED_CHECKS = 29
+EXPECTED_CHECKS = 35
 
 _results = []
 
@@ -216,6 +216,29 @@ def main():
     # proving the two paths are deliberately different, not accidentally the same.
     check("CONTROL the INSERT path still defaults to UNKNOWN",
           'or "UNKNOWN"' in fn_src2, True)
+
+    # ── the UPDATE must actually SET action, and must not lie about it ───────
+    # Until 2026-08-06 `action` was absent from this UPDATE's SET clause while
+    # the JSON response reported `new_action`: the API said "ignore" and the row
+    # stayed "pending". Behaviour is proven separately against a DB copy; these
+    # pin the shape so a later tidy-up cannot quietly restore either half of the
+    # bug.
+    print("\nthe UPDATE sets action, guarded, and the response reports the STORED value")
+    check("the UPDATE now sets action at all",
+          "action=CASE" in fn_src2.replace(" ", "").replace("\n", "") or
+          "action=CASE" in fn_src2, True)
+    check("it refuses to overwrite operator state (only advances 'pending')",
+          "action='pending'" in fn_src2, True)
+    check("it declines to act on an unparseable reply (NULL guard)",
+          "? IS NOT NULL" in fn_src2, True)
+    check("the response reports the STORED action, not the proposed one",
+          '"action": actual_action' in fn_src2, True)
+    # CONTROL: new_action must still be COMPUTED — it is the proposal the guards
+    # then accept or decline. If this vanished, the checks above could pass on a
+    # route that no longer proposes anything at all.
+    check("CONTROL the proposal is still computed", "new_action =" in fn_src2, True)
+    check("CONTROL the response no longer returns the raw proposal",
+          '"action": new_action' in fn_src2, False)
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)

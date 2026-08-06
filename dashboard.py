@@ -4608,9 +4608,31 @@ Alert: {alert_body}
         # failed, I have nothing to say about severity" and must leave whatever
         # is stored intact. A bare `risk_level=?` with None would NULL the column
         # — the same data loss the hardcoded "UNKNOWN" caused, just quieter.
+        # `action` is set here too — it was MISSING from this SET clause until
+        # 2026-08-06, so on the UPDATE path the row kept its old action while the
+        # response below reported `new_action`. The API said "ignore" and the row
+        # stayed "pending". Same family as the other defects on this route: a
+        # response that reads as authoritative while describing something that
+        # never happened.
+        #
+        # TWO GUARDS, both load-bearing — a bare `action=?` would fix the lie by
+        # creating a worse bug:
+        #   * `? IS NOT NULL` (on risk_level): a failed parse yields new_action
+        #     "pending" purely because risk_level != "LOW". Writing that would
+        #     silently demote a real action on every unparseable reply — exactly
+        #     the data loss COALESCE prevents for risk_level one line above.
+        #   * `action='pending'`: `action` is OPERATOR state. /api/action/<id>/<x>
+        #     lets a human set it, quarantine confirm/lift write 'block'/'pending',
+        #     and alert_watcher writes 'auto-quarantine'. Re-analysing an alert
+        #     must never overturn a human's decision — only advance a row nobody
+        #     has ruled on yet.
         c.execute("UPDATE alerts SET explanation=?, "
-                  "risk_level=COALESCE(?, risk_level) WHERE rule_id=?",
-                  (analysis["explanation"], analysis["risk_level"], rule_id))
+                  "risk_level=COALESCE(?, risk_level), "
+                  "action=CASE WHEN ? IS NOT NULL AND action='pending' "
+                  "            THEN ? ELSE action END "
+                  "WHERE rule_id=?",
+                  (analysis["explanation"], analysis["risk_level"],
+                   analysis["risk_level"], new_action, rule_id))
         if c.rowcount == 0:
             c.execute("""INSERT INTO alerts
                 (rule_id, rule_name, classification, priority, explanation, risk_level, action, times_seen, first_seen, last_seen)
@@ -4621,11 +4643,19 @@ Alert: {alert_body}
                 # UPDATE path above, "UNKNOWN" is the honest answer here.
                 (rule_id, raw_alert[:50], "", 1, analysis["explanation"],
                  analysis["risk_level"] or "UNKNOWN", new_action, now, now, rule_id))
+        # Report what was actually STORED, not what we intended to store. The
+        # guards above deliberately decline to overwrite an operator's decision,
+        # so `new_action` is our proposal — the row is the truth. Returning the
+        # proposal would move the same lie rather than fix it: the UI would show
+        # "ignore" over a row that (correctly) stayed "acknowledged".
+        stored = c.execute("SELECT action FROM alerts WHERE rule_id=?",
+                           (rule_id,)).fetchone()
+        actual_action = stored[0] if stored else new_action
         conn.commit()
         conn.close()
         return jsonify({**analysis, "cached": False, "src_ip": src_ip,
                         "enrichment": enrichment, "times_seen": 1,
-                        "last_seen": now, "action": new_action, "rule_name": ""})
+                        "last_seen": now, "action": actual_action, "rule_name": ""})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
