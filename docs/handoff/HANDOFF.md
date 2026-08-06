@@ -149,6 +149,40 @@ Full detail in the supplement. Headline sequence, roughly in dependency order:
    documenting it was never handed to Window 2 this session; carried forward as an open
    item to close out cleanly next session.
 
+## ⚠ Standing elevated grants — REVIEW FOR REVOCATION
+
+Elevated privileges granted for a specific piece of work, which must be revoked when
+that work ends rather than left to accumulate. **Anything listed here is expected to be
+removed — its presence is a live decision, not settled state.**
+
+### `nemesis-suricata-rules` — added 2026-08-06, for Suricata rule deployment
+
+- **File:** `/etc/sudoers.d/nemesis-suricata-rules`
+- **Grants (exact paths, no wildcards):**
+  - `/usr/bin/tee /etc/suricata/rules/local.rules`
+  - `/usr/bin/systemctl reload suricata`
+  - `/usr/bin/systemctl restart suricata`
+- **Why:** host-defence rule fixes previously needed operator intervention for every
+  deploy. Added so `scripts/deploy-suricata-rules.sh` can run unattended.
+- **What it actually gives away, stated plainly:** `tee` to a fixed path still writes
+  ARBITRARY CONTENT there. Anything running as the dashboard user can rewrite the IDS
+  ruleset and reload the engine with no password. The realistic worst case is not
+  privilege escalation — the paths are pinned, there is no shell and no `cp` (which
+  would take a caller-chosen source) — it is **detection loss**: write an empty rules
+  file, reload, and host-defence detection is silently off. That is the same
+  silently-off failure mode this rule set nearly shipped on 2026-08-06, when a
+  Snort-syntax `portvar` stopped both sweep rules from loading.
+- **Mitigations that make it acceptable rather than merely convenient:** exact paths
+  only; `suricata -T` validation needs no privilege and runs BEFORE every reload in
+  `scripts/deploy-suricata-rules.sh`, which refuses to install a ruleset that does not
+  parse; the deployed file is diffed against the staged copy before the reload.
+- **NOT required for normal Nemesis operation.** Only for deploying rule changes from
+  this repo. If rule work is not active, this file should not exist.
+- **Revoke with:** `sudo rm /etc/sudoers.d/nemesis-suricata-rules`
+- **Revocation trigger:** when host-defence rule iteration is done. Re-check at each
+  closeout; if nobody has deployed a rule change in a while, remove it and re-add later
+  if needed — re-adding is one command, and a forgotten standing grant is not.
+
 ## 6. Known issues/gaps, not yet fixed
 
 - **Live worklog discipline gap, again.** Same as 2026-08-04: no live worklog was appended
