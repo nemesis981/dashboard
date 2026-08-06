@@ -259,12 +259,110 @@ def init_devices_table():
                 friendly_name TEXT,
                 device_type TEXT,
                 notes TEXT,
-                trusted INTEGER DEFAULT 1
+                trusted INTEGER DEFAULT 1,
+                vendor TEXT,
+                category_override TEXT,
+                category_source TEXT,
+                hostname TEXT
             )
         """)
+        # ── Guarded migrations ───────────────────────────────────────────────
+        #
+        # ⚠ THE FIRST THREE FIX A REAL DRIFT, they are not new work. `vendor`,
+        # `category_override` and `category_source` were added to the LIVE
+        # database by `scripts/migrate_device_categories.py`, but this canonical
+        # CREATE was never updated to match. The live table had 9 columns while
+        # the repo's CREATE declared 6 (verified 2026-08-06).
+        #
+        # That is invisible on an existing install and breaks a FRESH one: a new
+        # database would get a `devices` table without those columns, and device
+        # categorisation would be silently inert — `get_network_devices()` probes
+        # for them with PRAGMA and simply omits what is absent, so nothing would
+        # error, the feature would just never work. Exactly the shape CLAUDE.md's
+        # "guarded ALTER alongside the UPDATED create" rule exists to prevent.
+        #
+        # `hostname` is the new one: DHCP option 12, captured at lease time by
+        # the dhcp module and reconciled in here (see `reconcile_dhcp_hostnames`).
+        # It is DISTINCT from `friendly_name` on purpose — friendly_name is the
+        # operator's own label and must never be overwritten by an observation.
+        _cols = {row[1] for row in c.execute("PRAGMA table_info(devices)").fetchall()}
+        for _col in ("vendor", "category_override", "category_source", "hostname"):
+            if _col not in _cols:
+                c.execute("ALTER TABLE devices ADD COLUMN %s TEXT" % _col)
         conn.commit()
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DHCP lease -> device inventory reconciliation
+#
+# ⚠ WHY THIS FUNCTION IS IN CORE AND NOT IN THE DHCP MODULE.
+#
+# ADR 0001: modules own tables by prefix and are WRITE-OWN / READ-ANY. `devices`
+# is core-owned and unprefixed, so the dhcp module may READ it but must never
+# write it. The module therefore records what it observes into its own
+# `dhcp_leases` table, and this core-side function is the only thing that
+# promotes an observation into the shared inventory.
+#
+# THE TABLE IS THE INTERFACE. `dhcp_leases` is the contract between the two
+# sides: the module produces rows, core consumes them. Neither reaches into the
+# other's storage. That boundary is what lets the DHCP module be disabled,
+# swapped for a different implementation, or run in a mode where it serves no
+# leases at all, without any of that touching the device inventory's schema or
+# its writers.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reconcile_dhcp_hostnames(conn=None):
+    """Promote observed DHCP hostnames into `devices.hostname`. Returns a summary.
+
+    Matches on MAC, which is the only identifier both sides share and the one
+    `devices` is keyed on.
+
+    NEVER TOUCHES `friendly_name`. That column is the operator's own naming, and
+    an observation must not overwrite a human decision — the product already has
+    one bug of exactly that shape on record (an OUI vendor string written into
+    `friendly_name` and destroyed on rename). `hostname` is stored alongside it;
+    display logic decides which to show, and the operator's name wins.
+
+    Only writes when the value actually CHANGES, so a device that reconnects
+    every few minutes does not generate a write per lease renewal.
+
+    Absent `dhcp_leases` is a normal state, not an error: the DHCP module may be
+    disabled, or running in `pihole`/`provider` mode where it never serves a
+    lease. Returns zeroes with `available=False` rather than raising, and the
+    caller can tell that apart from "ran and found nothing" — which a bare 0
+    could not.
+    """
+    own_conn = conn is None
+    if own_conn:
+        conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        have = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='dhcp_leases'"
+        ).fetchone()
+        if not have:
+            return {"available": False, "examined": 0, "updated": 0}
+
+        rows = conn.execute(
+            "SELECT mac, hostname FROM dhcp_leases "
+            "WHERE hostname IS NOT NULL AND TRIM(hostname) != ''"
+        ).fetchall()
+
+        updated = 0
+        for mac, hostname in rows:
+            if not mac:
+                continue
+            cur = conn.execute(
+                "UPDATE devices SET hostname=? "
+                "WHERE mac=? AND IFNULL(hostname,'') != ?",
+                (hostname, mac.lower(), hostname))
+            updated += cur.rowcount
+        conn.commit()
+        return {"available": True, "examined": len(rows), "updated": updated}
+    finally:
+        if own_conn:
+            conn.close()
 
 def init_error_tables():
     """Create the structured error-code tables (ADR 0001 core-owned `error_*`).

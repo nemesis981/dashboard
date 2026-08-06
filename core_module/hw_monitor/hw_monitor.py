@@ -2667,6 +2667,31 @@ def get_agent_devices():
     return [dict(zip(cols, r)) for r in rows]
 
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder: this process starts with no systemd
+# ordering against whatever creates the error tables, so registering at import
+# would be a race. See PUNCHLIST "Silent exception-swallow sites".
+_ERR_CODES = {
+    "E-HWMON-001": ("hw device list DB read failed; empty list returned as a real "
+                    "result (reads as 'no devices reporting')",
+                    "MEDIUM", "db-read-empty-default"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "hw_monitor", _db_connect, _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 def get_hw_devices():
     """Return distinct device_ids seen in hw_metrics last 24h with their latest readings."""
     try:
@@ -2684,7 +2709,14 @@ def get_hw_devices():
             ) latest ON m.device_id = latest.device_id AND m.timestamp = latest.max_ts
         """).fetchall()
         conn.close()
-    except Exception:
+    except Exception as exc:
+        # E-HWMON-001 — an empty list here renders as "no devices reporting",
+        # which is a legitimate state on a quiet network. The caller cannot tell
+        # the two apart, so the failure is recorded rather than discarded. The
+        # [] return is KEPT deliberately: callers iterate it and a raise would
+        # break the dashboard card.
+        _errors_record("E-HWMON-001", {"fn": "get_hw_devices",
+                                       "error": f"{type(exc).__name__}: {exc}"})
         return []
     result = []
     for device_id, ts, cpu_t, gpu_t, cpu_pct, ram_gb in rows:

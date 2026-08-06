@@ -285,6 +285,124 @@ def record_error_best_effort(conn, code, context=None, snapshot_id=None,
         return None
 
 
+class _Recorder:
+    """A never-raising, lazily-registering recorder bound to one module.
+
+    WHY THIS EXISTS. Every retrofit call site needs the same three things:
+    a connection, its codes registered exactly once, and a record that cannot
+    raise into the handler it lives in. Written inline that is ~25 lines per
+    file. The first seeded site (`modules/tickets`) proved the shape; this
+    turns it into one implementation instead of a copy in every module, which
+    matters because the PUNCHLIST retrofit has ~149 candidate sites to go.
+
+    REGISTRATION IS DEFERRED, NOT DONE AT IMPORT — deliberately. Several of
+    these modules are imported before the error tables are guaranteed to
+    exist (`modules_loader` runs ahead of any DDL, and the core services have
+    no systemd ordering between them). Registering at import would mean a
+    diagnostic facility could take down the thing it is meant to diagnose.
+    Registration is idempotent, so doing it on first use is safe.
+
+    EVERY method swallows. This object is only ever touched from inside an
+    `except:` block, where the original exception is the valuable thing and
+    must not be replaced by ours.
+    """
+
+    __slots__ = ("_module", "_conn_factory", "_codes", "_logger",
+                 "_registered", "_reg_failures")
+
+    # After this many consecutive failed registration attempts, stop retrying
+    # for the life of the process. Without a cap, a genuinely broken/unwritable
+    # DB means every single swallowed exception re-attempts the full DDL +
+    # registration — turning a degraded database into a hot loop on the exact
+    # path that is already failing.
+    _MAX_REG_FAILURES = 3
+
+    def __init__(self, module, conn_factory, codes, logger=None):
+        self._module = module
+        self._conn_factory = conn_factory
+        # {code: (description, severity, error_class)}
+        self._codes = dict(codes)
+        self._logger = logger
+        self._registered = False
+        self._reg_failures = 0
+
+    def _warn(self, msg, *a):
+        if self._logger is None:
+            return
+        try:
+            self._logger.warning(msg, *a)
+        except Exception:
+            pass
+
+    def __call__(self, code, context=None, snapshot_id=None, actor=None):
+        """Record one occurrence. Returns the id, or None if it did not record.
+
+        None means "not recorded" and is never mistakable for a real id.
+        """
+        if code not in self._codes:
+            # A typo'd code would otherwise register nothing and silently
+            # record nothing — the failure shape this whole system exists to
+            # eliminate. Surface it in the log; still do not raise.
+            self._warn("error-code %s not declared by module %s", code, self._module)
+            return None
+
+        # Check the give-up state BEFORE opening anything. Opening first and
+        # checking after still costs a connection attempt on every single
+        # swallowed exception once we have given up — which is precisely the
+        # hot loop on an already-failing path that the cap exists to prevent.
+        # Caught by the suite's factory-call-count check, not by inspection.
+        if not self._registered and self._reg_failures >= self._MAX_REG_FAILURES:
+            return None
+
+        conn = None
+        try:
+            conn = self._conn_factory()
+        except Exception as exc:                       # noqa: BLE001
+            self._warn("error-code recorder could not open a connection: %s", exc)
+            return None
+
+        try:
+            if not self._registered:
+                try:
+                    init_error_tables(conn)
+                    for c, (desc, sev, cls) in self._codes.items():
+                        register_error_code(conn, c, self._module, desc, sev,
+                                            error_class=cls)
+                    self._registered = True
+                    self._reg_failures = 0
+                except Exception as exc:               # noqa: BLE001
+                    self._reg_failures += 1
+                    if self._reg_failures >= self._MAX_REG_FAILURES:
+                        self._warn("error-code registration failed %d times for "
+                                   "module %s; giving up for this process: %s",
+                                   self._reg_failures, self._module, exc)
+                    return None
+            return record_error_best_effort(conn, code, context=context,
+                                            snapshot_id=snapshot_id,
+                                            actor=actor, logger=self._logger)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def make_recorder(module, conn_factory, codes, logger=None):
+    """Build a module-scoped error recorder. See `_Recorder`.
+
+    `conn_factory` is a zero-arg callable returning a fresh connection; the
+    recorder closes it after each use. A factory (rather than a live
+    connection) is required because these call sites run in long-lived
+    services where a cached handle would outlive its usefulness — and because
+    the connection must come from the CALLER, so the error system never opens
+    its own DB access and never becomes a way around the ADR 0006 module
+    contract that `modules_loader` enforces statically.
+
+    `codes` maps code -> (description, severity, error_class).
+    """
+    return _Recorder(module, conn_factory, codes, logger=logger)
+
+
 def add_cause(conn, cause_description, code=None, error_class=None,
               status=STATUS_CONFIRMED, check_ref=None):
     """Add a ledger cause at EXACTLY ONE level — code or class, never both.

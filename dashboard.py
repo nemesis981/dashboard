@@ -209,6 +209,35 @@ def _dm_conn():
     return conn
 
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder. Wired at the read sites whose failure
+# returns a value that is INDISTINGUISHABLE from a legitimate empty result — a
+# log line alone is not enough there, because the caller still renders the empty
+# value as fact. See PUNCHLIST "Silent exception-swallow sites" for the rest.
+_ERR_CODES = {
+    "E-DASH-001": ("device inventory read failed; empty list returned, which the "
+                   "UI renders as 'no devices on the network'",
+                   "HIGH", "db-read-empty-default"),
+    "E-DASH-002": ("VPN split-tunnel app list read failed; empty list returned as "
+                   "a real result",
+                   "LOW", "db-read-empty-default"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "dashboard", _dm_conn, _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 #: How often the degraded journal is swept into audit_log. A stat + seek on a
 #: file that is usually unchanged, so the cost is nil; 60s bounds how long a
 #: tamper event sits in the journal without reaching the audit trail.
@@ -2541,6 +2570,13 @@ def get_network_devices():
         return sorted(devices, key=lambda x: x["ip"])
     except Exception as e:
         log.exception("get_network_devices failed: %s", e)
+        # E-DASH-001 — HIGH, unlike its siblings: an empty device list is not a
+        # cosmetic gap. It reads as "nothing is on the network", which is the
+        # same thing the UI shows for a genuinely quiet LAN, and every downstream
+        # count and category tile inherits the lie. The log line above is not
+        # sufficient on its own — nothing reads the log at render time.
+        _errors_record("E-DASH-001", {"fn": "get_network_devices",
+                                      "error": f"{type(e).__name__}: {e}"})
         return []
 
 def _ensure_audit_log_table():
@@ -4078,12 +4114,31 @@ def get_vpn_status():
 
 
 def get_vpn_split_tunnel_apps():
+    # E-DASH-002. The discrimination here matters as much as the recording:
+    # `piactl` is a VENDOR binary (Private Internet Access) and is simply ABSENT
+    # on the overwhelming majority of installs. FileNotFoundError is therefore
+    # the normal state, not a fault — recording it would generate a steady drip
+    # of errors on every box that does not run PIA, which is exactly how a ledger
+    # becomes noise the operator learns to ignore.
+    #
+    # What IS worth recording: piactl present but failing (a timeout, a crash, a
+    # non-zero exit). That means the integration is installed and broken, and the
+    # empty list is silently reported as "no split-tunnel apps configured".
     try:
         r = subprocess.run(["piactl", "get", "splittunnelapps"], capture_output=True, text=True, timeout=5)
         if r.returncode == 0 and r.stdout.strip():
             return [a for a in r.stdout.strip().splitlines() if a.strip()]
-    except Exception:
-        pass
+        if r.returncode != 0:
+            # A non-zero exit raises nothing at all — the quietest failure shape
+            # of the three, and previously indistinguishable from "none set".
+            _errors_record("E-DASH-002", {"fn": "get_vpn_split_tunnel_apps",
+                                          "returncode": r.returncode,
+                                          "stderr": (r.stderr or "")[:200]})
+    except FileNotFoundError:
+        pass                      # piactl not installed — expected, not an error
+    except Exception as e:
+        _errors_record("E-DASH-002", {"fn": "get_vpn_split_tunnel_apps",
+                                      "error": f"{type(e).__name__}: {e}"})
     return []
 
 

@@ -145,6 +145,56 @@ def _fetch_latest_hw_sample():
     return d
 
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder — this process has no systemd ordering
+# against whatever creates the error tables.
+#
+# ⚠ THE DISCRIMINATION BELOW IS THE WHOLE POINT OF WIRING THESE TWO SITES.
+# Both read tables owned by OTHER processes (`fan_status`, `hw_metrics` — both
+# created by hw_monitor), and there is deliberately no startup ordering between
+# the services. So "no such table" is a NORMAL, EXPECTED cold-start state, not a
+# fault: on a fresh boot watchdog can genuinely win the race. Recording it would
+# emit an error on every clean start, which trains the operator to ignore the
+# ledger — the failure mode that makes an error system worthless.
+#
+# What is NOT expected is any OTHER failure (locked, corrupt, permission denied,
+# disk full). Those are indistinguishable from "no data" to every caller, and
+# they are what these codes exist to surface. Hence: record everything EXCEPT
+# missing-table.
+_ERR_CODES = {
+    "E-WATCHDOG-001": ("fan_status read failed for a reason other than the table "
+                       "being absent; empty status returned as a real result",
+                       "MEDIUM", "db-read-empty-default"),
+    "E-WATCHDOG-002": ("hw_metrics CPU-sample read failed for a reason other than "
+                       "the table being absent; empty sample set returned as real",
+                       "MEDIUM", "db-read-empty-default"),
+}
+_recorder = None
+
+
+def _table_missing(exc):
+    """True when this exception is the benign 'the table is not created yet' case.
+
+    Matched on the message because sqlite3 does not give missing-table its own
+    exception type — `OperationalError` covers locked, readonly, corrupt and
+    missing alike, so the type alone cannot make this distinction.
+    """
+    return isinstance(exc, sqlite3.OperationalError) and "no such table" in str(exc).lower()
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "watchdog", _db_connect, _ERR_CODES, logger=logging.getLogger())
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 def _fetch_fan_status():
     """Return {unique_key: {"label": str, "ever_active": bool}} from fan_status table.
 
@@ -155,7 +205,10 @@ def _fetch_fan_status():
         rows = conn.execute(
             "SELECT unique_key, label, ever_active FROM fan_status"
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        if not _table_missing(exc):
+            _errors_record("E-WATCHDOG-001", {"fn": "_fetch_fan_status",
+                                              "error": f"{type(exc).__name__}: {exc}"})
         rows = []
     finally:
         conn.close()
@@ -171,9 +224,13 @@ def _fetch_recent_cpu_percents(n):
             (n,),
         )
         rows = c.fetchall()
-    except Exception:
+    except Exception as exc:
         # hw_metrics may not exist yet (created by hw_monitor, no startup
         # ordering). Return empty rather than crash — matches _fetch_fan_status.
+        # That specific case stays unrecorded; anything else is a real fault.
+        if not _table_missing(exc):
+            _errors_record("E-WATCHDOG-002", {"fn": "_fetch_recent_cpu_percents",
+                                              "error": f"{type(exc).__name__}: {exc}"})
         rows = []
     finally:
         conn.close()

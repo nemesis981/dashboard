@@ -366,31 +366,27 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
 
 
 # ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
-# Registered lazily on first use rather than at import: this module is loaded by
-# modules_loader BEFORE the error tables are guaranteed to exist, and a failed
-# registration at import time would take the whole module down for a diagnostic
-# facility. Registration is idempotent, so first-use is safe and cheap.
-_ERR_REGISTERED = False
+# Registration is deferred to first use by `make_recorder`, not done at import:
+# this module is loaded by modules_loader BEFORE the error tables are guaranteed
+# to exist, and a failed registration at import time would take the whole module
+# down for a diagnostic facility.
+_ERR_CODES = {
+    "E-TICKETS-001": ("open-ticket count DB read failed; 0 returned as a real count",
+                      "MEDIUM", "db-read-empty-default"),
+}
+_recorder = None
 
 
 def _errors_record(code, context):
     """Record one structured error occurrence. Never raises into the caller."""
-    global _ERR_REGISTERED
+    global _recorder
     try:
-        import nemesis_errors
-    except Exception:
-        return None
-    try:
-        conn = get_data_manager().connect("tickets")
-        if not _ERR_REGISTERED:
-            nemesis_errors.init_error_tables(conn)
-            nemesis_errors.register_error_code(
-                conn, "E-TICKETS-001", "tickets",
-                "open-ticket count DB read failed; 0 returned as a real count",
-                "MEDIUM", error_class="db-read-empty-default")
-            _ERR_REGISTERED = True
-        return nemesis_errors.record_error_best_effort(conn, code, context=context,
-                                                       logger=log)
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "tickets", lambda: get_data_manager().connect("tickets"),
+                _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
     except Exception:
         return None
 

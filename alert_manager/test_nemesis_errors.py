@@ -32,7 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import nemesis_errors as ne          # noqa: E402
 import nemesis_severity              # noqa: E402
 
-EXPECTED_CHECKS = 57
+EXPECTED_CHECKS = 73
 
 passed = failed = 0
 
@@ -278,6 +278,121 @@ check("LIVE TABLE SURVIVES a failed archive verify",
 
 res = ne.archive_and_coalesce_occurrences(conn4, arch)
 check("archival with nothing to do is a clean no-op", res["archived"] == 0, str(res))
+
+
+# ── make_recorder() — the shared retrofit helper ─────────────────────────────
+# Weighted against the ways a never-raising helper fails INVISIBLY: it swallows
+# everything by contract, so "it didn't raise" proves nothing at all. Every check
+# below asserts on OBSERVABLE STATE (rows written, factory call counts) rather
+# than on the absence of an exception.
+print("\n--- make_recorder ---")
+
+rec_db = os.path.join(tempfile.mkdtemp(prefix="err-rec-"), "recorder.db")
+_opened = {"n": 0}
+
+
+def _rec_conn():
+    _opened["n"] += 1
+    return sqlite3.connect(rec_db)
+
+
+CODES = {"E-TEST-001": ("first probe code", "MEDIUM", "db-read-empty-default"),
+         "E-TEST-002": ("second probe code", "LOW", None)}
+
+
+class _CapturingLog:
+    def __init__(self):
+        self.msgs = []
+
+    def warning(self, msg, *a):
+        self.msgs.append(msg % a if a else msg)
+
+
+lg = _CapturingLog()
+rec = ne.make_recorder("probe", _rec_conn, CODES, logger=lg)
+
+# Tables must NOT exist before first use — registration is deferred, and if it
+# were happening at construction time this assertion is what would catch it.
+_c = sqlite3.connect(rec_db)
+_pre = _c.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+_c.close()
+check("make_recorder does NOT touch the DB at construction", _pre == 0, f"{_pre} tables")
+
+oid1 = rec("E-TEST-001", context={"probe": 1})
+check("first call registers and records", isinstance(oid1, int) and oid1 > 0, repr(oid1))
+
+_c = sqlite3.connect(rec_db)
+check("both declared codes registered on first use",
+      _c.execute("SELECT COUNT(*) FROM error_codes").fetchone()[0] == 2)
+check("occurrence row actually written",
+      _c.execute("SELECT COUNT(*) FROM error_occurrences").fetchone()[0] == 1)
+check("error_class persisted for the code that declared one",
+      _c.execute("SELECT class FROM error_codes WHERE code='E-TEST-001'"
+                 ).fetchone()[0] == "db-read-empty-default")
+_c.close()
+
+oid2 = rec("E-TEST-002")
+check("second call records without re-registering", isinstance(oid2, int) and oid2 > oid1)
+
+# Registration must be idempotent-by-flag, not re-run per call.
+_c = sqlite3.connect(rec_db)
+check("still exactly 2 codes after a second record (no duplicate registration)",
+      _c.execute("SELECT COUNT(*) FROM error_codes").fetchone()[0] == 2)
+check("connection is opened per call and closed (factory called once per record)",
+      _opened["n"] == 2, f"opened {_opened['n']}")
+_c.close()
+
+# An undeclared code must not silently write nothing with no trace.
+_before = _opened["n"]
+und = rec("E-NOT-DECLARED-999")
+check("undeclared code returns None", und is None, repr(und))
+check("undeclared code warns rather than failing silently",
+      any("not declared" in m for m in lg.msgs), str(lg.msgs))
+check("undeclared code does not even open a connection", _opened["n"] == _before)
+
+# NEGATIVE CONTROL for the whole harness: if the recorder could only ever return
+# None, every check above would still pass. Prove a real id came back and that
+# the two ids differ, so the instrument is demonstrably able to distinguish.
+check("NEGATIVE CONTROL: recorder returns distinct real ids, not a constant None",
+      oid1 is not None and oid2 is not None and oid1 != oid2, f"{oid1} {oid2}")
+
+
+def _broken_conn():
+    raise sqlite3.OperationalError("unable to open database file")
+
+
+rec_bad = ne.make_recorder("probe", _broken_conn, CODES, logger=lg)
+check("unopenable DB returns None instead of raising", rec_bad("E-TEST-001") is None)
+check("unopenable DB is logged", any("could not open" in m for m in lg.msgs))
+
+
+# Registration that keeps failing must give up rather than retry forever on the
+# already-failing path.
+class _RegFailConn:
+    """Opens fine, but every write fails — the 'DB is read-only' shape."""
+
+    def execute(self, *a, **k):
+        raise sqlite3.OperationalError("attempt to write a readonly database")
+
+    def close(self):
+        pass
+
+
+_regfail = {"n": 0}
+
+
+def _regfail_conn():
+    _regfail["n"] += 1
+    return _RegFailConn()
+
+
+rec_ro = ne.make_recorder("probe", _regfail_conn, CODES, logger=lg)
+for _ in range(6):
+    rec_ro("E-TEST-001")
+check("registration gives up after the cap instead of retrying every call",
+      _regfail["n"] == ne._Recorder._MAX_REG_FAILURES, f"opened {_regfail['n']}")
+check("giving up is logged, not silent",
+      any("giving up" in m for m in lg.msgs), str(lg.msgs))
 
 
 print("\n" + "=" * 62)
