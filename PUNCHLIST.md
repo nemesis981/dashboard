@@ -3128,3 +3128,42 @@ this entry is the proposal, not the implementation.
           variant exists.
     - [ ] Seeded already (2026-08-06): `modules/tickets/module.py` `get_open_ticket_count()`
           records `E-TICKETS-001` and still returns 0 — the reference shape for the rest.
+
+- [ ] **⚠ URGENT — dhcp module's Data Manager grant is a PREFIX match, not the exact-match
+      it claims to be. Fix before landing; flagged before commit specifically because
+      tonight is an unattended overnight run.** Found by Window 2, 2026-08-06, reviewing
+      Window 1's dhcp-module thread-wiring delivery (held, not committed).
+    - [ ] **The claim, verbatim from the code comment:** `alert_manager/data_manager.py`'s
+          new `"dhcp": ("dhcp_leases",)` entry is commented "EXPLICIT table, not a `dhcp_`
+          prefix grant... so it can't silently acquire writable tables as it grows."
+    - [ ] **The actual behaviour, demonstrated, not inferred:** `allowed()` treats a plain
+          tuple value as a PREFIX list (`table.startswith(p) for p in spec`) — exact-match
+          semantics only exist for the dict form (`{"tables": (...)}`), already used for
+          exactly this precision by `integrity_watch`. Live test:
+          ```
+          dm.allowed('dhcp', 'dhcp_leases')          -> True   (correct)
+          dm.allowed('dhcp', 'dhcp_leases_archive')  -> True   (WRONG — no such table
+                                                                 exists yet, but it is
+                                                                 silently pre-authorized)
+          dm.allowed('dhcp', 'devices')              -> False  (correct)
+          ```
+    - [ ] **Fix:** change the entry to `"dhcp": {"tables": ("dhcp_leases",)}`, matching the
+          `integrity_watch` precedent exactly.
+    - [ ] **The new test doesn't catch this, and that is the more important finding.**
+          `test_dhcp_module.py`'s "the grant is an EXPLICIT table, not a `dhcp_` prefix"
+          check greps the source for the literal substring `("dhcp_leases",)` — it never
+          calls `allowed()` to test actual semantics. This is the SAME "matches my own
+          text, not my own behaviour" trap the same delivery's handoff describes fixing
+          (instances 4 and 5, moving those checks to AST) — this would be a 6th, hiding
+          inside the one check meant to guard this exact property. Replace the grep with
+          a real assertion: `dm.allowed('dhcp', 'dhcp_leases_archive') is False`.
+    - [ ] **Not exploitable today** — no second `dhcp_`-prefixed table exists anywhere in
+          the codebase, so nothing is currently over-privileged. This is a latent gap in a
+          security-boundary claim, not an active hole. Filed as urgent anyway because the
+          whole point of this grant is to be the thing that makes ADR 0001's boundary
+          enforced rather than merely documented, and it should not ship — especially into
+          an unattended overnight run — with a precision claim the code does not back up.
+    - [ ] **Held, not committed:** `alert_manager/data_manager.py`, `modules/dhcp/module.py`,
+          `modules/dhcp/manifest.json`, `alert_manager/test_dhcp_module.py`. All four are
+          otherwise reviewed clean — 78/78 passing, `py_compile` clean, Rule-8 clean — and
+          ready to land the moment this one entry is corrected.
