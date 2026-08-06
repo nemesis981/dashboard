@@ -3300,3 +3300,37 @@ this entry is the proposal, not the implementation.
           check this was found alongside (that one asserted the TEXT of the grant while the
           behaviour was wrong). A fix here needs `allowed(m, 'MIXED_Case')` assertions with
           a control proving the lowercase form still passes.
+
+- [ ] **Windows DHCP hostnames arrive TRUNCATED at 15 characters — nothing accounts for
+      it.** Observed 2026-08-06 (Window 1) on the gateway test zone, while checking what
+      `database.reconcile_dhcp_hostnames()` will actually receive in practice.
+    - [ ] **Measured, with a control that rules out the obvious alternative explanation:**
+        - win-client sent `Nemesis-SW-CLEA` — **exactly 15 characters**, the NetBIOS name
+          limit, and visibly cut mid-word.
+        - CONTROL: the Linux client on the same segment, same DHCP server, same lease
+          file, sent `test-user-VirtualBox` — **20 characters, untruncated**. So the
+          truncation is NOT the DHCP server, the lease file, or the wire format. It is
+          Windows sending a short name in DHCP option 12.
+    - [ ] **Why it matters now:** `devices.hostname` is populated from exactly this value,
+          and `nemesis_device_category.classify()` matches on it. Today that is only the
+          iOS hint list (`iphone`/`ipad`/`ipod`), which is short enough to survive
+          truncation — so **nothing is broken today**. The hazard is anything future that
+          compares a hostname for EQUALITY, or matches a substring that could fall past
+          character 15, or joins `devices` to another source on hostname. All of those
+          would silently mismatch for Windows devices only.
+    - [ ] **The failure shape is the dangerous part**: it would not error. A Windows device
+          would simply never match, while every Linux/macOS/iOS device matched fine — so it
+          would read as "this feature is unreliable" rather than "Windows names are cut at
+          15", and the platform correlation is not obvious from a single failing case.
+    - [ ] **Do NOT try to reconstruct the full name.** The bytes are not on the wire; the
+          truncation happens before the DHCP packet is sent. The only fixes are to treat
+          hostname as a PREFIX for matching purposes, or to prefer another identifier (MAC)
+          when an exact identity is needed.
+    - [ ] **Related, same observation session:** 3 of 4 zone clients sent a hostname at
+          all — srv-client sent `*` (none). Absent-hostname is a NORMAL case, already
+          handled (`_norm(None)` -> `""`), and worth keeping in mind as the realistic
+          coverage rate rather than assuming hostname data will be present.
+    - [ ] Not yet verified: whether this is a fixed 15-char cap or the host's actual
+          NetBIOS name being short. Only one Windows client was observed. Worth confirming
+          against a Windows box whose full name is known to exceed 15 characters before
+          building anything that depends on the exact semantics.
