@@ -1,6 +1,6 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-06, ~18:24 CDT (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-06, ~18:35 CDT (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
@@ -17,33 +17,40 @@
 ## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
 **Public repo (`/opt/nemesis`) is fully clean and pushed.**
-- `origin/main` HEAD == local HEAD == `2f2d9e9`, confirmed by direct hash comparison, not
+- `origin/main` HEAD == local HEAD == `079a33e`, confirmed by direct hash comparison, not
   inferred.
 - **Zero unpushed commits.** Working tree has only `docs/roadmap/venue-guest-network.md`
   (foreign WIP, still not Window 2's). **Nothing held right now.**
+- **Not deployed anywhere** — the identifier-case fix below (`079a33e`) is code-only.
+  Production is still running `2f2d9e9`-and-earlier code. A gateway-test-zone deploy is
+  explicitly held per operator instruction, waiting on Window 3 confirming the zone is
+  synced — this is not Window 2's step to take.
 
-## ✅ RESOLVED: dhcp module's Data Manager grant — landed as `2f2d9e9`
+## ✅ Latest: table-identifier case-sensitivity fix — `079a33e`
 
-The URGENT item flagged earlier today (`PUNCHLIST.md` commit `9a52dd5`) is fixed and
-landed. Window 1 corrected `data_manager.py`'s `"dhcp"` entry to
-`{"tables": ("dhcp_leases",)}` (dict form, exact-match — matches `integrity_watch`) and
-rewrote the test's grant-precision check to call `allowed()` directly instead of grepping
-source text. **Re-verified independently by Window 2 before committing, not just
-trusted:**
-```
-dm.allowed('dhcp', 'dhcp_leases')          -> True   (correct)
-dm.allowed('dhcp', 'dhcp_leases_archive')  -> False  (was True before the fix — now closed)
-dm.allowed('dhcp', 'devices')              -> False  (correct)
-```
-Also confirmed no regression to `integrity_watch` or the plain-tuple-prefix modules
-(`tickets`, etc.) after the `NAMESPACES` edit. 81/81 live. All 4 held files landed
-together as `2f2d9e9`, including the full DHCP-own-dnsmasq rewrite, lease-sync thread,
-and declarative-addressing boot-deadlock fix reviewed earlier — see that commit's message
-for full detail, not repeated here.
+Found while verifying yesterday's dhcp grant fix: `data_manager.allowed()` lowercased
+only the GRANT side, so `INSERT INTO DHCP_LEASES` (valid SQL, the module's own table)
+matched neither the exact-table set nor the prefix path and was DENIED — a **fail-closed**
+bug (can only deny a legitimate write, never permit an illegitimate one), but **live, not
+latent**: every namespace resolves to `MODE_ENFORCE` today, so a mis-cased write would
+genuinely be refused right now, naming a table plainly present in its own grant list.
+Not DHCP-specific — measured across `dhcp`, `tickets`, `malware_detection`,
+`integrity_watch`, all four failed the same way. Fixed at `_ident()`, the single funnel
+every table token passes through, so a future comparison path can't reintroduce it by
+forgetting to lowercase. `test_identifier_case()` pairs every positive with a mis-cased
+negative that must still be refused, so the fix can't have quietly widened the guard.
+
+**Verified before committing:** `data_manager` suite ALL PASS; re-ran the three suites
+that exercise this guard through real namespaces for regressions — `dhcp` 81/81,
+`nemesis_errors` 73/73, `nemesis_device_category` 67/67 — all green, matching the report.
 
 ## Recent commits, newest first
 
-- `2f2d9e9` — the dhcp module landing described above.
+- `079a33e` — the identifier-case fix described above.
+- `2f2d9e9` — the dhcp module landing (`data_manager.py` grant, `module.py` own-dnsmasq
+  rewrite + lease-sync thread, `manifest.json`, `test_dhcp_module.py`) — the URGENT item
+  from `9a52dd5` below, fixed and re-verified independently before commit
+  (`dm.allowed('dhcp', 'dhcp_leases_archive')` confirmed `False`). 81/81.
 - `864ef1f` — vestigial-tables PUNCHLIST entry (Window 1 finding: `alert_notes`,
   `anomaly_ai_cache`, `anomaly_ai_usage` — no removal decision yet, Window 2 audits
   tomorrow).
