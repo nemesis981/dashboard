@@ -699,6 +699,41 @@ install_suricata() {
     else
         warn "Suricata failed to start — check: sudo journalctl -u suricata -n 20"
     fi
+
+    # ── QUIC static-policy block (Piece K) ───────────────────────────────────
+    # Added 2026-08-06, closing the same gap the host-defence rules had: the
+    # roadmap treats the QUIC block as the safe universal counterpart to
+    # profile-gated UDP deny ("ship it everywhere"), but it existed only as a
+    # hand-placed table on one box. Every fresh install shipped without it.
+    #
+    # Deployed here rather than in a firewall step on purpose: this is a protocol
+    # fingerprint, not access control. It gets its OWN nft table — never ufw, and
+    # never `nemesis_enforce`, whose single-authority constraint forbids anything
+    # else populating it.
+    local quic_src="$DASHBOARD_DIR/config/nftables/nemesis-quic-block.nft"
+
+    if [[ -f "$quic_src" ]]; then
+        if ! command -v nft >/dev/null 2>&1; then
+            apt-get install -y nftables >/dev/null 2>&1 || true
+        fi
+
+        # deploy-quic-block.sh validates with `nft -c -f` BEFORE installing, then
+        # verifies the table actually EXISTS afterwards and was not narrowed to a
+        # single address family. Both checks matter: an nft ruleset that fails to
+        # parse leaves no table at all and the counter reads 0 — which is
+        # indistinguishable from "no QUIC has crossed this box yet".
+        if "$DASHBOARD_DIR/scripts/deploy-quic-block.sh" >/dev/null 2>&1; then
+            ok "QUIC block deployed, enabled and verified"
+        else
+            # Non-fatal, same judgement as the Suricata rules: a box without this
+            # is the pre-2026-08-06 status quo, not a broken install. But say so.
+            warn "QUIC block FAILED to deploy — QUIC is NOT being blocked."
+            warn "  Re-run to see why:"
+            warn "  sudo $DASHBOARD_DIR/scripts/deploy-quic-block.sh --check"
+        fi
+    else
+        warn "config/nftables/nemesis-quic-block.nft not found — skipping QUIC block"
+    fi
 }
 
 ###############################################################################
