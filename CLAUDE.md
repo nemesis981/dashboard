@@ -862,7 +862,8 @@ an investigation:
 | `Nemesis Kali Master ISOLATED` | Kali 2026.1 | isolated | attacker/pentest box |
 | `Nemesis Kali Master BRIDGED` | Kali 2026.1 | bridged | attacker/pentest box |
 
-- **Permanent hardware/software gauge VM — `Nemesis Appliance HW-GAUGE`, built and pruned
+- **Permanent hardware/software gauge VM — `Nemesis Appliance Gateway` (renamed 2026-08-06
+  from `Nemesis Appliance HW-GAUGE`, same UUID, snapshot chain intact), built and pruned
   2026-08-02.** Ubuntu 26.04 Server (headless), bridged (`<bridged-iface>`, `<hw-gauge-ip>`),
   production Nemesis (`ce9696a`) with a deliberate OS-package removal pass applied (833 → 738
   packages; all 13 Nemesis-family services verified healthy after every batch). A separate,
