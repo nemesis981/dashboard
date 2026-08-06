@@ -1,6 +1,6 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-06, ~15:05 CDT (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-06, ~16:58 CDT (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
@@ -17,21 +17,24 @@
 ## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
 **Public repo (`/opt/nemesis`) is fully clean and pushed.**
-- `origin/main` HEAD == local HEAD == `3f4b933`, confirmed by direct hash comparison
+- `origin/main` HEAD == local HEAD == `18513c5`, confirmed by direct hash comparison
   (`git rev-parse HEAD` / `git rev-parse origin/main`), not inferred.
 - **Zero unpushed commits.** Working tree has ONE file that's Window 2's business
   (`docs/roadmap/venue-guest-network.md`, still foreign WIP, still not mine — see below)
-  plus a growing set of **Window 1 in-progress files, NOT yet explained in any handoff
-  this window has read**: `install.sh` and `modules/dhcp/module.py` modified;
-  `alert_manager/nemesis_errors.py`, `alert_manager/test_dhcp_module.py`,
-  `config/nftables/`, `scripts/deploy-quic-block.sh` untracked. Observed via `git status`
-  only — not reviewed, not staged, not touched. Matches Window 1's error-code-system
-  build (see the ADR 0001 note just below) plus what looks like DHCP-module and QUIC-block
-  work; **do not trust this list as current, re-run `git status` yourself.**
+  plus **Window 1 in-progress files, NOT yet explained in any handoff this window has
+  read**: `modules/dhcp/module.py` modified (989-line diff — substantial, untouched),
+  `alert_manager/test_dhcp_module.py` untracked. Observed via `git status` only — not
+  reviewed, not staged, not touched. **Do not trust this list as current, re-run
+  `git status` yourself.**
 - If power drops right now, **nothing of Window 2's is lost or half-committed.**
-- **Latest action:** `3f4b933` — added one line to ADR 0001 reserving the `error_*` table
-  prefix as CORE-owned (not a module namespace), at Window 1's request, needed for the
-  error-code-system build to land correctly under the existing prefix convention.
+- **Latest actions:** `3f4b933` (ADR 0001 `error_*` reservation) followed by four
+  commits landing Window 1's held work, all verified live before committing:
+  `35d3660` (`nemesis_errors.py` — structured error-code system, 57/57),
+  `2a24803` (QUIC static-policy block artifacts — `.nft`/`.service`/verify script),
+  `540e224` (`deploy-quic-block.sh` — validate-then-install, same shape as the Suricata
+  deploy script), `18513c5` (install.sh wiring for fresh installs). **PUNCHLIST.md was
+  named in the same request but had no pending diff at the time** — nothing to commit
+  there; flagged back rather than silently skipped.
 
 **Production (`/opt/nemesis`, the live box) is caught up and verified healthy.**
 - `dashboard` service restarted **11:34:24 CDT**, running code == `0ee0c57` at that time
