@@ -2936,3 +2936,28 @@ this entry is the proposal, not the implementation.
     - [ ] Full recommendation (normalize forward via a shared helper; fold in the
           timezone-awareness decision rather than touching the audit trail twice) delivered
           to the operator 2026-08-06 — decision is his, not filed as a chosen fix here.
+
+- [x] **[DONE] `test_quarantine.py` was red for five weeks, and three of its checks were
+      false passes.** Fixed 2026-08-06 (see the fix commit); entry is for the *lesson*, and
+      to correct the record.
+    - [x] **The reported cause was incomplete.** It was recorded as red for 8 days because
+          the confirm/lift routes were hardened to `methods=["POST"]` on 2026-07-28
+          (`8c8bce9`) while the test still issued GET. True, but only 8 of 14 failures. The
+          other 6 date from the **auth gate landing 2026-06-28** (`21c8931`) — five weeks,
+          not eight days. Every route the suite calls is absent from `_AUTH_EXEMPT`.
+    - [x] **Fixing the method alone would have turned zero checks green** — an
+          unauthenticated POST is still 302'd to `/login`, so `success=true` and both DB
+          transitions stay red. Measured, not reasoned: both GET and POST return 302.
+    - [x] **The false-pass, which is the durable part.** `http_get()` used
+          `urllib.request.urlopen`, which **follows redirects by default**. The 302 to
+          `/login` was chased, the login page came back 200, and
+          `check("/api/quarantines status=200", status == 200)` PASSED on it — in all three
+          scenarios. A green check whose only possible answer was green.
+    - [x] **Six further checks were invisible rather than failing** — `dashboard ip=test_ip`
+          and `minutes_remaining ~60` sat behind `if ours:`, so when the quarantine was not
+          found they never ran at all: not passed, not failed, absent from the tally.
+    - [ ] **Standing-practice hit, still open:** this is the "instrument that can only return
+          one answer" class the repo already tracks, in a *test suite* — the thing that is
+          supposed to catch it. Worth a grep pass for other uses of bare `urlopen` in test
+          code, since redirect-following silently converts any auth failure into a 200.
+    - [x] Found and fixed by Window 1, 2026-08-06.
