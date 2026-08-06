@@ -2854,3 +2854,28 @@ this entry is the proposal, not the implementation.
       alone. Firefox must be measured, not assumed.
     - [ ] Raised by Window 1, 2026-08-05. **ADRs are Window 2's to author** — this entry is
       the technical input, not the ADR. Next free number is 0022.
+
+- [ ] **Agent check-in scheduling has NO jitter, so the fleet synchronises — and the cost is
+  measured, not theoretical.** `nemesis_agent/agent.py` contains zero randomisation anywhere in
+  its beat scheduling: no `random`, `jitter`, `uniform`, `randint` or `splay`. The interval chain
+  (`_ramp_interval` → `_clamp_poll_hint` → `_effective_interval`) is fully deterministic, so
+  given the same beat index and poll interval every agent computes the identical sleep and they
+  never drift apart.
+    - [ ] **Measured 2026-08-05 on the gauge VM** (Phase 4, DB write-path contention, 100
+      simulated devices): 100 devices writing SIMULTANEOUSLY gave **p95 3140ms / max 3541ms**.
+      The same 100 devices writing **1000x more often** but staggered gave **p95 105ms**. Thirty
+      times better latency at a thousand times the load — because SQLite serialises writes, so
+      simultaneous arrivals queue behind one another while spread-out arrivals find the lock free.
+      **The worst case for this system is synchronised load, not sustained load.**
+    - [ ] **The trigger is ordinary, not exotic:** a power cut, a switch reboot, or a mass agent
+      restart starts every agent's clock at the same instant. With a deterministic interval they
+      stay locked together indefinitely rather than drifting apart, so the herd persists.
+    - [ ] **Fix is cheap and purely agent-side:** add a small random splay (a few percent of the
+      interval) to the computed sleep. No protocol change, no server change, no coordination —
+      each agent desynchronises itself. Worth doing independently of any hardware sizing.
+    - [ ] **Scope of the measurement, stated so it is not overread:** Phase 4 drove the DATABASE
+      WRITE PATH, not HTTP, enrollment or signature verification. It bounds DB contention; the
+      full check-in cost per agent is higher and unmeasured.
+    - [ ] Found by Window 1, 2026-08-05, while load-testing the gauge appliance VM. Verified
+      against `agent.py` by direct search before filing — the absence of jitter is confirmed,
+      not inferred from the measurement.
