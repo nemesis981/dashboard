@@ -3129,6 +3129,72 @@ this entry is the proposal, not the implementation.
     - [ ] Seeded already (2026-08-06): `modules/tickets/module.py` `get_open_ticket_count()`
           records `E-TICKETS-001` and still returns 0 — the reference shape for the rest.
 
+- [ ] **Vestigial tables in the live DB — audit WHY before removing anything.**
+      Found 2026-08-06 (Window 1) during the schema-drift sweep prompted by Window 3's
+      `devices` CREATE finding. Three tables exist in `/var/lib/nemesis/alerts.db` with
+      effectively no live code behind them. **No removal decision yet — Window 2 audits
+      tomorrow.**
+    - [ ] **SCOPE OF TOMORROW'S AUDIT — narrowed by operator, 2026-08-06: confirm removal
+          is SAFE, not whether the data is worth keeping.** None of the contents matter
+          (see the `alert_notes` note below), so there is no data-loss question to weigh.
+          The audit's one job is dependency confirmation: does anything still read these,
+          including under another name, via a constant, an f-string, a dynamically-built
+          query, or a doc/diagnostic that would break? **That last part is the real work** —
+          this same day's schema sweep proved a plain grep is not sufficient evidence, since
+          dynamically-constructed SQL (`ALTER TABLE %s`, `f"...{OP_LOG_TABLE}"`) is
+          invisible to it and produced a string of false conclusions until each was checked
+          by hand.
+    - [ ] **STARTING HYPOTHESIS (Paul's, 2026-08-06) — not a conclusion.** These are
+          likely leftovers from past reworks: a table got replaced by a redesign and the
+          old one was never cleaned up. The git history below is consistent with that and
+          is offered as a lead for the audit, not as the answer.
+    - [ ] **`alert_notes`** — 4 rows, all `author='admin'`, all created 2026-06-21 within
+          four minutes. **These are Paul's own test data from that day's testing, NOT
+          operator history** (confirmed by the operator, 2026-08-06). No export, no special
+          handling, nothing to preserve.
+        - [ ] **Process note, and the actually useful lesson here: these rows are exactly
+              what Rule 11 exists to prevent.** They are unlabelled test data — no "test
+              data" phrase, no date marker in the note body — so from the DB alone they
+              were indistinguishable from genuine operator content. That is not a
+              hypothetical cost: this entry originally reported them as "a working feature
+              with real use, not test scaffolding" and specified an export requirement, on
+              the strength of `author='admin'` and 0 orphaned `rule_id`s. Both signals were
+              real and both pointed the wrong way. Rule 11 predates this and would have
+              answered it in one grep.
+        - [ ] Correction to the first report: it is NOT zero-reference. It has no *code*
+              reference, but IS named in `docs/architecture/0001-database-and-module-architecture.md`.
+              A doc that still lists it makes it look current.
+        - [ ] Lead: introduced by `679eea7` ("Add admin notes system..."), and the last
+              commit touching it in Python is `cd47fe2` — **"Add tickets module (replaces
+              notes system)"**. The commit message states the replacement outright.
+        - [ ] Checked: `alerts` has no note/comment/annotation column, so nothing was
+              folded back into the parent row when the tickets module superseded this.
+              Recorded as a schema fact for the dependency check, NOT as a data-loss
+              concern — there is nothing here worth migrating.
+    - [ ] **`anomaly_ai_cache`** — 0 rows. Schema is a per-target AI report cache
+          (`offending_target` PK, `ai_report_json`, `generated_at`).
+        - [ ] **The module contradicts itself in the same file**, which is its own small
+              finding: `modules/anomaly_detection/module.py:16` documents it in the module
+              docstring as live ("per-target AI reports (24h dedup / 30-day reuse)"), while
+              line 2023 says "not from anomaly_ai_cache which is removed". Also still
+              listed in `diagnostics/anomaly_state.py:70`.
+        - [ ] Lead: last touched by `0980d1f` ("Refactor: centralize all AI functionality
+              into ai_engine module").
+    - [ ] **`anomaly_ai_usage`** — 0 rows, and the only one of the three with **genuinely
+          zero references in any tracked file**. Schema is an hourly AI call counter
+          (`date`, `hour`, `call_count`, `UNIQUE(date,hour)`).
+        - [ ] Lead: same `0980d1f` AI-centralisation refactor. Worth checking against
+              ADR 0006 — the `ai_engine` rate counter was formalised into
+              `DataManager.increment_counter()`, which would supersede this table exactly.
+    - [ ] **Not a fresh-install hazard** (unlike the `devices` CREATE gap that started this
+          sweep): nothing reads them, so a fresh install simply never creates them and
+          nothing breaks. That is why this is a cleanup item and not a bug.
+    - [ ] If removal IS agreed: a normal Rule 6 backup before the DROP is sufficient. No
+          export step is owed for any of the three — the two `anomaly_ai_*` tables are
+          empty and `alert_notes` holds only test data. The backup is there to make the
+          DROP reversible if the dependency check missed something, which is the only
+          risk left in this item.
+
 - [ ] **⚠ URGENT — dhcp module's Data Manager grant is a PREFIX match, not the exact-match
       it claims to be. Fix before landing; flagged before commit specifically because
       tonight is an unattended overnight run.** Found by Window 2, 2026-08-06, reviewing
