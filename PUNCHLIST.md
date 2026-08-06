@@ -2961,3 +2961,31 @@ this entry is the proposal, not the implementation.
           supposed to catch it. Worth a grep pass for other uses of bare `urlopen` in test
           code, since redirect-following silently converts any auth failure into a 200.
     - [x] Found and fixed by Window 1, 2026-08-06.
+
+- [ ] **Host-defence rules `sid:1000001`/`1000002` say "SYN sweep" but measure SYN RATE, with
+      no port-diversity test — so a legitimate high-rate client of a service this box hosts
+      trips them.** Investigated 2026-08-06; the standing "TCP SYN sweep" security finding
+      against a LAN host turned out to be a false positive, and this rule shape is the cause.
+    - [ ] **Measured:** every one of the 7,040 connections from the reporting host to this box
+          went to **port 53 and no other port**. Port diversity — the defining property of a
+          sweep — is entirely absent. The source is a known, `trusted=1` device in `devices`,
+          and :53 is this box's own advertised service (`pihole-FTL` active, listening on
+          `0.0.0.0:53`), which every LAN client is supposed to use. Correlating traffic is
+          ~6,200 Discord DNS lookups across three ET INFO rules — ordinary chat-app behaviour.
+    - [ ] **The rule logic:** `alert tcp any any -> $HOME_NET any; flow:to_server; flags:S,12;
+          threshold: type both, track by_src, count 100, seconds 60`. A pure rate counter. The
+          `msg` claims a behaviour the rule never tests for, so the alert text misdescribes
+          what fired — which is what made this read as reconnaissance for a week.
+    - [ ] **⚠ The real risk is the auto-quarantine adjacency.** The rule is `priority:1`, and
+          the gate at `core_module/alert_watcher/alert_watcher.py:237` is
+          `priority == 1 and threat == "CRITICAL"`. This scored MEDIUM so it did not fire
+          (verified: zero quarantine rows for that IP). **The product's highest-volume false
+          positive therefore sits one severity rung away from auto-firewalling a trusted
+          household device off the LAN's DNS server** — which would present to a family member
+          as "the internet is broken", with the cause buried in a firewall rule. Volume is
+          rising: 10 → 60 → 91 hits/day over 08-03 → 08-05.
+    - [ ] **Fix direction (not built — captured per Rule 7):** exclude this box's own listening
+          service ports from the host-defence rules, and/or add a real port-diversity condition
+          so "sweep" means what it says. Either is a rule-design change, not a threshold tweak.
+    - [ ] Investigated by Window 1, 2026-08-06, read-only: rule text, `fast.log` port
+          distribution (direction-checked), `devices`, `quarantines`, and the live listener set.
