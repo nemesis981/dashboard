@@ -3233,3 +3233,70 @@ this entry is the proposal, not the implementation.
           `modules/dhcp/manifest.json`, `alert_manager/test_dhcp_module.py`. All four are
           otherwise reviewed clean — 78/78 passing, `py_compile` clean, Rule-8 clean — and
           ready to land the moment this one entry is corrected.
+
+- [x] **[FIXED 2026-08-06 — code written, NOT YET DEPLOYED] `data_manager.allowed()` was
+      case-sensitive on the table name, so a legitimate mis-cased write was DENIED.**
+      Found 2026-08-06 (Window 1) while verifying the DHCP namespace grant fix. Not
+      DHCP-specific and not new — a pre-existing property of `allowed()` affecting every
+      module. Kept in full below rather than deleted: the analysis is the record of why
+      the fix is shaped the way it is.
+    - [x] **FIX APPLIED — normalised at `_ident()`**, the single funnel every table token
+          in `classify()` passes through (all seven write branches call it), rather than at
+          each comparison site. That placement is the point: a future comparison path
+          cannot reintroduce the bug by forgetting to lowercase, because the value it
+          receives is already normalised. Plus defence-in-depth normalisation on entry to
+          `allowed()` and `allowed_columns()` for direct (test/tooling) callers.
+        - [x] Deliberate side effect, wanted: `dm_operation_log.table_name` now records the
+              lowercased table, so the audit log is queryable by one spelling instead of
+              splitting a table's history across casings.
+        - [x] Regression test added — `test_data_manager.test_identifier_case()`, 22 checks.
+              Every positive is paired with a mis-cased NEGATIVE that must still be
+              refused, because a fix that lowercased unconditionally would satisfy the
+              positives while quietly widening the guard.
+        - [x] Verified: 4 suites green (data_manager ALL PASS, dhcp 81/81, errors 73/73,
+              device_category 67/67). Mis-cased own-table now allowed for all four
+              namespaces; `dhcp_leases_archive`, `devices`, `alerts` and `dm_operation_log`
+              still refused at every casing.
+    - [ ] **STILL OWED: deploy + verify on the GATEWAY TEST ZONE, not production**
+          (operator instruction 2026-08-06). Held for Window 2 to commit; zone deploy waits
+          on Window 3 confirming the zone is synced and ready. Nothing has been deployed
+          anywhere yet — production was not touched.
+    - [ ] **Mechanism**: `allowed()` (`alert_manager/data_manager.py:536`) lowercases the
+          GRANT side only — `if table in {t.lower() for t in spec.get("tables", ())}` —
+          and compares it against the table name exactly as `classify()` extracted it.
+          `classify()` does NOT normalise case, so it returns the identifier verbatim:
+          `INSERT INTO DHCP_LEASES ...` yields the table `'DHCP_LEASES'`, which matches
+          neither the lowercased grant nor the `startswith` prefix path below it.
+    - [ ] **Measured, both paths, all four namespaces checked:**
+        - `allowed('dhcp', 'dhcp_leases')` → True; `allowed('dhcp', 'DHCP_LEASES')` → **False**
+        - same on the PREFIX path, so it is not an artefact of the new dict form:
+          `malware_detection`/`MALWARE_FINDINGS`, `tickets`/`TICKETS_SEQ`,
+          `integrity_watch`/`INTEGRITY_OBSERVATIONS` all → **False**
+    - [ ] **⚠ THIS IS LIVE, NOT LATENT — correcting an earlier in-session statement.**
+          `namespace_mode()` defaults to `MODE_ENFORCE` (`data_manager.py:305`) and all
+          four namespaces above resolve to `enforce` right now. `check_write('dhcp',
+          'DHCP_LEASES', 'insert')` returns **False** today. The issue is theoretical only
+          because no current SQL is mis-cased — NOT because enforcement is off. Anyone
+          reading "fails closed" as "harmless" has the risk backwards: it is harmless
+          until the moment somebody writes `INSERT INTO Dhcp_Leases`.
+    - [ ] **Severity is bounded by the direction of failure**: it can only DENY a
+          legitimate write, never PERMIT an illegitimate one. So this is a correctness/
+          robustness item, not a security hole, and it does not block the DHCP module.
+    - [ ] **`allowed_columns()` (line 370) has the same bug and slightly worse**:
+          `grants.get(table)` looks the table up in the `columns` dict with NO
+          normalisation on EITHER side, so a mis-cased table gets no column grant either.
+          Fix both together or the column path silently keeps the defect.
+    - [ ] **How it would present, which is why it is worth fixing before it bites:** SQLite
+          itself is case-insensitive for identifiers, so the mis-cased write is perfectly
+          valid SQL and would work fine against a raw connection. It fails ONLY through the
+          guard — so the symptom is "this module cannot write its own table", with a denial
+          naming a table that visibly *is* in its grant list. That reads as a broken guard,
+          not a casing problem, and would cost real time to trace.
+    - [ ] **Fix shape**: normalise on BOTH sides at the boundary — lowercase the table name
+          once in `classify()` (or immediately on entry to `allowed()`/`allowed_columns()`),
+          rather than lowercasing grants at each comparison site. Doing it in one place is
+          what stops the next comparison path from reintroducing it.
+    - [ ] **Test it behaviourally, not by source-grep** — same lesson as the DHCP grant
+          check this was found alongside (that one asserted the TEXT of the grant while the
+          behaviour was wrong). A fix here needs `allowed(m, 'MIXED_Case')` assertions with
+          a control proving the lowercase form still passes.

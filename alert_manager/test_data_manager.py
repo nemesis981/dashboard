@@ -365,6 +365,73 @@ def test_column_grant(dm):
 
 
 # ── 9. GuardedCursor + executescript (regression: the .cursor()/script traps) ─
+def test_identifier_case(dm):
+    """SQLite identifiers are case-insensitive; the guard must agree.
+
+    THE BUG (found 2026-08-06, fixed same day): `allowed()` lowercased only the
+    GRANT side and compared it against whatever casing the SQL used. So
+    `INSERT INTO DHCP_LEASES` — valid SQL, the module's own table — matched
+    neither the exact-table set nor the prefix list, and was DENIED.
+
+    It failed CLOSED, so nothing broke and no test caught it: every piece of SQL
+    in the tree happens to be lowercase. But `namespace_mode()` defaults to
+    MODE_ENFORCE, so it was live, not latent — one mis-cased statement away from
+    a module being unable to write its own table, reported as a denial naming a
+    table plainly present in its own grant.
+
+    Both directions are asserted below, because a fix that lowercases everything
+    unconditionally would satisfy the positives while quietly widening the
+    guard — so every positive is paired with a mis-cased NEGATIVE that must still
+    be refused.
+    """
+    print("11. identifier case-insensitivity (guard must match SQLite semantics)")
+    dm_mod.NAMESPACES["t_case"] = {"tables": ("tcase_own",),
+                                   "columns": {"tcase_shared": ("okcol",)}}
+
+    # ── the extraction point normalises, so every downstream path agrees ──────
+    for sql, want in (("INSERT INTO TCASE_OWN (x) VALUES (1)", "tcase_own"),
+                      ("insert into tcase_own (x) values (1)", "tcase_own"),
+                      ("UPDATE TCase_Own SET x=1", "tcase_own"),
+                      ("DELETE FROM \"TCASE_OWN\"", "tcase_own")):
+        check(classify(sql)[1] == want,
+              f"classify normalises {sql[:34]!r} -> {want}")
+
+    # ── positives: the module's own table, however it is spelled ─────────────
+    for t in ("tcase_own", "TCASE_OWN", "TCase_Own"):
+        check(dm_mod.allowed("t_case", t) is True, f"own table allowed as {t!r}")
+
+    # ── NEGATIVES: the fix must not have widened anything ───────────────────
+    for t in ("tcase_owned", "TCASE_OWNED", "tcase_own_archive", "TCASE_OWN_ARCHIVE",
+              "alerts", "ALERTS"):
+        check(dm_mod.allowed("t_case", t) is False, f"foreign/prefix-sibling refused: {t!r}")
+
+    # The audit log is never module-writable, at any casing. Before the fix the
+    # mis-cased form skipped this explicit guard entirely and fell through to
+    # prefix matching — harmless only because no namespace grants that stem.
+    for t in (dm_mod.OP_LOG_TABLE, dm_mod.OP_LOG_TABLE.upper()):
+        check(dm_mod.allowed("t_case", t) is False, f"op-log refused as {t!r}")
+
+    # ── column grants resolve their TABLE key case-insensitively too ─────────
+    # This lookup normalised neither side before the fix.
+    for t in ("tcase_shared", "TCASE_SHARED", "TCase_Shared"):
+        g = dm_mod.allowed_columns("t_case", t)
+        check(g == {"okcol"}, f"column grant found for table spelled {t!r} (got {g})")
+    check(dm_mod.allowed_columns("t_case", "tcase_other") is None,
+          "CONTROL an ungranted table still has no column grant")
+
+    # ── end to end: check_write, the real decision point ────────────────────
+    for sql in ("INSERT INTO TCASE_OWN (x) VALUES (1)",
+                "insert into tcase_own (x) values (1)"):
+        op, tbl = classify(sql)
+        check(dm_mod.check_write("t_case", tbl, op, sql) is True,
+              f"check_write allows {sql[:32]!r}")
+    op, tbl = classify("INSERT INTO ALERTS (x) VALUES (1)")
+    check(dm_mod.check_write("t_case", tbl, op) is False,
+          "CONTROL check_write still refuses a foreign table, mis-cased")
+
+    del dm_mod.NAMESPACES["t_case"]
+
+
 def test_guarded_cursor_and_script(dm):
     print("9. GuardedCursor + executescript guarding")
     dm_mod.NAMESPACES["t_cur"] = {"tables": ("tc_own",)}
@@ -419,6 +486,7 @@ def main():
     test_three_state_modes(dm)
     test_column_grant(dm)
     test_guarded_cursor_and_script(dm)
+    test_identifier_case(dm)
     print()
     if _failures:
         print(f"RESULT: {len(_failures)} FAILURE(S):")

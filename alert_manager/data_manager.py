@@ -373,7 +373,15 @@ def allowed_columns(module, table):
     if not isinstance(spec, dict):
         return None
     grants = spec.get("columns") or {}
-    cols = grants.get(table)
+    # Both sides normalised. This lookup previously matched NEITHER — the table
+    # key came in at whatever casing the SQL used, and the grant keys were used
+    # verbatim — so a mis-cased table silently had no column grant, on top of
+    # failing the table grant in `allowed()`. Same 2026-08-06 fix.
+    if table is None:
+        return None
+    table = table.lower()
+    cols = grants.get(table) or next(
+        (v for k, v in grants.items() if k.lower() == table), None)
     return {c.lower() for c in cols} if cols else None
 
 
@@ -465,7 +473,38 @@ _TABLE_TOKEN = r"([\"'`\[\]\w.]+)"
 
 
 def _ident(token):
-    """Strip quotes / brackets / schema-qualifier from a table token."""
+    """Strip quotes / brackets / schema-qualifier from a table token, LOWERCASED.
+
+    ⚠ THE `.lower()` IS AN ACCESS-CONTROL FIX, not cosmetics. Added 2026-08-06.
+
+    SQLite treats identifiers case-insensitively, so `INSERT INTO DHCP_LEASES` and
+    `INSERT INTO dhcp_leases` are the same write to the same table. The guard did
+    not agree: `allowed()` lowercased only the GRANT side and compared it against
+    whatever casing the SQL happened to use, so the mis-cased form matched neither
+    the exact-table set nor the `startswith` prefixes and was DENIED. Measured
+    across every namespace — `dhcp`/`DHCP_LEASES`, `tickets`/`TICKETS_SEQ`,
+    `malware_detection`/`MALWARE_FINDINGS`, `integrity_watch`/`INTEGRITY_OBSERVATIONS`
+    all returned False, on the exact and prefix paths alike.
+
+    It failed CLOSED — it could only refuse a legitimate write, never permit an
+    illegitimate one — which is why nothing broke: no SQL in the tree is mis-cased
+    today. But `namespace_mode()` defaults to MODE_ENFORCE and every namespace
+    resolves to `enforce`, so this was live, not latent. The symptom would have
+    been "this module cannot write its own table", naming a table plainly present
+    in its own grant list — reading as a broken guard rather than a casing issue.
+
+    NORMALISED HERE, at the single funnel every table token in `classify()` passes
+    through (all seven write branches call this), rather than at each comparison
+    site. That is the point: a future comparison path cannot reintroduce the bug
+    by forgetting to lowercase, because the value it receives is already
+    normalised. Column names are unaffected — `updated_columns()` already lowers
+    them at its own append.
+
+    Deliberate consequence: `dm_operation_log.table_name` now records the
+    lowercased table. That is a small behaviour change and it is the wanted one —
+    the audit log becomes queryable by a single spelling instead of silently
+    splitting one table's history across casings.
+    """
     if token is None:
         return None
     t = token.strip().rstrip(";").strip()
@@ -473,7 +512,7 @@ def _ident(token):
         t = t.replace(q, "")
     if "." in t:
         t = t.split(".")[-1]
-    return t or None
+    return t.lower() or None
 
 
 def classify(sql):
@@ -540,6 +579,12 @@ def allowed(module, table):
                                module=module, kind="unknown_module")
     if table is None:
         return False                    # unidentifiable write target — fail-closed
+    # Defence in depth for DIRECT callers. `_ident()` already normalises anything
+    # arriving via classify(), which is every production path — but this function
+    # is also called straight from tests and tooling, where the caller supplies
+    # the name itself. Normalising on entry means the guarantee holds for those
+    # too, instead of depending on each caller remembering. Cheap; runs once.
+    table = table.lower()
     if table == OP_LOG_TABLE:
         return False                    # the audit log is never module-writable
     spec = NAMESPACES[module]
