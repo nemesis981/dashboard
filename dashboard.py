@@ -2473,26 +2473,70 @@ def get_device_name(mac, ip):
         log.exception("get_device_name failed for mac=%s ip=%s: %s", mac, ip, e)
         return (ip, "Unknown", 0)
 
+#: Columns added by scripts/migrate_device_categories.py. Selected only when
+#: present, so this function works BOTH before and after the migration runs.
+#: That is deliberate: code deploy and schema migration are separate,
+#: separately-approved steps here, and either order must leave a working
+#: dashboard. Selecting an absent column would raise and `except` would return
+#: [] — an empty device list that looks exactly like "no devices found".
+_DEVICE_CATEGORY_COLUMNS = ("vendor", "category_override", "category_source")
+
+
+def _devices_table_columns(conn):
+    return {r[1] for r in conn.execute("PRAGMA table_info(devices)")}
+
+
 def get_network_devices():
     try:
         conn = _dm_conn()   # §9 batch 2 (get_network_devices)
         c = conn.cursor()
-        c.execute("SELECT mac, ip, friendly_name, device_type, trusted FROM devices ORDER BY ip")
+        have = _devices_table_columns(conn)
+        extra = [col for col in _DEVICE_CATEGORY_COLUMNS if col in have]
+        cols = ["mac", "ip", "friendly_name", "device_type", "trusted"] + extra
+        c.execute(f"SELECT {', '.join(cols)} FROM devices ORDER BY ip")
         db_devices = c.fetchall()
         conn.close()
+
+        import nemesis_device_category as _cat
+
         devices = []
         for d in db_devices:
-            devices.append({
-                "ip": d[1],
-                "mac": d[0],
-                "vendor": d[3],
-                "friendly_name": d[2],
-                "device_type": d[3],
-                "trusted": d[4],
-                "offline": False
-            })
+            row = dict(zip(cols, d))
+            # `vendor` previously duplicated device_type here — the dict said
+            # "vendor" while carrying the device type, so every consumer reading
+            # d["vendor"] got the wrong field. Now it is the real column when the
+            # migration has run, and falls back to friendly_name otherwise,
+            # because device_scanner writes the OUI vendor string into
+            # friendly_name on first discovery (there was no vendor column).
+            vendor = (row.get("vendor") or "").strip()
+            entry = {
+                "ip": row["ip"],
+                "mac": row["mac"],
+                "vendor": vendor,
+                "friendly_name": row["friendly_name"],
+                "device_type": row["device_type"],
+                "trusted": row["trusted"],
+                "offline": False,
+                "category_override": row.get("category_override"),
+                "category_source": row.get("category_source"),
+            }
+            # has_agent is NOT passed yet. Correlating a `devices` row to an
+            # enrolled agent needs a join that does not exist: `devices` is
+            # MAC-keyed, `agent_devices` uses a 32-char id, and the only shared
+            # field is ip_address — which resolves 2 of 13 agents (measured
+            # 2026-08-06). Shipping "Agent Connected" on that would label 11
+            # protected devices as unprotected, so it waits for a MAC recorded
+            # at enrollment. Until then no device is claimed as agent-connected
+            # from this view, and the UI says so rather than showing an empty
+            # group that reads as "you have no agents".
+            cat, reason = _cat.classify(entry)
+            entry["category"] = cat
+            entry["category_label"] = _cat.LABELS[cat]
+            entry["category_reason"] = reason
+            devices.append(entry)
         return sorted(devices, key=lambda x: x["ip"])
     except Exception as e:
+        log.exception("get_network_devices failed: %s", e)
         return []
 
 def _ensure_audit_log_table():
@@ -2681,16 +2725,30 @@ def render_review_queue_html(items):
         </tr>""")
     return "".join(parts)
 
-def render_devices_html(devices):
-    parts = []
-    for d in devices:
-        trusted = d.get("trusted", 0)
-        offline = d.get("offline", False)
-        trust_icon = "✅" if trusted else "❓"
-        status_color = "#888" if offline else "#eee"
-        status = " (offline)" if offline else ""
-        onclick = html.escape(f"editDevice({json.dumps(d['mac'])}, {json.dumps(d['friendly_name'])}, {json.dumps(d['device_type'])})")
-        parts.append(f"""<tr style="color:{status_color}">
+def _render_device_row(d):
+    trusted = d.get("trusted", 0)
+    offline = d.get("offline", False)
+    trust_icon = "✅" if trusted else "❓"
+    status_color = "#888" if offline else "#eee"
+    status = " (offline)" if offline else ""
+    # Single quotes inside the JS call, values built with json.dumps — the
+    # house rule for JS embedded in a Python f-string.
+    onclick = html.escape(
+        f"editDevice({json.dumps(d['mac'])}, {json.dumps(d['friendly_name'])}, "
+        f"{json.dumps(d['device_type'])}, {json.dumps(d.get('category') or '')})")
+    # Provenance, not just the answer. The heuristic is known to be wrong on real
+    # data (31 of 41 devices had no usable signal before the vendor backfill), so
+    # an operator has to be able to see WHY a device landed where it did —
+    # otherwise a guess is indistinguishable from a fact.
+    src = (d.get("category_source") or "").strip()
+    reason = d.get("category_reason") or ""
+    if src == "operator":
+        prov = "set by you"
+        prov_color = "#00d4ff"
+    else:
+        prov = html.escape(reason)
+        prov_color = "#888"
+    return f"""<tr style="color:{status_color}">
             <td>{html.escape(d["ip"])}{status}</td>
             <td>
                 <span id="name-{d["mac"].replace(":","")}">{html.escape(d["friendly_name"])}</span>
@@ -2699,9 +2757,49 @@ def render_devices_html(devices):
                     ✏️</button>
             </td>
             <td style="font-size:0.8em">{html.escape(d["device_type"])}</td>
+            <td style="font-size:0.75em;color:{prov_color}">{prov}</td>
             <td style="font-size:0.8em">{html.escape(d["mac"])}</td>
             <td>{trust_icon}</td>
-        </tr>""")
+        </tr>"""
+
+
+def render_devices_html(devices):
+    """Device rows grouped into the five categories, in a fixed order.
+
+    Order is fixed rather than by-count so the layout does not reshuffle as
+    devices come and go — a list whose sections move around is harder to scan
+    than one that is occasionally lopsided.
+
+    An EMPTY category is rendered with a note rather than omitted. Omitting it
+    would make "we cannot determine this yet" look identical to "there are none
+    of these", which is the distinction Agent Connected depends on right now (see
+    get_network_devices: the agent join is not built, so that group is never
+    populated from this view and must not read as "you have no agents").
+    """
+    import nemesis_device_category as _cat
+
+    grouped = {c: [] for c in _cat.CATEGORIES}
+    for d in devices:
+        grouped.setdefault(d.get("category") or _cat.NON_AGENT, []).append(d)
+
+    parts = []
+    for cat in _cat.CATEGORIES:
+        rows = grouped.get(cat, [])
+        label = _cat.LABELS[cat]
+        if rows:
+            parts.append(
+                f"""<tr><td colspan="6" style="padding-top:14px;color:#00d4ff;
+                    font-weight:bold;font-size:0.85em;letter-spacing:0.04em">
+                    {html.escape(label)} &nbsp;<span style="color:#888;font-weight:normal">
+                    ({len(rows)})</span></td></tr>""")
+            parts.extend(_render_device_row(d) for d in rows)
+        elif cat == _cat.AGENT:
+            # The one empty group that must explain itself, for the reason above.
+            parts.append(
+                f"""<tr><td colspan="6" style="padding-top:14px;color:#888;
+                    font-size:0.8em">{html.escape(label)} &nbsp;—&nbsp;
+                    not yet matched from this view; agent correlation is a later
+                    step, so this is not a count of your agents.</td></tr>""")
     return "".join(parts)
 
 def get_pihole_summary():
@@ -4333,13 +4431,49 @@ def update_device():
         data = request.json
         conn = _dm_conn()   # §9 batch 4 (update_device)
         c = conn.cursor()
-        c.execute("""UPDATE devices SET friendly_name=?, device_type=?, notes=?, trusted=? 
-                     WHERE mac=?""",
-                  (data["friendly_name"], data["device_type"], 
-                   data.get("notes", ""), data.get("trusted", 1), data["mac"]))
+
+        # ── category override ────────────────────────────────────────────────
+        # VALIDATED, never coerced. This route has always written `device_type`
+        # as free text, so an unvalidated category would let arbitrary input
+        # become a grouping key and silently break every list that reads it —
+        # the row would render under a heading nobody defined. Reject instead.
+        import nemesis_device_category as _cat
+        category = (data.get("category") or "").strip()
+        set_category = False
+        if category:
+            if not _cat.valid(category):
+                conn.close()
+                return jsonify({
+                    "error": f"unknown category {category!r}",
+                    "valid": list(_cat.CATEGORIES),
+                }), 400
+            have = _devices_table_columns(conn)
+            if "category_override" not in have:
+                # The migration has not run. Storing nothing while returning
+                # success would be the "response says it happened, the row says
+                # otherwise" defect this codebase has already shipped once.
+                conn.close()
+                return jsonify({
+                    "error": "category overrides are not available yet — the "
+                             "device-category migration has not been applied",
+                }), 409
+            set_category = True
+
+        if set_category:
+            c.execute("""UPDATE devices SET friendly_name=?, device_type=?, notes=?,
+                         trusted=?, category_override=?, category_source='operator'
+                         WHERE mac=?""",
+                      (data["friendly_name"], data["device_type"],
+                       data.get("notes", ""), data.get("trusted", 1),
+                       category, data["mac"]))
+        else:
+            c.execute("""UPDATE devices SET friendly_name=?, device_type=?, notes=?, trusted=?
+                         WHERE mac=?""",
+                      (data["friendly_name"], data["device_type"],
+                       data.get("notes", ""), data.get("trusted", 1), data["mac"]))
         conn.commit()
         conn.close()
-        return jsonify({"success": True})
+        return jsonify({"success": True, "category": category or None})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -11575,6 +11709,16 @@ def dashboard():
                 <option>Printer</option>
                 <option>Unknown</option>
             </select>
+            <label>Category <span style="color:#888;font-weight:normal;font-size:0.85em">
+                (overrides the automatic guess)</span></label>
+            <select id="editCategory">
+                <option value="">— use the automatic guess —</option>
+                <option value="agent">Agent Connected</option>
+                <option value="gateway">Gateways</option>
+                <option value="ios">iOS</option>
+                <option value="iot">IoT</option>
+                <option value="non_agent">Non-agent</option>
+            </select>
             <label>Notes</label>
             <input type="text" id="editNotes">
             <label>
@@ -12082,10 +12226,14 @@ def dashboard():
                 }});
         }}
 
-        function editDevice(mac, name, type) {{
+        function editDevice(mac, name, type, category) {{
             document.getElementById("editMac").value = mac;
             document.getElementById("editName").value = name;
             document.getElementById("editType").value = type;
+            // Empty string selects the '- use the automatic guess -' option, so
+            // opening the dialog on a heuristic-classified device does not
+            // silently convert that guess into an operator override on save.
+            document.getElementById("editCategory").value = category || '';
             document.getElementById("deviceModal").style.display = "block";
         }}
 
@@ -12095,13 +12243,18 @@ def dashboard():
                 friendly_name: document.getElementById("editName").value,
                 device_type: document.getElementById("editType").value,
                 notes: document.getElementById("editNotes").value,
-                trusted: document.getElementById("editTrusted").checked ? 1 : 0
+                trusted: document.getElementById("editTrusted").checked ? 1 : 0,
+                category: document.getElementById("editCategory").value
             }};
             fetch("/api/update-device", {{
                 method: "POST",
                 headers: {{"Content-Type": "application/json"}},
                 body: JSON.stringify(data)
             }}).then(r => r.json()).then(d => {{
+                if (d && d.error) {{
+                    alert('Could not save: ' + d.error);
+                    return;
+                }}
                 closeDeviceModal();
                 location.reload();
             }});
