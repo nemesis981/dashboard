@@ -172,7 +172,7 @@ alert tcp !@NEMESIS_HOST@ any -> $HOME_NET [22,80,443,5000,5001] (\
     threshold:type both, track by_src, count 15, seconds 60; \
     classtype:attempted-recon; \
     priority:2; \
-    sid:1000003; rev:1;)
+    sid:1000003; rev:2;)
 
 # ── 4-6. NULL / FIN / XMAS stealth scans -- classic nmap -sN/-sF/-sX.
 #      THREE rules, not one: Suricata's `flags:` cannot express OR, and the
