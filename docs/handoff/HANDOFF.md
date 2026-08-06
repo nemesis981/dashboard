@@ -1,6 +1,6 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-06, ~18:20 CDT (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-06, ~18:24 CDT (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
@@ -17,34 +17,33 @@
 ## ⚡ POWER-RISK COLD-START SUMMARY — read this first, assume nothing else
 
 **Public repo (`/opt/nemesis`) is fully clean and pushed.**
-- `origin/main` HEAD == local HEAD == `864ef1f`, confirmed by direct hash comparison, not
+- `origin/main` HEAD == local HEAD == `2f2d9e9`, confirmed by direct hash comparison, not
   inferred.
-- **Zero unpushed commits.** Working tree: `docs/roadmap/venue-guest-network.md` (foreign
-  WIP, still not Window 2's) plus **4 files deliberately HELD, not lost or forgotten** —
-  see the URGENT item immediately below.
+- **Zero unpushed commits.** Working tree has only `docs/roadmap/venue-guest-network.md`
+  (foreign WIP, still not Window 2's). **Nothing held right now.**
 
-## 🛑 HELD: dhcp module's Data Manager grant — needs a Window 1 fix before landing
+## ✅ RESOLVED: dhcp module's Data Manager grant — landed as `2f2d9e9`
 
-**`alert_manager/data_manager.py`, `modules/dhcp/module.py`, `modules/dhcp/manifest.json`,
-`alert_manager/test_dhcp_module.py` are reviewed, tested (78/78), and otherwise ready — but
-deliberately NOT committed.** Full technical detail already filed publicly:
-`PUNCHLIST.md` (commit `9a52dd5`, search "URGENT — dhcp module's Data Manager grant").
-
-**One-line summary:** `"dhcp": ("dhcp_leases",)` in `data_manager.py` is commented
-"EXPLICIT table, not a prefix grant" but `allowed()` treats a plain tuple as a PREFIX
-match — demonstrated live, `dm.allowed('dhcp', 'dhcp_leases_archive')` returns `True` for
-a table that doesn't exist. Fix: `{"tables": ("dhcp_leases",)}`, matching `integrity_watch`.
-The new test's check for this property also needs fixing — it greps source text for the
-literal tuple rather than calling `allowed()`, so it would pass either way. Not exploitable
-today (no second `dhcp_`-prefixed table exists anywhere), but flagged before commit rather
-than after, specifically because tonight is an unattended overnight run.
-
-**This needs relaying to whichever window is available to make the one-line fix** — Window
-2 does not edit code content. Once fixed, land the same 4 files; nothing else about the
-delivery needs re-review.
+The URGENT item flagged earlier today (`PUNCHLIST.md` commit `9a52dd5`) is fixed and
+landed. Window 1 corrected `data_manager.py`'s `"dhcp"` entry to
+`{"tables": ("dhcp_leases",)}` (dict form, exact-match — matches `integrity_watch`) and
+rewrote the test's grant-precision check to call `allowed()` directly instead of grepping
+source text. **Re-verified independently by Window 2 before committing, not just
+trusted:**
+```
+dm.allowed('dhcp', 'dhcp_leases')          -> True   (correct)
+dm.allowed('dhcp', 'dhcp_leases_archive')  -> False  (was True before the fix — now closed)
+dm.allowed('dhcp', 'devices')              -> False  (correct)
+```
+Also confirmed no regression to `integrity_watch` or the plain-tuple-prefix modules
+(`tickets`, etc.) after the `NAMESPACES` edit. 81/81 live. All 4 held files landed
+together as `2f2d9e9`, including the full DHCP-own-dnsmasq rewrite, lease-sync thread,
+and declarative-addressing boot-deadlock fix reviewed earlier — see that commit's message
+for full detail, not repeated here.
 
 ## Recent commits, newest first
 
+- `2f2d9e9` — the dhcp module landing described above.
 - `864ef1f` — vestigial-tables PUNCHLIST entry (Window 1 finding: `alert_notes`,
   `anomaly_ai_cache`, `anomaly_ai_usage` — no removal decision yet, Window 2 audits
   tomorrow).
