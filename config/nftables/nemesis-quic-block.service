@@ -1,0 +1,40 @@
+[Unit]
+# Piece K — reload the QUIC static-policy nft table at boot.
+#
+# WHY THIS UNIT EXISTS AT ALL: nftables state is KERNEL-ONLY. Everything the
+# gateway does at runtime — the table, the counter, the reject rule — is gone
+# after a reboot with no trace and no error. A rule that silently ceases to exist
+# is worse than one that never shipped, because the dashboard and the operator
+# both still believe QUIC is blocked.
+#
+# ORDERING: after the network is up (the rule references no interface, but the
+# forward hook is meaningless before routing exists) and after nftables.service,
+# so a stock nft ruleset restore cannot clobber this table by loading later.
+# It is NOT ordered against ufw deliberately: this table is at priority mangle
+# (-150) and ufw at filter (0), so hook priority decides evaluation order, not
+# unit start order. Do not add a ufw dependency expecting it to change that.
+Description=Nemesis QUIC static-policy nft table (Piece K)
+Documentation=file:///etc/nemesis/nemesis-quic-block.nft
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Re-running is safe ONLY because the .nft file carries an explicit
+# create-then-delete-then-define preamble. `nft -f` is ADDITIVE on its own and
+# would append a duplicate rule on every start — measured, not assumed.
+ExecStart=/usr/sbin/nft -f /etc/nemesis/nemesis-quic-block.nft
+
+# Verify the table actually landed rather than trusting nft's exit code. A
+# ruleset that parses but installs nothing would otherwise start "successfully".
+ExecStartPost=/usr/sbin/nft list table inet nemesis_policy
+
+# Remove the table on stop so the state matches the unit. Leaving a live reject
+# rule behind after `systemctl stop` would be a silent policy the operator has
+# no unit to point at.
+ExecStop=/usr/sbin/nft delete table inet nemesis_policy
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,86 @@
+#!/usr/sbin/nft -f
+#
+# Piece K — QUIC-specific block on the FORWARD path.
+# Nemesis static-policy table. Window 1, 2026-08-06.
+#
+# ── WHY A SEPARATE TABLE ─────────────────────────────────────────────────────
+# This is deliberately NOT part of `nemesis_enforce` (ADR 0019). That table has a
+# single-authority constraint: it is populated exclusively by the enforcement
+# engine from its own derived state, and anything else writing into it breaks the
+# guarantee that its contents are attributable to that engine. Static policy is a
+# different concern with a different lifecycle, so it gets its own table.
+# It is also NOT a ufw rule: ufw is the access-control chokepoint
+# (alert_manager/firewall.py), and a protocol fingerprint is not access control.
+#
+# ── PRIORITY, and why this one ───────────────────────────────────────────────
+# Measured on the gateway 2026-08-06, forward hook occupancy:
+#     nemesis_enforce   priority raw    (-300)
+#     ufw (ip/ip6 filter) + nemesis_gw_nat   priority filter (0)
+# This table sits at `mangle` (-150): AFTER nemesis_enforce, so that engine keeps
+# first say and its single authority is untouched; BEFORE ufw, so the QUIC
+# decision is decisive rather than depending on ufw's accept rules further down.
+# Do not move it to raw/-300 — that collides with the enforcement engine.
+#
+# ── THE MATCH, verbatim from the validated research ──────────────────────────
+# Two fields in the clear at the front of every QUIC handshake packet:
+#     byte 0 bit 7  Header Form = 1 (long header)
+#     byte 0 bit 6  Fixed Bit   = 1
+#     bytes 1-4     Version     = 0x00000001 (v1) or 0x6b3343cf (v2)
+# @th,64,8  = first byte of the UDP payload (UDP header is 64 bits)
+# @th,72,32 = the 4-byte version field
+#
+# Measured discrimination, 0 false positives across 24 packets:
+#   real QUIC (aioquic -> Cloudflare + Google)   16 UDP:443 -> 11 matched
+#   WireGuard, STUN, DTLS, RTP, game binary, DNS 18 UDP:443 ->  0 matched
+#   adversarial near-miss (0xc0 first byte, bogus version)  3 ->  0 matched
+# THE NEAR-MISS ROW IS WHY THE VERSION FIELD IS IN THE MATCH. Header-form
+# matching alone gave 3/3 false positives. Do not "simplify" this rule.
+#
+# ── reject with icmpx, NOT icmp ──────────────────────────────────────────────
+# `reject with icmp ...` makes nft silently add `meta nfproto ipv4`, which
+# narrows the rule to IPv4. IPv6 QUIC then passes freely while the counter reads
+# 0 — indistinguishable from "the mechanism does not work". Measured 2026-08-04.
+# `icmpx` emits the right unreachable for whichever family matched.
+#
+# Reject rather than drop, deliberately: a client that gets an ICMP
+# port-unreachable falls back to TCP/443 immediately. A silent drop makes it wait
+# out a timeout first, which is what makes QUIC blocking feel like a broken
+# network instead of a fast fallback.
+#
+# ── KNOWN LIMITS, carried forward, not resolved here ─────────────────────────
+#   * QUIC v2 (0x6b3343cf) is in the match set but was NEVER observed on the
+#     wire — that set entry is unverified by real traffic.
+#   * Only Chrome 151 was measured. Firefox and Safari fallback are believed the
+#     same and are NOT measured. Firefox is now testable via this gateway.
+#   * Short-header (post-handshake) QUIC is not matched, by design: blocking the
+#     handshake is sufficient and cheaper than tracking established flows.
+#   * No throughput/CPU cost measured for this rule in the forward path.
+
+# ── ATOMIC REPLACE — this preamble is load-bearing, do not delete it ─────────
+# `nft -f` is ADDITIVE, not declarative: re-loading a file that merely defines a
+# table APPENDS its rules to the existing one. Measured 2026-08-06 — three loads
+# produced three identical reject rules. Since the systemd unit runs `nft -f` on
+# every start, and the installer may run the deploy more than once, that stacks
+# duplicates silently and makes the shared named counter over-count.
+#
+# The two lines below are the standard idiom: create the table if absent (so the
+# delete cannot fail on a fresh boot), then delete it, then define it fresh. The
+# whole file is applied as ONE transaction, so there is no window in which the
+# block is missing.
+#
+# SIDE EFFECT, stated because it looks like data loss otherwise: the named
+# counter RESETS on every reload. It counts since the last load, not since boot.
+table inet nemesis_policy { }
+delete table inet nemesis_policy
+
+table inet nemesis_policy {
+    counter quic_forward_blocked { }
+
+    chain forward {
+        type filter hook forward priority mangle; policy accept;
+
+        udp dport 443 @th,64,8 & 0xc0 == 0xc0 @th,72,32 { 0x00000001, 0x6b3343cf } \
+            counter name "quic_forward_blocked" \
+            reject with icmpx type port-unreachable
+    }
+}
