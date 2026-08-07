@@ -72,6 +72,32 @@ def _current(adapter):
     return mode, servers
 
 
+def _verify(adapter, want_mode, want_servers=None):
+    """Read the adapter's DNS back and prove it matches what was just set.
+
+    Rule 13. A PowerShell cmdlet's exit code says the command was ACCEPTED, not
+    that the OS now reflects it: `Set-DnsClientServerAddress` returns 0 against a
+    stale adapter alias, when a GPO overrides the setting, and on a WMI no-op.
+    Every function below previously took `rc == 0` as proof of a completed change.
+    `_current()` was already built and already trusted by `save_state()` — this
+    just uses that same read as evidence on the write path too.
+
+    `want_servers=None` means "don't assert specific servers" — used for the
+    DHCP/reset path, where the addresses that come back are whatever the DHCP
+    server hands out and asserting a particular set would be wrong.
+
+    Returns (ok, detail) so the caller can log WHY it failed, not merely that it
+    did — a bare False here would be its own unreadable instrument.
+    """
+    mode, servers = _current(adapter)
+    if mode != want_mode:
+        return False, "mode=%s expected=%s" % (mode, want_mode)
+    if want_servers is not None and sorted(servers) != sorted(want_servers):
+        return False, "servers=%s expected=%s" % (",".join(servers) or "(none)",
+                                                  ",".join(want_servers) or "(none)")
+    return True, ""
+
+
 def save_state(adapter):
     mode, servers = _current(adapter)
     state = {"adapter": adapter, "mode": mode, "servers": servers}
@@ -86,9 +112,14 @@ def set_dns(adapter, servers):
     joined = ",".join(f"'{s}'" for s in servers)
     rc, _, err = _ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" '
                      f'-ServerAddresses ({joined})')
-    ok = rc == 0
-    log.info("dns set: adapter=%s -> %s ok=%s%s", adapter, ",".join(servers), ok,
-             (" err=" + err) if err else "")
+    if rc != 0:
+        log.info("dns set: adapter=%s -> %s ok=False%s", adapter, ",".join(servers),
+                 (" err=" + err) if err else "")
+        return False
+    ok, detail = _verify(adapter, "static", servers)
+    log.info("dns set: adapter=%s -> %s ok=%s%s%s", adapter, ",".join(servers), ok,
+             (" err=" + err) if err else "",
+             "" if ok else (" UNVERIFIED: " + detail))
     return ok
 
 
@@ -109,17 +140,29 @@ def restore():
             joined = ",".join(f"'{s}'" for s in state["servers"])
             rc, _, _ = _ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" '
                            f'-ServerAddresses ({joined})')
+            want_mode, want_servers = "static", state["servers"]
         else:
             rc, _, _ = _ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" '
                            f'-ResetServerAddresses')
-        ok = rc == 0
-        log.info("dns restore: adapter=%s -> %s ok=%s",
-                 adapter, state.get("mode", "dhcp"), ok)
+            want_mode, want_servers = "dhcp", None
+        # Rule 13: rc==0 only means the cmdlet was accepted. Confirm the adapter
+        # actually reflects the saved state before claiming a restore.
+        ok, detail = (False, "cmdlet rc=%d" % rc) if rc != 0 \
+            else _verify(adapter, want_mode, want_servers)
+        log.info("dns restore: adapter=%s -> %s ok=%s%s",
+                 adapter, state.get("mode", "dhcp"), ok,
+                 "" if ok else (" UNVERIFIED: " + detail))
         if ok:
             try:
                 os.remove(STATE_PATH)
             except OSError:
                 pass
+        else:
+            # Keep the state file. It is the only record of what to go back to,
+            # and deleting it on an unproven restore would strand the machine on
+            # enforced DNS with nothing left to restore from.
+            log.warning("dns restore: state file KEPT at %s so a later attempt "
+                        "can still revert this machine", STATE_PATH)
         return ok
     except Exception as e:
         log.warning("dns restore failed: %s", e)
@@ -134,8 +177,16 @@ def kill_switch():
         return False
     rc, _, _ = _ps(f'Set-DnsClientServerAddress -InterfaceAlias "{adapter}" '
                    f'-ResetServerAddresses')
-    log.info("dns kill-switch: adapter=%s reset-to-dhcp ok=%s", adapter, rc == 0)
-    return rc == 0
+    # Rule 13, and this one matters most: the kill-switch is the last-resort revert
+    # an operator reaches for in an emergency, and it had the weakest evidence in
+    # the file — a bare exit code. If it cannot prove the adapter is back on DHCP
+    # it must say so, because "kill-switch returned True" is exactly the claim
+    # someone would stop investigating on.
+    ok, detail = (False, "cmdlet rc=%d" % rc) if rc != 0 \
+        else _verify(adapter, "dhcp")
+    log.info("dns kill-switch: adapter=%s reset-to-dhcp ok=%s%s", adapter, ok,
+             "" if ok else (" UNVERIFIED: " + detail))
+    return ok
 
 
 def enforce_if_configured(conf):

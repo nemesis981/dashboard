@@ -246,6 +246,55 @@ def restore_from_lkg() -> bool:
         return False
 
 
+def _auto_restore(reason: str, expected: str | None) -> None:
+    """Restore from LKG and PROVE it, rather than trusting `nft -f`'s exit code.
+
+    Rule 13. `restore_from_lkg()`'s success condition is only that `nft -f`
+    returned 0 (nemesis_fw_watch.py:243) — that says the file parsed, not that the
+    live table now matches it. Both call sites previously logged
+    "table auto-restored from last-known-good" unconditionally, outside the `if h:`
+    that guarded the baseline write, so the claim fired even when the post-restore
+    hash was unreadable. A false "restored" line is worse than silence here: the
+    critical alert has already fired, and this is the line that stops anyone
+    looking.
+
+    Deliberately ONE definition shared by both call sites, matching `verify()`'s
+    own reasoning about not letting two paths drift apart.
+
+    Note on the baseline comparison: nothing in this repo writes `lkg.nft` (it is
+    produced on the enforcement-engine side), so LKG content is NOT guaranteed to
+    hash-equal the recorded baseline. When they differ we report it and do NOT
+    adopt the observed hash — adopting it would silently bless whatever state the
+    restore actually produced and blind every future tamper check.
+    """
+    if not restore_from_lkg():
+        log.error("fwwatch: auto-restore did NOT apply last-known-good (%s) — "
+                  "table remains in the alerted state", reason)
+        return
+    h = table_hash()
+    if h is None:
+        log.error("fwwatch: auto-restore ran but the table could NOT be read back "
+                  "(%s) — treating as NOT restored; baseline left unchanged", reason)
+        return
+    if expected is None:
+        # No baseline existed (the deleted-with-no-prior-baseline case). The table
+        # is readable again, which is all that can honestly be claimed.
+        write_expected(h, "auto-restore (no prior baseline to confirm against)")
+        log.warning("fwwatch: table reloaded from last-known-good and is readable "
+                    "(%s); no prior baseline existed, so it could not be confirmed "
+                    "to match one", reason)
+        return
+    if h != expected:
+        log.error("fwwatch: auto-restore reloaded the table but it does NOT match "
+                  "the recorded baseline (%s): observed=%s expected=%s. NOT "
+                  "claiming a restore and NOT adopting the observed hash.",
+                  reason, h[:16], expected[:16])
+        return
+    write_expected(h, "auto-restore")
+    log.warning("fwwatch: table auto-restored from last-known-good and verified "
+                "against the recorded baseline (%s)", reason)
+
+
 #: Last condition alerted on, so a persisting problem does not re-alert forever.
 #: Measured on the VM 2026-08-01: an unresolved deletion produced four records in
 #: two minutes and would have emailed every 60s indefinitely — alert fatigue, and
@@ -289,11 +338,8 @@ def verify(reason: str) -> None:
     if live is None:
         _alert_once(("deleted",), ERR_DELETED, "critical", "deleted or unreadable",
                     reason=reason, expected=expected or "none")
-        if AUTORESTORE and restore_from_lkg():
-            h = table_hash()
-            if h:
-                write_expected(h, "auto-restore")
-            log.warning("fwwatch: table auto-restored from last-known-good")
+        if AUTORESTORE:
+            _auto_restore(reason, expected)
         return
 
     if expected is None:
@@ -312,11 +358,8 @@ def verify(reason: str) -> None:
         # condition and must alert again rather than being swallowed.
         _alert_once(("tampered", live), ERR_TAMPERED, "error", "modified outside Nemesis",
                     reason=reason, expected=expected[:16], observed=live[:16])
-        if AUTORESTORE and restore_from_lkg():
-            h = table_hash()
-            if h:
-                write_expected(h, "auto-restore")
-            log.warning("fwwatch: table auto-restored from last-known-good")
+        if AUTORESTORE:
+            _auto_restore(reason, expected)
 
 
 def classify(evt: dict) -> str | None:
