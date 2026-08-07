@@ -46,7 +46,7 @@ import nemesis_errors  # noqa: E402
 
 _modpath_for_ast = os.path.join(REPO, "modules", "dhcp", "module.py")
 
-EXPECTED_CHECKS = 83
+EXPECTED_CHECKS = 159
 
 _results = []
 
@@ -383,7 +383,7 @@ check("core owns the promotion path",
       "def reconcile_dhcp_hostnames" in pathlib.Path(
           os.path.join(REPO, "alert_manager", "database.py")).read_text(), True)
 check("sync_leases is a no-op in non-serving modes",
-      dhcp.Module({"name": "dhcp", "_dir": "/nonexistent"}).sync_leases()["served"],
+      dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"}).sync_leases()["served"],
       False)
 
 print("\n14. Loader + Data Manager contract (both caught real failures)")
@@ -421,7 +421,7 @@ check("CONTROL: an ungranted namespace/table pair is refused",
 print("\n15. start() must not raise — the loader silently drops modules that do")
 # modules_loader wraps load in `except Exception: log.exception(...)`, so a raise
 # means the module does not load AT ALL: no card, no status, no explanation.
-_m = dhcp.Module({"name": "dhcp", "_dir": "/nonexistent"})
+_m = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
 try:
     _m.start()
     check("start() with no config does not raise", True, True)
@@ -429,6 +429,422 @@ except Exception:
     check("start() with no config does not raise", False, True)
 check("stop() is safe with no thread running",
       (_m.stop(), True)[1] if False else True, True)
+
+print("\n16. Health derivation — the crash-loop gap status() used to have")
+# THE DEFECT BEING PINNED. status() used to be `systemctl is-active` mapped
+# "active" -> "running". Under Restart=on-failure/RestartSec=5 a daemon that
+# cannot start IS "active" for part of every cycle, so the dashboard said
+# "running" through the whole of the first live run's crash loop (2026-08-07).
+#
+# Every crash-loop case below is deliberately ActiveState=active — i.e. every one
+# is an input the OLD code called healthy. If the derivation ever regresses to
+# reading only ActiveState, these stop discriminating.
+_HEALTHY_PROPS = {"ActiveState": "active", "SubState": "running",
+                  "NRestarts": "0",
+                  "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"}
+_T0 = dhcp._parse_systemd_timestamp("Fri 2026-08-07 19:04:31 UTC")
+
+check("systemd timestamp parses to an epoch", isinstance(_T0, float), True)
+check("unparseable timestamp is None, NOT a default",
+      dhcp._parse_systemd_timestamp("not a timestamp"), None)
+check("empty timestamp is None, NOT epoch 0",
+      dhcp._parse_systemd_timestamp(""), None)
+
+check("stable + :67 bound => serving",
+      dhcp.derive_health(_HEALTHY_PROPS, "bound", (), _T0 + 7200, 0)["state"],
+      dhcp.HEALTH_SERVING)
+check("REGRESSION: active but restart count GREW => crash_looping",
+      dhcp.derive_health(dict(_HEALTHY_PROPS, NRestarts="7"), "bound", (),
+                         _T0 + 7200, 4)["state"],
+      dhcp.HEALTH_CRASH_LOOP)
+check("REGRESSION: active, restarted, young run => crash_looping",
+      dhcp.derive_health(dict(_HEALTHY_PROPS, NRestarts="3"), "bound", (),
+                         _T0 + 10, None)["state"],
+      dhcp.HEALTH_CRASH_LOOP)
+check("auto-restart backoff is NOT 'starting up'",
+      dhcp.derive_health({"ActiveState": "activating",
+                          "SubState": "auto-restart", "NRestarts": "0",
+                          "ExecMainStartTimestamp": ""},
+                         "unknown", (), _T0)["state"],
+      dhcp.HEALTH_CRASH_LOOP)
+# A cumulative count that has NOT moved, on a long-running daemon, is history —
+# not a live loop. Without this the check would flag every daemon that ever
+# restarted, forever, which is the mirror-image false positive.
+check("old restarts + long uptime + no delta => serving, not looping",
+      dhcp.derive_health(dict(_HEALTHY_PROPS, NRestarts="3"), "bound", (),
+                         _T0 + 7200, 3)["state"],
+      dhcp.HEALTH_SERVING)
+check("active but :67 free => unverified, never 'serving'",
+      dhcp.derive_health(_HEALTHY_PROPS, "free", (), _T0 + 7200, 0)["state"],
+      dhcp.HEALTH_UNVERIFIED)
+check("':67 unknown' is a FAILURE, not a pass",
+      dhcp.derive_health(_HEALTHY_PROPS, "unknown", (), _T0 + 7200, 0)["state"],
+      dhcp.HEALTH_UNVERIFIED)
+check("interface lost its address => unverified",
+      dhcp.derive_health(_HEALTHY_PROPS, "bound", ("enp0s3 lost it",),
+                         _T0 + 7200, 0)["state"],
+      dhcp.HEALTH_UNVERIFIED)
+check("inactive => down",
+      dhcp.derive_health({"ActiveState": "inactive", "SubState": "dead",
+                          "NRestarts": "0", "ExecMainStartTimestamp": ""},
+                         "free", (), _T0)["state"],
+      dhcp.HEALTH_DOWN)
+check("unreadable properties => unknown, NOT down and NOT serving",
+      dhcp.derive_health(None, "unknown", (), _T0)["state"],
+      dhcp.HEALTH_UNKNOWN)
+check("a serving verdict carries its raw inputs for auditing",
+      set(("nrestarts", "uptime_seconds", "port67")).issubset(
+          dhcp.derive_health(_HEALTHY_PROPS, "bound", (), _T0 + 7200, 0)["facts"]),
+      True)
+
+print("\n16b. The derivation's own self-test must be able to FAIL")
+# The standing practice: a verification instrument proves its premise against a
+# known-different input before it is trusted. A self-test that cannot fail is
+# the exact defect it exists to catch, so the control here breaks the derivation
+# and confirms the self-test notices.
+check("self-test passes against the real derivation",
+      dhcp.selftest_health_derivation()[0], True)
+_real_derive = dhcp.derive_health
+try:
+    dhcp.derive_health = lambda *a, **k: {"state": dhcp.HEALTH_SERVING,
+                                          "serving": True, "facts": {}}
+    check("CONTROL: a derivation that always says 'serving' FAILS the self-test",
+          dhcp.selftest_health_derivation()[0], False)
+finally:
+    dhcp.derive_health = _real_derive
+check("self-test restored to passing", dhcp.selftest_health_derivation()[0], True)
+
+print("\n16c. The /proc port probe — because the bind probe is blind unprivileged")
+# The dashboard runs as unprivileged `nemesis-dash` (verified on the live gateway
+# 2026-08-07), and :67 is a privileged port, so port67_state() returns "unknown"
+# from there EVERY time. A health check built on it alone would report
+# "cannot confirm serving" on a perfectly healthy daemon forever — the same
+# can-only-say-one-thing defect this whole section exists to remove.
+check("the /proc probe proves itself two-sided (real socket, both answers)",
+      dhcp.selftest_proc_port_probe()[0], True)
+check("a failed /proc read is None, NOT an empty set read as 'nothing bound'",
+      dhcp._udp_ports_in_use() is not None, True)
+_probe_sock = sqlite3 and __import__("socket").socket(
+    __import__("socket").AF_INET, __import__("socket").SOCK_DGRAM)
+_probe_sock.bind(("127.0.0.1", 0))
+_pp = _probe_sock.getsockname()[1]
+check("POSITIVE control: a really-bound port is seen in /proc",
+      _pp in dhcp._udp_ports_in_use(), True)
+_probe_sock.close()
+check("NEGATIVE control: an unbound port is not reported bound",
+      99 in (dhcp._udp_ports_in_use() or set()), False)
+
+print("\n15a. Bind settle — no false alarm on every clean start")
+# systemctl start returns when the unit is ACTIVE, before dnsmasq has bound :67.
+# Sampling health right then read port67=free at 0.2s uptime and recorded a
+# spurious serving->unverified->serving flap plus an E-DHCP-015 occurrence on
+# EVERY clean start (observed live 2026-08-07).
+_bm = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
+_calls = {"n": 0}
+
+
+def _held_on_third():
+    _calls["n"] += 1
+    return (dhcp.PORT67_OURS if _calls["n"] >= 3 else dhcp.PORT67_FREE), {}
+
+
+_saved_avail = dhcp.port67_availability
+try:
+    dhcp.port67_availability = _held_on_third
+    check("waits for the bind, then returns True",
+          _bm._await_bind(timeout=5, _sleep=lambda s: None), True)
+    check("it polled rather than sampling once", _calls["n"] >= 3, True)
+    # The bound must be a real bound: a daemon that NEVER binds must not hang
+    # dashboard boot, and must not be excused either.
+    dhcp.port67_availability = lambda: (dhcp.PORT67_FREE, {})
+    check("a daemon that never binds gives up (bounded, never hangs boot)",
+          _bm._await_bind(timeout=0.5, _sleep=lambda s: None), False)
+finally:
+    dhcp.port67_availability = _saved_avail
+check("the settle window is short enough for inline dashboard boot",
+      dhcp.Module.BIND_SETTLE_SECONDS <= 5, True)
+# THE PLACEMENT IS THE POINT. The settle must live in _start_serving(), which
+# every start path funnels through — start() AND _apply_state() (the rollback
+# path). It was originally only in start(), so rollback still measured :67
+# microseconds after systemctl returned, read `free`, failed every tier, and
+# escalated into a real DHCP outage. Live, 2026-08-07.
+import inspect as _insp_settle  # noqa: E402
+check("the bind settle is inside _start_serving (covers rollback too)",
+      "_await_bind" in _insp_settle.getsource(dhcp.Module._start_serving), True)
+check("CONTROL: rollback reaches it via _apply_state -> _start_serving",
+      "_start_serving" in _insp_settle.getsource(dhcp.Module._apply_state), True)
+
+print("\n15c. REGRESSION — start() must survive an UNEXPECTED exception too")
+# The loader wraps load in `except Exception: log.exception(...)`, so ANY escape
+# means the module does not load at all — no card, no status, no explanation.
+# start() caught a narrow tuple of the exceptions it meant to raise, and an
+# OSError from tempfile.mkstemp (read-only /tmp under the dashboard's
+# ProtectSystem=strict sandbox) walked straight past it. Live, 2026-08-07.
+_boom = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
+_boom._cfg = {"interfaces": ["eth9"], "allowlist": ["eth9"], "scopes": [],
+              "expected_addrs": {}, "mode": "nemesis"}
+
+
+def _explode(*a, **k):
+    raise OSError(30, "Read-only file system")
+
+
+_saved_start_serving = dhcp.Module._start_serving
+try:
+    dhcp.Module._start_serving = _explode
+    try:
+        _boom.start()
+        check("an unexpected OSError does NOT escape start()", True, True)
+    except Exception:
+        check("an unexpected OSError does NOT escape start()", False, True)
+    check("and the reason is retained for the dashboard card",
+          "Read-only file system" in (_boom._last_error or ""), True)
+finally:
+    dhcp.Module._start_serving = _saved_start_serving
+
+print("\n15d. REGRESSION — the validator writes where it is allowed to write")
+# ProtectSystem=strict + ReadWritePaths=/var/lib/nemesis means /tmp is read-only
+# to the dashboard process. mkstemp() with no dir= raised there and took the
+# whole module down with it.
+import inspect as _inspect  # noqa: E402
+_vsrc = _inspect.getsource(dhcp.validate_config_text)
+check("mkstemp is given an explicit dir=", "dir=tmp_dir" in _vsrc, True)
+check("that dir is the data dir, not the system temp dir",
+      "os.path.dirname(LEASE_PATH)" in _vsrc, True)
+check("a temp-file failure reports UNVALIDATED, never a pass",
+      dhcp.validate_config_text.__doc__ is not None and
+      "validator could not create a temp file" in _vsrc, True)
+
+print("\n15b. REGRESSION — config is read from /etc, not from the code tree")
+# THE BUG. _load_config used `manifest["_dir"]` (the module's own CODE directory)
+# with CONF_DIR only as a fallback for when `_dir` was absent — and the loader
+# ALWAYS sets `_dir`. So production always read <module_dir>/config.json, which
+# has never existed, silently took the serve-nowhere default, and reported
+# `mode=provider` while /etc/nemesis/dhcp/config.json said `mode=nemesis`. The
+# module looked perfectly healthy announcing it was deliberately not serving.
+# Found live 2026-08-07 on the first load through the real loader.
+check("config path is under /etc, NOT the module directory",
+      dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/c.json"})
+      ._config_path(), "/nonexistent/c.json")
+_pathmod = dhcp.Module({"name": "dhcp", "_dir": "/opt/nemesis/modules/dhcp"})
+check("with only _dir set, config still resolves to CONF_DIR",
+      _pathmod._config_path(), os.path.join(dhcp.CONF_DIR, "config.json"))
+check("_dir does NOT leak into the config path any more",
+      "/opt/nemesis/modules/dhcp" in _pathmod._config_path(), False)
+# Read and write must agree, or a mode switch persists somewhere the next load
+# never reads and silently reverts on restart.
+check("read and write resolve to the SAME path",
+      _pathmod._config_path(), _pathmod._config_path())
+with tempfile.TemporaryDirectory() as td:
+    _cp = os.path.join(td, "config.json")
+    open(_cp, "w").write('{"mode": "nemesis", "interfaces": ["eth9"],'
+                         ' "allowlist": ["eth9"], "scopes": []}')
+    check("a real config file IS actually read (mode reaches the module)",
+          dhcp.Module({"name": "dhcp", "_config_path": _cp}).mode, "nemesis")
+
+print("\n16f. REGRESSION — verify_mode() must not use the blind bind probe")
+# THE MOST DAMAGING INSTANCE OF THE UNPRIVILEGED BLIND SPOT. verify_mode() used
+# port67_state() directly, which from the dashboard user always returns
+# "unknown". So every ROLLBACK tier failed its own verification even when the
+# rollback had mechanically succeeded and the daemon was serving — the cascade
+# exhausted all four tiers, escalated, and deliberately STOPPED nemesis-dhcpd.
+# A recoverable failure became a real DHCP outage. Measured live 2026-08-07;
+# invisible to the stubbed-systemd suite, whose fake world returned "bound".
+_vm = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
+_vm._cfg = {"interfaces": [], "allowlist": [], "expected_addrs": {},
+            "scopes": [], "mode": "nemesis"}
+_vm._daemon_active = lambda: True
+_saved_avail2 = dhcp.port67_availability
+try:
+    # The exact live condition: bind probe blind, /proc says our unit holds :67.
+    dhcp.port67_availability = lambda: (dhcp.PORT67_OURS, {"bind_probe": "unknown",
+                                                           "source": "proc"})
+    _ok, _rb, _det = _vm.verify_mode(dhcp.MODE_NEMESIS)
+    check("our own daemon holding :67 VERIFIES (rollback can succeed)", _ok, True)
+    check("and the readback records how it was determined",
+          _rb.get("port67_readback", {}).get("source"), "proc")
+    # The guard must still refuse the genuinely bad cases.
+    dhcp.port67_availability = lambda: (dhcp.PORT67_FREE, {})
+    check("SAFETY: :67 not held still fails verification",
+          _vm.verify_mode(dhcp.MODE_NEMESIS)[0], False)
+    dhcp.port67_availability = lambda: (dhcp.PORT67_UNKNOWN, {})
+    check("SAFETY: genuinely unknowable still fails verification",
+          _vm.verify_mode(dhcp.MODE_NEMESIS)[0], False)
+    dhcp.port67_availability = lambda: (dhcp.PORT67_FOREIGN, {})
+    check("SAFETY: a FOREIGN holder fails verification (stricter than 'bound')",
+          _vm.verify_mode(dhcp.MODE_NEMESIS)[0], False)
+finally:
+    dhcp.port67_availability = _saved_avail2
+# AST, not a substring search — the first draft of this check asserted
+# `"port67_state()" not in source` and FAILED, because the method carries a
+# comment explaining why it no longer calls it. Exactly the trap this file's own
+# `directives()` helper documents: a grep for the thing matching the note about
+# the thing. Parse the calls; do not pattern-match the prose.
+import inspect as _insp2, textwrap as _tw  # noqa: E402
+_vm_tree = _ast.parse(_tw.dedent(_insp2.getsource(dhcp.Module.verify_mode)))
+_vm_calls = {n.func.id for n in _ast.walk(_vm_tree)
+             if isinstance(n, _ast.Call) and isinstance(n.func, _ast.Name)}
+check("verify_mode does NOT call the raw bind probe",
+      "port67_state" in _vm_calls, False)
+check("CONTROL: it DOES call the privilege-aware availability check",
+      "port67_availability" in _vm_calls, True)
+
+print("\n16d. :67 ownership — the two-DHCP-servers guard, as a truth table")
+# WHY THIS CHANGED. The guard used to ask port67_state(), which binds a probe on
+# a privileged port -> EACCES -> "unknown" -> refuse, from the unprivileged
+# dashboard user, ALWAYS. So the module could never start itself: not when :67
+# was busy, and not when it was free either. The POLICY is unchanged; only the
+# instrument is. These rows pin that the policy really is unchanged.
+check("free + our unit down => free",
+      dhcp.classify_port67(False, False), dhcp.PORT67_FREE)
+check("free + our unit up => free",
+      dhcp.classify_port67(False, True), dhcp.PORT67_FREE)
+check("EXEMPTION: held while OUR unit is active => ours (adoption)",
+      dhcp.classify_port67(True, True), dhcp.PORT67_OURS)
+check("SAFETY: held while our unit is DOWN => foreign",
+      dhcp.classify_port67(True, False), dhcp.PORT67_FOREIGN)
+check("SAFETY: held + ownership unknowable => unknown, never permitted",
+      dhcp.classify_port67(True, None), dhcp.PORT67_UNKNOWN)
+check("SAFETY: cannot tell if held => unknown",
+      dhcp.classify_port67(None, True), dhcp.PORT67_UNKNOWN)
+check("the classifier self-test passes", dhcp.selftest_port67_classifier()[0], True)
+# The whole point of the exemption is that it is NARROW. Only one of the seven
+# input combinations may permit a start while the port is held.
+_permitting = [(h, a) for h in (True, False, None) for a in (True, False, None)
+               if h is True and dhcp.classify_port67(h, a) in
+               (dhcp.PORT67_FREE, dhcp.PORT67_OURS)]
+check("exactly ONE held-port combination is permitted (held + our unit up)",
+      _permitting, [(True, True)])
+
+print("\n16e. The guard fails CLOSED if its own classifier is broken")
+# A precondition that permits a start because its safety check silently stopped
+# working is the worst possible failure. Break the classifier and confirm the
+# precondition refuses rather than proceeding.
+_real_classify = dhcp.classify_port67
+try:
+    dhcp.classify_port67 = lambda held, active: dhcp.PORT67_FREE
+    check("CONTROL: an always-'free' classifier FAILS its self-test",
+          dhcp.selftest_port67_classifier()[0], False)
+    _f = dhcp.check_preconditions(["eth9"], {"eth9"}, toml_path="/nonexistent")
+    check("a broken classifier makes preconditions REFUSE (fail closed)",
+          any(c == dhcp.E_PORT_BOUND and "SELF-TEST" in d for c, d in _f), True)
+finally:
+    dhcp.classify_port67 = _real_classify
+check("classifier restored", dhcp.selftest_port67_classifier()[0], True)
+
+print("\n17. status() reports health, not process presence")
+_hm = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
+_hm._cfg = {"interfaces": ["enp0s3"], "allowlist": ["enp0s3"], "scopes": [],
+            "expected_addrs": {}, "mode": "nemesis"}
+
+
+def _with_health(state, detail="x"):
+    _hm.health = lambda advance=True: {
+        "state": state, "serving": state == dhcp.HEALTH_SERVING,
+        "detail": detail, "facts": {}}
+    return _hm.status()
+
+
+_hm.read_leases = lambda: [{"mac": "aa", "ip": "1.2.3.4", "hostname": "h",
+                            "expiry": "1"}]
+check("crash_looping surfaces AS crash_looping (not 'running')",
+      _with_health(dhcp.HEALTH_CRASH_LOOP)["state"], dhcp.HEALTH_CRASH_LOOP)
+check("crash_looping is not reported healthy",
+      _with_health(dhcp.HEALTH_CRASH_LOOP)["healthy"], False)
+# The lease FILE still lists a lease while the daemon is failing. Leading the
+# card with "1 lease" there is the same lie in a different field.
+check("unhealthy detail leads with health, not a stale lease count",
+      _with_health(dhcp.HEALTH_CRASH_LOOP, "looping")["detail"], "looping")
+check("healthy detail reports the lease count",
+      _with_health(dhcp.HEALTH_SERVING)["detail"], "1 lease")
+check("unknown health is not reported healthy",
+      _with_health(dhcp.HEALTH_UNKNOWN)["healthy"], False)
+check("a non-serving MODE is still not_serving, not a fault",
+      (lambda: (_hm._cfg.update({"mode": "provider"}), _hm.status()["state"])[1])(),
+      "not_serving")
+_hm._cfg["mode"] = "nemesis"
+check("broken and off do NOT render the same on the card",
+      dhcp.Module._CARD_STYLE[dhcp.HEALTH_CRASH_LOOP][1]
+      != dhcp.Module._CARD_STYLE[dhcp.HEALTH_DOWN][1], True)
+
+print("\n18. Observability tables — lease HISTORY, not just a snapshot")
+_ob = sqlite3.connect(":memory:")
+_om = dhcp.Module({"name": "dhcp", "_config_path": "/nonexistent/config.json"})
+_om._cfg = {"interfaces": [], "allowlist": [], "scopes": [],
+            "expected_addrs": {}, "mode": "nemesis"}
+_om.init_lease_table(_ob)
+_om.init_lease_event_table(_ob)
+
+
+def _sync(leases):
+    _om.read_leases = lambda: leases
+    return _om.sync_leases(_ob)
+
+
+def _events():
+    return [tuple(r) for r in _ob.execute(
+        "SELECT event, mac, ip, prev_ip FROM dhcp_lease_events ORDER BY id")]
+
+
+_sync([{"mac": "AA:BB", "ip": "10.0.0.5", "hostname": "box", "expiry": "1"}])
+check("a device joining records a 'new' event",
+      [e[0] for e in _events()], ["new"])
+_sync([{"mac": "AA:BB", "ip": "10.0.0.5", "hostname": "box", "expiry": "2"}])
+check("an unchanged lease records NO event (renewals are not churn)",
+      len(_events()), 1)
+_sync([{"mac": "AA:BB", "ip": "10.0.0.9", "hostname": "box", "expiry": "3"}])
+check("an address change is recorded with its previous value",
+      _events()[-1], ("ip_changed", "aa:bb", "10.0.0.9", "10.0.0.5"))
+_sync([{"mac": "AA:BB", "ip": "10.0.0.9", "hostname": "renamed", "expiry": "4"}])
+check("a hostname change is recorded", _events()[-1][0], "hostname_changed")
+# THE POINT OF THE TABLE: dhcp_leases overwrites, so without this the fact that
+# the device ever left is unrecoverable one sync later.
+_sync([])
+check("a lease disappearing records 'gone'", _events()[-1][0], "gone")
+check("the snapshot table still holds the device after it goes",
+      _ob.execute("SELECT COUNT(*) FROM dhcp_leases").fetchone()[0], 1)
+
+print("\n18b. Health samples — change always, heartbeat in between")
+_om.init_health_table(_ob)
+_om.read_leases = lambda: []
+_om.health = lambda advance=True: {"state": dhcp.HEALTH_SERVING,
+                                   "serving": True, "detail": "ok", "facts": {}}
+_om.record_health_sample(_ob)
+
+
+def _samples():
+    return [tuple(r) for r in _ob.execute(
+        "SELECT state, is_change FROM dhcp_health_samples ORDER BY id")]
+
+
+check("first sample is recorded and flagged a change", _samples(), [("serving", 1)])
+_om.record_health_sample(_ob)
+check("an unchanged state inside the heartbeat window is NOT re-recorded",
+      len(_samples()), 1)
+_om.health = lambda advance=True: {"state": dhcp.HEALTH_CRASH_LOOP,
+                                   "serving": False, "detail": "loop", "facts": {}}
+_om.record_health_sample(_ob)
+check("a state CHANGE is always recorded immediately",
+      _samples()[-1], ("crash_looping", 1))
+check("the raw facts are stored alongside the verdict",
+      _ob.execute("SELECT facts FROM dhcp_health_samples ORDER BY id DESC "
+                  "LIMIT 1").fetchone()[0] is not None, True)
+# Observability must never be able to kill the loop it rides on.
+_om.health = lambda advance=True: (_ for _ in ()).throw(RuntimeError("boom"))
+try:
+    _om.record_health_sample(_ob)
+    check("a failing health check does not raise out of the sampler", True, True)
+except Exception:
+    check("a failing health check does not raise out of the sampler", False, True)
+
+print("\n18c. The new tables are GRANTED — untested grants fail only in production")
+# The module's own tables are built here on a plain sqlite3 connection, so a
+# missing Data Manager grant would pass every check above and fail only at
+# runtime, as a WOULD DENY log line with the write silently dropped.
+for _t in ("dhcp_health_samples", "dhcp_lease_events"):
+    check("grant covers %s" % _t, _dm.allowed("dhcp", _t), True)
+check("CONTROL: the grant is still EXACT, not a dhcp_ prefix",
+      _dm.allowed("dhcp", "dhcp_health_samples_archive"), False)
 
 passed = sum(1 for _, ok in _results if ok)
 total = len(_results)

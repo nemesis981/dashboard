@@ -97,7 +97,19 @@ NAMESPACES = {
     # was made exact on 2026-08-06 precisely to stop that (a bare tuple falls
     # through to startswith(), which had already pre-authorised
     # `dhcp_leases_archive` unnoticed).
-    "dhcp":               {"tables": ("dhcp_leases", "dhcp_mode_change_log")},
+    # `dhcp_health_samples` + `dhcp_lease_events` added 2026-08-07 for steady-state
+    # observability (see modules/dhcp/module.py::record_health_sample and
+    # ::sync_leases). Named individually for the same reason as the two above —
+    # four exact names is the point, not an argument for relaxing to `dhcp_`.
+    # ⚠ ADDING THE NAME HERE IS NOT OPTIONAL AND IS NOT COVERED BY THE TESTS. A
+    # module writing an ungranted table is refused at RUNTIME; the module's own
+    # suite builds its tables on a plain sqlite3 connection, so a missing grant
+    # passes every test and only appears in production as a `WOULD DENY` log line
+    # with the write silently not happening — which is precisely the failure this
+    # observability work exists to make visible, and would be a poor way to
+    # discover it.
+    "dhcp":               {"tables": ("dhcp_leases", "dhcp_mode_change_log",
+                                      "dhcp_health_samples", "dhcp_lease_events")},
 
     # An EXPLICIT table list, not an `integrity_` prefix grant, and deliberately
     # so: this module exists to cross-check agent-reported scan activity, and a

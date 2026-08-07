@@ -60,7 +60,7 @@ unavailable — but a gap in the ledger must never be silent either.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import re
 import shutil
@@ -230,12 +230,28 @@ E_ROLLBACK_FAILED      = "E-DHCP-010"
 E_ROLLBACK_TO_BASELINE = "E-DHCP-011"
 E_BASELINE_FAILED      = "E-DHCP-012"
 E_OVERRIDE_USED        = "E-DHCP-013"
+# ── steady-state health (2026-08-07) ─────────────────────────────────────────
+# Every code above fires at a TRANSITION — start, reload, switch, rollback. None
+# of them can fire while the module is simply running, which is why a daemon that
+# crash-looped for hours produced no occurrence at all. These three are the
+# operating-state codes: they exist to be recorded by the periodic health sample,
+# not by an operation the operator just performed.
+E_DAEMON_CRASH_LOOP    = "E-DHCP-014"
+E_SERVING_UNVERIFIED   = "E-DHCP-015"
+E_HEALTH_UNMEASURABLE  = "E-DHCP-016"
 
 #: The failure family shared by 002-005 and 007: a precondition that must hold
 #: before this module may serve DHCP at all. Grouped so one confirmed cause
 #: ("the gateway VM was re-imaged and the static address never applied") can
 #: explain an occurrence at any of them, rather than each site relearning it.
 _CLASS_PRECONDITION = "dhcp-precondition-refused"
+
+#: The failure family shared by 014-016: the module IS meant to be serving and
+#: the periodic health sample says it is not (or cannot tell). Separate from the
+#: precondition family on purpose — a precondition failure means we correctly
+#: refused to start, which is the system working; these mean we believed we were
+#: serving and the readback disagreed, which is the system lying to itself.
+_CLASS_HEALTH = "dhcp-serving-unhealthy"
 
 _CODES = (
     (E_CONFIG_INVALID, "Rendered dnsmasq config failed validation; nothing applied",
@@ -271,6 +287,18 @@ _CODES = (
     (E_OVERRIDE_USED,
      "Operator forced a mode switch that failed verification (override) — "
      "automatic rollback suppressed", "MEDIUM", None),
+    # ── steady-state health ──────────────────────────────────────────────────
+    (E_DAEMON_CRASH_LOOP,
+     "DHCP daemon is restarting repeatedly — it is up at any given instant but "
+     "not staying up, so leases are being served intermittently or not at all",
+     "CRITICAL", _CLASS_HEALTH),
+    (E_SERVING_UNVERIFIED,
+     "DHCP daemon is active but could not be confirmed to be serving (UDP :67 "
+     "not bound, or a served interface lost its address)", "HIGH", _CLASS_HEALTH),
+    (E_HEALTH_UNMEASURABLE,
+     "Health could not be measured — the check itself failed, so the daemon's "
+     "true state is UNKNOWN and must not be reported as healthy", "MEDIUM",
+     _CLASS_HEALTH),
 )
 
 # ── Mode-switch fail-over: snapshot chain ────────────────────────────────────
@@ -652,7 +680,22 @@ def validate_config_text(text):
     binary = _dnsmasq_binary()
     if not os.path.exists(binary):
         return False, "dnsmasq binary not found at %s" % binary
-    fd, path = tempfile.mkstemp(prefix="nemesis-dhcp-", suffix=".conf")
+    # ⚠ NOT the system temp dir. The dashboard unit runs `ProtectSystem=strict`
+    # with `ReadWritePaths=/var/lib/nemesis`, so /tmp is READ-ONLY to the process
+    # that loads this module — `tempfile.mkstemp()` with no `dir=` raised OSError
+    # there, escaped `start()`, and made the whole module fail to load (verified
+    # live 2026-08-07). The data directory is the one path the module is
+    # guaranteed to be able to write, and it is already a precondition
+    # (`E_LEASE_DIR`) that it is writable, so nothing new is being assumed here.
+    tmp_dir = os.path.dirname(LEASE_PATH)
+    try:
+        fd, path = tempfile.mkstemp(prefix="nemesis-dhcp-", suffix=".conf",
+                                    dir=tmp_dir)
+    except OSError as e:
+        # An explicit failure, never a pass: if the validator cannot run, the
+        # config is UNVALIDATED, which must not be reported as valid.
+        return False, ("validator could not create a temp file in %s: %s"
+                       % (tmp_dir, e))
     try:
         with os.fdopen(fd, "w") as f:
             f.write(text)
@@ -759,6 +802,476 @@ def port67_state():
         s.close()
 
 
+def _udp_ports_in_use():
+    """Local UDP ports from /proc/net/{udp,udp6}. Returns a set, or None.
+
+    None means the read failed — not "no ports are in use". An empty set is a
+    legitimate (if unlikely) measurement; a failed read is not a measurement at
+    all, and the two must not be the same value.
+    """
+    ports = set()
+    read_any = False
+    for path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            with open(path) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        read_any = True
+        for line in lines[1:]:                      # skip the header row
+            cols = line.split()
+            if len(cols) < 2 or ":" not in cols[1]:
+                continue
+            try:
+                ports.add(int(cols[1].rsplit(":", 1)[1], 16))
+            except ValueError:
+                continue
+    return ports if read_any else None
+
+
+def port67_bound_via_proc():
+    """Is UDP :67 bound, read from /proc? Returns True | False | None.
+
+    ⚠ WHY THIS EXISTS ALONGSIDE `port67_state()`, WHICH ALREADY ANSWERS THIS.
+    That function binds a probe socket, and :67 is privileged — so from any
+    unprivileged caller it returns EACCES -> "unknown", ALWAYS. Its own docstring
+    says exactly that, and treating "unknown" as a precondition failure is right
+    for the pre-start check: refusing to assume a port is free is the correct bias
+    when the hazard is two DHCP servers.
+
+    But that bias inverts for a STEADY-STATE health check. The dashboard runs as
+    the unprivileged `nemesis-dash` (verified live 2026-08-07 — the unit sets
+    `User=nemesis-dash`, and an unprivileged bind on :67 returns errno 13 EACCES
+    on that box). So a health check built on the bind probe would return "cannot
+    confirm serving" on every single sample of a perfectly healthy daemon — an
+    instrument that can only ever produce one answer, which is the exact defect
+    this health work exists to remove, reintroduced one layer up.
+
+    /proc/net/udp is world-readable (confirmed `-r--r--r--` on the live gateway,
+    showing `00000000:0043`), so this reads the same fact at the privilege level
+    the code actually runs at. It proves the port is HELD, not by whom — pair it
+    with the systemd state, which is what identifies the holder.
+    """
+    ports = _udp_ports_in_use()
+    if ports is None:
+        return None
+    return 67 in ports
+
+
+def selftest_proc_port_probe():
+    """Prove the /proc probe can return BOTH answers. Returns (ok, detail).
+
+    Two-sided and REAL, not synthetic: it binds an actual UDP socket on an
+    ephemeral port and requires the probe to see it (positive control), then
+    requires that same port to read as free once closed (negative control). A
+    probe that always says "bound" and one that always says "free" both fail
+    here, which is the whole point — the bind-probe's EACCES blind spot was
+    invisible precisely because nothing ever asked it to produce a second answer.
+    """
+    ports = _udp_ports_in_use()
+    if ports is None:
+        return False, "/proc/net/udp unreadable — cannot verify the probe at all"
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("127.0.0.1", 0))
+        probe_port = s.getsockname()[1]
+        seen = _udp_ports_in_use()
+        if seen is None or probe_port not in seen:
+            return False, ("positive control FAILED: a socket bound on %d was "
+                           "not visible in /proc" % probe_port)
+    finally:
+        s.close()
+    after = _udp_ports_in_use()
+    if after is None:
+        return False, "negative control FAILED: /proc became unreadable"
+    if probe_port in after:
+        # Not fatal on its own — the kernel can hold a closed socket briefly —
+        # but it means the negative side was not demonstrated on this run.
+        return True, ("positive control passed; negative control inconclusive "
+                      "(port %d still listed after close)" % probe_port)
+    return True, "probe sees a bound port and not a freed one"
+
+
+# ── :67 ownership — the two-DHCP-servers guard, made measurable ──────────────
+#
+# WHAT THIS CHANGES AND WHAT IT DELIBERATELY DOES NOT.
+#
+# The guard's purpose is unchanged and must stay unchanged: Nemesis must never
+# start a second DHCP server alongside somebody else's. What was wrong was not
+# the policy but the INSTRUMENT. `check_preconditions()` asked `port67_state()`,
+# which binds a probe socket on a privileged port — so from the unprivileged
+# dashboard user it returns EACCES -> "unknown" -> refuse, ALWAYS. The module
+# therefore could not start itself at all: not when :67 was busy, and not when it
+# was free either. A guard that refuses unconditionally is not protecting
+# anything, it is just broken in the safe direction, and it is why the live
+# daemon had to be started by hand.
+#
+# Two separate facts are needed, and the old check conflated them:
+#   1. IS :67 held?            — answerable unprivileged via /proc.
+#   2. Is it held BY US?       — answerable from our own unit's state.
+#
+# The exemption is narrow: :67 held while OUR OWN unit is active. dnsmasq runs
+# with --keep-in-foreground and exits if it cannot bind, so a unit that is active
+# and stable is what holds the port; a foreign holder would leave our unit dead
+# or restart-looping instead. Every other combination still refuses, including
+# both "cannot tell" cases.
+
+PORT67_FREE    = "free"      # nothing holds it — safe to start
+PORT67_OURS    = "ours"      # held by our own active unit — adoption, not a conflict
+PORT67_FOREIGN = "foreign"   # held by something else — THE hazard; refuse
+PORT67_UNKNOWN = "unknown"   # cannot tell — refuse, never assume
+
+
+def classify_port67(held, unit_active):
+    """Pure truth table: (is :67 held?, is our unit active?) -> verdict.
+
+    Split from the measurement so the SAFETY property can be tested directly and
+    exhaustively, rather than inferred from whatever state the machine running
+    the tests happens to be in. `held` and `unit_active` are True/False/None,
+    where None means "could not determine" — and None on either axis refuses.
+    """
+    if held is None:
+        return PORT67_UNKNOWN
+    if held is False:
+        return PORT67_FREE
+    if unit_active is True:
+        return PORT67_OURS
+    if unit_active is False:
+        return PORT67_FOREIGN
+    return PORT67_UNKNOWN
+
+
+#: (label, held, unit_active, expected). The FOREIGN and UNKNOWN rows are the
+#: safety property: if a future edit ever lets either resolve to a permitted
+#: verdict, the self-test fails and the module refuses to start rather than
+#: shipping a weakened two-DHCP-servers guard.
+_PORT67_CANARIES = (
+    ("free, unit down",          False, False, PORT67_FREE),
+    ("free, unit up",            False, True,  PORT67_FREE),
+    ("held by our active unit",  True,  True,  PORT67_OURS),
+    ("HELD, our unit is DOWN",   True,  False, PORT67_FOREIGN),
+    ("held, ownership unknown",  True,  None,  PORT67_UNKNOWN),
+    ("cannot tell if held",      None,  True,  PORT67_UNKNOWN),
+    ("cannot tell either way",   None,  None,  PORT67_UNKNOWN),
+)
+
+
+def selftest_port67_classifier():
+    """Prove the classifier discriminates before the guard relies on it."""
+    for label, held, active, expected in _PORT67_CANARIES:
+        got = classify_port67(held, active)
+        if got != expected:
+            return False, ("canary %r -> %r, expected %r" % (label, got, expected))
+    # The property that matters most, asserted as a property and not only as rows:
+    # nothing may be permitted while the port is held and our unit is not up.
+    if classify_port67(True, False) in (PORT67_FREE, PORT67_OURS):
+        return False, "FOREIGN holder would be permitted — guard is broken"
+    return True, "%d port-ownership canaries classify correctly" % len(_PORT67_CANARIES)
+
+
+def port67_availability(service=None):
+    """Measure :67 ownership. Returns (verdict, readback dict).
+
+    The readback carries the RAW inputs — which instrument answered, what it
+    said, what our unit's state was — because "refused: foreign holder" is only
+    actionable if the operator can see what led to it.
+    """
+    readback = {}
+
+    held = None
+    state = port67_state()
+    readback["bind_probe"] = state
+    readback["source"] = "bind"
+    if state == "bound":
+        held = True
+    elif state == "free":
+        held = False
+    else:
+        # Privileged-port EACCES from an unprivileged caller. Fall back to /proc,
+        # but only if that probe can prove it discriminates.
+        ok_probe, probe_detail = selftest_proc_port_probe()
+        readback["proc_selftest"] = probe_detail
+        if ok_probe:
+            held = port67_bound_via_proc()
+            readback["source"] = "proc"
+        else:
+            readback["source"] = "none"
+    readback["held"] = held
+
+    unit_active = None
+    props = _systemd_props(service)
+    if props is not None:
+        try:
+            pid = int(props.get("ExecMainPID") or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        unit_active = (props.get("ActiveState") == "active" and pid > 0)
+        readback["unit_active_state"] = props.get("ActiveState")
+        readback["unit_main_pid"] = pid
+    else:
+        readback["unit_active_state"] = None
+    readback["unit_active"] = unit_active
+
+    verdict = classify_port67(held, unit_active)
+    readback["verdict"] = verdict
+    return verdict, readback
+
+
+# ── Daemon health: measurement, then derivation ──────────────────────────────
+#
+# WHY THIS EXISTS AT ALL. `status()` used to be one line: `systemctl is-active`,
+# mapped "active" -> "running". That is process PRESENCE, not health, and the two
+# come apart in exactly the case that matters. Under `Restart=on-failure` +
+# `RestartSec=5` a daemon that cannot start is genuinely `active` for the fraction
+# of each 5-second cycle it is up — so a status sample lands on "active" and the
+# module reports `running` while no device on the network can get a lease. That is
+# not hypothetical: it happened on the first live run (2026-08-07), and the
+# dashboard said "running" throughout.
+#
+# The fix is not a better guess about `is-active`. It is to MEASURE the things
+# that distinguish the two states and derive the verdict from them:
+#
+#   * `NRestarts`  — systemd's count of AUTOMATIC restarts. `systemctl restart`
+#     does NOT increment it, so a non-zero value means the daemon FAILED and was
+#     restarted, never that an operator bounced it. This is the signal the old
+#     status() had no access to, because `is-active` does not carry it.
+#   * current-run uptime — `NRestarts` alone is not enough: it is cumulative and
+#     never resets, so a daemon that looped three times at boot and has since run
+#     for three hours still reads `NRestarts=3`. "Has restarted AND the current
+#     run is young" is what actually means "looping right now".
+#   * UDP :67 actually bound, and the served interfaces still holding their
+#     addresses — the same readback `verify_mode()` already does after a switch.
+#     A daemon can be up, stable, and still not serving.
+#
+#: A current run younger than this, on a service that has auto-restarted at least
+#: once, reads as an active crash loop. `RestartSec=5` means a real loop cycles
+#: every few seconds, so anything genuinely recovered clears this almost at once;
+#: the window is deliberately generous because a false "healthy" is far more
+#: expensive here than a false "still settling".
+CRASH_LOOP_YOUNG_SECONDS = 90
+
+#: Health states. `unknown` is a first-class value, not an error case: a health
+#: check that could not run must never collapse into either "healthy" or "down".
+HEALTH_SERVING     = "serving"        # measured, confirmed, actually handing out leases
+HEALTH_CRASH_LOOP  = "crash_looping"  # up at this instant, not staying up
+HEALTH_UNVERIFIED  = "unverified"     # active but readback does not confirm serving
+HEALTH_DOWN        = "down"           # not active, and not looping
+HEALTH_UNKNOWN     = "unknown"        # the instrument failed; state is NOT known
+
+_SYSTEMD_TS_FMT = "%a %Y-%m-%d %H:%M:%S %Z"
+
+
+def _parse_systemd_timestamp(raw):
+    """systemd's `ExecMainStartTimestamp` -> epoch seconds, or None.
+
+    None is returned for an empty, malformed, or unparseable value — never a
+    default of 0 or `now`. Both of those are legal-looking numbers that would
+    silently become an uptime of "56 years" or "0 seconds", and a 0-second uptime
+    is precisely the input that makes the crash-loop check fire. A broken clock
+    read must not be able to manufacture a verdict.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        # systemd renders e.g. "Fri 2026-08-07 19:04:31 UTC". %Z parses the name
+        # but does not apply an offset, so parse as naive and treat as UTC when
+        # the zone says UTC; otherwise fall back to naive-local.
+        parts = raw.split()
+        if len(parts) < 4:
+            return None
+        dt = datetime.strptime(" ".join(parts[:3]), "%a %Y-%m-%d %H:%M:%S")
+        if parts[3] == "UTC":
+            return dt.replace(tzinfo=timezone.utc).timestamp()
+        # Any other zone name: systemd renders local time, so parse as naive
+        # local. Guests on this fleet run UTC while the host is -0500, which is
+        # exactly why the zone field is read rather than assumed either way.
+        return dt.timestamp()
+    except (ValueError, IndexError):
+        return None
+
+
+def _systemd_props(service=None):
+    """Read the systemd properties health is derived from. Returns dict or None.
+
+    None means THE READ FAILED — the caller must treat that as "cannot tell",
+    not as "nothing is running". Returning `{}` here would be the exact defect
+    this codebase keeps finding: an empty result that every downstream `.get()`
+    turns into a confident, wrong answer.
+    """
+    service = service or SERVICE_NAME
+    keys = ("ActiveState", "SubState", "NRestarts", "ExecMainPID",
+            "ExecMainStartTimestamp", "Result")
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", service, "-p", ",".join(keys)],
+            capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode != 0:
+        return None
+    out = {}
+    for line in (r.stdout or "").splitlines():
+        if "=" in line:
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+    # A successful call that carried none of the keys is a failed read wearing a
+    # success exit code — refuse it rather than deriving from an empty dict.
+    if "ActiveState" not in out:
+        return None
+    return out
+
+
+def derive_health(props, port67, addr_problems, now_epoch, prev_nrestarts=None):
+    """Pure derivation: measured inputs -> health verdict. No I/O, no guessing.
+
+    Split out from the measurement deliberately so it can be exercised against
+    known-good AND known-bad inputs without a live daemon — which is what
+    `selftest_health_derivation()` below does on every real call. A derivation
+    that has only ever been run against the one state the machine happens to be
+    in is not known to discriminate at all.
+
+    `prev_nrestarts` is the restart count from the PREVIOUS sample, when one
+    exists. A count that has increased between two samples is direct evidence of
+    a loop in progress and does not depend on the uptime heuristic at all; the
+    heuristic is what catches a loop on the FIRST sample, before there is a
+    previous one to compare against.
+    """
+    if props is None:
+        return {"state": HEALTH_UNKNOWN,
+                "detail": "systemd properties could not be read",
+                "serving": None}
+
+    active_state = props.get("ActiveState") or ""
+    sub_state = props.get("SubState") or ""
+    try:
+        nrestarts = int(props.get("NRestarts") or 0)
+    except (TypeError, ValueError):
+        nrestarts = 0
+    started = _parse_systemd_timestamp(props.get("ExecMainStartTimestamp"))
+    uptime = None if (started is None or now_epoch is None) else max(
+        0.0, now_epoch - started)
+
+    facts = {
+        "active_state": active_state,
+        "sub_state": sub_state,
+        "nrestarts": nrestarts,
+        "uptime_seconds": None if uptime is None else round(uptime, 1),
+        "port67": port67,
+        "addr_problems": list(addr_problems or ()),
+        "main_pid": props.get("ExecMainPID"),
+        "result": props.get("Result"),
+    }
+
+    # 1. A restart count that GREW since the last sample is unambiguous.
+    restarted_since = (None if prev_nrestarts is None
+                       else nrestarts - int(prev_nrestarts))
+    facts["restarts_since_last_sample"] = restarted_since
+    if restarted_since:
+        return {"state": HEALTH_CRASH_LOOP, "serving": False, "facts": facts,
+                "detail": "daemon auto-restarted %d time(s) since the last health "
+                          "sample — it is not staying up" % restarted_since}
+
+    # 2. First-sample case: has auto-restarted, and the current run is young.
+    if nrestarts > 0 and uptime is not None and uptime < CRASH_LOOP_YOUNG_SECONDS:
+        return {"state": HEALTH_CRASH_LOOP, "serving": False, "facts": facts,
+                "detail": "daemon has auto-restarted %d time(s) and the current "
+                          "run is only %.0fs old" % (nrestarts, uptime)}
+
+    # 3. `activating` under auto-restart backoff is DOWN, not "starting up".
+    if active_state == "activating" and sub_state == "auto-restart":
+        return {"state": HEALTH_CRASH_LOOP, "serving": False, "facts": facts,
+                "detail": "systemd is in auto-restart backoff (%s/%s)"
+                          % (active_state, sub_state)}
+
+    if active_state != "active":
+        return {"state": HEALTH_DOWN, "serving": False, "facts": facts,
+                "detail": "daemon is %s/%s" % (active_state or "?",
+                                               sub_state or "?")}
+
+    # 4. Active and stable — but is it SERVING? `unknown` from the port probe is
+    #    not a pass. This is the same rule verify_mode() applies after a switch:
+    #    refusing beats assuming, because the hazard being guarded is a network
+    #    with no working DHCP that looks fine on the dashboard.
+    if port67 != "bound":
+        return {"state": HEALTH_UNVERIFIED, "serving": False, "facts": facts,
+                "detail": "UDP :67 reads %r, expected 'bound' — %s"
+                          % (port67, "cannot determine, refusing to assume"
+                             if port67 == "unknown" else "the daemon is not serving")}
+    if addr_problems:
+        return {"state": HEALTH_UNVERIFIED, "serving": False, "facts": facts,
+                "detail": "; ".join(addr_problems)}
+
+    return {"state": HEALTH_SERVING, "serving": True, "facts": facts,
+            "detail": "active, stable (%s), :67 bound"
+                      % ("uptime unknown" if uptime is None
+                         else "up %.0fs" % uptime)}
+
+
+#: Known-good / known-bad inputs the derivation MUST classify differently.
+#: Each entry is (label, props, port67, addr_problems, prev_nrestarts, expected).
+#: The crash-loop rows are the ones that matter: they are all `ActiveState=active`
+#: — i.e. every one of them is a case the old `is-active` status() reported as
+#: "running". If the derivation ever collapses back to reading only ActiveState,
+#: these stop discriminating and the self-test fails loudly.
+_HEALTH_CANARIES = (
+    ("healthy",
+     {"ActiveState": "active", "SubState": "running", "NRestarts": "0",
+      "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"},
+     "bound", (), 0, HEALTH_SERVING),
+    ("crash-loop via restart delta",
+     {"ActiveState": "active", "SubState": "running", "NRestarts": "7",
+      "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"},
+     "bound", (), 4, HEALTH_CRASH_LOOP),
+    ("crash-loop via young run",
+     {"ActiveState": "active", "SubState": "running", "NRestarts": "3",
+      "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"},
+     "bound", (), None, HEALTH_CRASH_LOOP),
+    ("active but :67 not bound",
+     {"ActiveState": "active", "SubState": "running", "NRestarts": "0",
+      "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"},
+     "free", (), 0, HEALTH_UNVERIFIED),
+    ("active but port unknowable",
+     {"ActiveState": "active", "SubState": "running", "NRestarts": "0",
+      "ExecMainStartTimestamp": "Fri 2026-08-07 19:04:31 UTC"},
+     "unknown", (), 0, HEALTH_UNVERIFIED),
+    ("stopped",
+     {"ActiveState": "inactive", "SubState": "dead", "NRestarts": "0",
+      "ExecMainStartTimestamp": ""},
+     "free", (), 0, HEALTH_DOWN),
+    ("unreadable properties",
+     None, "unknown", (), None, HEALTH_UNKNOWN),
+)
+
+
+def selftest_health_derivation():
+    """Prove the derivation discriminates, BEFORE trusting what it reports.
+
+    Returns (ok, detail). Runs on every real health check, not only under the
+    test suite — the standing practice in this repo after nine instruments in one
+    day reported a non-measurement as a result. The reference shape is
+    `scripts/nemesis-fw-neverblock`'s CANARIES block and `selftest_validator()`
+    above: inputs that MUST pass and inputs that MUST fail, both checked, so an
+    instrument that can only ever return one answer is caught here rather than
+    after it has vouched for something real.
+
+    The crash-loop canaries are the point. Every one of them is `active` — the
+    exact input the old status() called "running".
+    """
+    for label, props, port, addrs, prev, expected in _HEALTH_CANARIES:
+        # The young-run canary is relative to a fixed start; evaluate it against
+        # a `now` just after that start so the case stays deterministic forever.
+        base = _parse_systemd_timestamp("Fri 2026-08-07 19:04:31 UTC")
+        now = (base + 10) if base is not None else None
+        if label == "healthy" or label.startswith("active"):
+            now = (base + 7200) if base is not None else None
+        got = derive_health(props, port, addrs, now, prev_nrestarts=prev)
+        if got["state"] != expected:
+            return False, ("canary %r classified as %r, expected %r"
+                           % (label, got["state"], expected))
+    return True, "%d health canaries classify correctly" % len(_HEALTH_CANARIES)
+
+
 _PIHOLE_DHCP_ACTIVE_RE = re.compile(
     r"^\s*\[dhcp\]\s*$(.*?)(?=^\s*\[|\Z)", re.M | re.S)
 
@@ -829,13 +1342,34 @@ def check_preconditions(interfaces, allowlist, expected_addrs=None,
                          "could not determine Pi-hole DHCP state from %s — "
                          "refusing rather than assuming it is off" % toml_path))
 
-    port = port67_state()
-    if port == "bound":
-        failures.append((E_PORT_BOUND, "UDP :67 already bound by another process"))
-    elif port == "unknown":
+    # The classifier must prove it still refuses a foreign holder BEFORE it is
+    # used to permit anything. A guard that cannot demonstrate it discriminates
+    # does not get to authorise a start — fail closed, loudly.
+    ok_cls, cls_detail = selftest_port67_classifier()
+    if not ok_cls:
         failures.append((E_PORT_BOUND,
-                         "could not determine whether UDP :67 is free (insufficient "
-                         "privilege) — refusing rather than assuming it is"))
+                         "UDP :67 ownership check FAILED ITS OWN SELF-TEST (%s) — "
+                         "refusing to start rather than trust a guard that cannot "
+                         "prove it discriminates" % cls_detail))
+    else:
+        verdict, readback = port67_availability()
+        if verdict == PORT67_FOREIGN:
+            failures.append((E_PORT_BOUND,
+                             "UDP :67 is held by another process and %s is not "
+                             "active — refusing to start a second DHCP server "
+                             "(readback: %s)" % (SERVICE_NAME, readback)))
+        elif verdict == PORT67_UNKNOWN:
+            failures.append((E_PORT_BOUND,
+                             "could not determine whether UDP :67 is free — "
+                             "refusing rather than assuming it is (readback: %s)"
+                             % (readback,)))
+        elif verdict == PORT67_OURS:
+            # Not a failure. Our own daemon already holds the port, which is the
+            # normal state when the dashboard restarts while DHCP keeps serving,
+            # or when the module adopts a daemon that is already up. `systemctl
+            # start` on an active unit is a no-op, so this path is idempotent.
+            log.info("dhcp: UDP :67 is held by our own active %s — adopting the "
+                     "running daemon rather than refusing", SERVICE_NAME)
 
     for iface in interfaces:
         if not _iface_exists(iface):
@@ -889,8 +1423,40 @@ class Module(NemesisModule):
         #: card so a failed start explains itself instead of the module simply
         #: appearing inert.
         self._last_error = None
+        #: Restart count at the previous health sample, for delta detection. None
+        #: until the first sample — deliberately NOT 0, because 0 would make the
+        #: very first reading of a daemon that has already restarted look like a
+        #: fresh loop that just began.
+        self._prev_nrestarts = None
 
     # -- config ------------------------------------------------------------
+
+    def _config_path(self):
+        """Where this module's runtime config lives: `/etc/nemesis/dhcp/config.json`.
+
+        ⚠ THIS USED TO READ `<module_dir>/config.json` (`manifest["_dir"]`, with
+        CONF_DIR only as a fallback for when `_dir` was absent). The loader ALWAYS
+        sets `_dir`, so the fallback never applied in production and the module
+        read a path inside its own CODE tree — where no config has ever existed.
+        Every load therefore hit FileNotFoundError, took the serve-nowhere
+        default, and reported `mode=provider`: the module loaded, announced it was
+        deliberately not serving DHCP, and looked entirely healthy doing it, while
+        the real config at `/etc/nemesis/dhcp/config.json` said `mode=nemesis`.
+        Caught live 2026-08-07 on the first load through the real loader.
+
+        Config belongs in /etc, not beside the code: the module directory is
+        replaced on upgrade and is inside the git working tree, so
+        `_write_config_json()` writing there would both dirty the repo and lose the
+        operator's settings on the next update.
+
+        `_config_path` in the manifest overrides, for tests that need a path
+        guaranteed not to exist. That is an EXPLICIT seam — the previous behaviour
+        was an accidental one, which is precisely how it went unnoticed.
+        """
+        override = self.manifest.get("_config_path")
+        if override:
+            return override
+        return os.path.join(CONF_DIR, "config.json")
 
     def _load_config(self):
         """Read module config. Absent config yields a SERVE-NOWHERE default.
@@ -900,7 +1466,7 @@ class Module(NemesisModule):
         code (already a Rule 8 PUNCHLIST item). A DHCP server that guesses a
         range is worse than one that refuses to start.
         """
-        path = os.path.join(self.manifest.get("_dir", CONF_DIR), "config.json")
+        path = self._config_path()
         try:
             with open(path) as f:
                 raw = json.load(f)
@@ -998,6 +1564,32 @@ class Module(NemesisModule):
             self._last_error = str(e)
             log.error("dhcp: not serving — %s", e)
             return
+        except Exception as e:  # noqa: BLE001
+            # ⚠ THE CATCH-ALL IS THE CONTRACT, not laziness. This method's
+            # docstring says it MUST NOT raise, because the loader turns any
+            # escape into "module silently does not load at all". The narrow
+            # tuple above enumerated the exceptions this code MEANT to raise —
+            # and then an OSError from `tempfile.mkstemp()` (read-only /tmp under
+            # the dashboard's sandbox) went straight past it and did exactly what
+            # the docstring warns about: no card, no status, no explanation,
+            # 2026-08-07. An unexpected exception is precisely the case the
+            # module most needs to survive in order to report.
+            self._last_error = "unexpected error while starting: %s" % e
+            log.exception("dhcp: not serving — unexpected error during start")
+            _record(E_DAEMON_FAILED,
+                    context={"phase": "start", "error": repr(e)}, conn=conn)
+            return
+
+        # The bind settle lives in `_start_serving()` (see the note there), so it
+        # covers the rollback path too — not just this one.
+
+        # First health sample BEFORE the loop starts, so the record begins at the
+        # moment serving began rather than one sync interval later. A start that
+        # comes straight up crash-looping is visible immediately.
+        try:
+            self.record_health_sample(conn)
+        except Exception:  # noqa: BLE001
+            log.exception("dhcp: initial health sample failed")
 
         self._start_sync_thread()
 
@@ -1042,7 +1634,45 @@ class Module(NemesisModule):
         log.info("dhcp: started %s on %s", SERVICE_NAME,
                  ", ".join(self._cfg.get("interfaces", [])))
 
+        # ⚠ WAIT FOR THE BIND HERE, not in the callers. `systemctl start` returns
+        # once the unit is ACTIVE, which is before dnsmasq has bound :67 — and
+        # EVERY caller then immediately measures that port:
+        #   * start()        -> the first health sample, which read `free` at 0.2s
+        #     uptime and logged a spurious serving->unverified->serving flap;
+        #   * _apply_state() -> verify_mode(), which is far worse. Measured live
+        #     2026-08-07: a rollback restored a genuinely working daemon, verify
+        #     sampled :67 microseconds later, read `free`, and declared the tier
+        #     failed. Both attempts on every tier failed the same way, the cascade
+        #     escalated, and it STOPPED nemesis-dhcpd — a real DHCP outage caused
+        #     entirely by measuring too early.
+        # Putting the settle in `_start_serving` rather than in each caller is the
+        # point: a caller added later cannot forget it.
+        self._await_bind()
+
     # -- lease sync loop ---------------------------------------------------
+
+    #: Longest wait for the daemon to bind :67 after `systemctl start` returns.
+    #: Bounded and short because `start()` runs INLINE during dashboard boot (see
+    #: that method's docstring) — a healthy bind is sub-second, and a daemon that
+    #: has not bound within this window is reported honestly rather than waited on.
+    BIND_SETTLE_SECONDS = 3.0
+    BIND_POLL_INTERVAL = 0.2
+
+    def _await_bind(self, timeout=None, _sleep=time.sleep):
+        """Poll until :67 is bound, or the bounded timeout expires.
+
+        Returns True if the bind was observed. A False return is NOT treated as a
+        failure by the caller — it just means the health sample that follows will
+        report what it measures, which may legitimately be `unverified`.
+        """
+        timeout = self.BIND_SETTLE_SECONDS if timeout is None else timeout
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            verdict, _ = port67_availability()
+            if verdict in (PORT67_OURS, PORT67_FOREIGN):   # i.e. held
+                return True
+            _sleep(self.BIND_POLL_INTERVAL)
+        return False
 
     def _start_sync_thread(self):
         """Spawn the periodic lease->inventory sync.
@@ -1075,7 +1705,15 @@ class Module(NemesisModule):
             try:
                 conn = _dm_conn()
                 try:
-                    self.sync_leases(conn)
+                    summary = self.sync_leases(conn)
+                    # Health rides on THIS loop rather than a timer of its own.
+                    # The sync thread is already the module's proof-of-life: if
+                    # it dies, health sampling stops too, and the resulting gap
+                    # in `dhcp_health_samples` is exactly the signal that the
+                    # module stopped watching — which a separate timer would
+                    # hide by carrying on cheerfully without it.
+                    self.record_health_sample(
+                        conn, lease_count=summary.get("seen"))
                 finally:
                     conn.close()
                 # ⚠ DELIBERATELY on core's OWN connection, not the one above.
@@ -1118,10 +1756,91 @@ class Module(NemesisModule):
                     conn=self._err_conn())
             raise RuntimeError("reload failed")
 
+    def health(self, advance=True):
+        """MEASURE the daemon's real state and derive a verdict. Never raises.
+
+        This is what `status()` is now built on. It exists as its own method
+        because health is also what the periodic sample records — the dashboard
+        and the history must not be able to disagree about what "running" means,
+        which they would the moment each derived it separately.
+
+        `advance=False` reads without consuming the restart-delta: `status()` can
+        be called many times between sync cycles (every dashboard render), and if
+        each call advanced `_prev_nrestarts` the sampler would find the delta
+        already eaten and a real crash loop would go unrecorded.
+
+        The self-test runs FIRST and its failure is fatal to the result. An
+        instrument that cannot prove it discriminates does not get to return a
+        verdict — it returns `unknown`, which is a state the caller must handle.
+        """
+        ok, detail = selftest_health_derivation()
+        if not ok:
+            log.error("dhcp: health self-test FAILED (%s) — refusing to report a "
+                      "health verdict derived from an unproven instrument", detail)
+            return {"state": HEALTH_UNKNOWN, "serving": None,
+                    "detail": "health self-test failed: %s" % detail,
+                    "facts": {"selftest": detail}}
+
+        props = _systemd_props()
+
+        # Bind-probe first; fall back to /proc when it cannot tell. From the
+        # unprivileged dashboard user the bind probe ALWAYS says "unknown"
+        # (EACCES on a privileged port), so without this fallback every sample of
+        # a healthy daemon would read `unverified`. See port67_bound_via_proc().
+        port = port67_state()
+        port_source = "bind"
+        if port == "unknown":
+            ok_probe, probe_detail = selftest_proc_port_probe()
+            if ok_probe:
+                via_proc = port67_bound_via_proc()
+                if via_proc is not None:
+                    port = "bound" if via_proc else "free"
+                    port_source = "proc"
+            else:
+                # The fallback could not prove itself, so it does not get used.
+                # `unknown` stands, and health reports `unverified` — refusing,
+                # not assuming, exactly as the pre-start check does.
+                log.warning("dhcp: /proc port probe self-test failed (%s) — "
+                            "leaving :67 state unknown", probe_detail)
+
+        addr_problems = []
+        expected = self._cfg.get("expected_addrs", {}) or {}
+        for iface in (self._cfg.get("interfaces", []) or []):
+            want = expected.get(iface)
+            if want and want not in _iface_addresses(iface):
+                addr_problems.append("%s lost expected address %s" % (iface, want))
+
+        result = derive_health(props, port, addr_problems, time.time(),
+                               prev_nrestarts=self._prev_nrestarts)
+        # Which instrument answered is itself diagnostic — a sample that says
+        # "bound" via /proc and one that says so via a successful privileged bind
+        # are different observations, and a later reader should not have to guess.
+        result.setdefault("facts", {})["port67_source"] = port_source
+        if advance and props is not None:
+            try:
+                self._prev_nrestarts = int(props.get("NRestarts") or 0)
+            except (TypeError, ValueError):
+                self._prev_nrestarts = None
+        return result
+
+    #: Health states that mean "the module believes it is serving and it is not".
+    _UNHEALTHY_CODE = {
+        HEALTH_CRASH_LOOP: E_DAEMON_CRASH_LOOP,
+        HEALTH_UNVERIFIED: E_SERVING_UNVERIFIED,
+        HEALTH_UNKNOWN: E_HEALTH_UNMEASURABLE,
+    }
+
     def status(self) -> dict:
-        active = subprocess.run(["systemctl", "is-active", SERVICE_NAME],
-                                capture_output=True, text=True, timeout=10)
-        state = (active.stdout or "").strip()
+        """Current state, DERIVED FROM MEASURED HEALTH — not from process presence.
+
+        The old implementation mapped `systemctl is-active == "active"` straight
+        to `"running"`. See the health section above for why that reports a
+        crash-looping daemon as healthy; that is the defect this rewrite closes.
+
+        `state` can now be any of: `serving`, `crash_looping`, `unverified`,
+        `down`, `unknown`, or `not_serving` (a chosen mode, not a fault).
+        `unknown` is deliberately not collapsed into either good or bad.
+        """
         leases = self.read_leases()
         mode = self.mode
         caps = mode_capabilities(mode)
@@ -1138,14 +1857,29 @@ class Module(NemesisModule):
                 "interfaces": [],
                 "degraded": caps["degraded"],
             }
+        h = self.health(advance=False)
+        healthy = h["state"] == HEALTH_SERVING
+
+        # The lease count is only meaningful alongside a health verdict. "2
+        # leases" on a crash-looping daemon is a stale file, not evidence of
+        # service, so the detail line leads with health whenever it is not good.
+        if healthy:
+            detail = "%d lease%s" % (len(leases), "" if len(leases) == 1 else "s")
+        else:
+            detail = h["detail"]
+
         return {
-            "state": "running" if state == "active" else "stopped",
+            "state": h["state"],
+            "healthy": healthy,
             "mode": mode,
             "mode_label": caps["label"],
-            "detail": "%d lease%s" % (len(leases), "" if len(leases) == 1 else "s"),
+            "detail": detail,
+            "health_detail": h["detail"],
+            "health_facts": h.get("facts", {}),
             "lease_count": len(leases),
             "interfaces": self._cfg.get("interfaces", []),
             "degraded": caps["degraded"],
+            "last_error": self._last_error,
         }
 
     # -- lease capture: the module's side of the ADR 0001 boundary ----------
@@ -1173,6 +1907,203 @@ class Module(NemesisModule):
             )
         """)
         conn.commit()
+
+    # -- steady-state observability ---------------------------------------
+    #
+    # WHAT WAS ALREADY HERE, AND WHY IT WAS NOT ENOUGH (assessed 2026-08-07).
+    # The module had three channels before this: `dhcp_mode_change_log`, the
+    # `E-DHCP-0XX` codes, and `dhcp_leases`. Every one of them is a TRANSITION
+    # channel — they fire when something is being CHANGED (start, reload, mode
+    # switch, rollback) or record only the current snapshot. None of them can
+    # answer a question about how the module has BEHAVED over a period:
+    #
+    #   * `dhcp_mode_change_log` gets zero rows on a module that never switches
+    #     mode, which is the normal case and was the actual live state.
+    #   * the error codes all fire at transition sites, so hours of crash-looping
+    #     produced no occurrence at all.
+    #   * `dhcp_leases` is a CURRENT-STATE table — `last_seen` is overwritten on
+    #     every sync, so an address change, a device appearing, or a device going
+    #     away leaves no trace once the next sync runs.
+    #   * dnsmasq's own journal has the real DHCPACK/REQUEST traffic, but it is
+    #     unstructured, rotates away, and is not reachable from the dashboard.
+    #
+    # So the module could say what it IS, and what was last DONE to it, but not
+    # what it had been doing. These two tables are that missing channel.
+
+    #: How often a health sample is written when nothing has changed. Every
+    #: CHANGE is always recorded; this is the heartbeat that proves the sampler
+    #: itself was alive in between. Without it, a gap in the table is ambiguous
+    #: between "nothing happened" and "nothing was watching" — and those need to
+    #: be distinguishable, since the second is the failure mode being guarded.
+    HEALTH_HEARTBEAT_SECONDS = 900
+
+    #: Health samples are telemetry, not forensic evidence, so unlike
+    #: `dhcp_mode_change_log` they are prunable. The mode-change log must survive
+    #: the operation it records; a health heartbeat from five weeks ago has no
+    #: such duty and would otherwise grow the shared DB without bound.
+    HEALTH_RETENTION_DAYS = 30
+
+    def init_health_table(self, conn):
+        """DDL for `dhcp_health_samples` — the periodic operating-state record.
+
+        This is the table that would have made the first live run's crash loop
+        visible while it was happening rather than by reading the journal
+        afterwards. It stores the RAW measured facts next to the derived state,
+        deliberately: "state=crash_looping" tells you what was concluded, and
+        "nrestarts=7, uptime=3s, port67=free" is what lets someone check whether
+        the conclusion was right. A verdict without its inputs cannot be audited.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dhcp_health_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                state TEXT NOT NULL,
+                serving INTEGER,
+                mode TEXT,
+                active_state TEXT,
+                sub_state TEXT,
+                nrestarts INTEGER,
+                restarts_since_last INTEGER,
+                uptime_seconds REAL,
+                port67 TEXT,
+                lease_count INTEGER,
+                detail TEXT,
+                facts TEXT,
+                is_change INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dhcp_health_ts "
+                     "ON dhcp_health_samples(ts)")
+        conn.commit()
+
+    def init_lease_event_table(self, conn):
+        """DDL for `dhcp_lease_events` — APPEND-ONLY lease history.
+
+        `dhcp_leases` answers "who holds what right now". This answers "what has
+        happened" — a device joining, an address changing, a device going away.
+        The two are different questions and the snapshot table structurally
+        cannot answer the second, because every sync overwrites the answer.
+
+        Append-only as a code property, same as `dhcp_mode_change_log`: nothing
+        in this module issues UPDATE or DELETE against it.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dhcp_lease_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event TEXT NOT NULL,
+                mac TEXT NOT NULL,
+                ip TEXT,
+                prev_ip TEXT,
+                hostname TEXT,
+                prev_hostname TEXT,
+                expiry TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dhcp_lease_events_mac "
+                     "ON dhcp_lease_events(mac)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_dhcp_lease_events_ts "
+                     "ON dhcp_lease_events(ts)")
+        conn.commit()
+
+    def record_health_sample(self, conn=None, health=None, lease_count=None):
+        """Take (or accept) a health reading and record it. Returns the reading.
+
+        Writes on CHANGE always, and on the heartbeat interval otherwise — see
+        `HEALTH_HEARTBEAT_SECONDS` for why the heartbeat is not optional.
+
+        An unhealthy verdict ALSO records the matching `E-DHCP-01X` code, so an
+        operating-state problem reaches the same error ledger a transition
+        failure would. That is the gap that let a crash loop run for hours
+        without producing a single recorded occurrence.
+
+        Never raises: observability failing must not take down the sync loop it
+        rides on. It logs loudly instead — a health sample that could not be
+        stored is itself a fact worth seeing in the journal.
+        """
+        # `self.health()` is called INSIDE the try on purpose. It shells out to
+        # systemctl and binds a probe socket, so it can fail — and this runs on
+        # the sync thread, where an escaping exception costs the cycle that also
+        # syncs leases. Observability must never be able to take down the thing
+        # it observes.
+        h = {"state": HEALTH_UNKNOWN, "serving": None, "facts": {},
+             "detail": "health check did not complete"}
+        own = conn is None
+        try:
+            if health is not None:
+                h = health
+            else:
+                h = self.health()
+            if own:
+                conn = _dm_conn()
+            self.init_health_table(conn)
+            facts = h.get("facts", {}) or {}
+
+            row = conn.execute(
+                "SELECT state, ts FROM dhcp_health_samples ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            prev_state = row[0] if row else None
+            prev_ts = row[1] if row else None
+            changed = (prev_state != h["state"])
+
+            due = True
+            if not changed and prev_ts:
+                try:
+                    age = (datetime.now()
+                           - datetime.fromisoformat(prev_ts)).total_seconds()
+                    due = age >= self.HEALTH_HEARTBEAT_SECONDS
+                except (TypeError, ValueError):
+                    due = True  # unparseable timestamp -> record, never skip
+
+            if changed or due:
+                if lease_count is None:
+                    lease_count = len(self.read_leases())
+                conn.execute(
+                    "INSERT INTO dhcp_health_samples "
+                    "(ts,state,serving,mode,active_state,sub_state,nrestarts,"
+                    " restarts_since_last,uptime_seconds,port67,lease_count,"
+                    " detail,facts,is_change) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (_now_iso(), h["state"],
+                     None if h.get("serving") is None else int(h["serving"]),
+                     self.mode, facts.get("active_state"), facts.get("sub_state"),
+                     facts.get("nrestarts"), facts.get("restarts_since_last_sample"),
+                     facts.get("uptime_seconds"), facts.get("port67"),
+                     lease_count, h.get("detail"), json.dumps(facts),
+                     1 if changed else 0))
+                self._prune_health_samples(conn)
+                conn.commit()
+
+            if changed:
+                line = ("dhcp/health %s -> %s: %s"
+                        % (prev_state or "(first sample)", h["state"], h.get("detail")))
+                if h["state"] == HEALTH_SERVING:
+                    log.info(line)
+                else:
+                    log.warning(line)
+
+            code = self._UNHEALTHY_CODE.get(h["state"])
+            if code and changed:
+                # On the TRANSITION only. A crash loop sampled every 60s would
+                # otherwise write an occurrence a minute and bury the ledger in
+                # repetitions of one ongoing condition.
+                _record(code, context={"detail": h.get("detail"), "facts": facts},
+                        conn=conn)
+        except Exception:  # noqa: BLE001
+            log.exception("dhcp: could not record health sample (state=%s)",
+                          h.get("state"))
+        finally:
+            if own and conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        return h
+
+    def _prune_health_samples(self, conn):
+        """Drop samples past the retention window. Caller commits."""
+        cutoff = datetime.now().timestamp() - self.HEALTH_RETENTION_DAYS * 86400
+        conn.execute("DELETE FROM dhcp_health_samples WHERE ts < ?",
+                     (datetime.fromtimestamp(cutoff).isoformat(timespec="seconds"),))
 
     # -- mode-switch fail-over: trace log ---------------------------------
 
@@ -1378,8 +2309,29 @@ class Module(NemesisModule):
         readback = {"systemctl_is_active": active}
 
         if mode == MODE_NEMESIS:
-            port = port67_state()
+            # ⚠ `port67_availability()`, NOT the raw `port67_state()` bind probe.
+            # This is the same unprivileged blind spot that broke health(), and
+            # here it was far more damaging: from the dashboard user the bind
+            # probe always returns "unknown", so EVERY rollback tier failed its
+            # own verification even though the rollback had mechanically
+            # succeeded and the daemon was serving. The cascade then exhausted
+            # all four tiers, escalated, and DELIBERATELY STOPPED nemesis-dhcpd —
+            # turning a recoverable failure into a real DHCP outage.
+            #
+            # Measured live 2026-08-07: a deliberate bad switch to `pihole` was
+            # correctly rejected, the rollback to install-baseline genuinely
+            # restored a working daemon, and the mechanism reported "EVERY
+            # rollback tier failed" and took DHCP down anyway. This could not
+            # have been caught with stubbed systemd — the stub returned "bound".
+            #
+            # `OURS` rather than merely "held" is also STRICTER than the old
+            # check: it distinguishes our own daemon holding the port from some
+            # other process holding it, which "bound" could never tell apart.
+            port_verdict, port_rb = port67_availability()
+            port = "bound" if port_verdict == PORT67_OURS else port_verdict
             readback["port67_state"] = port
+            readback["port67_verdict"] = port_verdict
+            readback["port67_readback"] = port_rb
             ifaces = self._cfg.get("interfaces", []) or []
             expected = self._cfg.get("expected_addrs", {}) or {}
             addr_ok, addr_detail = True, []
@@ -1464,7 +2416,10 @@ class Module(NemesisModule):
                 conn.close()
 
     def _write_config_json(self):
-        path = os.path.join(self.manifest.get("_dir", CONF_DIR), "config.json")
+        # Same resolution as the read side — they MUST agree, or a mode switch
+        # persists to a file the next load never reads, and the switch silently
+        # un-does itself on restart.
+        path = self._config_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.")
         with os.fdopen(fd, "w") as f:
@@ -1645,24 +2600,67 @@ class Module(NemesisModule):
             conn = _dm_conn()
         try:
             self.init_lease_table(conn)
+            self.init_lease_event_table(conn)
             leases = self.read_leases()
             now = _now_iso()
+
+            # Read the PRIOR snapshot before overwriting it — this is the only
+            # moment the change is knowable. The upsert below destroys it.
+            prior = {r[0]: {"ip": r[1], "hostname": r[2]}
+                     for r in conn.execute(
+                         "SELECT mac, ip, hostname FROM dhcp_leases")}
+
             written = 0
+            events = []
+            seen_macs = set()
             for lease in leases:
                 mac = (lease.get("mac") or "").lower()
                 if not mac:
                     continue
+                seen_macs.add(mac)
+                ip = lease.get("ip")
+                hostname = lease.get("hostname")
+                was = prior.get(mac)
+                if was is None:
+                    events.append(("new", mac, ip, None, hostname, None))
+                else:
+                    if was["ip"] != ip:
+                        events.append(("ip_changed", mac, ip, was["ip"],
+                                       hostname, was["hostname"]))
+                    if was["hostname"] != hostname:
+                        events.append(("hostname_changed", mac, ip, was["ip"],
+                                       hostname, was["hostname"]))
                 conn.execute(
                     "INSERT INTO dhcp_leases (mac, ip, hostname, expiry, "
                     "first_seen, last_seen) VALUES (?,?,?,?,?,?) "
                     "ON CONFLICT(mac) DO UPDATE SET "
                     "  ip=excluded.ip, hostname=excluded.hostname, "
                     "  expiry=excluded.expiry, last_seen=excluded.last_seen",
-                    (mac, lease.get("ip"), lease.get("hostname"),
-                     lease.get("expiry"), now, now))
+                    (mac, ip, hostname, lease.get("expiry"), now, now))
                 written += 1
+
+            # A MAC that was in the table and is no longer in the lease file has
+            # had its lease expire or be released. The row is deliberately LEFT
+            # in `dhcp_leases` — it is the inventory's record that the device was
+            # seen — so the event log is the only place this becomes visible.
+            for mac in set(prior) - seen_macs:
+                events.append(("gone", mac, None, prior[mac]["ip"],
+                               None, prior[mac]["hostname"]))
+
+            for ev, mac, ip, prev_ip, hostname, prev_hostname in events:
+                conn.execute(
+                    "INSERT INTO dhcp_lease_events "
+                    "(ts,event,mac,ip,prev_ip,hostname,prev_hostname,expiry) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (now, ev, mac, ip, prev_ip, hostname, prev_hostname,
+                     next((l.get("expiry") for l in leases
+                           if (l.get("mac") or "").lower() == mac), None)))
+            if events:
+                log.info("dhcp: lease events: %s",
+                         ", ".join("%s %s" % (e[0], e[1]) for e in events))
             conn.commit()
-            return {"served": True, "seen": len(leases), "written": written}
+            return {"served": True, "seen": len(leases), "written": written,
+                    "events": len(events)}
         finally:
             if own:
                 conn.close()
@@ -1698,12 +2696,24 @@ class Module(NemesisModule):
 
     # -- dashboard ---------------------------------------------------------
 
+    #: (dot, colour, label) per health state. `crash_looping` and `unverified`
+    #: are RED, not grey: the old card had two visual states, so a daemon that
+    #: was failing rendered identically to one deliberately turned off. "Broken"
+    #: and "off" must not look the same at a glance — that similarity is what let
+    #: the first live run's crash loop sit unnoticed on the dashboard.
+    _CARD_STYLE = {
+        HEALTH_SERVING:    ("🟢", "#00ff88", "Serving"),
+        HEALTH_CRASH_LOOP: ("🔴", "#ff4444", "Crash-looping"),
+        HEALTH_UNVERIFIED: ("🔴", "#ff8800", "Not confirmed serving"),
+        HEALTH_DOWN:       ("⚫", "#888",    "Stopped"),
+        HEALTH_UNKNOWN:    ("⚠️", "#ffcc00", "Unknown"),
+        "not_serving":     ("⚫", "#888",    "Inactive"),
+    }
+
     def get_dashboard_card(self) -> str:
         s = self.status()
-        running = s["state"] == "running"
-        dot = "🟢" if running else "⚫"
-        colour = "#00ff88" if running else "#888"
-        label = "Active" if running else "Inactive"
+        dot, colour, label = self._CARD_STYLE.get(
+            s["state"], ("⚠️", "#ffcc00", "Unknown"))
         ifaces = ", ".join(s["interfaces"]) or "none configured"
         return (
             '<div class="card">'

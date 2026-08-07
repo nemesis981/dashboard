@@ -99,10 +99,30 @@ def make_module(world, snapdir, mode="provider", cfg=None):
     M.SNAP_DIR = snapdir
     M.subprocess.run = world.run
     M.port67_state = lambda: world.port67
+
+    # verify_mode() now asks port67_availability(), not the raw bind probe (that
+    # probe is blind from the unprivileged dashboard user, which made every
+    # rollback tier fail verification and took DHCP down live on 2026-08-07).
+    # The fake world has to model ownership, not just held-ness, or this suite
+    # stops exercising the code the real cascade runs.
+    def _fake_availability():
+        if world.port67 == "bound":
+            return (M.PORT67_OURS if world.daemon_active
+                    else M.PORT67_FOREIGN), {"source": "fake"}
+        if world.port67 == "free":
+            return M.PORT67_FREE, {"source": "fake"}
+        return M.PORT67_UNKNOWN, {"source": "fake"}
+
+    M.port67_availability = _fake_availability
     M.pihole_dhcp_active = lambda *a, **k: world.pihole_dhcp
     M._iface_addresses = lambda iface: ["10.0.0.1"]
 
-    inst = M.Module({"name": "dhcp", "_dir": moddir})
+    # `_config_path`, not `_dir`: config now resolves to /etc/nemesis/dhcp
+    # unconditionally (see Module._config_path — `_dir` pointed at the CODE tree
+    # in production and silently yielded mode=provider). This is the explicit
+    # injection seam that replaced the accidental one.
+    inst = M.Module({"name": "dhcp",
+                     "_config_path": os.path.join(moddir, "config.json")})
     # Serving is exercised end-to-end elsewhere (test_dhcp_module.py, 81 checks);
     # here the subject is the switch/verify/rollback cascade, so the serving path
     # is reduced to its observable effect on the fake world.
@@ -146,9 +166,15 @@ def main():
     check("2 attempts per tier", M.ROLLBACK_ATTEMPTS_PER_TIER, 2)
     check("30s between attempts", M.ROLLBACK_RETRY_DELAY_SECONDS, 30)
     codes = [c[0] for c in M._CODES]
-    check("E-DHCP-009..013 registered in _CODES",
+    # 009-013 are this file's subject: the mode-switch/rollback cascade.
+    # 014-016 are the steady-state health codes added 2026-08-07 alongside the
+    # health derivation; they are listed here so this assertion stays an EXACT
+    # set check (which is what makes it catch an accidentally-dropped code)
+    # rather than being loosened to a subset test the moment it first fails.
+    check("E-DHCP-009..016 registered in _CODES",
           [c for c in codes if c >= "E-DHCP-009"],
-          ["E-DHCP-009", "E-DHCP-010", "E-DHCP-011", "E-DHCP-012", "E-DHCP-013"])
+          ["E-DHCP-009", "E-DHCP-010", "E-DHCP-011", "E-DHCP-012", "E-DHCP-013",
+           "E-DHCP-014", "E-DHCP-015", "E-DHCP-016"])
 
     section("1. Install baseline: captured once, NEVER overwritten")
     w = World()
