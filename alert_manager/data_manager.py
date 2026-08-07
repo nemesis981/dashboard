@@ -90,7 +90,14 @@ NAMESPACES = {
     # table sharing that stem — while the comment above it claimed to be an exact
     # grant. Exact-match semantics exist ONLY in the dict form. Matches the
     # `integrity_watch` precedent, which uses it for exactly this precision.
-    "dhcp":               {"tables": ("dhcp_leases",)},
+    # `dhcp_mode_change_log` added 2026-08-07 for the mode-switch fail-over trace
+    # (see modules/dhcp/module.py::switch_mode). Kept in the EXACT-MATCH dict form
+    # alongside dhcp_leases rather than relaxed to a `dhcp_` prefix: the prefix
+    # form would silently pre-authorise every future dhcp_* table, and this grant
+    # was made exact on 2026-08-06 precisely to stop that (a bare tuple falls
+    # through to startswith(), which had already pre-authorised
+    # `dhcp_leases_archive` unnoticed).
+    "dhcp":               {"tables": ("dhcp_leases", "dhcp_mode_change_log")},
 
     # An EXPLICIT table list, not an `integrity_` prefix grant, and deliberately
     # so: this module exists to cross-check agent-reported scan activity, and a

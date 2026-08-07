@@ -66,6 +66,7 @@ import re
 import shutil
 import socket
 import subprocess
+import time
 import threading
 import tempfile
 
@@ -223,6 +224,12 @@ E_LEASE_DIR        = "E-DHCP-005"
 E_DAEMON_FAILED    = "E-DHCP-006"
 E_IFACE_NOT_ALLOWED = "E-DHCP-007"
 E_RELOAD_FAILED    = "E-DHCP-008"
+# ── mode-switch fail-over (2026-08-07) ───────────────────────────────────────
+E_SWITCH_VERIFY_FAILED = "E-DHCP-009"
+E_ROLLBACK_FAILED      = "E-DHCP-010"
+E_ROLLBACK_TO_BASELINE = "E-DHCP-011"
+E_BASELINE_FAILED      = "E-DHCP-012"
+E_OVERRIDE_USED        = "E-DHCP-013"
 
 #: The failure family shared by 002-005 and 007: a precondition that must hold
 #: before this module may serve DHCP at all. Grouped so one confirmed cause
@@ -244,7 +251,62 @@ _CODES = (
     (E_IFACE_NOT_ALLOWED, "Interface is not in the serve allowlist — refusing", "CRITICAL",
      _CLASS_PRECONDITION),
     (E_RELOAD_FAILED, "Config reload (SIGHUP) failed", "MEDIUM", None),
+    # ── mode-switch fail-over ────────────────────────────────────────────────
+    # One code per failure SITE in the switch/rollback cascade. The tier and
+    # attempt number ride in `context` rather than multiplying codes: a rollback
+    # failing is the same failure shape whichever tier was being tried, and a
+    # code per tier would fragment one condition across four catalogue entries.
+    (E_SWITCH_VERIFY_FAILED,
+     "Mode switch applied but post-change readback did not confirm the intended "
+     "state — rolling back", "HIGH", None),
+    (E_ROLLBACK_FAILED,
+     "A rollback attempt failed its own verification (see context for tier/attempt)",
+     "HIGH", None),
+    (E_ROLLBACK_TO_BASELINE,
+     "All rolling snapshot tiers exhausted — restored from the permanent install "
+     "baseline", "HIGH", None),
+    (E_BASELINE_FAILED,
+     "Install-baseline restore ALSO failed — daemon stopped, DHCP needs manual "
+     "attention", "CRITICAL", None),
+    (E_OVERRIDE_USED,
+     "Operator forced a mode switch that failed verification (override) — "
+     "automatic rollback suppressed", "MEDIUM", None),
 )
+
+# ── Mode-switch fail-over: snapshot chain ────────────────────────────────────
+#
+# THREE ROLLING TIERS PLUS ONE PERMANENT BASELINE. A single last-known-good slot
+# answers "what was the last state?" but not "how PROVEN is it?" — a state that
+# barely passed its first readback and one that has run untouched for three weeks
+# are very different bets to roll back onto, and one slot cannot tell them apart.
+#
+# Promotion is EVENT-driven, not time-driven: the chain shifts only when a switch
+# SUCCEEDS. So "trusted" means "this state stayed live, undisturbed, all the way
+# through to the next successful change" — however long that actually was. That is
+# a stronger proof of stability than any fixed soak timer, and it costs nothing
+# extra to compute because it falls out of the promotion rule itself.
+SNAP_DIR = "/var/lib/nemesis/dhcp_snapshots"
+TIER_THOUGHT = "thought-trusted"
+TIER_TRUSTED = "trusted"
+TIER_AGING = "aging"
+TIER_BASELINE = "install-baseline"
+
+#: Rolling tiers, newest first. Order IS the rollback order (§3c).
+ROLLING_TIERS = (TIER_THOUGHT, TIER_TRUSTED, TIER_AGING)
+
+#: Full rollback cascade: most-proven-recent first, ending at the one snapshot
+#: guaranteed to exist and guaranteed never to mutate.
+ROLLBACK_ORDER = ROLLING_TIERS + (TIER_BASELINE,)
+
+#: Attempts per tier before moving to the next, and the gap between them.
+#:
+#: TWO, not one (operator decision 2026-08-07): a first failure may be a transient
+#: fault rather than a real problem with the target state, and spending the whole
+#: budget on the least-proven tier would defeat the point of having the others.
+#: Bounded by construction — 4 tiers x 2 attempts x 30s is a few minutes, never an
+#: unbounded retry loop.
+ROLLBACK_ATTEMPTS_PER_TIER = 2
+ROLLBACK_RETRY_DELAY_SECONDS = 30
 
 def ensure_codes_registered(conn):
     """Declare this module's codes in the catalog. Idempotent.
@@ -1057,6 +1119,454 @@ class Module(NemesisModule):
             )
         """)
         conn.commit()
+
+    # -- mode-switch fail-over: trace log ---------------------------------
+
+    def init_mode_change_log(self, conn):
+        """DDL for `dhcp_mode_change_log` — the INSERT-ONLY diagnostic trace.
+
+        WHY A DB TABLE AND NOT A FILE NEXT TO THE SNAPSHOTS. This log has to
+        survive the very operation it records. The tier snapshots are overwritten
+        and read back by design, so a trace living in or beside them could be
+        clobbered by exactly the rollback it exists to explain. The switch
+        mechanism otherwise touches ONLY filesystem and process state — never this
+        database — so a table here is STRUCTURALLY outside anything a restore can
+        reach, rather than merely conventionally separate.
+
+        INSERT-ONLY, and that is a code property rather than a policy statement:
+        nothing in this module issues UPDATE or DELETE against this table, at any
+        tier, for any reason. A successful restore appends "restored"; a failed one
+        appends "failed". Recovering access must never erase the evidence of why it
+        was needed — the gap that made 2026-08-07's outage take three days to
+        explain.
+
+        Distinct from the error codes: `E-DHCP-0XX` marks THAT something happened
+        in a coarse category; this is the step-by-step record with raw readback
+        values and a timestamp per step, which is what actually lets someone
+        reconstruct a cascade after the fact.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dhcp_mode_change_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event TEXT NOT NULL,
+                trigger TEXT,
+                from_mode TEXT,
+                to_mode TEXT,
+                tier TEXT,
+                attempt INTEGER,
+                ok INTEGER,
+                readback TEXT,
+                detail TEXT,
+                actor TEXT
+            )
+        """)
+        conn.commit()
+
+    def _trace(self, event, trigger=None, from_mode=None, to_mode=None,
+               tier=None, attempt=None, ok=None, readback=None, detail=None):
+        """Append one step to the trace log AND the log stream. Never raises.
+
+        Two channels on purpose: the table is the durable, survives-rollback
+        record; the log stream is what a person is actually watching while
+        something is going wrong. Same split `_record()` already uses for codes.
+
+        `readback` carries the RAW measured values, not a pass/fail verdict —
+        "port67=unknown, active=failed" is diagnosable after the fact; "verify
+        failed" is not.
+        """
+        line = ("dhcp/switch %s trigger=%s %s->%s tier=%s attempt=%s ok=%s "
+                "readback=%s detail=%s" % (event, trigger, from_mode, to_mode,
+                                           tier, attempt, ok, readback, detail))
+        if ok is False:
+            log.warning(line)
+        else:
+            log.info(line)
+        try:
+            conn = _dm_conn()
+            try:
+                self.init_mode_change_log(conn)
+                conn.execute(
+                    "INSERT INTO dhcp_mode_change_log "
+                    "(ts,event,trigger,from_mode,to_mode,tier,attempt,ok,"
+                    " readback,detail,actor) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (_now_iso(), event, trigger, from_mode, to_mode, tier,
+                     attempt, None if ok is None else (1 if ok else 0),
+                     json.dumps(readback) if readback is not None else None,
+                     detail, "system"))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            # A trace that cannot persist must not take down the switch it is
+            # describing — but it must not vanish either, hence the log line
+            # above always happening first.
+            log.exception("dhcp/switch: trace row NOT persisted (event=%s)", event)
+
+    # -- mode-switch fail-over: snapshot chain -----------------------------
+
+    def _snapshot_path(self, tier):
+        return os.path.join(SNAP_DIR, "%s.json" % tier)
+
+    def _capture_state(self):
+        """Current state as a snapshot record. Includes what was MEASURED.
+
+        `verified` holds real readbacks rather than intentions, so a snapshot can
+        later be compared against reality instead of trusted on its own say-so.
+        """
+        return {
+            "mode": self.mode,
+            "config": self._cfg,
+            "daemon_was_active": self._daemon_active(),
+            "captured_at": _now_iso(),
+            "verified": {
+                "port67_state": port67_state(),
+                "pihole_dhcp_active": pihole_dhcp_active(),
+            },
+        }
+
+    def _write_snapshot(self, tier, record):
+        """Write a tier atomically. Returns True on success.
+
+        Atomic rename, not a plain write: a snapshot half-written by a crash is
+        worse than an absent one, because the cascade would read it, parse-fail or
+        act on partial config, and burn a tier that might have been recoverable.
+        """
+        try:
+            os.makedirs(SNAP_DIR, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(dir=SNAP_DIR, prefix=".%s." % tier)
+            with os.fdopen(fd, "w") as f:
+                json.dump(record, f, indent=2)
+            os.replace(tmp, self._snapshot_path(tier))
+            return True
+        except Exception:  # noqa: BLE001
+            log.exception("dhcp/switch: could not write snapshot tier %s", tier)
+            return False
+
+    def _read_snapshot(self, tier):
+        """Read a tier, or None if absent/unreadable.
+
+        Absent and unreadable both return None deliberately: the cascade SKIPS a
+        tier it cannot use rather than attempting a restore against nothing, and
+        an unparseable file is exactly as unusable as a missing one. The caller
+        distinguishes "skipped" from "tried and failed" in the trace.
+        """
+        try:
+            with open(self._snapshot_path(tier)) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+        except Exception:  # noqa: BLE001
+            log.exception("dhcp/switch: snapshot tier %s unreadable — treating "
+                          "as absent", tier)
+            return None
+
+    def ensure_install_baseline(self):
+        """Capture the permanent factory-floor snapshot ONCE, if absent.
+
+        Never overwritten. This is what guarantees the cascade always has a final
+        target, which is what removes the old "no snapshot exists yet" edge case
+        entirely — even a box's very first mode switch has somewhere to fall back
+        to.
+
+        Records whatever was ACTUALLY true at first load rather than assuming the
+        shipped default. On a normal install that is `provider` (the manifest ships
+        `enabled_by_default: false`), but a box provisioned some other way gets its
+        own real floor rather than a hardcoded guess about it.
+        """
+        if os.path.exists(self._snapshot_path(TIER_BASELINE)):
+            return False
+        rec = self._capture_state()
+        if self._write_snapshot(TIER_BASELINE, rec):
+            self._trace("baseline-captured", to_mode=rec.get("mode"),
+                        detail="permanent install baseline written (once, never "
+                               "overwritten)")
+            return True
+        return False
+
+    def _rotate_chain(self, new_record):
+        """Shift the rolling chain after a SUCCESSFUL switch: aging<-trusted<-thought.
+
+        Oldest first, so nothing is overwritten before it has been copied forward.
+        A FAILED switch never calls this — the attempted state simply never earns
+        a tier, which is why the pre-change state is still sitting in
+        `thought-trusted` for the cascade to find.
+        """
+        aging_src = self._read_snapshot(TIER_TRUSTED)
+        if aging_src is not None:
+            self._write_snapshot(TIER_AGING, aging_src)
+        thought_src = self._read_snapshot(TIER_THOUGHT)
+        if thought_src is not None:
+            self._write_snapshot(TIER_TRUSTED, thought_src)
+        self._write_snapshot(TIER_THOUGHT, new_record)
+
+    # -- mode-switch fail-over: verification -------------------------------
+
+    def _daemon_active(self):
+        r = subprocess.run(["systemctl", "is-active", SERVICE_NAME],
+                           capture_output=True, text=True, timeout=10)
+        return (r.stdout or "").strip() == "active"
+
+    def verify_mode(self, mode):
+        """Post-change READBACK. Returns (ok, readback_dict, detail).
+
+        Rule 13 applied here rather than merely cited: nothing in this function
+        trusts a `systemctl` exit code. It measures the resulting state — is the
+        socket actually bound, is the daemon actually active, does the interface
+        still hold its address — because "the command returned 0" and "the system
+        is now in the intended state" are different claims, and this codebase has
+        already shipped the gap between them three times.
+
+        `unknown` from `port67_state()` is a FAILURE, never a pass. Refusing beats
+        assuming a port is free when two DHCP servers is the hazard being guarded.
+        """
+        active = self._daemon_active()
+        readback = {"systemctl_is_active": active}
+
+        if mode == MODE_NEMESIS:
+            port = port67_state()
+            readback["port67_state"] = port
+            ifaces = self._cfg.get("interfaces", []) or []
+            expected = self._cfg.get("expected_addrs", {}) or {}
+            addr_ok, addr_detail = True, []
+            for iface in ifaces:
+                have = _iface_addresses(iface)
+                readback["addrs_%s" % iface] = have
+                want = expected.get(iface)
+                if want and want not in have:
+                    addr_ok = False
+                    addr_detail.append("%s lost expected address" % iface)
+            if not active:
+                return False, readback, "daemon is not active after switch"
+            if port != "bound":
+                return False, readback, (
+                    "UDP :67 reads %r, expected 'bound' — %s"
+                    % (port, "cannot determine, refusing to assume"
+                       if port == "unknown" else "the daemon is not serving"))
+            if not addr_ok:
+                return False, readback, "; ".join(addr_detail)
+            return True, readback, "serving and verified"
+
+        # pihole / provider: this module must NOT be serving.
+        if active:
+            return False, readback, (
+                "%s is still active but mode %s means Nemesis must not serve"
+                % (SERVICE_NAME, mode))
+
+        if mode == MODE_PIHOLE:
+            ph = pihole_dhcp_active()
+            readback["pihole_dhcp_active"] = ph
+            if ph is not True:
+                # False or None both fail. Handing authority to Pi-hole while
+                # Pi-hole is not configured to serve is the ZERO-DHCP-servers
+                # case, and "cannot tell" is not evidence that it is fine.
+                return False, readback, (
+                    "Pi-hole DHCP reads %r, expected active — handing DHCP to a "
+                    "server that is not serving would leave the network with none"
+                    % (ph,))
+            return True, readback, "Pi-hole confirmed serving"
+
+        # MODE_PROVIDER — the honest floor.
+        #
+        # The router is UNVERIFIABLE from this box. All that can be confirmed is
+        # that this module stopped. That limit is stated in the detail string and
+        # carried into the trace, rather than being dressed up as a pass; it is
+        # also exactly why switching to this mode requires an explicit operator
+        # affirmation at the UI layer.
+        return True, readback, ("nemesis-dhcpd stopped; router/ISP DHCP is "
+                                "UNVERIFIABLE from this host")
+
+    # -- mode-switch fail-over: the operation ------------------------------
+
+    def _apply_state(self, mode, cfg):
+        """Put the module into (mode, cfg) — the SAME path a normal switch uses.
+
+        Rollback deliberately routes through here too rather than getting a
+        special-cased shortcut. That is what guarantees a rollback re-runs the
+        full precondition gate (Pi-hole-DHCP-off, :67 free, interface holds its
+        address) instead of blindly forcing a state that may itself now conflict
+        with something that changed since the snapshot was taken. A snapshot's own
+        recorded readings are NEVER trusted as still current.
+        """
+        self._cfg = dict(cfg or {})
+        self._cfg["mode"] = mode
+        self._write_config_json()
+        # Stop first, unconditionally: every transition either ends with the
+        # daemon down, or wants it restarted against new config anyway.
+        subprocess.run(["systemctl", "stop", SERVICE_NAME],
+                       capture_output=True, text=True, timeout=30)
+        if mode != MODE_NEMESIS:
+            return True, "stopped (mode %s does not serve)" % mode
+        conn = self._err_conn()
+        try:
+            self._start_serving(conn)
+            self._start_sync_thread()
+            return True, "started"
+        except (DhcpConfigError, PreconditionFailed, RuntimeError) as e:
+            self._last_error = str(e)
+            return False, str(e)
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def _write_config_json(self):
+        path = os.path.join(self.manifest.get("_dir", CONF_DIR), "config.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".config.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(self._cfg, f, indent=2)
+        os.replace(tmp, path)
+
+    def switch_mode(self, new_mode, new_config=None, force=False,
+                    _sleep=time.sleep):
+        """Switch DHCP authority, verify the result, and roll back if it failed.
+
+        The single entry point: a route calls this rather than reimplementing the
+        sequence. Returns a result dict; NEVER raises.
+
+        `force=True` suppresses automatic rollback ONLY — the operator accepting a
+        state that did not verify. It does NOT bypass `check_preconditions()`'s
+        hard conflict gates, which are what stop two DHCP servers running at once:
+        that is the catastrophic, cheaply-detectable case this module exists to
+        prevent, and convenience is not a reason to relax it.
+
+        `_sleep` is injected so tests can exercise the retry cascade without
+        actually waiting minutes. Production callers never pass it.
+        """
+        try:
+            return self._switch_mode(new_mode, new_config, force, _sleep)
+        except Exception as e:  # noqa: BLE001
+            log.exception("dhcp/switch: unexpected failure")
+            self._last_error = "switch_mode crashed: %s" % e
+            self._trace("switch-crashed", to_mode=new_mode, ok=False, detail=str(e))
+            return {"ok": False, "action": "error", "detail": str(e)}
+
+    def _switch_mode(self, new_mode, new_config, force, _sleep):
+        if new_mode not in MODES:
+            return {"ok": False, "action": "rejected",
+                    "detail": "unknown mode %r; expected one of %s"
+                              % (new_mode, ", ".join(MODES))}
+
+        self.ensure_install_baseline()
+        from_mode = self.mode
+        prev_state = self._capture_state()
+        trigger = "operator-force" if force else "operator"
+        self._trace("switch-requested", trigger=trigger, from_mode=from_mode,
+                    to_mode=new_mode, detail="force=%s" % force)
+
+        target_cfg = dict(new_config) if new_config is not None else dict(self._cfg)
+        applied, detail = self._apply_state(new_mode, target_cfg)
+        if not applied:
+            self._trace("apply-failed", trigger=trigger, from_mode=from_mode,
+                        to_mode=new_mode, ok=False, detail=detail)
+
+        ok, readback, vdetail = self.verify_mode(new_mode)
+        self._trace("verify", trigger=trigger, from_mode=from_mode,
+                    to_mode=new_mode, ok=ok, readback=readback, detail=vdetail)
+
+        if applied and ok:
+            self._rotate_chain(self._capture_state())
+            self._trace("switch-succeeded", trigger=trigger, from_mode=from_mode,
+                        to_mode=new_mode, ok=True, readback=readback,
+                        detail="snapshot chain rotated")
+            self._last_error = None
+            return {"ok": True, "action": "switched", "mode": new_mode,
+                    "readback": readback, "detail": vdetail}
+
+        # ---- verification failed ----
+        _record(E_SWITCH_VERIFY_FAILED,
+                context={"from": from_mode, "to": new_mode, "detail": vdetail,
+                         "readback": readback}, conn=self._err_conn())
+
+        if force:
+            # Accepted deliberately by the operator. Recorded as its own code so
+            # "a human chose this" is never confused with "the system gave up",
+            # and the chain is NOT rotated — an unverified state must not become
+            # a rollback target for some later failure.
+            _record(E_OVERRIDE_USED,
+                    context={"to": new_mode, "detail": vdetail}, conn=self._err_conn())
+            self._last_error = ("mode %s did not verify (%s) — accepted via "
+                                "operator override" % (new_mode, vdetail))
+            self._trace("override-accepted", trigger=trigger, from_mode=from_mode,
+                        to_mode=new_mode, ok=False, readback=readback,
+                        detail="rollback SUPPRESSED by operator override; "
+                               "snapshot chain deliberately NOT rotated")
+            return {"ok": False, "action": "forced", "mode": new_mode,
+                    "readback": readback, "detail": vdetail,
+                    "rolled_back": False}
+
+        return self._rollback_cascade(from_mode, new_mode, vdetail, prev_state, _sleep)
+
+    def _rollback_cascade(self, from_mode, failed_mode, why, prev_state, _sleep):
+        """Walk the tiers most-proven-recent first until one VERIFIES.
+
+        Every tier is verified with the same readback a normal switch gets — a
+        tier is only reported as the recovery point after it proves itself. That
+        is the exact gap `nemesis_fw_watch.py` shipped (its "auto-restored" line
+        fires outside its own readback check), and it is not repeated here.
+        """
+        attempts_log = []
+        for tier in ROLLBACK_ORDER:
+            snap = self._read_snapshot(tier)
+            if snap is None:
+                self._trace("rollback-skip", from_mode=from_mode, tier=tier,
+                            detail="tier absent or unreadable — skipped, not "
+                                   "attempted")
+                continue
+            if tier == TIER_BASELINE:
+                _record(E_ROLLBACK_TO_BASELINE,
+                        context={"failed_mode": failed_mode}, conn=self._err_conn())
+
+            for attempt in range(1, ROLLBACK_ATTEMPTS_PER_TIER + 1):
+                tmode = snap.get("mode", DEFAULT_MODE)
+                applied, adetail = self._apply_state(tmode, snap.get("config") or {})
+                ok, readback, vdetail = self.verify_mode(tmode)
+                self._trace("rollback-attempt", from_mode=failed_mode,
+                            to_mode=tmode, tier=tier, attempt=attempt, ok=ok,
+                            readback=readback,
+                            detail=vdetail if applied else adetail)
+                if applied and ok:
+                    self._last_error = (
+                        "mode %s failed verification (%s); rolled back to %s "
+                        "snapshot (%s)" % (failed_mode, why, tier, tmode))
+                    self._trace("rollback-succeeded", from_mode=failed_mode,
+                                to_mode=tmode, tier=tier, attempt=attempt,
+                                ok=True, readback=readback,
+                                detail="recovery point verified")
+                    return {"ok": False, "action": "rolled_back",
+                            "mode": tmode, "tier": tier, "attempt": attempt,
+                            "detail": why, "rolled_back": True,
+                            "attempts": attempts_log}
+                attempts_log.append({"tier": tier, "attempt": attempt,
+                                     "detail": vdetail if applied else adetail})
+                _record(E_ROLLBACK_FAILED,
+                        context={"tier": tier, "attempt": attempt,
+                                 "detail": vdetail}, conn=self._err_conn())
+                if attempt < ROLLBACK_ATTEMPTS_PER_TIER:
+                    # A first failure may be transient rather than a real problem
+                    # with the target state — hence a second attempt, spaced.
+                    _sleep(ROLLBACK_RETRY_DELAY_SECONDS)
+
+        # ---- every tier exhausted, including the permanent baseline ----
+        #
+        # Land in the safest MECHANICAL state this module can guarantee: its own
+        # daemon stopped, so whatever else is wrong, Nemesis is definitely not
+        # contributing a second DHCP server. Then stop — no infinite retry — and
+        # say so loudly enough that it cannot read as a working system.
+        subprocess.run(["systemctl", "stop", SERVICE_NAME],
+                       capture_output=True, text=True, timeout=30)
+        _record(E_BASELINE_FAILED,
+                context={"failed_mode": failed_mode, "attempts": attempts_log},
+                conn=self._err_conn())
+        self._last_error = (
+            "DHCP NEEDS ATTENTION — mode %s failed verification (%s) and EVERY "
+            "rollback tier failed too, including the permanent install baseline. "
+            "nemesis-dhcpd has been stopped. Nemesis is not serving DHCP."
+            % (failed_mode, why))
+        self._trace("escalated", from_mode=failed_mode, ok=False,
+                    detail=self._last_error)
+        return {"ok": False, "action": "escalated", "detail": self._last_error,
+                "rolled_back": False, "attempts": attempts_log}
 
     def sync_leases(self, conn=None):
         """Read the lease file into `dhcp_leases`. Returns a summary.
