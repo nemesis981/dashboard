@@ -397,9 +397,30 @@ class Scope:
         self.dns = dns
         self.netmask = netmask
 
-    def render(self):
+    def render(self, other_tags=(), is_default=False):
+        """Render this scope's dhcp-range and options.
+
+        `tag:` NOT `set:` — this is the segmentation bug found on the first live
+        run, 2026-08-07. `set:X` TAGS a client that receives an address from the
+        range; it does NOT restrict the range to clients already tagged X. So a
+        per-device tier assignment in `dhcp-hostsfile` had no effect on which
+        range served the device: a client tagged `iot` was still handed a general
+        address, every time. Unit tests asserted the rendered TEXT and so could
+        not tell the two apart. Only dnsmasq's own behaviour could.
+
+        THE DEFAULT SCOPE IS THE QUARANTINE TIER (operator decision, 2026-08-07),
+        consistent with the mode-failover design's default-to-quarantine
+        principle. It renders with NEGATED tags — `tag:!iot,tag:!general,` — so a
+        device carrying ANY tier tag is excluded from it, and an untagged/unknown
+        device can land nowhere else. Negation rather than ordering: relying on
+        which range dnsmasq happens to try first would be a guess about
+        implementation detail, and this is the range an unknown device falls into.
+        """
         lines = []
-        prefix = "set:%s," % self.tag if self.tag else ""
+        if is_default:
+            prefix = "".join("tag:!%s," % t for t in sorted(other_tags))
+        else:
+            prefix = "tag:%s," % self.tag if self.tag else ""
         parts = [self.start, self.end]
         if self.netmask:
             parts.append(self.netmask)
@@ -459,6 +480,23 @@ class DhcpConfig:
             "# ADR 0002 placed outside this optional module.",
             "port=0",
             "",
+            "# No pidfile. The unit is Type=simple with --keep-in-foreground, so",
+            "# systemd tracks the process directly and dnsmasq's default",
+            "# /var/run/dnsmasq.pid is not needed -- and cannot be written anyway",
+            "# under ProtectSystem=strict, which made it crash-loop on the first",
+            "# live run 2026-08-07 (\"failed to open pidfile ... Read-only file",
+            "# system\"). Disabling it is correct here, not a workaround.",
+            "pid-file=",
+            "",
+            "# Do not let dnsmasq drop to its packaged dnsmasq:dip identity. The",
+            "# privilege model here is systemd's (narrow AmbientCapabilities +",
+            "# SupplementaryGroups), and the internal drop both FAILS under that",
+            "# capability set (\"failed to change group-id to dip: Operation not",
+            "# permitted\", live run 2026-08-07) and would discard the nemesis-db",
+            "# membership the lease file depends on.",
+            "user=root",
+            "group=root",
+            "",
             "# bind-interfaces is deliberately ABSENT. Measured 2026-08-06: with",
             "# it, DHCP never answered a single Request — DHCP needs broadcasts",
             "# to 255.255.255.255 that a strictly-bound socket does not receive.",
@@ -478,7 +516,11 @@ class DhcpConfig:
             out.append("dhcp-script=%s" % self.dhcp_script)
         out.append("")
         for scope in self.scopes:
-            out.extend(scope.render())
+            other = [t for t in (sc.tag for sc in self.scopes)
+                     if t and t != scope.tag]
+            out.extend(scope.render(other_tags=other,
+                                    is_default=bool(self.default_tag)
+                                    and scope.tag == self.default_tag))
         out.append("")
         return "\n".join(out)
 
@@ -567,8 +609,20 @@ def render_systemd_unit(conf_path=CONF_PATH):
         "RestartSec=5\n"
         "# :67 is privileged and DHCP needs raw access to answer broadcasts.\n"
         "# Granted narrowly rather than running unconfined as root.\n"
-        "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN\n"
-        "CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN\n"
+        "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN "
+        "CAP_SETGID CAP_SETUID\n"
+        "CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_NET_ADMIN "
+        "CAP_SETGID CAP_SETUID\n"
+        # THE LEASE FILE NEEDS GROUP ACCESS, NOT MORE CAPABILITY. Found on the
+        # first live run 2026-08-07: dnsmasq crash-looped with "cannot open or
+        # create lease file ... Permission denied" DESPITE running as root with
+        # ReadWritePaths set. Cause: CapabilityBoundingSet above deliberately
+        # excludes CAP_DAC_OVERRIDE, so root IS subject to ordinary permission
+        # checks -- and /var/lib/nemesis is 0770 root-excluded (group nemesis-db,
+        # per the data-directory model). The fix is to join the group that owns
+        # the directory, NOT to widen the capability set: the hardening is
+        # correct, the group membership was simply missing.
+        "SupplementaryGroups=nemesis-db\n"
         "NoNewPrivileges=true\n"
         "ProtectSystem=strict\n"
         "ProtectHome=true\n"

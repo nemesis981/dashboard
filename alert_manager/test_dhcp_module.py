@@ -46,7 +46,7 @@ import nemesis_errors  # noqa: E402
 
 _modpath_for_ast = os.path.join(REPO, "modules", "dhcp", "module.py")
 
-EXPECTED_CHECKS = 81
+EXPECTED_CHECKS = 83
 
 _results = []
 
@@ -153,11 +153,23 @@ multi = dhcp.DhcpConfig(
                   lease_time="12h", router="10.66.2.1", dns="10.66.0.1")],
     default_tag="quarantine")
 mtext = multi.render()
-check("tagged range emitted", "dhcp-range=set:iot,10.66.2.50,10.66.2.200,12h" in mtext, True)
+check("tagged range RESTRICTS with tag: (not set:)",
+      "dhcp-range=tag:iot,10.66.2.50,10.66.2.200,12h" in mtext, True)
 check("per-tier router option", "dhcp-option=tag:iot,3,10.66.2.1" in mtext, True)
 check("per-tier DNS points at Pi-hole", "dhcp-option=tag:iot,6,10.66.0.1" in mtext, True)
 check("quarantine keeps a SHORT lease (fast re-tiering)",
-      "dhcp-range=set:quarantine,10.66.0.50,10.66.0.99,5m" in mtext, True)
+      "10.66.0.50,10.66.0.99,5m" in mtext, True)
+# THE REGRESSION GUARD. `set:` tags a client that RECEIVES an address; `tag:`
+# restricts the range to clients already tagged. The module shipped `set:` and
+# segmentation was mechanically inert -- a device tagged `iot` was still served a
+# general address, every time, on the live zone 2026-08-07. The old tests could
+# not see it because they asserted rendered text that looked plausible either way.
+check("NO dhcp-range uses set: (the inert-segmentation bug)",
+      not any(l.startswith("dhcp-range=set:") for l in mtext.splitlines()), True)
+# Default = quarantine: the untagged/unknown device must be EXCLUDED from every
+# tier range, so it can land nowhere but quarantine.
+check("default (quarantine) range excludes every tier tag by negation",
+      "dhcp-range=tag:!iot,10.66.0.50,10.66.0.99,5m" in mtext, True)
 check("hosts.d wired for SIGHUP-reloadable tier assignment",
       "dhcp-hostsfile=" in mtext, True)
 
