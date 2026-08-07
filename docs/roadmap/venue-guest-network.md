@@ -81,7 +81,27 @@ funnel** → network effect: more venues → more users → better intelligence.
   0016; do not treat as a guaranteed liability shield.
 
 ## Sequencing
-- **Mobile agent (V2/V3)** — required first.
+- **Mobile agent (V2/V3)** — required first. **This is hurdle 1 for the venue direction as a
+  whole** — nothing else in this stub can start until it clears. Platform order within it
+  (operator decision, 2026-08-03):
+  - **Android agent development is deferred until near a final v2.0 agent** — not picked up
+    now, and not picked up early; work starts once the core (Windows/Linux) agent is close to
+    its v2.0-final state, not before.
+  - **Apple platform approval (Mac + iPhone) is sequenced AFTER Android is fully tested and
+    working as intended — not in parallel.** Android has to actually work first; Apple work
+    doesn't start alongside it as a hedge. **What "fully tested and working as intended"
+    concretely means for Android:** validating the QR → install → connect **guest
+    self-service enrollment flow** — [ADR 0015](../architecture/0015-guest-self-service-enrollment.md)'s
+    mechanism — end-to-end on Android. Not a general platform port checked off in the
+    abstract; the specific thing that has to work is the captive-portal/QR onboarding this
+    stub's whole venue flow depends on. Apple sequencing waits on *that* validation
+    specifically, not just "an Android build exists."
+  - **Mac/iOS otherwise stay fully parked, no design effort, until then.** This sharpens (does
+    not contradict) [hardware-stable-identifiers.md](hardware-stable-identifiers.md)'s existing
+    "Mac = interface + type-vocabulary only (drop-in later)" / "Android/iOS = still
+    parked/future" split — that doc covers hardware-fingerprint *collection* specifically; this
+    is the broader mobile-agent build-and-store-approval sequencing that gates the venue
+    direction overall.
 - **Auto-approve flow** (venue setting) — a simple `enrollment_status` change (venue can't
   approve each guest by hand).
 - **Captive portal (V2)** — the QR → install → connect flow.
