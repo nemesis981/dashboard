@@ -449,6 +449,72 @@ def init_audit_log_table():
         conn.close()
 
 
+def init_connectivity_episodes_table():
+    """Canonical DDL for `connectivity_episodes` (connectivity outage episodes).
+
+    WHY THIS TABLE EXISTS (2026-08-07). Two independent subsystems already detect
+    connectivity failure — the diagnostics watcher and `vpn_dns_guard` — and on
+    2026-08-07 BOTH detected a real ~1-hour outage, dozens of times each, and
+    neither told anyone: diagnostics wrote 27 consecutive LOCAL_FAIL samples to
+    `diagnostics_connectivity_samples` and vpn_dns_guard logged ~56 warnings to a
+    flat file, while the outage was chased as an ISP fault. Detection was never
+    the gap; NOTIFICATION was.
+
+    This table is the durable state that turns a stream of per-cycle samples into
+    EPISODES, so one outage produces one notification instead of one per sample
+    (27 alerts for a single event would train an operator to ignore the alert
+    that matters).
+
+    It is core-owned and unprefixed deliberately (ADR 0001). Both writers are
+    core-side processes: the diagnostics *module* stays observe-only by design
+    (ADR 0005 — it makes no system changes and raises nothing), so the episode
+    logic lives in core where writing core tables, opening tickets and sending
+    mail is already the established pattern (`watchdog.py` does exactly this for
+    hardware alerts).
+
+    THREE STATES, not two. A failure streak that never reaches the debounce
+    threshold is recorded as `counting` and then closed without ever escalating.
+    Those sub-threshold rows are KEPT, not deleted: they are the measured record
+    of how often short blips occur, which is the evidence needed to tell whether
+    the debounce threshold is set correctly. Deleting them would discard exactly
+    the data that would justify changing it.
+
+    Runs on a RAW connection like its siblings, so no namespace grant is needed to
+    call it. `IF NOT EXISTS`, so any process may call it and later calls are
+    no-ops.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS connectivity_episodes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source TEXT NOT NULL,
+                state TEXT NOT NULL,
+                verdict TEXT,
+                severity TEXT,
+                consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                first_failure_at TEXT,
+                opened_at TEXT,
+                closed_at TEXT,
+                ticket_id INTEGER,
+                alert_rule_id TEXT,
+                email_sent INTEGER NOT NULL DEFAULT 0,
+                detail TEXT,
+                actor TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        # Lookup is always "the live row for this source" — the hot path on every
+        # probe cycle for every writer.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conn_ep_source_state "
+                  "ON connectivity_episodes(source, state)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_scan_tables():
     """Canonical DDL for `scan_threats` and `scan_schedules`.
 
