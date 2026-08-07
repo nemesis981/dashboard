@@ -672,6 +672,52 @@ def _force_iface():
 # Daemon loop
 # --------------------------------------------------------------------------- #
 
+def _notify_connectivity(res):
+    """Report this cycle to the shared episode notifier — ONLY when a real probe ran.
+
+    WHY THIS IS GATED ON `action == "apply"` AND NOT ON `res["ok"]`.
+    `reconcile()` returns ok=True from the restore path too, and `restore()`
+    early-returns True whenever nothing was applied (`vpn_dns_guard.py`'s
+    `if not state.get("applied"): return True`). So on the common
+    no-tunnel-configured cycle, `ok` is True having measured NOTHING. Feeding that
+    to the notifier as a passing observation would be an instrument reporting
+    success it never established — and worse, it would CLOSE a real episode that
+    the diagnostics watcher had legitimately opened.
+
+    `verify_upstream_resolves()` only runs inside `apply_fix()`, i.e. on the
+    apply path, so that is the only cycle where `ok` reflects an actual
+    resolution probe. Every other cycle reports nothing at all, which is the
+    honest answer: this guard has no connectivity signal when no tunnel is up.
+    Diagnostics covers that case; this one is deliberately silent rather than
+    falsely reassuring.
+
+    VERDICT IS `DEGRADED`, NOT `LOCAL_FAIL`, ON PURPOSE. This guard probes DNS
+    resolution through a tunnel resolver. When that fails it genuinely cannot
+    tell a local misconfiguration from the VPN provider's own resolver being
+    down — so it must not claim the local-vs-upstream discrimination that the
+    diagnostics watcher actually performs (four independent probe layers). Naming
+    a verdict it did not determine would make the severity split meaningless.
+    DEGRADED maps to MEDIUM, keeping it dashboard-visible without auto-ticketing
+    on a determination that was never made.
+
+    Never raises — reporting must not kill the guard loop.
+    """
+    try:
+        if res.get("action") != "apply":
+            return
+        import nemesis_connectivity_notify as conn_notify
+        ok = bool(res.get("ok"))
+        conn_notify.observe(
+            source="vpn_dns_guard",
+            ok=ok,
+            verdict=None if ok else "DEGRADED",
+            # Fixed string — reaches the DB and email, so no addresses (Rule 8).
+            detail=None if ok else "vpn dns upstream did not resolve",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("connectivity notify failed (guard loop continues)")
+
+
 def main_loop():
     log.info("vpn_dns_guard starting (interval=%ss, debounce=%ss)",
              CHECK_INTERVAL_SECONDS, DEBOUNCE_SECONDS)
@@ -690,6 +736,7 @@ def main_loop():
                 res = reconcile(ph)
                 if not res["ok"]:
                     log.warning("reconcile reported failure: %s", res["action"])
+                _notify_connectivity(res)
         except Exception:  # noqa: BLE001
             log.exception("reconcile cycle errored")
         time.sleep(CHECK_INTERVAL_SECONDS)
