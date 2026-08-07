@@ -99,7 +99,8 @@ import database          # module handle: canonical DDL owner (init_audit_log_ta
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table, init_recovery_codes_table,
-                      init_settings_table, init_error_tables)
+                      init_settings_table, init_error_tables,
+                      init_conn_events_tables)
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append,
@@ -121,6 +122,11 @@ init_users_table()
 init_login_events_table()
 init_recovery_codes_table()
 init_enrollment_tokens_table()
+# Track C (ADR 0001 canonical DDL in alert_manager/database.py). Created here AND
+# by hw_monitor's startup — deliberately both, the same reasoning as
+# init_quarantines_table: there is no systemd ordering between the two services,
+# and hw_monitor must not write conn_events before the table exists.
+init_conn_events_tables()
 # Structured error codes (ADR 0001 core-owned `error_*`). Canonical DDL in
 # alert_manager/nemesis_errors.py; created here at startup so every service and
 # module can record from first use rather than each re-creating them.

@@ -145,10 +145,88 @@ def init_settings_table():
         conn.close()
 
 
+def init_conn_events_tables():
+    """Canonical DDL for Track C's two tables (ADR 0001: one CREATE, in the repo).
+
+    `conn_consent` — the SERVER-side record of consent, and the thing that makes
+    Requirement 0 clause 5 enforceable. The agent has its own local record, but a
+    buggy, downgraded, or tampered agent must not be able to push data the user
+    never agreed to, so the server keeps its own and checks it on every ingest.
+    Defence in depth, and the audit trail requirement 8 asks for (who, when, which
+    disclosure version, which device).
+
+    `conn_events` — one row per connection lifecycle event. Field names and types
+    mirror `nemesis_agent/conn_events.py` deliberately: that module is the single
+    schema definition and this table is its storage shape. If you change one,
+    change both — the validator is what stops them silently diverging.
+
+    Nullable columns are nullable ON PURPOSE. `bytes_sent`/`bytes_recv` NULL means
+    "the platform did not provide it", which is NOT the same as 0, and
+    `proc_signed` carries 'unknown' rather than a coerced boolean. Storing a
+    default here would destroy the distinction the schema exists to preserve.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS conn_consent (
+                device_id          TEXT PRIMARY KEY,
+                consent_version    INTEGER NOT NULL,
+                granted_at         TEXT,
+                granted_by         TEXT,
+                recorded_at        TEXT NOT NULL,
+                revoked_at         TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS conn_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id       TEXT NOT NULL,
+                conn_id         TEXT NOT NULL,
+                event           TEXT NOT NULL,
+                consent_version INTEGER NOT NULL,
+                proto           TEXT NOT NULL,
+                laddr           TEXT NOT NULL,
+                lport           INTEGER NOT NULL,
+                raddr           TEXT NOT NULL,
+                rport           INTEGER NOT NULL,
+                ts_open_wall    TEXT NOT NULL,
+                ts_open_mono    REAL NOT NULL,
+                ts_close_wall   TEXT,
+                ts_close_mono   REAL,
+                pid             INTEGER,
+                proc_name       TEXT,
+                proc_path       TEXT,
+                proc_signed     TEXT,
+                bytes_sent      INTEGER,
+                bytes_recv      INTEGER,
+                resolved_name        TEXT,
+                resolved_name_source TEXT,
+                received_at     TEXT NOT NULL
+            )
+        """)
+        # Retention reaping scans by received_at; novelty/seen-set work (Piece 5)
+        # scans by destination. Both get an index rather than a table scan that
+        # grows with a 30-day window of every connection every device makes.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conn_events_received "
+                  "ON conn_events(received_at)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conn_events_dest "
+                  "ON conn_events(raddr, rport)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_conn_events_device "
+                  "ON conn_events(device_id, received_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 #: Core settings and their shipped defaults. A key absent from here is not a
 #: known setting — get_setting() will still return it if stored, but the UI and
 #: validation work from this map, so adding a knob means adding it here.
 CORE_SETTING_DEFAULTS = {
+    # Track C retention. The build plan requires 30 days "enforced by a real
+    # reaper, not by intention", user-configurable and surfaced in settings.
+    # Stored as a string like every other setting value.
+    "conn_event_retention_days": "30",
     # How often a REMOTE (vpn_remote) agent sends a full observation snapshot,
     # expressed as "every Nth heartbeat". Local agents always observe every beat
     # and are deliberately not adjustable — it is free on a LAN.

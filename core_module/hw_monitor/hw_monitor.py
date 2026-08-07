@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 
@@ -1805,6 +1805,185 @@ def queue_reinstatement_scan(device_id, from_status, actor=None):
         return (False, "error: %s" % e)
 
 
+def _conn_schema():
+    """Import the ONE connection-event schema definition (Track C Piece 1).
+
+    Same cross-package pattern `alert_manager/attestation.py` uses for
+    `nemesis_agent.attest`. The repo root is derived from __file__ rather than
+    assumed to be on sys.path — this process runs with PYTHONPATH pointed at
+    alert_manager/, not at the repo root, so relying on the ambient path would
+    work in a dev shell and fail as a service.
+    """
+    import sys as _sys                                   # noqa: PLC0415
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    if root not in _sys.path:
+        _sys.path.insert(0, root)
+    from nemesis_agent import conn_events                # noqa: PLC0415
+    return conn_events
+
+
+def _server_consent_version(conn, device_id):
+    """The consent version this SERVER has recorded for a device, or None.
+
+    Requirement 0 clause 5 rests on this: "a buggy, downgraded, or tampered agent
+    must not be able to push data the user never agreed to". The agent's own local
+    consent record is not evidence to the server — this is.
+
+    Fails CLOSED. No row, a revoked row, an unreadable table, or any error at all
+    returns None, and None means reject. There is no branch here that turns a
+    failure into permission.
+    """
+    try:
+        row = conn.execute(
+            "SELECT consent_version, revoked_at FROM conn_consent WHERE device_id=?",
+            (device_id,)).fetchone()
+    except Exception:                                    # noqa: BLE001
+        log.exception("conn ingest: consent lookup failed for %s — rejecting", device_id[:12])
+        return None
+    if not row:
+        return None
+    if row[1]:                       # revoked_at set => consent withdrawn
+        return None
+    v = row[0]
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def ingest_connection_events(payload):
+    """Track C step 3 — accept connection events from a heartbeat payload.
+
+    Returns a counts dict; callers log it. Never raises: a malformed telemetry
+    block must not break heartbeat processing for everything else in the payload.
+
+    Order is deliberate — CONSENT IS CHECKED BEFORE ANYTHING IS PARSED OR STORED.
+    Validating first and checking consent later would mean unconsented data had
+    already been through the parser, and any early-return bug in between would
+    leak it into the store.
+    """
+    counts = {"received": 0, "stored": 0, "rejected_no_consent": 0,
+              "rejected_consent_mismatch": 0, "rejected_invalid": 0}
+    try:
+        ce = _conn_schema()
+        security = payload.get("security", {}) or {}
+        events = security.get(ce.PAYLOAD_KEY)
+        if not events:
+            return counts
+        if not isinstance(events, list):
+            log.warning("conn ingest: %s is not a list — rejecting whole block", ce.PAYLOAD_KEY)
+            counts["rejected_invalid"] = 1
+            return counts
+        counts["received"] = len(events)
+
+        device_id = payload.get("device_id") or ""
+        if not device_id:
+            counts["rejected_no_consent"] = len(events)
+            log.warning("conn ingest: payload has no device_id — rejecting %d event(s)",
+                        len(events))
+            return counts
+
+        conn = _db_connect()
+        try:
+            server_version = _server_consent_version(conn, device_id)
+            if server_version is None:
+                # THE CLAUSE 5 GATE. Logged, not silent: the plan requires the
+                # rejection be recorded, because a device pushing data it has no
+                # consent for is a signal in its own right.
+                counts["rejected_no_consent"] = len(events)
+                log.warning("conn ingest: REJECTED %d event(s) from device %s — no "
+                            "recorded consent on this server", len(events), device_id[:12])
+                return counts
+
+            now = datetime.now().isoformat(timespec="seconds")
+            rows = []
+            for rec in events:
+                ok, errors = ce.validate(rec)
+                if not ok:
+                    counts["rejected_invalid"] += 1
+                    # Rule 8: log the validation reason, never the record — a
+                    # record contains a destination and a process path.
+                    log.warning("conn ingest: invalid event from %s: %s",
+                                device_id[:12], "; ".join(errors)[:200])
+                    continue
+                if rec["consent_version"] != server_version:
+                    # The agent claims a disclosure version the server did not
+                    # record. Stale agent, ahead-of-server agent, or tampering —
+                    # all three are "do not store", not "store and sort out later".
+                    counts["rejected_consent_mismatch"] += 1
+                    log.warning("conn ingest: consent_version %r from %s != server's %r "
+                                "— rejected", rec["consent_version"], device_id[:12],
+                                server_version)
+                    continue
+                if rec["device_id"] != device_id:
+                    # A record claiming to be from another device inside this
+                    # device's authenticated payload.
+                    counts["rejected_invalid"] += 1
+                    log.warning("conn ingest: event device_id mismatch from %s — rejected",
+                                device_id[:12])
+                    continue
+                rows.append((
+                    rec["device_id"], rec["conn_id"], rec["event"], rec["consent_version"],
+                    rec["proto"], rec["laddr"], rec["lport"], rec["raddr"], rec["rport"],
+                    rec["ts_open_wall"], rec["ts_open_mono"],
+                    rec.get("ts_close_wall"), rec.get("ts_close_mono"),
+                    rec.get("pid"), rec.get("proc_name"), rec.get("proc_path"),
+                    rec.get("proc_signed"), rec.get("bytes_sent"), rec.get("bytes_recv"),
+                    rec.get("resolved_name"), rec.get("resolved_name_source"),
+                    now))
+            if rows:
+                conn.executemany(
+                    "INSERT INTO conn_events (device_id, conn_id, event, consent_version, "
+                    "proto, laddr, lport, raddr, rport, ts_open_wall, ts_open_mono, "
+                    "ts_close_wall, ts_close_mono, pid, proc_name, proc_path, proc_signed, "
+                    "bytes_sent, bytes_recv, resolved_name, resolved_name_source, received_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                conn.commit()
+                counts["stored"] = len(rows)
+        finally:
+            conn.close()
+    except Exception:                                    # noqa: BLE001
+        log.exception("conn ingest: unexpected failure — no events stored this cycle")
+    return counts
+
+
+#: Wall-clock of the last retention sweep. Module-level so the loop can rate
+#: limit it without a class or a closure.
+_last_conn_reap = 0.0
+
+
+def reap_conn_events():
+    """Enforce the retention window. Returns rows deleted, or -1 on failure.
+
+    The plan requires retention "enforced by a real reaper, not by intention".
+    Returns -1 rather than 0 on error so a caller cannot read a failure as a
+    clean sweep — 0 is a real answer meaning "nothing was old enough".
+    """
+    try:
+        conn = _db_connect()
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM settings WHERE key='conn_event_retention_days'"
+                ).fetchone()
+                days = int(row[0]) if row and row[0] is not None else 30
+            except Exception:                            # noqa: BLE001
+                days = 30
+            # Clamp: a corrupt or hostile setting must not disable retention
+            # outright (0 = delete everything, or a huge value = keep forever).
+            days = max(1, min(days, 365))
+            cutoff = (datetime.now() - timedelta(days=days)).isoformat(timespec="seconds")
+            cur = conn.execute("DELETE FROM conn_events WHERE received_at < ?", (cutoff,))
+            deleted = cur.rowcount or 0
+            conn.commit()
+            if deleted:
+                log.info("conn reaper: deleted %d event(s) older than %d days",
+                         deleted, days)
+            return deleted
+        finally:
+            conn.close()
+    except Exception:                                    # noqa: BLE001
+        log.exception("conn reaper: failed — retention NOT enforced this cycle")
+        return -1
+
+
 def _check_and_queue_scan_triggers(payload):
     """Evaluate all enabled scan_conditions against the incoming payload.
 
@@ -3423,6 +3602,13 @@ def _start_windows_agent_listener():
 
                 metrics = _nemesis_payload_to_metrics(payload)
                 _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
+                # Track C ingest. Deliberately AFTER the scan triggers and wrapped
+                # in its own never-raising handler: connection telemetry is
+                # opt-in and secondary, and must never be able to break heartbeat
+                # processing for a device that has not opted in at all.
+                _c = ingest_connection_events(payload)
+                if _c["received"]:
+                    log.info("conn ingest: %s", _c)
                 _update_agent_device(payload, remote_ip=remote_ip)
                 insert_sample(metrics)
                 device_id = payload.get("device_id", "local")
@@ -3558,6 +3744,16 @@ def main():
     log.info("hw_monitor starting (db=%s interval=%ds iface=%s)",
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
+    # Track C tables. This process WRITES conn_events, so it must not depend on
+    # the dashboard having started first — there is no systemd ordering between
+    # them. Canonical DDL lives in alert_manager/database.py; both callers are
+    # deliberate, same pattern as init_quarantines_table.
+    try:
+        import database as _database                     # noqa: PLC0415
+        _database.init_conn_events_tables()
+    except Exception:                                    # noqa: BLE001
+        log.exception("could not ensure Track C tables exist — connection ingest "
+                      "will reject everything until this is resolved")
 
     # Server signing keypair (ADR 0004 Stage 1). hw_monitor is the ONLY process
     # that signs task envelopes, so it is the only one that holds the private
@@ -3609,6 +3805,14 @@ def main():
             )
         except Exception as e:
             log.exception("sample failed: %s", e)
+        # Track C retention. Hourly, not per-sample: the sample loop runs every
+        # SAMPLE_INTERVAL seconds and a DELETE scan on every tick would be pure
+        # waste. Time-based rather than a tick counter so the cadence does not
+        # silently change if SAMPLE_INTERVAL is retuned.
+        global _last_conn_reap
+        if time.time() - _last_conn_reap >= 3600:
+            _last_conn_reap = time.time()
+            reap_conn_events()
         _sleep_interruptible(SAMPLE_INTERVAL)
     log.info("hw_monitor stopped")
 

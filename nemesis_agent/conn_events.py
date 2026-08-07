@@ -11,8 +11,8 @@ validator is strict rather than forgiving: an event that does not match is
 REJECTED, never coerced into something storable. A coerced record is worse than a
 dropped one — it looks like evidence.
 
-Three field-level decisions worth reading before using this
------------------------------------------------------------
+Four field-level decisions worth reading before using this
+----------------------------------------------------------
 * **`proc_signed` is tri-state, not a bool.** `signed` / `unsigned` / `unknown`.
   Linux has no ambient code-signature concept, so a Linux collector reports
   `unknown`. Coercing that to `False` would state "this binary is unsigned" — a
@@ -30,6 +30,13 @@ Three field-level decisions worth reading before using this
   on one machine, within one boot** — never compare them across records, devices,
   or reboots. `duration_seconds()` enforces this by construction.
 
+* **`resolved_name` is nullable and its NULL is not informative on its own.**
+  Always read `resolved_name_source` alongside it: `unavailable` means the
+  collector cannot see DNS at all (Linux, today), `no_dns_observed` means we were
+  watching and this connection genuinely had none. A name without
+  `resolved_name_source == 'os_dns_event'` is REJECTED — attributable-looking
+  evidence with untraceable provenance is worse than no evidence.
+
 Explicitly NOT in this schema (build plan, "Explicitly NOT in this tier"): payload
 bytes, JA3/SNI, certificate data, or anything derived from packet contents.
 
@@ -39,7 +46,7 @@ Rule 8: examples and defaults here use documentation addresses only.
 #: Wire-format version. The agent and the server update independently, so the
 #: server must be able to say "I do not speak this version" rather than
 #: best-guessing a record it does not understand. Bump on ANY field change.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 #: Key this rides under inside the existing heartbeat `security` block. Reuses
 #: `_post_payload()` — the plan is explicit that this needs no new transport.
@@ -58,6 +65,16 @@ SIGNED_NO = "unsigned"
 SIGNED_UNKNOWN = "unknown"
 SIGNED_STATES = (SIGNED_YES, SIGNED_NO, SIGNED_UNKNOWN)
 
+#: Where `resolved_name` came from. Provenance is NOT decoration: without it,
+#: `resolved_name = None` is ambiguous between "we observed no DNS for this
+#: connection" and "this platform cannot tell us". Those need different
+#: treatment by anything reasoning over the data, and conflating them is the
+#: same failure class as a default value standing in for a failed read.
+NAME_SRC_DNS_EVENT = "os_dns_event"   # observed via the OS resolver's own event stream
+NAME_SRC_NONE = "no_dns_observed"     # we were watching, and this connection had none
+NAME_SRC_UNAVAILABLE = "unavailable"  # this platform/collector cannot observe DNS at all
+NAME_SOURCES = (NAME_SRC_DNS_EVENT, NAME_SRC_NONE, NAME_SRC_UNAVAILABLE)
+
 #: Required on every record, whatever the event type.
 _REQUIRED = (
     "schema_version", "event", "conn_id", "device_id", "consent_version",
@@ -71,6 +88,18 @@ _OPTIONAL = (
     "ts_close_wall", "ts_close_mono",
     "pid", "proc_name", "proc_path", "proc_signed",
     "bytes_sent", "bytes_recv",
+    # Schema v2 (2026-08-07): destination NAME, so reputation can be
+    # domain-attributable rather than IP-attributable — materially stronger
+    # against CDNs (one IP, many names) and fast-flux (one name, many IPs).
+    #
+    # NULLABLE AND OFTEN NULL, IN A BIASED WAY — read `resolved_name_source`
+    # before drawing any conclusion from a null. A connection carries no name
+    # when it used an IP literal, when the OS answered from its DNS cache with
+    # no fresh query, or when the application does DoH/DoT internally and never
+    # touches the OS resolver at all. That last case means the traffic LEAST
+    # likely to carry a name is the evasive traffic. Absence of a name is
+    # therefore never evidence of anything.
+    "resolved_name", "resolved_name_source",
 )
 
 ALL_FIELDS = _REQUIRED + _OPTIONAL
@@ -166,6 +195,17 @@ def validate(rec):
     if rec.get("proc_signed") is not None and rec["proc_signed"] not in SIGNED_STATES:
         errors.append("proc_signed must be one of %s or None — never a bool"
                       % (SIGNED_STATES,))
+    if rec.get("resolved_name") is not None and _bad_str(rec["resolved_name"]):
+        errors.append("resolved_name must be a non-empty string <= %d chars or None" % _MAX_STR)
+    if rec.get("resolved_name_source") is not None and \
+            rec["resolved_name_source"] not in NAME_SOURCES:
+        errors.append("resolved_name_source must be one of %s or None" % (NAME_SOURCES,))
+    if rec.get("resolved_name") is not None and \
+            rec.get("resolved_name_source") in (None, NAME_SRC_NONE, NAME_SRC_UNAVAILABLE):
+        # A name with no provenance, or with provenance that contradicts it, is
+        # worse than no name: it reads as attributable evidence while being
+        # untraceable to how it was obtained.
+        errors.append("resolved_name requires resolved_name_source=%r" % NAME_SRC_DNS_EVENT)
     for f in ("bytes_sent", "bytes_recv"):
         v = rec.get(f)
         if v is not None and (not _is_int(v) or v < 0):
@@ -180,7 +220,8 @@ def new_event(event, conn_id, device_id, consent_version, proto,
               ts_close_wall=None, ts_close_mono=None,
               pid=None, proc_name=None, proc_path=None,
               proc_signed=SIGNED_UNKNOWN,
-              bytes_sent=None, bytes_recv=None):
+              bytes_sent=None, bytes_recv=None,
+              resolved_name=None, resolved_name_source=NAME_SRC_UNAVAILABLE):
     """Build a record. Validates before returning — a collector cannot emit a
     malformed event by construction, which is cheaper than finding out server-side.
 
@@ -198,6 +239,8 @@ def new_event(event, conn_id, device_id, consent_version, proto,
         "pid": pid, "proc_name": proc_name, "proc_path": proc_path,
         "proc_signed": proc_signed,
         "bytes_sent": bytes_sent, "bytes_recv": bytes_recv,
+        "resolved_name": resolved_name,
+        "resolved_name_source": resolved_name_source,
     }
     ok, errors = validate(rec)
     if not ok:
@@ -234,7 +277,9 @@ def redact_for_log(rec):
     """
     if not isinstance(rec, dict):
         return "<not a record>"
-    return "%s %s %s:%s proc=%s signed=%s" % (
+    dest = rec.get("resolved_name") or rec.get("raddr")
+    return "%s %s %s:%s proc=%s signed=%s name_src=%s" % (
         rec.get("event"), rec.get("proto"),
-        rec.get("raddr"), rec.get("rport"),
-        rec.get("proc_name") or "?", rec.get("proc_signed") or "?")
+        dest, rec.get("rport"),
+        rec.get("proc_name") or "?", rec.get("proc_signed") or "?",
+        rec.get("resolved_name_source") or "?")

@@ -120,6 +120,12 @@ NAMESPACES = {
             "hw_metrics", "hw_notifications", "hw_anomaly_snapshots",
             "scan_jobs", "scan_queue", "scan_conditions",
             "agent_devices", "correlation_events",
+            # Track C (2026-08-07): hw_monitor is the ingest point for agent
+            # connection telemetry, so it writes the events and reaps them on
+            # retention. `conn_consent` is the server-side consent record it
+            # must CHECK before accepting any event (Requirement 0 clause 5) and
+            # UPDATE when an agent reports a consent change.
+            "conn_events", "conn_consent",
             # `scan_threats` / `scan_schedules` — GRANT REMOVED 2026-07-29.
             # hw_monitor never wrote a row to either; its only statements were the
             # two CREATEs, which now live in alert_manager/database.py

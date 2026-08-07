@@ -40,6 +40,7 @@ def base(**over):
         "pid": 4242, "proc_name": "curl", "proc_path": "/usr/bin/curl",
         "proc_signed": ce.SIGNED_UNKNOWN,
         "bytes_sent": None, "bytes_recv": None,
+        "resolved_name": None, "resolved_name_source": ce.NAME_SRC_UNAVAILABLE,
     }
     rec.update(over)
     return rec
@@ -171,6 +172,31 @@ check("keeps the destination", "198.51.100.20" in line and "443" in line)
 check("DROPS proc_path (can contain a home directory / username)",
       "/usr/bin/curl" not in line)
 check("DROPS the local address", "192.0.2.10" not in line)
+
+# ------------------------------------------------- resolved_name (schema v2)
+print("resolved_name is nullable, and a name without provenance is rejected")
+check("name + os_dns_event source is VALID",
+      ok(base(resolved_name="example.test", resolved_name_source=ce.NAME_SRC_DNS_EVENT)))
+check("no name + 'unavailable' is VALID (Linux today)",
+      ok(base(resolved_name=None, resolved_name_source=ce.NAME_SRC_UNAVAILABLE)))
+check("no name + 'no_dns_observed' is VALID (watched, genuinely none)",
+      ok(base(resolved_name=None, resolved_name_source=ce.NAME_SRC_NONE)))
+check("a NAME with NO source REJECTED (untraceable evidence)",
+      not ok(base(resolved_name="example.test", resolved_name_source=None)))
+check("a NAME claiming 'unavailable' REJECTED (self-contradictory)",
+      not ok(base(resolved_name="example.test", resolved_name_source=ce.NAME_SRC_UNAVAILABLE)))
+check("a NAME claiming 'no_dns_observed' REJECTED (self-contradictory)",
+      not ok(base(resolved_name="example.test", resolved_name_source=ce.NAME_SRC_NONE)))
+check("bogus source value REJECTED", not ok(base(resolved_name_source="guessed")))
+check("empty name REJECTED", not ok(base(resolved_name="",
+                                         resolved_name_source=ce.NAME_SRC_DNS_EVENT)))
+check("over-long name REJECTED", not ok(base(resolved_name="a" * 600,
+                                             resolved_name_source=ce.NAME_SRC_DNS_EVENT)))
+check("schema version is now 2", ce.SCHEMA_VERSION == 2)
+line = ce.redact_for_log(base(resolved_name="example.test",
+                              resolved_name_source=ce.NAME_SRC_DNS_EVENT))
+check("log line prefers the NAME over the raw IP", "example.test" in line)
+check("  and records the provenance", "os_dns_event" in line)
 
 print()
 print("%d/%d passed" % (passed, passed + failed))
