@@ -3432,6 +3432,32 @@ def _nemesis_tailnet_host() -> str:
     return host
 
 
+def _scrub_spent_preauth_keys(conn):
+    """NULL `preauth_key` on every token that can no longer legitimately use it.
+
+    The condition is the EXACT COMPLEMENT of `_valid_installer_token`'s validity test
+    (`revoked=0 AND uses < max_uses AND expires_at > now`): if a row fails that, no zip
+    download will ever read its key again, so retaining the secret buys nothing and
+    costs plaintext-at-rest indefinitely.
+
+    Why this exists: the 2026-08-07 audit found 22 keys still stored in plaintext, the
+    oldest from 2026-06-30 — nothing in the codebase had ever removed one. The keys
+    themselves were single-use with a 2h TTL, so the practical exposure was small, but
+    the RETENTION was unbounded and that is the part that does not self-correct.
+
+    `preauth_key_id` is deliberately NOT scrubbed: it is not a secret, and it is the
+    only handle that makes a key revocable after the fact.
+
+    Returns the number of rows scrubbed. Caller commits.
+    """
+    cur = conn.execute(
+        "UPDATE enrollment_tokens SET preauth_key = NULL "
+        "WHERE preauth_key IS NOT NULL "
+        "  AND (revoked = 1 OR uses >= max_uses OR expires_at <= ?)",
+        (time.time(),))
+    return cur.rowcount or 0
+
+
 def _valid_installer_token(token):
     """Return the token row if it exists, is not revoked, not expired, and not yet used.
     A spent (used), revoked, or expired token HARD-FAILS the download — no fallback
@@ -3506,23 +3532,28 @@ def api_agent_installer_generate():
     # the minted key / client_secret are never logged.
     pasted_key = (data.get("preauth_key") or "").strip()[:256]
     preauth_key = ""
+    preauth_key_id = ""      # NOT a secret: the handle used to revoke the key later.
     preauth_source = "none"
     preauth_warning = ""
-    if tailscale_api.is_configured():
-        try:
-            minted, _kid = tailscale_api.mint_preauth_key(device_hint=hint, ttl_seconds=2 * 3600)
-            preauth_key, preauth_source = minted, "api"
-        except tailscale_api.TailscaleAPIError as e:
-            _audit(action="tailscale_key_mint_fail", rule_id=str(e)[:40])
-            if pasted_key:
-                preauth_key, preauth_source = pasted_key, "pasted_fallback"
-            else:
-                preauth_source = "none"
-                preauth_warning = ("Tailscale key minting is unavailable right now — this "
-                                   "installer has no baked key, so the device will need a "
-                                   "manual tailnet join.")
-    elif pasted_key:
+    # NOTHING IS MINTED HERE ANY MORE. The Tailscale key is minted at DOWNLOAD time
+    # (`/install/windows/<token>/zip`) so that no secret is ever written to the database
+    # on the API path. Before this, the key was minted here and stored in
+    # `enrollment_tokens.preauth_key` for the token's whole life; the 2026-08-07 audit
+    # found 22 such keys still sitting in plaintext, the oldest from 2026-06-30.
+    #
+    # A PASTED key is the one exception and is deliberately kept (operator decision,
+    # 2026-08-07): it arrives HERE, at generate time, so it must be stored to survive
+    # until download. It is the fallback when OAuth is unavailable, and dropping it would
+    # make an OAuth outage unrecoverable. So "no stored secret" is true of the API path,
+    # not of this one — stated plainly rather than implied.
+    if pasted_key:
         preauth_key, preauth_source = pasted_key, "pasted"
+    elif tailscale_api.is_configured():
+        preauth_source = "api_at_download"
+    else:
+        preauth_source = "none"
+        preauth_warning = ("Tailscale key minting is not configured — this installer has "
+                           "no baked key, so the device will need a manual tailnet join.")
     # Auto-approve is OPT-IN (ADR 0012): default 0 (manual approval via Settings ->
     # Devices). Only an explicit truthy flag from the form flips it to 1. Absent or
     # falsy -> 0. Handles JSON bool/int and form strings.
@@ -3548,10 +3579,22 @@ def api_agent_installer_generate():
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
-            " device_name_hint, revoked, preauth_key, poll_interval) VALUES (?,?,?,?,1,0,?,?,0,?,?)",
-            (token, creator, now, expires, auto_approve, hint, preauth_key or None, poll_interval))
+            " device_name_hint, revoked, preauth_key, poll_interval, preauth_key_id) "
+            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?)",
+            (token, creator, now, expires, auto_approve, hint, preauth_key or None,
+             poll_interval, preauth_key_id or None))
+        # Bound how long any OTHER key lingers in plaintext. A token that is spent,
+        # revoked, or expired can never legitimately serve a zip again (see
+        # `_valid_installer_token`'s condition, which this is the exact complement of),
+        # so its key is dead weight — and before this, nothing ever removed it.
+        # Swept here because token generation is the natural cadence: every new
+        # installer link clears the previous ones.
+        scrubbed = _scrub_spent_preauth_keys(conn)
         conn.commit()
         conn.close()
+        if scrubbed:
+            log.info("scrubbed preauth_key from %d spent/expired/revoked token row(s)",
+                     scrubbed)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     # Rule-8: log the token prefix only; NEVER the pre-auth key.
@@ -3592,8 +3635,12 @@ def api_agent_installer_generate():
         "transport_warning": transport_warning,
         "device_name_hint": hint,
         "expires_at": expires,
-        "preauth_key_baked": bool(preauth_key),
-        "preauth_source": preauth_source,       # api | pasted_fallback | pasted | none
+        # True when the downloaded zip WILL carry a key — which now includes the
+        # api_at_download path, where nothing is baked yet at this moment but the zip
+        # route mints one. Reporting bool(preauth_key) alone would tell the operator
+        # "no key" about an installer that does in fact self-onboard.
+        "preauth_key_baked": bool(preauth_key) or preauth_source == "api_at_download",
+        "preauth_source": preauth_source,       # api_at_download | pasted | none
         "preauth_warning": preauth_warning,     # non-empty => show the user a caution note
         "zip_url": f"{base}/install/windows/{token}/zip",   # primary: frozen exe + baked conf
         "exe_url": f"{base}/install/windows/{token}/exe",   # advanced: generic exe, no baked conf
@@ -3680,7 +3727,65 @@ def install_windows_zip(token):
                         "agent exe is not staged on the server (set NEMESIS_AGENT_EXE to "
                         "the built NemesisAgent-Setup.exe). Contact your administrator.\n",
                         status=503, mimetype="text/plain")
+    # ── Tailscale key: minted HERE, at download, never stored ────────────────────────
+    # A stored key sat in the DB for the token's whole life (and, before the 08-07 fix,
+    # forever). Minting at download means the secret exists only in this request's
+    # memory and in the zip the operator receives.
+    #
+    # MINT FIRST, THEN REVOKE the previous one (operator decision, 2026-08-07). This
+    # route is intentionally repeatable — `uses` is incremented at ENROLMENT
+    # (hw_monitor.py:3112), not here — so a re-download must keep working. Revoking
+    # first would open a window where the revoke succeeds, the mint fails, and the user
+    # is left with a dead installer and a token that still looks valid. This ordering
+    # fails the other way: the worst case is an orphaned key that expires on its own.
     preauth = row["preauth_key"] if "preauth_key" in row.keys() else ""
+    prior_key_id = row["preauth_key_id"] if "preauth_key_id" in row.keys() else ""
+    prior_minted_at = (row["preauth_key_minted_at"]
+                       if "preauth_key_minted_at" in row.keys() else None)
+    if not preauth and tailscale_api.is_configured():
+        try:
+            preauth, new_key_id = tailscale_api.mint_preauth_key(
+                device_hint=row["device_name_hint"] or "Windows Device",
+                ttl_seconds=3600)
+        except tailscale_api.TailscaleAPIError as e:
+            # Rule 8: the audit/log carry the reason and the token prefix, never a key.
+            _audit(action="tailscale_key_mint_fail", rule_id=str(e)[:40])
+            log.error("installer zip: key mint failed after retries for token %s: %s",
+                      token[:8], e)
+            # NO silent fallback. Not an older key, not an empty key (which yields an
+            # installer that cannot join the tailnet and fails later, somewhere the
+            # user cannot connect to this cause), and the token is NOT marked used —
+            # so retrying genuinely works.
+            return Response("The system appears busy, please try again in a few "
+                            "minutes.\n",
+                            status=503, mimetype="text/plain",
+                            headers={"Retry-After": "120"})
+        # Record the id (not a secret) so this key is revocable, then retire the one it
+        # supersedes. Both are best-effort: a bookkeeping failure must not cost the user
+        # a working download they have already earned.
+        try:
+            conn = _dm_conn()
+            conn.execute("UPDATE enrollment_tokens SET preauth_key_id=?, "
+                         "preauth_key_minted_at=? WHERE token=?",
+                         (new_key_id or None, time.time(), token))
+            conn.commit()
+            conn.close()
+        except Exception:
+            log.exception("installer zip: could not record preauth_key_id for token %s",
+                          token[:8])
+        # AGED REVOKE. Retire the superseded key only once it is old enough that no
+        # install can still be using it — a re-fetch seconds after a real download
+        # (link-preview bot, AV scanner, browser prefetch) must NOT revoke the key the
+        # user is installing with right now. Unknown age fails toward leaving it alone;
+        # the cost is one orphan expiring on its own TTL. See
+        # tailscale_api.should_retire_superseded_key for the full reasoning.
+        if prior_key_id and prior_key_id != new_key_id:
+            if tailscale_api.should_retire_superseded_key(prior_minted_at):
+                tailscale_api.revoke_key(prior_key_id)   # never raises, by contract
+            else:
+                log.info("installer zip: superseded key id=%s left live (within the "
+                         "grace window) so an in-progress install is not broken",
+                         str(prior_key_id)[:12])
     poll_interval = row["poll_interval"] if "poll_interval" in row.keys() else None
     conf = _render_install_conf(_nemesis_tailnet_host(), token,
                                 row["device_name_hint"] or "Windows Device",
