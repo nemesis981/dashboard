@@ -54,6 +54,9 @@ import modules                                # noqa: E402
 modules.set_shared_db_path(DB_PATH)
 from modules.diagnostics import module as diag           # noqa: E402  (after set_shared_db_path)
 from modules.diagnostics import watcher as diag_watcher  # noqa: E402
+# Core-side episode notifier, shared with vpn_dns_guard. Resolves via the unit's
+# PYTHONPATH (/opt/nemesis/alert_manager), same as `nemesis_paths` above.
+import nemesis_connectivity_notify as conn_notify         # noqa: E402
 
 _running = True
 
@@ -100,6 +103,46 @@ def _on_signal(signum, _frame) -> None:
     _running = False
 
 
+def _notify(result: dict) -> None:
+    """Hand this cycle's verdict to the shared episode notifier.
+
+    WHY THIS LIVES IN THE SERVICE HOST AND NOT IN THE MODULE. The diagnostics
+    module is observe-only by deliberate design (ADR 0005) and, under ADR 0001,
+    may write only its own `diagnostics_*` tables — while episode state is
+    core-owned (`connectivity_episodes`) and shared with `vpn_dns_guard`. So the
+    probe stays in the module and the *reporting* happens here, core-side, which
+    is the same split `watchdog.py` already uses for hardware alerts.
+
+    Raising an alert is reporting, not remediation, so this does not weaken the
+    observe-only boundary — nothing here changes system state.
+
+    NEVER raises: a broken notifier must not stop the probe loop that feeds it.
+    `observe()` already guarantees that internally; this is the second belt,
+    because a probe that dies because reporting failed would recreate the exact
+    silence this whole change exists to remove.
+    """
+    verdict = result.get("verdict")
+    if not verdict:
+        # An absent verdict is NOT "everything is fine" — it means the probe did
+        # not produce a reading. Treating it as OK would be an instrument that
+        # can only report success, which is the failure shape this codebase keeps
+        # finding. Skip the cycle and say so.
+        log.warning("diagnostics-service: probe returned no verdict — "
+                    "episode state NOT updated this cycle")
+        return
+    try:
+        conn_notify.observe(
+            source="diagnostics",
+            ok=(verdict == "ALL_OK"),
+            verdict=None if verdict == "ALL_OK" else verdict,
+            # Controlled vocabulary only — this reaches the DB and email (Rule 8).
+            # `note` is already a fixed-string field in the probe library.
+            detail=result.get("note"),
+        )
+    except Exception:
+        log.exception("diagnostics-service: connectivity notify failed")
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -122,6 +165,7 @@ def main() -> None:
                 log.info("diagnostics-service: verdict=%s vpn=%s lat=%sms",
                          result.get("verdict"), result.get("vpn_connected"),
                          result.get("latency_ms"))
+                _notify(result)
             else:
                 log.info("diagnostics-service: self-gated off — skipping probe")
         except Exception:
