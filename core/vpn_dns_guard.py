@@ -582,7 +582,38 @@ def restore(ph, state):
     saved = state.get("saved_upstreams")
     if saved is not None:
         ph.set_upstreams(saved)
-        log.info("restored pre-VPN upstreams %s", saved)
+        # Rule 13 / Rule 3: prove the revert, don't assert it. set_upstreams()'s
+        # only failure signal is raise_for_status() on the PATCH, which sees
+        # transport and auth failures but NOT "Pi-hole accepted the PATCH and the
+        # config never actually took" (async/eventually-consistent config-apply in
+        # some FTL versions, partial apply, config-reload race). apply_fix() above
+        # already verifies before claiming success; this is the same evidence
+        # standard applied to the restore path, which is the asymmetry that made
+        # a false "restored" claim possible.
+        try:
+            readback = ph.get_upstreams()
+        except Exception:  # noqa: BLE001
+            readback = None
+            log.exception("restore: could not read upstreams back from Pi-hole")
+        # Compare order-insensitively: Pi-hole is free to return the same set in a
+        # different order, and treating that as a mismatch would produce a
+        # permanent false failure — the exact "instrument that can only say no"
+        # shape this rule exists to prevent.
+        matched = (readback is not None
+                   and sorted(map(str, readback)) == sorted(map(str, saved)))
+        resolves = verify_upstream_resolves()
+        if not (matched and resolves):
+            # Do NOT clear `applied` / `saved_upstreams` here. Leaving them intact
+            # is what lets the next reconcile cycle retry; clearing them on an
+            # UNPROVEN restore is precisely what would turn a transient failure
+            # into a permanent silent one, because nothing would ever revisit it.
+            log.error("restore NOT confirmed: readback=%s (expected %s, match=%s), "
+                      "resolve-probe=%s. Leaving state applied so the next cycle "
+                      "retries — Pi-hole may still be pointed at the tunnel "
+                      "resolver and DNS may be broken for its clients.",
+                      readback, saved, matched, resolves)
+            return False
+        log.info("restored pre-VPN upstreams %s (readback matched, resolving)", saved)
     else:
         # Applied, tunnel now down, but no baseline to go back to. Say so loudly:
         # Pi-hole is left pointing at a resolver that was only reachable THROUGH
