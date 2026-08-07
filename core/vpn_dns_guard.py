@@ -755,19 +755,42 @@ def main(argv):
     if arg == "--detect":
         _print(detect_tunnel())
     elif arg == "--status":
+        # Rule 13. This block used to build `dns = {"error": str(e)}` on failure and
+        # then read `dns.get("upstreams")` out of it — so an exception rendered as
+        # `"pihole_upstreams": null`, IDENTICAL to a healthy Pi-hole that simply has
+        # no upstreams set, and the "error" key it had just built was never printed.
+        # That cost real time on 2026-08-07: a run without the service's
+        # EnvironmentFile (so an empty PIHOLE_PASSWORD) showed nulls and was read as
+        # a live production auth failure. It was not — the daemon authenticates fine.
+        # The failure must be visible, and it must be distinguishable from an
+        # empty-but-healthy answer.
         ph = Pihole()
+        dns, pihole_error = {}, None
         try:
             dns = ph.get_dns()
         except Exception as e:  # noqa: BLE001
-            dns = {"error": str(e)}
+            pihole_error = "%s: %s" % (type(e).__name__, e)
         _print({
             "tunnel": detect_tunnel(),
             "state": _load_state(),
+            # Report the CONFIG this process actually resolved, not what a service
+            # would get. Reading --status from a shell without /etc/nemesis.env
+            # loaded is the single most likely reason it fails, and these two fields
+            # say so immediately instead of leaving it to be inferred from a null.
+            # The password is reported as a boolean ONLY — never its value (Rule 8).
+            "pihole_target": PIHOLE_IP,
+            "pihole_password_configured": bool(PIHOLE_PASSWORD),
+            "pihole_query_ok": pihole_error is None,
+            "pihole_error": pihole_error,
             "pihole_upstreams": dns.get("upstreams"),
             "pihole_interface": dns.get("interface"),
             "pihole_listeningMode": dns.get("listeningMode"),
             "resolves_now": verify_upstream_resolves(),
         })
+        # Non-zero exit when Pi-hole could not be queried, matching the
+        # --egress-iface precedent above: a caller that scripts this must be able
+        # to tell "reported successfully" from "could not measure".
+        return 1 if pihole_error else 0
     elif arg == "--apply":
         _print(reconcile(force="apply"))
     elif arg == "--restore":
