@@ -83,13 +83,35 @@ Full per-commit detail in `docs/handoff/supplements/2026-08-07-001.md`. In order
    `anomaly_ai_usage`) — carried from 2026-08-06, still Window 2's to do, not touched today.
 4. **QUIC/nftables ADR 0022** — carried from 2026-08-06, still Window 2's to write, not
    touched today.
-5. **DHCP `status()` observability gap** — reports `running` during a crash-loop, found
-   today, not fixed.
+5. ~~**DHCP `status()` observability gap** — reports `running` during a crash-loop, found
+   today, not fixed.~~ **RESOLVED same day, later session (`f5deda0`)**: crash-loop
+   detection, port67 verification, and a lease-event log landed, 159/159 + 78/78 re-run
+   live. Superseded by item 7 below — the deployment work that followed surfaced four new
+   follow-ups, not this one.
 6. **`enrich_ip()` external IP exposure, agent check-in jitter, empty-alert-list read-window
    mismatch, install.sh default-route interface detection, host-defence rule naming,
    Windows DHCP hostname truncation, cache-hit token skew, installer token revocation,
    credential rotation, Concurrency Phase 3, `/api/analyze/<rule_id>` GET-that-spends-money**
    — all carried forward unchanged from prior HANDOFFs, none newly urgent.
+7. **NEW — four follow-ups from tonight's live DHCP deployment (2026-08-07, later
+   session), filed to `PUNCHLIST.md` — surface in tomorrow's (2026-08-08) Morning Status
+   briefing per explicit operator instruction, for Window 3 to pick up after Paul's usage
+   resets:**
+   - Polkit rule (dashboard→DHCP-daemon control) is a stopgap; architecturally consistent
+     fix is a `nemesis-fwd` peer/op, same pattern as `fail2ban`/`write_env`.
+   - Pi-hole group-membership grant (needed for dashboard DHCP-status reads) also grants
+     read access to Pi-hole's config file, including its web password hash — real
+     privilege increase, worth narrowing, risk not yet assessed.
+   - `dhcp` namespace has no Data Manager grant for `error_codes`/`error_occurrences` —
+     every `E-DHCP-*` occurrence write has silently failed since the error-code system
+     was added. Really an ADR-0006 question (how any module reaches the core-owned error
+     system), not DHCP-specific.
+   - Three of tonight's six deployment fixes (polkit rule, systemd drop-in, group
+     membership) are host-level, exist nowhere in the repo/installer — a fresh install
+     hits the same wall tonight worked through by hand. Needs an `install.sh` fix,
+     verified against a fresh VM clone, not a re-read of the script.
+   Full detail, evidence, and fix shapes: `PUNCHLIST.md`, "Four follow-ups from tonight's
+   live DHCP deployment (2026-08-07)".
 
 ## 4. Verified live today, not just claimed (Rule 3 discipline)
 

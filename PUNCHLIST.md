@@ -3334,3 +3334,89 @@ this entry is the proposal, not the implementation.
           NetBIOS name being short. Only one Windows client was observed. Worth confirming
           against a Windows box whose full name is known to exceed 15 characters before
           building anything that depends on the exact semantics.
+
+### [SMALL] Four follow-ups from tonight's live DHCP deployment (2026-08-07) — for Window 3, after Paul's usage resets
+Captured during the same session that landed `f5deda0` (DHCP steady-state health
+observability). None of these block that commit or tonight's deployment — all are
+follow-up items surfaced *while* getting DHCP running live, not defects in the code
+just committed.
+
+- [ ] **Polkit rule is a stopgap for dashboard→daemon control, not the architecturally
+      consistent fix.** Tonight's deployment needed the dashboard to control the DHCP
+      daemon and reached for a polkit rule to get there live. The rest of this codebase
+      routes privileged operations through `nemesis-fwd` — a root-helper listening on a
+      Unix socket, already the pattern for `fail2ban` (`block_ip`/`deny_ip`) and the
+      dashboard's own `write_env`/`restart_dashboard` ops. A polkit rule is a second,
+      parallel privilege-escalation path alongside that one, not an instance of it.
+    - [ ] **Fix shape:** add a `nemesis-fwd` peer/op for DHCP daemon control (start/
+          stop/restart/reload), same shape as the existing peers, and retire the polkit
+          rule once it's wired. Until then the polkit rule is load-bearing — don't remove
+          it without the replacement in place first.
+    - [ ] **Why this matters beyond tidiness:** every other privileged path in the repo
+          goes through one chokepoint that can be audited, rate-limited, and reasoned
+          about in one place (see `alert_manager/firewall.py`'s ufw chokepoint rule in
+          CLAUDE.md, same principle). A second privilege path is a second thing to secure
+          and a second place a future audit has to remember to check.
+
+- [ ] **The Pi-hole group-membership grant needed for dashboard→Pi-hole DHCP status
+      reads ALSO grants read access to Pi-hole's config file, which includes its web
+      password hash.** This is a real privilege increase beyond what the DHCP status
+      feature actually needs — worth narrowing if a cleaner path exists (a narrower
+      ACL, a read-only status endpoint on Pi-hole's API instead of file access, or a
+      dedicated group scoped to just the status file).
+    - [ ] **Not yet assessed:** how exposed the hash actually is (file permissions
+          within the group, whether the dashboard process ever handles or logs it) —
+          this entry is the "found it, flagging it" step, not a completed risk
+          assessment. Do that assessment before deciding whether narrowing is worth
+          the effort or the exposure is already adequately contained.
+
+- [ ] **No Data Manager namespace grants `error_codes`/`error_occurrences` to the `dhcp`
+      module at all — every `E-DHCP-*` code the module has ever tried to record has
+      silently failed to persist.** Confirmed while reviewing `f5deda0`:
+      `modules/dhcp/module.py:377` calls
+      `nemesis_errors.record_error_best_effort()` for every error path, including
+      tonight's new crash-loop/health codes (E-DHCP-014/015/016), but `data_manager.py`'s
+      `dhcp` namespace grant covers only `dhcp_leases`, `dhcp_mode_change_log`,
+      `dhcp_health_samples`, `dhcp_lease_events` — never `error_codes` or
+      `error_occurrences`. Every occurrence write is refused at runtime with a silent
+      `WOULD DENY`/deny log line, not an exception, so nothing about this looks broken
+      from the module's own test suite (which builds tables on a plain sqlite3
+      connection, same class of blind spot the health-samples grant comment already
+      flags in `f5deda0`).
+    - [ ] **This is really an ADR-0006 question, not a DHCP-specific bug:** how is ANY
+          module supposed to reach the core-owned error system through the Data Manager's
+          write-own/read-any model? `error_codes`/`error_occurrences` are core tables by
+          the prefix convention (ADR 0001) — granting every module blanket write access
+          would defeat the write-own boundary the Data Manager exists to enforce, but
+          some sanctioned path has to exist or the error system is decorative for every
+          module except core itself. Worth checking whether any OTHER module actually
+          has this working today, or whether DHCP just happened to be the one where
+          someone read the grant map closely enough to notice.
+    - [ ] **Fix shape, pending the ADR-0006 answer:** either a narrow, explicit grant
+          (module may INSERT into `error_occurrences` only, never read/write
+          `error_codes`) or a dedicated Data Manager method (e.g.
+          `record_module_error()`) that handles the cross-namespace write on the
+          module's behalf, auditable in one place rather than by widening raw grants.
+
+- [ ] **Three of tonight's six deployment fixes are host-level changes that exist
+      nowhere in the repo or installer — a fresh Nemesis install would hit the exact
+      same wall tonight's session worked through by hand.** The polkit rule, a systemd
+      drop-in, and a group-membership grant (the Pi-hole group above) were all applied
+      directly to this box, live, to get DHCP running — none of the three is captured
+      as an installer step, a packaged config file, or even a documented manual step.
+    - [ ] **Concrete gap:** anyone following the installer today gets DHCP code that
+          cannot actually control the daemon (no polkit rule), cannot read Pi-hole
+          status (no group membership), and is missing whatever the systemd drop-in
+          was covering for — three separate points of "it doesn't work" discovered only
+          by live-running it, exactly as happened tonight.
+    - [ ] **Fix shape:** add all three to `install.sh` (or the module's own install
+          hook, if DHCP has one) as idempotent steps — polkit rule file drop +
+          `systemctl daemon-reload`, group membership via `usermod -aG`, and the systemd
+          drop-in file. Verify by testing against a fresh VM clone (see CLAUDE.md's VM
+          test fleet — `Nemesis Linux Master ISOLATED` or a fresh appliance clone), not
+          by re-reading the installer script, since that's exactly the kind of claim
+          Rule 3 exists to distrust without a live install to point at.
+    - [ ] **Sequencing note:** do this after the polkit→nemesis-fwd fix above, not
+          before — installing a polkit rule that's about to be retired is wasted work
+          if the two land close together. If the nemesis-fwd fix is going to take a
+          while, install the polkit rule for now and revisit.
