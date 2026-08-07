@@ -900,7 +900,9 @@ def init_enrollment_tokens_table():
                 auto_approve     INTEGER DEFAULT 1,
                 device_name_hint TEXT,
                 revoked          INTEGER DEFAULT 0,
-                preauth_key      TEXT
+                preauth_key      TEXT,
+                preauth_key_id   TEXT,
+                preauth_key_minted_at REAL
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_token "
@@ -916,6 +918,23 @@ def init_enrollment_tokens_table():
         # NULL => the agent uses its own 300s default.
         if "poll_interval" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN poll_interval INTEGER")
+        # Migration (ADR 0001 guarded ALTER): preauth_key_id = the Tailscale key ID that
+        # `mint_preauth_key()` already returns and the caller used to discard. It is NOT a
+        # secret — it is the handle needed to REVOKE a key via the API. Storing it is what
+        # makes revocation programmatic instead of a hand-search in the admin console, and
+        # it is what survives after `preauth_key` itself is scrubbed. Audit 2026-08-07
+        # found 22 keys retained in plaintext indefinitely with no id recorded for any of
+        # them, so none could be revoked without matching them by hand.
+        if "preauth_key_id" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN preauth_key_id TEXT")
+        # Migration (ADR 0001 guarded ALTER): when the current key was minted. NOT a
+        # secret — a unix timestamp. It exists so a superseded key can be retired only
+        # once it is old enough that revoking it cannot pull the rug out from under an
+        # install that is already running (see
+        # tailscale_api.should_retire_superseded_key). NULL on rows predating this
+        # column, which that helper deliberately treats as "do not revoke".
+        if "preauth_key_minted_at" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN preauth_key_minted_at REAL")
 
         # backup_media_status: last-known free space per backup destination.
         #
