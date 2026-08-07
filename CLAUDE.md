@@ -612,6 +612,43 @@ at `~/work/nemesis-internal/handoff/`, `~/work/nemesis-internal/briefing/`, and
   brought under the same standing rule as handoff/briefing (permanent, not a one-time copy) so
   future sessions mirror automatically without being asked.
 
+### 13. Host-level network changes need a PROVEN revert, not a claimed one
+No change to the operator's own daily-driver machine's network state — exit node, routing,
+VPN prefs, iptables/nft rules, DNS — may be handed to Paul with a claimed auto-revert unless
+the revert is PROVEN by reading the live state back (e.g. `tailscale debug prefs`, `ip
+route`, `nft list ruleset`) before declaring success. This is the same standard Rule 3
+already applies everywhere else in a session — a revert mechanism is exactly the kind of
+self-reported "it'll handle it" claim Rule 3 exists to distrust by default.
+
+**Prefer not touching the real host's network stack at all.** Route this class of test
+through the isolated VM fleet (see "VM test fleet" in TIER 2) instead of the operator's
+actual machine — a scoped VM test produces the same observation without ever putting the
+operator's real internet/DNS path at risk.
+
+**Why (2026-08-04 → 2026-08-07 incident; full postmortem:
+`~/work/nemesis-internal/known-limitations/tailscale-exit-node-persistence-2026-08-07.md`):**
+a `trap '...' EXIT INT TERM` was handed to Paul as a self-reverting exit-node test, with the
+claim "auto-reverts on exit or Ctrl-C, so it can't leave your machine routed through a test
+VM." **The claim was false.** `EXIT` fires when the interactive shell itself exits, not when
+a foregrounded `&&`-chained command finishes — on the expected success path (`sleep 300`
+elapsing normally), the compound command simply ended and nothing ever reverted; the trap
+sat registered and idle. The exit node stayed live for ~2 days 20 hours — invisible because
+the test VM kept genuinely forwarding traffic — until an unrelated reboot restored the
+persisted Tailscale pref while the VM happened to be offline, breaking the operator's
+internet (LAN stayed fine, disguising it as an ISP/router problem). Zero `EditPrefs` journal
+events occurred between the change and Paul's own manual fix three days later — hard evidence
+the trap never fired once. No production/Nemesis impact, but a real, hours-long workstation
+outage caused by an unverified safety claim.
+
+**If a host-level network test is genuinely unavoidable:**
+- The revert is a separate, explicit, operator-run command issued as its own step — never
+  chained after the change in the same command/trap.
+- State is read back and shown before the change is called reverted.
+- The change is logged in the live worklog at the moment it's made (per Rule 9), including
+  the exact revert command, so a later session can find it without archaeology.
+- Treat it as a state-changing action under the State Snapshots discipline above — not an
+  exception to it.
+
 ---
 
 ## TIER 2 — Nemesis-specific rules
