@@ -122,6 +122,36 @@ NAMESPACES = {
     # static-analysis output, so it needs no WARN grace period.
     "integrity_watch":    {"tables": ("integrity_observations",)},
 
+    # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
+    # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the
+    # dashboard can render a persistent degraded banner and so every transition
+    # leaves an audit row. Those are the same fact published two ways, so they
+    # share one mechanism: this namespace WRITES both tables; the dashboard only
+    # READS them (ADR 0001 read-any needs no grant).
+    #
+    # An EXPLICIT table list, not a `tier2_` prefix grant, following the
+    # `integrity_watch` precedent directly above: this publishes
+    # security-posture state, and a prefix grant would let it silently acquire
+    # new writable tables as Tier 2 grows. Adding a table becomes a deliberate
+    # act rather than a side effect of naming.
+    #
+    # ⚠ THE EXACT-MATCH TRAP, CLOSED DELIBERATELY. A missing name here is NOT a
+    # test failure — `tier2_gate_state.py`'s own suite could build these tables
+    # on a plain sqlite3 connection and pass every assertion, while production
+    # logs one `WOULD DENY` line and silently drops the write. For THIS table
+    # pair that failure is unusually quiet and unusually bad: the banner would
+    # keep rendering the last successfully-written state, so a gate that has
+    # gone into bypass would still display as inspecting. A dropped write here
+    # produces a FALSE REASSURANCE, not a visible outage.
+    # `test_tier2_gate_state.py` therefore asserts BOTH names against
+    # `allowed()` DIRECTLY, plus a control proving the grant is exact rather
+    # than a prefix, and both are mutation-verified.
+    #
+    # Mode is the default ENFORCE — this list is authored, not static-analysis
+    # output, so it needs no WARN grace period (same reasoning as
+    # `integrity_watch`).
+    "tier2_gate":         {"tables": ("tier2_gate_state", "tier2_gate_events")},
+
     # ── core_module processes (retrofit, 2026-07-28) ─────────────────────────
     # Table lists derived by parsing each process's SQL with this module's own
     # classify(), so the audit and the enforcement agree by construction.

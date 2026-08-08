@@ -100,7 +100,7 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table, init_recovery_codes_table,
                       init_settings_table, init_error_tables,
-                      init_conn_events_tables)
+                      init_conn_events_tables, init_tier2_gate_tables)
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append,
@@ -127,6 +127,15 @@ init_enrollment_tokens_table()
 # init_quarantines_table: there is no systemd ordering between the two services,
 # and hw_monitor must not write conn_events before the table exists.
 init_conn_events_tables()
+# Tier 2 gate state publication (ADR 0001 canonical DDL in
+# alert_manager/database.py). Created HERE specifically: the dashboard is the
+# READER, and it must not depend on the gate having published first — an absent
+# table would otherwise surface as a read error on a box where Tier 2 is simply
+# not deployed, which is the normal case today. Defining the DDL without calling
+# it anywhere is the `devices`-table fresh-install failure in miniature: a CREATE
+# that exists in the repo but never runs is indistinguishable from no CREATE at
+# all on a fresh install. Caught in review by Window 2 before commit, 2026-08-08.
+init_tier2_gate_tables()
 # Structured error codes (ADR 0001 core-owned `error_*`). Canonical DDL in
 # alert_manager/nemesis_errors.py; created here at startup so every service and
 # module can record from first use rather than each re-creating them.
@@ -2717,6 +2726,39 @@ def get_active_quarantines():
             "minutes_remaining": minutes_remaining,
         })
     return out
+
+
+def render_tier2_gate_banner_html():
+    """Persistent banner for the Tier 2 inspection gate's posture.
+
+    PERSISTENT, not a toast: while traffic is uninspected the operator must be
+    able to see it at any moment, not only if they happened to be looking when
+    the transition fired. That is the whole reason this is rendered into the
+    page rather than pushed as an alert.
+
+    FAILS LOUD, NEVER SILENT. Any error reading the gate state renders a
+    CRITICAL banner saying the state is unknown. Returning "" on error would
+    make a broken reader indistinguishable from a healthy gate — the exact
+    false-reassurance failure `tier2_gate_state`'s staleness handling exists to
+    prevent, reintroduced at the last step.
+    """
+    try:
+        from alert_manager import tier2_gate_state as _tg
+        b = _tg.banner()
+    except Exception as e:                                   # noqa: BLE001
+        logger.warning("tier2 gate banner unavailable: %r", e)
+        return ('<div class="t2-banner t2-critical">'
+                '<strong>Tier 2 inspection state UNKNOWN</strong>'
+                '<div>The dashboard could not read the inspection gate state. '
+                'Traffic may or may not be inspected.</div></div>')
+    if not b:
+        return ""
+    # html.escape on every interpolated value: these strings are assembled from
+    # gate-supplied reason text, which is not the dashboard's to trust.
+    cls = "t2-critical" if b["level"] == "critical" else "t2-info"
+    return (f'<div class="t2-banner {cls}">'
+            f'<strong>{html.escape(b["title"])}</strong>'
+            f'<div>{html.escape(b["body"])}</div></div>')
 
 
 def render_quarantine_banner_html(quarantines):
@@ -11001,6 +11043,12 @@ def hardware_all_page():
         a.back {{ color: #00d4ff; text-decoration: none; font-size: 0.9em; }}
         .alert-banner {{ background: #1a0000; border: 1px solid #ff4444;
             border-radius: 6px; padding: 12px 16px; margin: 12px 0; color: #ff8888; }}
+        .t2-banner {{ border-radius: 6px; padding: 12px 16px; margin: 12px 0; }}
+        .t2-banner.t2-critical {{ background: #1a0000; border: 1px solid #ff4444;
+            color: #ff8888; }}
+        .t2-banner.t2-info {{ background: #001a14; border: 1px solid #00ff88;
+            color: #88ffcc; }}
+        .t2-banner div {{ margin-top: 4px; color: #ccc; font-size: 0.9em; }}
         .device-section {{ background: #0d1117; border: 1px solid #1e2d4e;
             border-radius: 8px; margin-bottom: 12px; overflow: hidden; }}
         .device-header {{ padding: 14px 18px; cursor: pointer; display: flex;
@@ -11835,6 +11883,7 @@ def dashboard():
     review_queue_count = len(review_queue)
     quarantines = get_active_quarantines()
     quarantine_banner_html = render_quarantine_banner_html(quarantines)
+    tier2_gate_banner_html = render_tier2_gate_banner_html()
     quarantine_banner_display = "block" if quarantines else "none"
 
     module_cards_html = "".join(
@@ -12042,6 +12091,8 @@ def dashboard():
     </nav>
 
     <div id="nemesisIncidentBannerWrap">{incident_banner_html}</div>
+
+    <div id="tier2GateBannerWrap">{tier2_gate_banner_html}</div>
 
     <div class="quarantine-banner" id="quarantineBanner" style="display:{quarantine_banner_display}">
         <h2>🚨 Auto-Quarantined IPs</h2>

@@ -239,6 +239,79 @@ def init_conn_events_tables():
         conn.close()
 
 
+def init_tier2_gate_tables():
+    """Canonical DDL for the Tier 2 gate's state-publication interface.
+
+    ── WHAT THIS IS FOR ─────────────────────────────────────────────────────────
+    The Tier 2 inspection gate's fail-safe (L3 Piece 5) lives outside this repo.
+    The dashboard has to show whether traffic is currently being inspected, and
+    every state transition has to leave an audit row. Those are the SAME fact
+    published two ways, so they share one mechanism rather than two: the gate
+    writes here, the dashboard reads here (ADR 0001 read-any), and no other
+    coupling between the two sides exists.
+
+    ── WHY THERE IS A HEARTBEAT, AND WHY THE READER MUST HONOUR IT ──────────────
+    `tier2_gate_state` holds ONE row describing the current state. A stored state
+    row is a CLAIM about a moment; it does not expire on its own. If the gate
+    service dies while the row says `inspecting`, the row keeps saying
+    `inspecting` forever and the dashboard keeps telling the operator their
+    traffic is being inspected when nothing is running at all — a false
+    reassurance that looks exactly like a working feature.
+
+    So `heartbeat_at` is refreshed on every publish, and readers MUST treat a row
+    older than the staleness bound as UNKNOWN rather than as the last known
+    state. `tier2_gate_state.read_state()` does this; anything reading the table
+    directly must do the same. Presence of a row is not evidence of a live gate.
+
+    ── WHY `state` IS NOT A BOOLEAN ─────────────────────────────────────────────
+    "Inspecting: yes/no" cannot express `soaking` (installed but still proving
+    itself) or `locked_out` (bypassed and NOT retrying, needs a human). Those
+    need different operator responses, and collapsing them would make the
+    dashboard say the same thing for "recovering on its own" and "stuck until you
+    act". The full state string is stored, and `inspecting`/`degraded` are stored
+    alongside it as DERIVED convenience columns — derived by the gate, which owns
+    the state machine, never re-derived by the dashboard from a string it would
+    have to keep in sync.
+
+    `tier2_gate_events` is append-only and is the audit trail: one row per
+    transition, never updated, never deleted by the publisher. It carries
+    `actor` for the same reason every other state-changing table here does
+    (multi-user-ready by default) even though nothing sets it yet.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tier2_gate_state (
+                id                 INTEGER PRIMARY KEY CHECK (id = 1),
+                state              TEXT    NOT NULL,
+                inspecting         INTEGER NOT NULL,
+                degraded           INTEGER NOT NULL,
+                episodes_in_window INTEGER NOT NULL DEFAULT 0,
+                reason             TEXT,
+                since              TEXT    NOT NULL,
+                heartbeat_at       TEXT    NOT NULL,
+                actor              TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS tier2_gate_events (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts        TEXT    NOT NULL,
+                event     TEXT    NOT NULL,
+                severity  TEXT    NOT NULL,
+                ticket    INTEGER NOT NULL DEFAULT 0,
+                detail    TEXT,
+                actor     TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_tier2_gate_events_ts "
+                  "ON tier2_gate_events(ts DESC)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 #: The lawful basis a consent record rests on. NOT a free-text field — an
 #: unrecognised value is a bug, and None means "predates the column" (see the
 #: migration above), never "individual".
