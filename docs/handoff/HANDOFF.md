@@ -170,19 +170,27 @@ Full detail: `PUNCHLIST.md`'s DHCP-deployment-follow-ups section and Window 1's 
 deployed to production, these two grants land here too and should be re-verified at that
 point, not assumed to match the test-zone state.
 
-### ⚠ Claim NOT confirmed, flagged rather than recorded as fact (2026-08-08)
-A request to document "the operator's new `pihole` group membership for the cardinality
-tool" was checked against live state and against Window 1's own handoff and does not hold up:
-- `getent group pihole` on this box: empty (`pihole:x:1001:`) — `<user>` is not a member.
-- `id <user>`: no `pihole` group listed.
-- Window 1's own handoff is explicit on this exact point: *"`/etc/pihole/pihole-FTL.db` is
-  `640 pihole:pihole`; `<user>` is not in the `pihole` group, and the NOPASSWD sudo rules on
-  this host are all narrow ... with nothing that can read it ... this needs the operator to
-  run it. Do not go looking for a way around that."* The cardinality tool
-  (`~/work/nemesis-internal/tools/pihole-cardinality.py`) was run via `sudo python3 ...`
-  under the operator's own general (password-gated) sudo access, not via a new group grant.
-- **No such grant exists to revoke.** Recorded here so the discrepancy is visible rather than
-  silently either fabricating the entry or silently dropping the request.
+### `<user>`'s `pihole` group membership — CONFIRMED live, added this session (2026-08-08)
+- **Command:** the operator ran `sudo gpasswd -a <user> pihole` directly, for the cardinality
+  tool (`~/work/nemesis-internal/tools/pihole-cardinality.py`).
+- **Live-verified twice, with a real discrepancy in between that turned out to be timing, not
+  drift.** The FIRST check this session (`getent group pihole` empty, `id <user>` with no
+  `pihole`) ran *before* the operator's `gpasswd` command and correctly reported the group as
+  it stood at that moment — it also matched Window 1's handoff, written earlier in the day
+  before this grant existed. A SECOND check, run fresh at the operator's request, shows
+  `getent group pihole` → `pihole:x:1001:<user>` and `id -nG <user>` → includes `pihole`.
+  `/etc/group`'s mtime (10:28:54, ~3 minutes before the recheck) corroborates a change landed
+  in exactly that window. **No revert happened; nothing needed chasing down** — both checks
+  were accurate for the moment they ran, on either side of the operator's own live change.
+  (One artifact worth noting for anyone repeating this style of check: this session's own
+  shell still doesn't show `pihole` in a bare `id` with no argument — supplementary groups are
+  cached per-process at login, so an already-running shell won't pick up a new group until a
+  fresh login/`newgrp`. `getent group <name>` and `id <user>` for an explicit user both read
+  `/etc/group` live and are the reliable check, not `id` with no argument from a
+  pre-existing shell.)
+- **Real elevated grant, same footing as the other two above** — worth its own revoke
+  decision once the cardinality tool's current use is done, not assumed self-limiting just
+  because it was operator-run rather than installer-granted.
 
 ## 7. Known issues/gaps, not yet fixed
 
