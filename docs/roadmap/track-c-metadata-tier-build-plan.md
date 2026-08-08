@@ -132,8 +132,13 @@ surfaced in settings.
 
 ### 5 — Novelty / seen-set
 Destination membership set, feeding Track C's novelty-weighted sampling and later Phase 3's
-novelty trigger. Reuses the reputation cache's **membership** — its verdicts are useless (6
-reactive rows) but "have I seen this destination before" is exactly right.
+novelty trigger. **Correction (2026-08-08, Window 1):** this does NOT reuse the reputation
+cache. That cache is agent-side and keyed on IP only — a different scope than this table's
+per-device, name-preferred/address-fallback destination membership — so its membership doesn't
+apply here. Built as its own store instead (`alert_manager/conn_seen.py`), populated
+incrementally at ingest rather than derived from `conn_events`, specifically so novelty survives
+that table's 30-day reaper. See the module's docstring and `database._init_conn_seen_tables` for
+the full design.
 
 ### 6 — Retire the dead path
 Remove or repoint the poll-based `_network_connections()` so there is one mechanism. Left in
