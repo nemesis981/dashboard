@@ -206,6 +206,104 @@ check("absent name stored as NULL, not empty string", r[0] is None)
 check("  with 'unavailable' provenance preserved (null is not informative alone)",
       r[1] == ce.NAME_SRC_UNAVAILABLE)
 
+# ── Track C step 5: ingest populates the seen-set, and ONLY from stored events ──
+# The seen-set is derived from consented telemetry, so every gate protecting
+# conn_events has to protect it too. A rejection path that stored no event but
+# still recorded the destination would leak exactly what Requirement 0 exists to
+# prevent — and it would leak it into the table nothing ever reaps by device.
+
+def seen_dests(device="dev-1"):
+    return db().execute(
+        "SELECT dest_key, key_kind, first_seen, conn_count FROM "
+        "conn_seen_destinations WHERE device_id=? ORDER BY dest_key",
+        (device,)).fetchall()
+
+
+def wipe_seen():
+    c = db()
+    c.execute("DELETE FROM conn_seen_dest_addrs")
+    c.execute("DELETE FROM conn_seen_destinations")
+    c.commit()
+    c.close()
+
+
+print("ingest populates the seen-set from stored events")
+wipe(); wipe_seen(); grant()
+c = hm.ingest_connection_events(payload([ev(raddr="198.51.100.7")]))
+d = seen_dests()
+check("a stored event created a seen-set entry", len(d) == 1, str(d))
+check("  keyed on the address when no name was observed",
+      d and d[0][0] == "198.51.100.7" and d[0][1] == "addr")
+check("  and the ingest counts report it", c.get("seen_new") == 1, str(c))
+
+print("the seen-set learns NOTHING from rejected events")
+for label, setup, evs in (
+        ("no consent", lambda: None, [ev(raddr="198.51.100.20")]),
+        ("revoked consent", lambda: grant(revoked="2026-08-07T13:00:00"),
+         [ev(raddr="198.51.100.21")]),
+        ("consent_version mismatch", lambda: grant(version=2),
+         [ev(raddr="198.51.100.22", consent_version=1)]),
+        ("invalid record", lambda: grant(),
+         [ev(raddr="198.51.100.23", rport=99999)]),
+):
+    wipe(); wipe_seen(); setup()
+    res = hm.ingest_connection_events(payload(evs))
+    check("%s: nothing stored" % label, rowcount() == 0, str(res))
+    check("  and the seen-set is EMPTY", len(seen_dests()) == 0, str(seen_dests()))
+
+# CONTROL. Every check above is satisfied by an ingest function that is simply
+# broken and stores nothing at all, so the accept case is re-run last: the same
+# harness, the same table, one valid consented event, and it MUST land.
+wipe(); wipe_seen(); grant()
+hm.ingest_connection_events(payload([ev(raddr="198.51.100.30")]))
+check("CONTROL: a valid consented event still populates the seen-set",
+      len(seen_dests()) == 1, str(seen_dests()))
+
+print("the merge path survives the real ingest path, not just unit tests")
+wipe(); wipe_seen(); grant()
+hm.ingest_connection_events(payload([ev(conn_id="m-1", raddr="198.51.100.40")]))
+first = seen_dests()[0][2]
+hm.ingest_connection_events(payload([
+    ev(conn_id="m-2", raddr="198.51.100.40", resolved_name="edge.example.test",
+       resolved_name_source=ce.NAME_SRC_DNS_EVENT)]))
+d = seen_dests()
+check("address entry merged into the named one", len(d) == 1, str(d))
+check("  first_seen carried across the merge", d[0][2] == first)
+check("  keyed on the name now", d[0][0] == "edge.example.test")
+
+print("close events refresh the seen-set without double-counting connections")
+wipe(); wipe_seen(); grant()
+hm.ingest_connection_events(payload([ev(conn_id="x-1", raddr="198.51.100.50")]))
+hm.ingest_connection_events(payload([
+    ev(conn_id="x-1", raddr="198.51.100.50", event=ce.EVENT_CLOSE,
+       ts_close_wall="2026-08-07T12:00:05", ts_close_mono=5.0)]))
+check("one connection counted once despite two lifecycle events",
+      seen_dests()[0][3] == 1, str(seen_dests()))
+
+print("the seen-set reaper runs on its own window, not the event window")
+wipe(); wipe_seen(); grant()
+s = db()
+s.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('conn_seen_retention_days','365')")
+s.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('conn_event_retention_days','30')")
+s.commit(); s.close()
+hm.ingest_connection_events(payload([ev(raddr="198.51.100.60")]))
+old = (datetime.now() - timedelta(days=100)).isoformat(timespec="seconds")
+s = db(); s.execute("UPDATE conn_seen_destinations SET first_seen=?, last_seen=?", (old, old))
+s.execute("UPDATE conn_seen_dest_addrs SET first_seen=?, last_seen=?", (old, old))
+s.commit(); s.close()
+# 100 days old: past the 30-day EVENT window, well inside the 365-day SEEN
+# window. It must survive — this is the whole point of decoupling the two.
+n = hm.reap_conn_seen()
+check("an entry older than the EVENT window survives the seen window",
+      n == 0 and len(seen_dests()) == 1, "reaped=%r rows=%s" % (n, seen_dests()))
+# CONTROL: the same reaper must actually delete when the entry IS stale.
+s = db()
+s.execute("INSERT OR REPLACE INTO settings (key,value) VALUES ('conn_seen_retention_days','30')")
+s.commit(); s.close()
+n = hm.reap_conn_seen()
+check("CONTROL: shortening the seen window does delete it",
+      n > 0 and len(seen_dests()) == 0, "reaped=%r rows=%s" % (n, seen_dests()))
+
 import shutil                                    # noqa: E402
 shutil.rmtree(_tmp, ignore_errors=True)
 print()

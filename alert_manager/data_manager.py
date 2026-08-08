@@ -138,6 +138,26 @@ NAMESPACES = {
             # must CHECK before accepting any event (Requirement 0 clause 5) and
             # UPDATE when an agent reports a consent change.
             "conn_events", "conn_consent",
+            # Track C step 5 (2026-08-08): the destination seen-set. hw_monitor
+            # populates it from the same transaction as the event insert and
+            # runs its retention sweep, so it needs full write on both.
+            #
+            # ⚠ THE USUAL TRAP, CLOSED DELIBERATELY HERE. The seen-set suite
+            # builds its tables on a plain sqlite3 connection, so it exercises
+            # the SQL without ever passing through this guard — meaning a missing
+            # name would pass every behavioural test and surface only in
+            # production as a `WOULD DENY` log line with the write silently not
+            # happening. For the seen-set that failure is unusually quiet:
+            # novelty would simply never populate and every destination would
+            # read as novel forever, which looks like a working detector having a
+            # busy day rather than a broken one.
+            #
+            # So `test_conn_seen.py` asserts these two names against `allowed()`
+            # DIRECTLY, plus a control proving the grant is exact-match rather
+            # than a prefix. Verified by mutation: deleting this line fails that
+            # suite. Any future table added here deserves the same treatment —
+            # the behavioural tests still cannot see this file.
+            "conn_seen_destinations", "conn_seen_dest_addrs",
             # `scan_threats` / `scan_schedules` — GRANT REMOVED 2026-07-29.
             # hw_monitor never wrote a row to either; its only statements were the
             # two CREATEs, which now live in alert_manager/database.py

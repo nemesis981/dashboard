@@ -214,9 +214,138 @@ def init_conn_events_tables():
                   "ON conn_events(raddr, rport)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_conn_events_device "
                   "ON conn_events(device_id, received_at)")
+
+        # ── consent_basis migration (Track C step 5, 2026-08-08) ─────────────
+        # `granted_by` already records WHO clicked. It does not record UNDER WHAT
+        # AUTHORITY, and those are different questions: individual consent and
+        # employer enrollment are different lawful bases, not different
+        # usernames. A basis is what determines whether consent can be withdrawn
+        # by the person using the device, so it cannot be inferred from the name.
+        #
+        # NO DEFAULT, DELIBERATELY. Rows written before this column existed get
+        # NULL, and NULL means "recorded before the basis was tracked — unknown".
+        # Defaulting them to 'individual' would manufacture a legal claim about
+        # consent that nobody actually recorded, which is precisely the
+        # failed-read-as-real-value shape this codebase treats as a defect.
+        # Callers must branch on None explicitly rather than coalescing it.
+        existing = {row[1] for row in
+                    c.execute("PRAGMA table_info(conn_consent)").fetchall()}
+        if "consent_basis" not in existing:
+            c.execute("ALTER TABLE conn_consent ADD COLUMN consent_basis TEXT")
+
+        _init_conn_seen_tables(c)
         conn.commit()
     finally:
         conn.close()
+
+
+#: The lawful basis a consent record rests on. NOT a free-text field — an
+#: unrecognised value is a bug, and None means "predates the column" (see the
+#: migration above), never "individual".
+CONSENT_BASIS_INDIVIDUAL = "individual"   # the device's own user opted in
+CONSENT_BASIS_EMPLOYER = "employer"       # enrolled under organisational authority
+CONSENT_BASES = (CONSENT_BASIS_INDIVIDUAL, CONSENT_BASIS_EMPLOYER)
+
+
+def _init_conn_seen_tables(c):
+    """Canonical DDL for Track C's seen-set (step 5). Called from the Track C init.
+
+    ── WHY THIS IS NOT DERIVED FROM conn_events ─────────────────────────────────
+    The obvious implementation — answer "have I seen this destination before?" by
+    querying conn_events — is WRONG, and wrong in a way that hides itself.
+    conn_events is reaped at `conn_event_retention_days` (default 30). A seen-set
+    derived from it would make EVERY destination novel again after 30 days:
+    novelty would silently decay into a rolling 30-day window that nobody chose,
+    that no setting describes, and that looks identical to a working feature.
+
+    So the seen-set is its own store, populated INCREMENTALLY at ingest and never
+    recomputed from the event table. It survives the event reaper by construction,
+    not by ordering luck.
+
+    ── ITS OWN RETENTION, AND WHY THE NUMBER IS DIFFERENT ───────────────────────
+    Retaining it longer than conn_events is a deliberate decision, not an
+    oversight, and it rests on the two stores holding genuinely different data:
+
+      * conn_events is a DETAILED BEHAVIOURAL LOG — per-connection timing, ports,
+        byte counts, the process path that opened it. Thirty days of that is a
+        minute-by-minute account of how a person used their machine.
+      * this table is a MEMBERSHIP SUMMARY — one row per destination, with a
+        first/last date and a count. It cannot reconstruct a session, a sequence,
+        or what someone was doing at 11pm on a Tuesday.
+
+    Different sensitivity justifies a different window. It is still personal data,
+    so it is BOUNDED and configurable (`conn_seen_retention_days`, default 365),
+    not "forever" — and revocation purges it outright (Requirement 0 clause 7,
+    see conn_seen.purge_device).
+
+    ── AGED BY INACTIVITY, NEVER BY AGE ─────────────────────────────────────────
+    Rows expire on `last_seen`, not `first_seen`. Expiring on first_seen would
+    delete the OLDEST and best-established destinations first — the exact rows
+    that make novelty meaningful — and would reintroduce the rolling-window bug
+    from a different direction.
+
+    365 days is chosen so annual-cadence destinations (tax software, travel
+    booking, a seasonal service) do not read as novel every single year. Past
+    that, "this device has not contacted this destination in over a year" IS
+    genuinely novel again, so expiry here is a semantic statement rather than
+    mere housekeeping.
+
+    A FLOOR IS ENFORCED IN CODE (conn_seen.effective_retention_days): the seen-set
+    window can never be shorter than conn_events'. If it were, raw events would
+    outlive the summary of them and a destination with events still on file would
+    read as never-seen — incoherent, and hard to spot from the outside.
+
+    ── TWO TABLES, BECAUSE THE MERGE PATH NEEDS THE MAPPING ─────────────────────
+    `conn_seen_destinations` holds one row per destination IDENTITY (name-keyed
+    where a name was observed, address-keyed otherwise). `conn_seen_dest_addrs`
+    maps every observed address to the destination it belongs to.
+
+    The second table is what makes the merge correct rather than approximate. A
+    destination first seen as a bare IP and later seen WITH a name must fold into
+    the name entry carrying first_seen across; without a persistent addr->dest
+    mapping, the next name-less connection to that IP would create a fresh
+    address-keyed row with first_seen=now and the destination would read as novel
+    again — history silently reset, which is the failure this whole design is
+    built around avoiding. See conn_seen.record_destinations.
+    """
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conn_seen_destinations (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id    TEXT NOT NULL,
+            dest_key     TEXT NOT NULL,
+            key_kind     TEXT NOT NULL,
+            first_seen   TEXT NOT NULL,
+            last_seen    TEXT NOT NULL,
+            conn_count   INTEGER NOT NULL DEFAULT 0,
+            merged_count INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    # key_kind IS part of the unique key, not decoration. A hostile or broken
+    # agent can report resolved_name="203.0.113.4" — a name that is textually an
+    # address. Without key_kind in the index that record would collide with the
+    # genuine address entry for 203.0.113.4 and silently merge two unrelated
+    # destinations. With it, they coexist and stay distinguishable.
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_conn_seen_dest_key "
+              "ON conn_seen_destinations(device_id, key_kind, dest_key)")
+    # The reaper scans by last_seen (see the retention note above).
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conn_seen_dest_last "
+              "ON conn_seen_destinations(last_seen)")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conn_seen_dest_addrs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id  TEXT NOT NULL,
+            addr       TEXT NOT NULL,
+            dest_id    INTEGER NOT NULL,
+            first_seen TEXT NOT NULL,
+            last_seen  TEXT NOT NULL
+        )
+    """)
+    c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_conn_seen_addr "
+              "ON conn_seen_dest_addrs(device_id, addr)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conn_seen_addr_dest "
+              "ON conn_seen_dest_addrs(dest_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_conn_seen_addr_last "
+              "ON conn_seen_dest_addrs(last_seen)")
 
 
 #: Core settings and their shipped defaults. A key absent from here is not a
@@ -227,6 +356,12 @@ CORE_SETTING_DEFAULTS = {
     # reaper, not by intention", user-configurable and surfaced in settings.
     # Stored as a string like every other setting value.
     "conn_event_retention_days": "30",
+    # Track C step 5. The seen-set's OWN retention, deliberately decoupled from
+    # the event window above — a seen-set that aged with conn_events would make
+    # every destination novel again every 30 days. Aged by INACTIVITY, and floored
+    # at conn_event_retention_days in code so it can never outlive-by-less than
+    # the events it summarises. Full reasoning: database._init_conn_seen_tables.
+    "conn_seen_retention_days": "365",
     # How often a REMOTE (vpn_remote) agent sends a full observation snapshot,
     # expressed as "every Nth heartbeat". Local agents always observe every beat
     # and are deliberately not adjustable — it is free on a LAN.

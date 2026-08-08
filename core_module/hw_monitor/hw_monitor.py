@@ -1822,6 +1822,19 @@ def _conn_schema():
     return conn_events
 
 
+def _conn_seen():
+    """Import the seen-set module (Track C step 5).
+
+    Lives in alert_manager/, which is on this process's PYTHONPATH — the same
+    route `import database` already takes from main(). Imported lazily so a
+    missing or broken seen-set module degrades to "no novelty tracking" rather
+    than preventing the service from starting and stopping telemetry ingest
+    altogether.
+    """
+    import conn_seen                                     # noqa: PLC0415
+    return conn_seen
+
+
 def _server_consent_version(conn, device_id):
     """The consent version this SERVER has recorded for a device, or None.
 
@@ -1894,6 +1907,13 @@ def ingest_connection_events(payload):
 
             now = datetime.now().isoformat(timespec="seconds")
             rows = []
+            # Track C step 5. Built from the SAME loop that builds `rows`, and
+            # only from records that survive every gate above — so the seen-set
+            # can never learn a destination from an event that was rejected for
+            # want of consent. Deriving it from `rows` afterwards would work
+            # today and break the moment a column is inserted, since that is
+            # positional; this is not.
+            observations = []
             for rec in events:
                 ok, errors = ce.validate(rec)
                 if not ok:
@@ -1928,6 +1948,8 @@ def ingest_connection_events(payload):
                     rec.get("proc_signed"), rec.get("bytes_sent"), rec.get("bytes_recv"),
                     rec.get("resolved_name"), rec.get("resolved_name_source"),
                     now))
+                observations.append((rec["raddr"], rec.get("resolved_name"),
+                                     rec["event"] == ce.EVENT_OPEN))
             if rows:
                 conn.executemany(
                     "INSERT INTO conn_events (device_id, conn_id, event, consent_version, "
@@ -1935,6 +1957,28 @@ def ingest_connection_events(payload):
                     "ts_close_wall, ts_close_mono, pid, proc_name, proc_path, proc_signed, "
                     "bytes_sent, bytes_recv, resolved_name, resolved_name_source, received_at) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+                # Seen-set population, INSIDE the same transaction as the insert
+                # above and committed with it. If it were committed separately,
+                # a crash between the two would leave events stored whose
+                # destinations the seen-set never learned — and those
+                # destinations would then read as novel forever after, since
+                # nothing ever revisits an old event to backfill.
+                try:
+                    seen_counts = _conn_seen().record_destinations(
+                        conn, device_id, observations, now)
+                    counts["seen_new"] = seen_counts.get("created", 0)
+                    counts["seen_merged"] = seen_counts.get("merged", 0)
+                    if seen_counts.get("errors"):
+                        log.warning("conn ingest: seen-set recorded %d error(s) "
+                                    "for device %s", seen_counts["errors"],
+                                    device_id[:12])
+                except Exception:                        # noqa: BLE001
+                    # Novelty tracking is a consumer of ingest, not a
+                    # precondition for it. Losing the seen-set update must not
+                    # cost us the events themselves — but it is never silent.
+                    log.exception("conn ingest: seen-set population FAILED for "
+                                  "device %s — events still stored, novelty for "
+                                  "this batch is not tracked", device_id[:12])
                 conn.commit()
                 counts["stored"] = len(rows)
         finally:
@@ -1981,6 +2025,60 @@ def reap_conn_events():
             conn.close()
     except Exception:                                    # noqa: BLE001
         log.exception("conn reaper: failed — retention NOT enforced this cycle")
+        return -1
+
+
+def _setting_int(conn, key, default):
+    """Read an integer setting. Returns `default` only when the key is genuinely
+    absent or unusable — and says which in the log, so a misconfigured value is
+    not mistaken for an unset one."""
+    try:
+        row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    except Exception:                                    # noqa: BLE001
+        log.exception("could not read setting %s — using default %d", key, default)
+        return default
+    if not row or row[0] is None:
+        return default
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        log.warning("setting %s holds a non-integer value — using default %d",
+                    key, default)
+        return default
+
+
+def reap_conn_seen():
+    """Enforce the SEEN-SET's own retention. Returns rows deleted, or -1 on failure.
+
+    Separate from `reap_conn_events` on purpose, and not merely for tidiness: the
+    two windows are deliberately different lengths, and the seen-set's is floored
+    at the event window so it can never expire a destination whose raw events are
+    still on file. `conn_seen.effective_retention_days` owns that arithmetic.
+
+    Returns -1 rather than 0 on error, matching the event reaper — 0 is a real
+    answer meaning nothing was old enough.
+    """
+    try:
+        cs = _conn_seen()
+        conn = _db_connect()
+        try:
+            seen_days = _setting_int(conn, "conn_seen_retention_days", 365)
+            event_days = _setting_int(conn, "conn_event_retention_days", 30)
+            now = datetime.now().isoformat(timespec="seconds")
+            res = cs.reap(conn, seen_days, event_days, now)
+            conn.commit()
+            total = res["destinations"] + res["addrs"] + res["orphans"]
+            if total:
+                log.info("conn seen-set reaper: deleted %d destination(s), %d "
+                         "address row(s), %d orphan(s) older than %d days",
+                         res["destinations"], res["addrs"], res["orphans"],
+                         res["days"])
+            return total
+        finally:
+            conn.close()
+    except Exception:                                    # noqa: BLE001
+        log.exception("conn seen-set reaper: failed — seen-set retention NOT "
+                      "enforced this cycle")
         return -1
 
 
@@ -3813,6 +3911,12 @@ def main():
         if time.time() - _last_conn_reap >= 3600:
             _last_conn_reap = time.time()
             reap_conn_events()
+            # Same cadence, separate sweep and separate window — see
+            # reap_conn_seen. Called unconditionally rather than only when the
+            # event reaper succeeded: the two retentions are independent, and
+            # skipping this one on an unrelated failure would quietly stop
+            # enforcing seen-set retention with nothing in the log saying so.
+            reap_conn_seen()
         _sleep_interruptible(SAMPLE_INTERVAL)
     log.info("hw_monitor stopped")
 
