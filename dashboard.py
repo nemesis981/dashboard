@@ -3564,6 +3564,148 @@ def _render_install_conf(server_host: str, token: str, hint: str,
     return "\n".join(lines) + "\n"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Track C consent (E-CONSENT-*). NEW code only — no existing except-site is
+# touched here, so this does not collide with the parallel error-code audit.
+#
+# SECURITY POSTURE, stated so a future sibling can be checked against it:
+#   * POST-only. These change state; a GET would be CSRF-triggerable by a plain
+#     <img> tag under default SameSite=Lax cookies — the `db_action` defect.
+#   * Auth-gated by ABSENCE from _AUTH_EXEMPT. Deliberately absent: consent
+#     administration is an owner action. Adding either endpoint to that set
+#     would make them reachable unauthenticated, which for /revoke means an
+#     unauthenticated irreversible erasure.
+#   * device_id arrives as a path segment and reaches SQL only as a bound
+#     parameter — never interpolated, here or in conn_consent.py.
+#   * No exception text is returned to the client. The sibling agent routes do
+#     (`jsonify({"error": str(e)})`), which leaks internals; that is recorded as
+#     a route-audit finding rather than copied.
+# ─────────────────────────────────────────────────────────────────────────────
+def _consent_conn():
+    """Guarded connection on the `conn_consent` namespace, NOT `dashboard`.
+
+    Revocation deletes from the telemetry store; that authority is scoped to
+    this namespace rather than granted to the whole web process. Also the
+    connection the error codes are recorded on, since it is the one holding the
+    error-table grant.
+    """
+    from modules import get_data_manager
+    return get_data_manager().connect("conn_consent")
+
+
+@app.route("/api/consent/<device_id>", methods=["GET"])
+def api_consent_status(device_id):
+    """Read one device's consent state. READ-ONLY, so GET is correct here."""
+    import conn_consent
+    conn = None
+    try:
+        conn = _consent_conn()
+        return jsonify({"ok": True, "consent": conn_consent.status(device_id, conn=conn)})
+    except Exception as e:
+        log.exception("api_consent_status failed: %r", e)
+        _consent_error(conn, "E-CONSENT-006",
+                       "status read failed for %s" % (device_id or "")[:12])
+        return jsonify({"ok": False, "error": "consent status unavailable"}), 500
+    finally:
+        _close_quietly(conn)
+
+
+@app.route("/api/consent/<device_id>/grant", methods=["POST"])
+def api_consent_grant(device_id):
+    """Record individual-basis consent. Opens the ingest gate for this device."""
+    import conn_consent
+    basis = (request.get_json(silent=True) or {}).get("basis", "individual")
+    conn = None
+    try:
+        conn = _consent_conn()
+        conn_consent.ensure_codes(conn)
+        res = conn_consent.grant(device_id, basis=basis, granted_by=_actor(),
+                                 actor=_actor(), conn=conn)
+        conn.commit()
+        _audit(action="consent_grant", rule_id=device_id)
+        return jsonify({"ok": True, "consent": res})
+    except conn_consent.EmployerBasisNotAvailable as e:
+        _consent_error(conn, "E-CONSENT-005",
+                       "employer basis attempted for %s" % (device_id or "")[:12])
+        # Fixed literal, not str(e): the message happens to be safe today, but
+        # returning exception text couples the wire format to an exception
+        # string a future edit could change into something internal.
+        return jsonify({"ok": False,
+                        "error": "employer-basis consent is not available yet "
+                                 "(pending legal review)"}), 409
+    except conn_consent.ConsentError as e:
+        _consent_error(conn, "E-CONSENT-001",
+                       "grant refused for %s: %s" % ((device_id or "")[:12], e))
+        return jsonify({"ok": False, "error": "invalid consent request"}), 400
+    except Exception as e:
+        log.exception("api_consent_grant failed: %r", e)
+        _consent_error(conn, "E-CONSENT-002",
+                       "grant failed for %s" % (device_id or "")[:12])
+        return jsonify({"ok": False, "error": "could not record consent"}), 500
+    finally:
+        _close_quietly(conn)
+
+
+@app.route("/api/consent/<device_id>/revoke", methods=["POST"])
+def api_consent_revoke(device_id):
+    """Withdraw consent AND purge collected data. Requirement 0 clause 7.
+
+    IRREVERSIBLE. The purge counts are returned so the caller can show what was
+    actually erased rather than a bare success — "revoked" and "revoked and 412
+    events erased" are different assurances, and only the second is evidence.
+    """
+    import conn_consent
+    conn = None
+    try:
+        conn = _consent_conn()
+        conn_consent.ensure_codes(conn)
+        res = conn_consent.revoke(device_id, actor=_actor(), conn=conn)
+        conn.commit()
+        _audit(action="consent_revoke", rule_id=device_id)
+        return jsonify({"ok": True, "revocation": res})
+    except conn_consent.ConsentError as e:
+        # Two distinct conditions, deliberately NOT collapsed: nothing to revoke
+        # is a 404, a failed-and-rolled-back revocation is a 500 and CRITICAL.
+        # Reporting the second as the first would tell a requester their data
+        # was already gone when it is still on disk.
+        if "no consent record" in str(e):
+            _consent_error(conn, "E-CONSENT-004",
+                           "revoke requested, no record for %s" % (device_id or "")[:12])
+            return jsonify({"ok": False, "error": "no consent record for this device"}), 404
+        _consent_error(conn, "E-CONSENT-003",
+                       "REVOCATION FAILED and rolled back for %s — data NOT purged"
+                       % (device_id or "")[:12])
+        return jsonify({"ok": False,
+                        "error": "revocation failed and was rolled back; data was "
+                                 "NOT purged. Retry — do not treat this as an "
+                                 "erasure."}), 500
+    except Exception as e:
+        log.exception("api_consent_revoke failed: %r", e)
+        _consent_error(conn, "E-CONSENT-003",
+                       "REVOCATION FAILED for %s — data NOT purged" % (device_id or "")[:12])
+        return jsonify({"ok": False,
+                        "error": "revocation failed; data was NOT purged"}), 500
+    finally:
+        _close_quietly(conn)
+
+
+def _consent_error(conn, code, context):
+    """Record an E-CONSENT-* occurrence. Never raises, never masks the original."""
+    try:
+        import conn_consent_errors
+        conn_consent_errors.record(conn, code, context, actor=_actor())
+    except Exception:                                        # noqa: BLE001
+        log.exception("consent: error recording itself failed [%s]", code)
+
+
+def _close_quietly(conn):
+    try:
+        if conn is not None:
+            conn.close()
+    except Exception:                                        # noqa: BLE001
+        pass
+
+
 @app.route("/api/agent/installer/generate", methods=["POST"])
 def api_agent_installer_generate():
     """Owner action (auth-gated): mint a single-use, short-TTL enrollment token and
