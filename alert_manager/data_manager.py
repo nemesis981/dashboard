@@ -51,6 +51,21 @@ log = logging.getLogger("nemesis.data_manager")
 # module through the guard).
 OP_LOG_TABLE = "dm_operation_log"
 
+# ── core error-ledger tables (see check_write's exemption) ───────────────────
+# Core-owned cross-cutting infrastructure, same shape as `audit_log`: many
+# writers, no single owning module. Every module must be able to record a
+# structured error, so these cannot live behind per-module namespace grants —
+# see the reasoning at the exemption itself in check_write().
+#
+# ALL FOUR are created by nemesis_errors.init_error_tables(); only the first two
+# are written by the retrofit call sites. The split is deliberate and the two
+# tuples must not be merged: `add_cause()` and `capture_snapshot()` write the
+# other two from CORE, on a core connection, and no module call site inserts
+# into them.
+ERROR_LEDGER_TABLES = ("error_codes", "error_occurrences",
+                       "error_code_snapshots", "error_ledger_causes")
+ERROR_LEDGER_INSERT_TABLES = ("error_codes", "error_occurrences")
+
 # Module -> writable tables.  ADR 0001 ownership; the unprefixed legacy names
 # (`tickets`, `community_queue`) are covered because their module prefix is
 # itself a prefix of the table name ("tickets" ⊑ "tickets"/"tickets_seq";
@@ -509,6 +524,52 @@ def check_write(module, table, op, sql=None):
         return True
     if allowed(module, table):
         return True
+
+    # ── core error-ledger: narrow, op-restricted, namespace-independent ──────
+    # Added 2026-08-08. Every module must be able to record a structured error,
+    # and before this NONE effectively could: `error_codes`/`error_occurrences`
+    # were granted to exactly one namespace (`conn_consent`), so every
+    # record_error_best_effort() call anywhere else looked correctly
+    # instrumented and silently persisted nothing. Confirmed live for `dhcp`
+    # (PUNCHLIST) — every E-DHCP-* code it ever recorded was refused here.
+    #
+    # WHY NOT per-module grants. That is the obvious fix and it is the wrong
+    # one: nemesis_errors.py's own header rejects it by name, citing the drift
+    # that left `scan_tasks` missing from hw_monitor's namespace for five days.
+    # A facility every module must reach does not belong behind a list somebody
+    # has to remember to update.
+    #
+    # WHY HERE and not in allowed(). allowed() answers "does this module OWN
+    # this table" and takes no `op` — which is exactly why the OP_LOG_TABLE
+    # rule lives there (an always-DENY, no op dimension). This is an
+    # op-RESTRICTED always-ALLOW, so it needs the one decision point that sees
+    # the operation. The column-grant block directly below is the same shape:
+    # a deliberate narrow widening of ADR 0001, gated on op.
+    #
+    # WHY `create` is included, and why insert-only would NOT have worked.
+    # _Recorder self-initialises: on first use it calls init_error_tables() on
+    # the MODULE's guarded connection, issuing CREATE TABLE IF NOT EXISTS on all
+    # four tables. `create` is a write op and the default mode is ENFORCE, so an
+    # insert-only exemption denies that CREATE, _Recorder swallows the
+    # AccessDenied, gives up after three attempts and records nothing — exactly
+    # the silent failure this exemption exists to remove. Relying on core to
+    # pre-create them does not hold either: init_error_tables() is called only
+    # from dashboard.py, and hw_monitor is a separate process that never calls
+    # it.
+    #
+    # WHY NOT update/delete/drop — the security half, and the reason this stays
+    # this narrow. The error ledger is an append-only audit record. A module
+    # that could rewrite or erase it could erase evidence of its own
+    # misbehaviour, which is precisely what a compromised component would do
+    # first. Adding rows is a capability every module needs; changing or
+    # removing existing ones is a capability none of them do. Widening this
+    # tuple is therefore a security decision, not a convenience one.
+    if table is not None:
+        _t = table.lower()
+        if op == "insert" and _t in ERROR_LEDGER_INSERT_TABLES:
+            return True
+        if op == "create" and _t in ERROR_LEDGER_TABLES:
+            return True
 
     # ── column-level grant ───────────────────────────────────────────────────
     # A narrow, deliberate widening of ADR 0001, added 2026-07-28. Two real
