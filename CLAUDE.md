@@ -73,6 +73,30 @@ session, before anything else. Run these and report the results in a clean block
      drift number, which is exactly how the 2026-07-27 false positive went unnoticed until it
      was caught by accident.
 
+7. **Elevated access grants — surfaced live every session, not noted once and forgotten.**
+   HANDOFF.md's "⚠ Standing elevated grants — REVIEW FOR REVOCATION" section is the running
+   list this rule formalizes as recurring Morning Status behavior, same spirit as item 6's
+   "LIVE each session, baseline diff" — a grant flagged once in a session that ends and is
+   never re-surfaced is exactly how an unneeded grant outlives its reason and nobody notices.
+   Each morning, check what is CURRENTLY live — don't just carry forward yesterday's list
+   unchecked:
+   - sudo NOPASSWD entries: `sudo -n -l`
+   - non-default group memberships that grant meaningful access (e.g. `pihole`, `nemesis-db`,
+     `nemesis-fw`) for every account HANDOFF is tracking: `getent group <name>` / `id <user>`
+   - polkit rules: `ls /etc/polkit-1/rules.d/` (needs root to read on this box — note
+     explicitly if the current session can't check it rather than silently skipping)
+   - any other standing elevated grant already named in HANDOFF's list
+   Report a short "Elevated grants:" line in the Morning Status output and keep the detail in
+   HANDOFF.md's existing section — a grant still needed stays listed with its reason; one no
+   longer needed gets flagged for revocation, not silently dropped from the list without a
+   revoke actually happening. **No hardcoded grant list lives in this file** — same reasoning
+   as item 6's baseline: a copy here is a second source of truth that desyncs the moment
+   someone forgets to update it after a grant is added or revoked, and a stale "all clear" is
+   worse than no check at all. Treat every claimed grant the same way the route-security audit
+   treats an unconfirmed finding: verify it against live state (`sudo -n -l`, `getent group`,
+   actual file/group membership) before writing it into HANDOFF or the briefing as fact — a
+   claim that doesn't check out gets flagged as contradicted, not written down anyway.
+
 Format the output as:
 ```
 --- NEMESIS MORNING STATUS ---
@@ -82,14 +106,16 @@ Services: dashboard=active watchdog=active ...
 Tree: clean / [N files modified]
 Resume: [one sentence from HANDOFF]
 Roadmap: N shipped / N partial / N parked (M total) — [drift note or "no change"]
+Elevated grants: [short summary — e.g. "2 live (Suricata sudo, gateway-zone DHCP/pihole), see HANDOFF"]
 ------------------------------
 ```
-7. **Write the briefing to disk (EVERY session, automatically — do not ask).** Save the full
+8. **Write the briefing to disk (EVERY session, automatically — do not ask).** Save the full
    briefing to `docs/briefing/YYYY-MM-DD.md` — the status block above **plus** the supporting
    detail that doesn't fit in it: the roadmap-vs-state audit findings (baseline file used,
-   file-set drift, shipping drift, and the closeout action if drift was found), the model
-   self-check result, any process findings, and the open items carried forward from HANDOFF.
-   Then print the status block in chat. Both — the file is not a substitute for reporting.
+   file-set drift, shipping drift, and the closeout action if drift was found), the elevated-
+   grants check (what's live, what changed, what's owed a revoke), the model self-check
+   result, any process findings, and the open items carried forward from HANDOFF. Then print
+   the status block in chat. Both — the file is not a substitute for reporting.
    - `docs/briefing/` is **gitignored, local-only** — never committed, so this is not a
      git-write and needs no push. Rule 8 still applies to its content (placeholders, not real
      IPs/hosts/accounts) — the file is one copy-paste away from somewhere public.
@@ -590,7 +616,7 @@ will actually treat as public.
 `docs/audits/` live inside `/opt/nemesis` — not convenient to reach from a
 `~/work/nemesis-internal` session. **Every time any of the three is written or refreshed**
 (HANDOFF.md overwrite, a new supplement/worklog entry, a new dated briefing — see Rule 9 and
-Morning Status §7 — or a new/updated audit doc), also copy the current file(s) to the mirror
+Morning Status §8 — or a new/updated audit doc), also copy the current file(s) to the mirror
 at `~/work/nemesis-internal/handoff/`, `~/work/nemesis-internal/briefing/`, and
 `~/work/nemesis-internal/audits/` (same relative structure: `handoff/HANDOFF.md`,
 `handoff/supplements/`, `handoff/worklog/`, `briefing/YYYY-MM-DD.md`,

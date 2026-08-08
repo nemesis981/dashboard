@@ -146,23 +146,43 @@ context handoff for that detail.
 
 ## 6. ⚠ Standing elevated grants — REVIEW FOR REVOCATION
 
-Carried unchanged from 2026-08-06, not re-checked this closeout beyond the live-state
-check in §1 (which covered `pihole` group membership specifically and found it NOT
-applied here):
+**Now a formalized, recurring Morning Status check (CLAUDE.md item 7, added 2026-08-08),**
+not an ad hoc note — every session re-verifies this list against live state rather than
+carrying it forward unchecked. Live-reverified 2026-08-08 (Window 2), via `sudo -n -l`,
+`getent group <name>`, and `id <user>` on this production box:
 
 ### `nemesis-suricata-rules` — added 2026-08-06, for Suricata rule deployment
 - **File:** `/etc/sudoers.d/nemesis-suricata-rules`
+- **CONFIRMED LIVE today** (`sudo -n -l` shows the three scoped NOPASSWD entries: `tee
+  /etc/suricata/rules/local.rules`, `systemctl reload suricata`, `systemctl restart
+  suricata`).
 - **NOT required for normal Nemesis operation.** Revoke with
   `sudo rm /etc/sudoers.d/nemesis-suricata-rules` when rule iteration is done; re-check at
   each closeout. Full detail in the 2026-08-06 supplement.
 
-### NEW (2026-08-07, gateway test zone only — NOT this production box, confirmed §1)
-A polkit rule and a Pi-hole group-membership grant were added on the gateway test zone
-tonight to get DHCP daemon control and status reads working live. Neither exists on this
-production box (verified directly, §1). Full detail: `PUNCHLIST.md`'s new section (§3
-item 2 above) and Window 1's own handoff. Flagged here as a governance pointer, not a
-duplicate audit — if/when this work is deployed to production, these two grants land here
-too and should be re-verified at that point, not assumed to match the test-zone state.
+### Gateway test zone only — NOT this production box (2026-08-07, re-confirmed 2026-08-08)
+A polkit rule (`49-nemesis-dhcpd.rules`) and `usermod -aG pihole nemesis-dash` were added on
+the gateway test zone to get DHCP daemon control and status reads working live. **Reconfirmed
+today**: `getent group pihole` on this box is empty and `nemesis-dash`'s groups here are still
+only `nemesis-db`, `nemesis`, `nemesis-fw` — neither grant exists on this production box.
+Full detail: `PUNCHLIST.md`'s DHCP-deployment-follow-ups section and Window 1's own handoff
+(`~/work/nemesis-internal/handoff/2026-08-08-window1-handoff.md`). If/when this work is
+deployed to production, these two grants land here too and should be re-verified at that
+point, not assumed to match the test-zone state.
+
+### ⚠ Claim NOT confirmed, flagged rather than recorded as fact (2026-08-08)
+A request to document "the operator's new `pihole` group membership for the cardinality
+tool" was checked against live state and against Window 1's own handoff and does not hold up:
+- `getent group pihole` on this box: empty (`pihole:x:1001:`) — `<user>` is not a member.
+- `id <user>`: no `pihole` group listed.
+- Window 1's own handoff is explicit on this exact point: *"`/etc/pihole/pihole-FTL.db` is
+  `640 pihole:pihole`; `<user>` is not in the `pihole` group, and the NOPASSWD sudo rules on
+  this host are all narrow ... with nothing that can read it ... this needs the operator to
+  run it. Do not go looking for a way around that."* The cardinality tool
+  (`~/work/nemesis-internal/tools/pihole-cardinality.py`) was run via `sudo python3 ...`
+  under the operator's own general (password-gated) sudo access, not via a new group grant.
+- **No such grant exists to revoke.** Recorded here so the discrepancy is visible rather than
+  silently either fabricating the entry or silently dropping the request.
 
 ## 7. Known issues/gaps, not yet fixed
 
