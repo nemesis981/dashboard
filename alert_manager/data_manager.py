@@ -152,6 +152,44 @@ NAMESPACES = {
     # `integrity_watch`).
     "tier2_gate":         {"tables": ("tier2_gate_state", "tier2_gate_events")},
 
+    # ── Track C consent grant / revoke + Requirement 0 clause 7 purge ────────
+    # `alert_manager/conn_consent.py`. Deliberately NOT folded into the
+    # `dashboard` namespace even though the route is served there: revocation
+    # must DELETE from `conn_events` and both seen-set tables, and giving the
+    # web-facing process standing delete authority over the entire telemetry
+    # store — for every request it serves, not just this one — is a far wider
+    # grant than this one operation needs. A dedicated namespace keeps the
+    # authority named, narrow and auditable.
+    #
+    # All four tables are required and each for a distinct reason, so removing
+    # any one silently breaks a different half of clause 7:
+    #   conn_consent           the record itself (grant, revoke)
+    #   conn_events            the behavioural log being purged
+    #   conn_seen_destinations \ the membership summary being purged. NOT exempt
+    #   conn_seen_dest_addrs   / for being a summary — it still records which
+    #                            destinations a person's device contacted.
+    #
+    # ⚠ SHARED WRITER with hw_monitor on all four, and that is intended:
+    # hw_monitor INGESTS and reaps, this namespace CONSENTS and erases. Two
+    # namespaces writing the same tables is the existing `quarantines` pattern
+    # (dashboard + nemesis_fwd), not a new exception.
+    #
+    # Exact list, not a `conn_` prefix: a prefix would hand the erasure path
+    # write access to every future Track C table by default, which is the
+    # opposite of what a data-erasure capability should have.
+    "conn_consent":       {"tables": ("conn_consent", "conn_events",
+                                      "conn_seen_destinations",
+                                      "conn_seen_dest_addrs",
+                                      # Its own failure paths record structured
+                                      # errors, and best-effort recording returns
+                                      # None rather than raising — so without
+                                      # these two the route would look
+                                      # instrumented while persisting nothing.
+                                      # Verified empirically before adding, not
+                                      # inferred: a guarded connection without
+                                      # them returns None and writes 0 rows.
+                                      "error_codes", "error_occurrences")},
+
     # ── core_module processes (retrofit, 2026-07-28) ─────────────────────────
     # Table lists derived by parsing each process's SQL with this module's own
     # classify(), so the audit and the enforcement agree by construction.
