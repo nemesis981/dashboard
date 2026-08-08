@@ -3492,8 +3492,10 @@ def _create_enrollment(payload, remote_ip):
         log.exception("agent enrollment insert failed")
         return None, "db_error"
     try:   # best-effort approval ticket
-        import modules
-        modules.set_shared_db_path(DB_PATH)
+        # The shared-path publish that used to sit here moved to main() — it is a
+        # startup concern, not a per-request one. The lazy import stays: most
+        # enrollments never open a ticket, and there is no reason to pay the
+        # tickets-module import cost at startup for a path that rarely runs.
         from modules.tickets.module import open_ticket
         if enroll_status == "approved":
             title = f"Device auto-enrolled via installer token: {device_name} ({os_name})"
@@ -3839,6 +3841,30 @@ def _sleep_interruptible(seconds):
 def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
+
+    # Publish the shared DB path ONCE, at process startup, before anything can
+    # need it. This used to live inside `_create_enrollment()` — a request
+    # handler — which meant a freshly-restarted service had it unpublished until
+    # the first agent enrollment happened to arrive. `get_shared_db_path()`
+    # RAISES when unpublished (modules/__init__.py:33-38), so any future caller
+    # reaching a module API before that first enrollment would have failed for a
+    # reason that had nothing to do with what it was doing.
+    #
+    # Startup, NOT module import, and the distinction is load-bearing:
+    # dashboard.py imports this file (line 108) and 9 test files do too. A
+    # module-level publish would fire as an import side effect inside every one
+    # of those processes and silently overwrite a path they had already chosen
+    # for themselves. main() runs only in the service process, which is exactly
+    # the one that owns this path. The dashboard publishes its own via
+    # modules_loader.init(); the tests publish their temp DBs the same way.
+    #
+    # Safe to remove from the handler because `_create_enrollment()` is only
+    # reachable through the listener thread, and the only thing that starts that
+    # listener is `_start_windows_agent_listener()` at the bottom of this
+    # function — so this line always precedes it.
+    import modules
+    modules.set_shared_db_path(DB_PATH)
+
     log.info("hw_monitor starting (db=%s interval=%ds iface=%s)",
              DB_PATH, SAMPLE_INTERVAL, NET_IFACE)
     init_db()
