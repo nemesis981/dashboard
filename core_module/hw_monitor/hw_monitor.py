@@ -306,9 +306,24 @@ def init_db():
                 attestation_state TEXT NOT NULL DEFAULT 'absent',
                 attestation_detail TEXT,
                 attestation_at TEXT,
-                attestation_version TEXT
+                attestation_version TEXT,
+                -- ── remote-device entitlement (licensing cap) ──────────────
+                -- Mirrors the migration entry below. NOT NULL DEFAULT 0 for the
+                -- same reason attestation_state defaults to 'absent': a device
+                -- that was never granted remote access must not be
+                -- indistinguishable from one whose flag is merely NULL.
+                -- Local devices are unlimited; only this flag is capped.
+                remote_enabled INTEGER NOT NULL DEFAULT 0,
+                remote_enabled_at TEXT,
+                remote_enabled_by TEXT
             )
         """)
+        # NOTE (2026-08-17): this CREATE is NOT a complete column list -- several
+        # earlier additions (uninstalled_at/by, revoked_at/by, last_signed_at)
+        # live only in the ALTER migration below, so a fresh install gets them
+        # from the migration rather than from here. Pre-existing drift, not
+        # introduced by this change; the new columns are added to BOTH per the
+        # schema rule. Reconciling the rest is its own cleanup.
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
 
         # scan_jobs: tracks malware scan executions per device.
@@ -397,7 +412,31 @@ def init_db():
                           # cannot raise it and lock out the real agent. Local ISO
                           # TEXT, so lexical comparison is chronological
                           # (ADR 0004 step 2).
-                          ("last_signed_at",      "TEXT")):
+                          ("last_signed_at",      "TEXT"),
+                          # ── remote-device entitlement (licensing cap) ──
+                          # The free tier caps REMOTE-enabled devices at
+                          # entitlements.FREE_TIER_REMOTE_CAP. Local devices are
+                          # unlimited and are never counted.
+                          #
+                          # DEFAULT 0 is deliberate and its consequence is worth
+                          # stating: every pre-existing row becomes NOT
+                          # remote-enabled, including devices that ARE on the
+                          # tailnet today. That is the honest value -- none of
+                          # them were ever granted the flag, because it did not
+                          # exist. Backfilling it from `connection_type` was
+                          # considered and rejected: that field is a per-heartbeat
+                          # OBSERVATION whose fallback conflates detection failure
+                          # with a genuine remote answer, and it is NULL on 7 of
+                          # 13 live rows. Seeding an entitlement from an untrusted
+                          # observation would invent entitlements nobody granted.
+                          #
+                          # The resulting gap is not hidden: core/remote_census
+                          # reconciles against the live tailnet and reports any
+                          # node with no entitlement record, so the operator sees
+                          # exactly which devices need a decision.
+                          ("remote_enabled",      "INTEGER NOT NULL DEFAULT 0"),
+                          ("remote_enabled_at",   "TEXT"),
+                          ("remote_enabled_by",   "TEXT")):   # actor seam
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
