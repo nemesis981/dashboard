@@ -3447,13 +3447,69 @@ tests couldn't surface (a tailnet address can be claimed by more than one
 `agent_devices` row; revoking a stale row could otherwise evict a different, currently-
 active device). Both are covered by the code in the same commit as this entry.
 
-- [ ] **Not yet true today: this box's own running `dashboard`/`hw-monitor` haven't
-      been restarted onto today's code** (per Window 1's own handoff — nothing was
-      deployed as part of building or testing this). The live E2E test exercised the
-      real Tailscale API directly; it did not exercise this box's production dashboard
-      process. Restart is a separate, State-Snapshot-gated step, not implied by this
-      entry being closed.
+- [x] ~~**Not yet true today: this box's own running `dashboard`/`hw-monitor` haven't
+      been restarted onto today's code**~~ — **CORRECTED 2026-08-17 (Window 1).** This
+      was written from an earlier Window 1 handoff and was already out of date when
+      committed. Both services HAVE been restarted onto this code, under the State
+      Snapshot discipline:
+      - `dashboard` pid started **11:01:57**, after commit `8981f52` (09:40:44), and the
+        live E2E revoke at 11:03 removed a real tailnet node **through this box's
+        production dashboard process** — so it did exercise it, empirically.
+      - `hw-monitor` restarted **2026-08-16 19:31:39** for Gap 3b; its startup log line
+        `":5001 source guard active … allowing …"` confirms the guard is live.
+      - Snapshots taken first: `2026-08-16-1930-pre-gap123-deploy` and
+        `2026-08-17-1600-pre-tailnet-removal-e2e`.
+      Left visible rather than deleted: a struck-through wrong claim is more useful than
+      a silently corrected one, because it records that the two windows briefly disagreed.
 - [ ] **Pre-existing, unrelated, deliberately left alone:** `_revoke_tailnet_access`
       does a local `import tailscale_api` inside a `try`, but `dashboard.py`'s
       module-level import already makes that except branch unreachable. Harmless
       dead-guard pattern; Window 1's call to leave it rather than churn this change.
+
+### [SMALL] `hw_monitor._match_fingerprint()` cannot load `hwid.py` — TOFU matching has never run
+
+**Found 2026-08-17 (Window 1) while building the licensing install-id module. Filed
+separately and deliberately NOT fixed in that batch — unrelated concern, and a licensing
+commit is the wrong place for an hw_monitor change.**
+
+`_match_fingerprint()` (`core_module/hw_monitor/hw_monitor.py:~3277`) loads
+`nemesis_agent/hwid.py` by absolute path via `importlib`. But `hwid.py` does
+`import win_run` at module level — a sibling in the same directory — and **loading a file
+by absolute path does not put that file's directory on `sys.path`.** The sibling import
+therefore raises `ModuleNotFoundError` and the whole load fails.
+
+**Reproduced directly**, under the production PYTHONPATH (`/opt/nemesis/alert_manager:/opt/nemesis`):
+
+```
+$ python3 -c "import importlib.util; spec=importlib.util.spec_from_file_location(
+    'h','/opt/nemesis/nemesis_agent/hwid.py'); m=importlib.util.module_from_spec(spec);
+    spec.loader.exec_module(m)"
+ModuleNotFoundError: No module named 'win_run'
+```
+
+**Impact — real but contained.** The call site wraps it in
+`except Exception: log.exception("fingerprint match failed (non-fatal)")`, so **enrollment
+still succeeds**; nothing is broken for users. What silently does not happen is the TOFU
+"have I seen this hardware before?" comparison — an informational signal that has, on this
+evidence, never actually run in production.
+
+**LATENT, not observed.** There is no log evidence either way: `grep` for both
+`"fingerprint match failed"` and `"enroll fingerprint: outcome="` returns **zero** hits in
+the current `hw_monitor.log`, because no enrollment has occurred inside the current log
+window. So the failure is proven by reproduction, not by a production trace. Stated
+explicitly so nobody later "confirms" it from an absence of log lines, which would prove
+nothing.
+
+**The fix** (one option, already implemented and working in the licensing module — copy the
+shape from `core/install_id.py:hwid_module()`): insert the `nemesis_agent` directory into
+`sys.path` for the duration of `exec_module` only, and remove it in `finally`. Scoped, not a
+permanent mutation, so the single-source-of-truth reason for loading by path is preserved.
+
+- [ ] Apply the same scoped-insert fix to `hw_monitor._match_fingerprint()`.
+- [ ] **Add a test that fails on the current code.** The reason this survived is that the
+      only consumer swallows the exception — so a test asserting `_match_fingerprint`
+      returns a real outcome for a known-matching fingerprint is what would have caught it,
+      and is what stops it regressing.
+- [ ] While there: consider whether `log.exception(... "non-fatal")` is the right level for
+      something that has never once succeeded. A warning that fires on every enrollment and
+      is expected to fire is indistinguishable from noise.
