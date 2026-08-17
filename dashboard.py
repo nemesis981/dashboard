@@ -14136,4 +14136,32 @@ if __name__ == "__main__":
     # Started here, not at import: this spawns a thread that writes the live
     # database, which a test import or py_compile has no business doing.
     _start_degraded_ingest()
-    app.run(host="0.0.0.0", port=5000)
+    # ── GAP 3 (2026-08-16): loopback, not 0.0.0.0 ─────────────────────────────
+    #
+    # This bound every interface, and the ONLY thing keeping :5000 off the
+    # network was ufw having no rule for it at all — i.e. an absence in a
+    # configuration file, on a box whose ruleset is rewritten by the installer,
+    # by the enforcement engine, and by hand. One `ufw disable`, one botched
+    # reset, one migration to a subnet that does not match $DETECTED_SUBNET, and
+    # an unauthenticated Flask dev server is world-reachable. Binding here makes
+    # it structural instead: the socket is not on the network to begin with, and
+    # ufw becomes defence-in-depth rather than the sole control.
+    #
+    # Verified nothing legitimate breaks — every consumer already targets
+    # loopback explicitly, and none of them are off-box:
+    #   install.sh:1525,1534   nginx proxy_pass http://127.0.0.1:5000  (port 80
+    #                          is the real front door, with basic auth)
+    #   dashboard.py:9843      backup cron -> http://localhost:5000
+    #   alert_manager/test_quarantine.py:56  DASHBOARD = http://127.0.0.1:5000
+    # A repo-wide grep for ":5000" finds no other network client.
+    #
+    # NEMESIS_DASH_BIND exists as a deliberate escape hatch for a deployment
+    # that fronts Flask from another host. It is NOT a silent default: anything
+    # other than loopback is announced at WARNING, because the whole point of
+    # this line is that widening it should never happen by accident.
+    _bind = os.environ.get("NEMESIS_DASH_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    if _bind != "127.0.0.1":
+        log.warning("dashboard binding to %s, NOT loopback (NEMESIS_DASH_BIND) — "
+                    ":5000 serves unauthenticated; nginx basic auth on :80 is "
+                    "bypassed for anything that can reach this socket", _bind)
+    app.run(host=_bind, port=5000)
