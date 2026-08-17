@@ -3466,17 +3466,28 @@ active device). Both are covered by the code in the same commit as this entry.
       module-level import already makes that except branch unreachable. Harmless
       dead-guard pattern; Window 1's call to leave it rather than churn this change.
 
-### [SMALL] `hw_monitor._match_fingerprint()` cannot load `hwid.py` — TOFU matching has never run
+### [FIXED — 2026-08-17] `hw_monitor._match_fingerprint()` couldn't load `hwid.py` — TOFU matching had never run
 
-**Found 2026-08-17 (Window 1) while building the licensing install-id module. Filed
-separately and deliberately NOT fixed in that batch — unrelated concern, and a licensing
-commit is the wrong place for an hw_monitor change.**
+**Found 2026-08-17 (Window 1) while building the licensing install-id module. Originally
+filed describing only the secondary cause below — the primary cause (and the one that
+actually broke it) was found afterward and is corrected here, not just appended.**
 
-`_match_fingerprint()` (`core_module/hw_monitor/hw_monitor.py:~3277`) loads
-`nemesis_agent/hwid.py` by absolute path via `importlib`. But `hwid.py` does
-`import win_run` at module level — a sibling in the same directory — and **loading a file
-by absolute path does not put that file's directory on `sys.path`.** The sibling import
-therefore raises `ModuleNotFoundError` and the whole load fails.
+**Primary cause, missed in the first pass of this entry: a hardcoded path-depth count.**
+`_match_fingerprint()` located `nemesis_agent/hwid.py` via
+`dirname(dirname(abspath(__file__)))` — correct only while this file lived at
+`alert_manager/hw_monitor.py`, one level under the repo root. Commit `9ffac56`
+(2026-07-28, "add relocated layout for six daemons") moved it to
+`core_module/hw_monitor/`, one level *deeper*, and the hardcoded count silently started
+resolving to `/opt/nemesis/core_module/nemesis_agent/hwid.py` — which doesn't exist. Counting
+`dirname()` calls encodes the file's tree depth as a magic number; any future relocation
+would have broken it again the same silent way. **This was the defect that actually made
+the load fail** — the sibling-import issue below made it fail differently, not fail at all,
+since the wrong-path load never got far enough to reach the `import win_run` line.
+
+**Secondary cause (the one originally documented here):** `hwid.py` does `import win_run`
+at module level — a sibling in the same directory — and loading a file by absolute path
+does not put that file's directory on `sys.path`, so the sibling import raises
+`ModuleNotFoundError`.
 
 **Reproduced directly**, under the production PYTHONPATH (`/opt/nemesis/alert_manager:/opt/nemesis`):
 
@@ -3487,32 +3498,32 @@ $ python3 -c "import importlib.util; spec=importlib.util.spec_from_file_location
 ModuleNotFoundError: No module named 'win_run'
 ```
 
-**Impact — real but contained.** The call site wraps it in
-`except Exception: log.exception("fingerprint match failed (non-fatal)")`, so **enrollment
-still succeeds**; nothing is broken for users. What silently does not happen is the TOFU
-"have I seen this hardware before?" comparison — an informational signal that has, on this
+**Impact — real but contained.** The call site wrapped it in
+`except Exception: log.exception("fingerprint match failed (non-fatal)")`, so enrollment
+still succeeded; nothing was broken for users. What silently didn't happen was the TOFU
+"have I seen this hardware before?" comparison — an informational signal that had, on this
 evidence, never actually run in production.
 
-**LATENT, not observed.** There is no log evidence either way: `grep` for both
-`"fingerprint match failed"` and `"enroll fingerprint: outcome="` returns **zero** hits in
-the current `hw_monitor.log`, because no enrollment has occurred inside the current log
-window. So the failure is proven by reproduction, not by a production trace. Stated
-explicitly so nobody later "confirms" it from an absence of log lines, which would prove
-nothing.
+**LATENT, not observed at the time.** There was no log evidence either way: `grep` for both
+`"fingerprint match failed"` and `"enroll fingerprint: outcome="` returned **zero** hits in
+`hw_monitor.log`, because no enrollment had occurred inside the log window. The failure was
+proven by reproduction, not by a production trace.
 
-**The fix** (one option, already implemented and working in the licensing module — copy the
-shape from `core/install_id.py:hwid_module()`): insert the `nemesis_agent` directory into
-`sys.path` for the duration of `exec_module` only, and remove it in `finally`. Scoped, not a
-permanent mutation, so the single-source-of-truth reason for loading by path is preserved.
+**Fixed 2026-08-17:** new `_hwid_path()` walks up from the file's own location looking for
+a `nemesis_agent/` sibling directory (bounded to 6 levels, never reaching filesystem root)
+instead of counting `dirname()` calls — survives any future relocation the same way.
+Combined with a scoped `sys.path` insert/remove around `exec_module` (same shape as
+`core/install_id.py:hwid_module()`) for the sibling-import issue. The call site's log
+message no longer says "non-fatal" — it now states the actual consequence (the hardware
+comparison did not run) rather than a severity word that invited ignoring it.
 
-- [ ] Apply the same scoped-insert fix to `hw_monitor._match_fingerprint()`.
-- [ ] **Add a test that fails on the current code.** The reason this survived is that the
-      only consumer swallows the exception — so a test asserting `_match_fingerprint`
-      returns a real outcome for a known-matching fingerprint is what would have caught it,
-      and is what stops it regressing.
-- [ ] While there: consider whether `log.exception(... "non-fatal")` is the right level for
-      something that has never once succeeded. A warning that fires on every enrollment and
-      is expected to fire is indistinguishable from noise.
+- [x] Scoped-insert fix applied to `hw_monitor._match_fingerprint()`, plus the path-walk fix
+      for the primary cause.
+- [x] **Regression test added:** `core_module/hw_monitor/test_match_fingerprint.py` — runs
+      the real function in a subprocess under the actual production `PYTHONPATH` (not the
+      caller's own, which would hide the bug by accident), with positive and negative
+      matches, a sys.path-leak check, and a check that the call site no longer says
+      "non-fatal". 13/13 assertions passing, verified with real output, not just claimed.
 
 ### [HIGH — legal, not just docs] `LICENSE` / `README.md` drafted, real review still owed (2026-08-17)
 

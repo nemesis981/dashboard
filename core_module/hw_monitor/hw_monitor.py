@@ -3295,19 +3295,71 @@ def _verify_agent_heartbeat(headers, body, device_id):
 _HWID_MOD = None
 
 
+def _hwid_path():
+    """Absolute path to nemesis_agent/hwid.py, found by WALKING UP rather than
+    by counting directories.
+
+    ⚠ THIS WAS BROKEN FOR WEEKS AND NOTHING SAID SO. The previous version used
+    `dirname(dirname(abspath(__file__)))`, which was correct when this file lived
+    at `alert_manager/hw_monitor.py` — one level under the repo root. Commit
+    `9ffac56` relocated it to `core_module/hw_monitor/`, one level DEEPER, and the
+    hard-coded count silently started resolving to
+    `/opt/nemesis/core_module/nemesis_agent/hwid.py`, which does not exist.
+
+    Counting `dirname()` calls encodes the file's depth in the tree as a magic
+    number, so any future relocation breaks it again in exactly the same silent
+    way. Searching upward for a known sibling directory does not.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    cur = here
+    for _ in range(6):                       # bounded: never walk to /
+        cand = os.path.join(cur, "nemesis_agent", "hwid.py")
+        if os.path.exists(cand):
+            return cand
+        parent = os.path.dirname(cur)
+        if parent == cur:                    # reached the filesystem root
+            break
+        cur = parent
+    raise FileNotFoundError(
+        "nemesis_agent/hwid.py not found walking up from %s" % here)
+
+
 def _match_fingerprint(incoming, stored):
     """TOFU "same device?" comparison, delegating to the canonical pure implementation in
-    nemesis_agent/hwid.py (loaded by absolute path — single source of truth, no drift, no
-    sys.path mutation). Returns (outcome, matched_device_id, matched_signal_count) with
-    outcome 'exact' | 'partial' | 'none'. Informational — never gates enrollment."""
+    nemesis_agent/hwid.py (loaded by absolute path — single source of truth, no drift).
+    Returns (outcome, matched_device_id, matched_signal_count) with
+    outcome 'exact' | 'partial' | 'none'. Informational — never gates enrollment.
+
+    ⚠ THE sys.path INSERT IS REQUIRED, and is scoped to the load. `hwid` imports a
+    SIBLING module (`win_run`) at module level, and loading a file by absolute path
+    does NOT put that file's directory on sys.path — so the sibling import raises
+    ModuleNotFoundError and the whole load fails. The directory is inserted for the
+    duration of exec_module only and removed in `finally`, so this stays a scoped
+    insert rather than the ambient path mutation that loading-by-path exists to
+    avoid. Same fix, same reasoning as core/install_id.py's hwid_module().
+
+    TWO separate defects were fixed here together (2026-08-17): the wrong path (see
+    _hwid_path) and this sibling import. Either one alone was enough to make the
+    comparison never run."""
     global _HWID_MOD
     if _HWID_MOD is None:
         import importlib.util
-        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                            "nemesis_agent", "hwid.py")
+        path = _hwid_path()
+        agent_dir = os.path.dirname(path)
         spec = importlib.util.spec_from_file_location("nemesis_hwid", path)
-        _HWID_MOD = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_HWID_MOD)
+        mod = importlib.util.module_from_spec(spec)
+        added = agent_dir not in sys.path
+        if added:
+            sys.path.insert(0, agent_dir)
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            if added:
+                try:
+                    sys.path.remove(agent_dir)
+                except ValueError:
+                    pass
+        _HWID_MOD = mod
     return _HWID_MOD.match_fingerprint(incoming, stored)
 
 
@@ -3536,7 +3588,17 @@ def _create_enrollment(payload, remote_ip):
                          outcome, hw_confidence, bool(hw_is_virtual),
                          len(fp.get("signals_used") or []), matched_id, matched_n)
             except Exception:
-                log.exception("fingerprint match failed (non-fatal)")
+                # NOT labelled "non-fatal" any more, deliberately. That wording
+                # invited ignoring this line, and it WAS ignored — the comparison
+                # had never once succeeded in production (two loader defects,
+                # fixed 2026-08-17) while enrollment carried on looking healthy.
+                # Enrollment still proceeds; what is lost is the has-this-hardware
+                # enrolled-before comparison, so say that rather than reassure.
+                log.exception(
+                    "enroll fingerprint: hardware comparison did NOT run for "
+                    "device %s — enrollment continues, but this device was not "
+                    "checked against previously-enrolled hardware",
+                    str(device_id)[:12] if device_id else "?")
 
         # ── REMOTE ENTITLEMENT STAMPING (licensing cap, 2026-08-17) ──────────
         #
