@@ -3513,3 +3513,32 @@ permanent mutation, so the single-source-of-truth reason for loading by path is 
 - [ ] While there: consider whether `log.exception(... "non-fatal")` is the right level for
       something that has never once succeeded. A warning that fires on every enrollment and
       is expected to fire is indistinguishable from noise.
+
+### [HIGH — legal, not just docs] `LICENSE` / `README.md` drafted, real review still owed (2026-08-17)
+
+**Audit finding:** the repo had no `LICENSE` file at all (none, ever — confirmed via
+`git log --all --full-history`), no `README.md`, and no license-grant language anywhere in
+the codebase. Under default copyright law that means "all rights reserved" — not the
+too-permissive risk originally asked about, but a legal vacuum that didn't even authorize
+the intended free-personal-use tier in writing. Full reasoning:
+`docs/architecture/0022-source-available-license.md`.
+
+**Drafted, not finalized:** `LICENSE` (source-available: free personal/non-commercial use,
+commercial use requires a paid license, no pricing figures published) and a minimal
+`README.md` pointing to it. Both are explicitly marked DRAFT at the top of the file.
+
+- [ ] **Real legal review is recommended before either is treated as load-bearing.** These
+      were drafted by Window 2 (Claude) using the general shape of comparable real-world
+      source-available licenses (Sentry/BSL-family), not by a lawyer. Enforceability, exact
+      wording, and jurisdiction were not verified against real legal standards.
+- [ ] **Fill in the placeholders `LICENSE` explicitly leaves open:** copyright holder legal
+      name/entity, commercial-licensing contact, governing law/jurisdiction. Operator's call
+      on all three — not guessed at in the draft.
+- [ ] **This is more urgent than a typical doc gap.** Per the locked tiering model,
+      commercial firewall-only use is licensed with **no technical enforcement at all** —
+      the license document IS the entire enforcement mechanism for that mode, not backup
+      for a code-level gate. Until `LICENSE` is reviewed and finalized, that mode's terms
+      rest on a self-drafted, legally-unreviewed document.
+- [ ] `LICENSE` §7 (contributions) is a placeholder pending a real Contributor License
+      Agreement — not urgent while the project has no external contributors, but blocks
+      soliciting any.

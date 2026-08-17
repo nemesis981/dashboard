@@ -1,0 +1,112 @@
+══════════════════════════════════════════════════════════════════════════
+ DRAFT — NOT FINAL. Pending Paul's review and real legal review before this
+ is treated as binding. See docs/architecture/0022-source-available-license.md
+ for the reasoning behind this shape, and PUNCHLIST.md for open items
+ (including that at least one product mode — commercial firewall-only use —
+ currently has NO technical enforcement and depends entirely on this
+ document for its terms to mean anything).
+══════════════════════════════════════════════════════════════════════════
+
+Nemesis Firewall — Source-Available License
+
+Copyright (c) 2026 [COPYRIGHT HOLDER NAME — Paul to confirm: personal name
+or a business entity]
+
+1. DEFINITIONS
+
+"The Software" means the Nemesis Firewall source code, object code,
+documentation, and associated files contained in this repository.
+
+"Personal Use" means use of the Software by an individual, or within a
+single household, for that individual's or household's own network
+security — not on behalf of, for the benefit of, or in connection with any
+business, organization, or commercial activity, and not for any paid
+service offered to others.
+
+"Commercial Use" means any use of the Software that is not Personal Use,
+including without limitation: use by or on behalf of a business, nonprofit,
+government body, or other organization; use to provide a paid or unpaid
+service to third parties; use in a commercial product or offering; and use
+to protect infrastructure operated for commercial purposes.
+
+"Commercial License" means a separate written license agreement obtained
+from the copyright holder authorizing Commercial Use, on terms agreed
+between the parties.
+
+2. GRANT — PERSONAL USE
+
+Subject to the terms of this License, the copyright holder grants any
+individual a worldwide, royalty-free, non-exclusive, non-transferable
+license to:
+
+  (a) view, download, and run the Software for Personal Use;
+  (b) modify the Software for that individual's own Personal Use; and
+  (c) redistribute unmodified copies of the Software, for Personal Use by
+      the recipient, provided this License is included unmodified.
+
+This grant does not include the right to sell the Software, to relicense
+it, to remove or alter this License, or to use it for Commercial Use.
+
+3. COMMERCIAL USE REQUIRES A SEPARATE LICENSE
+
+Commercial Use of the Software requires a Commercial License from the
+copyright holder. This includes any deployment mode of the Software that
+is marketed, documented, or offered as intended for commercial or
+business use, REGARDLESS of whether the Software technically enforces
+that restriction in a given mode or configuration. Where the Software
+does not technically prevent a particular Commercial Use, this License is
+the only thing that makes that use unauthorized — the absence of a
+technical block is not permission.
+
+To inquire about a Commercial License, contact: [COMMERCIAL LICENSING
+CONTACT — email or process, to be added].
+
+4. SOURCE AVAILABILITY IS NOT AN OPEN-SOURCE GRANT
+
+The Software's source is made available in this repository for
+transparency, security review, and community trust — so that anyone can
+verify what a security product installed on their own network actually
+does. This availability is NOT an open-source license under any OSI
+definition, and does not by itself grant rights beyond Sections 2 and 3
+above. In particular, availability of the source does not grant the right
+to build a competing product or service from it, whether free or paid,
+outside the scope of Section 2.
+
+5. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL
+THE COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY
+ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.
+
+This Software is a network security tool, not a guarantee of security.
+See the product documentation for its stated scope and limitations.
+
+6. TERMINATION
+
+This License terminates automatically if you breach any of its terms.
+Sections 4 and 5 survive termination.
+
+7. CONTRIBUTIONS
+
+Contributions submitted to this project are accepted under the
+understanding that they may be incorporated into the Software and
+distributed under this License, unless otherwise agreed in writing.
+[This section is a placeholder — a real Contributor License Agreement or
+equivalent should be drafted before contributions are actively solicited;
+not yet needed while the project has no external contributors.]
+
+8. GOVERNING LAW
+
+[JURISDICTION — to be specified. Not decided in this draft.]
+
+══════════════════════════════════════════════════════════════════════════
+ END OF DRAFT. Open items before this can be finalized:
+   - Copyright holder legal name/entity (Section header)
+   - Commercial licensing contact (Section 3)
+   - Governing law / jurisdiction (Section 8)
+   - Real legal review of the enforceability and wording throughout —
+     this was drafted by Window 2 (Claude) as a starting point, not by
+     a lawyer, and should not be treated as legally sound until reviewed.
+══════════════════════════════════════════════════════════════════════════
