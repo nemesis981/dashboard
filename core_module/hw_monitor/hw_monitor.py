@@ -59,6 +59,33 @@ else:
              "burst %.0f, max pace %.1fs", _PACER.rate, _PACER.burst,
              _PACER.max_delay)
 
+# ── :5001 source admission (GAP 3, 2026-08-16) ───────────────────────────────
+# Application-layer enforcement of "local traffic and VPN traffic, nothing
+# else". Until now that rule lived only in ufw, so it held exactly as long as
+# the firewall configuration did. See agent_source_guard for the full rationale,
+# the allowlist, and the self-test that proves the guard can actually refuse
+# something. Disable with NEMESIS_5001_SOURCE_GUARD=0.
+import agent_source_guard  # noqa: E402
+
+try:
+    _SOURCE_GUARD, _sg_note = agent_source_guard.from_env()
+except agent_source_guard.GuardError as _e:
+    # Construction failing means the guard could not prove it works. Serving
+    # without it would be the exact defect it exists to prevent — an absent
+    # check that nothing distinguishes from a passing one — so refuse to come up
+    # rather than silently reverting to ufw-only.
+    log.critical("agent listener: source guard REFUSED TO BUILD — %s", _e)
+    raise
+if _SOURCE_GUARD is None:
+    log.warning("agent listener: :5001 source guard DISABLED (%s) — admission "
+                "rests on ufw alone", _sg_note)
+else:
+    if _SOURCE_GUARD.lan_enumeration_error:
+        log.error("agent listener: :5001 source guard — %s", _sg_note)
+    else:
+        log.info("agent listener: :5001 source guard active (%s) — allowing %s",
+                 _sg_note, _SOURCE_GUARD.describe())
+
 # Prime psutil so the first cpu_percent() call returns a real value rather than 0.
 psutil.cpu_percent(interval=None, percpu=True)
 
@@ -3555,6 +3582,29 @@ def _start_windows_agent_listener():
             self.end_headers()
             self.wfile.write(body)
 
+        def _source_ok(self):
+            """True = proceed, False = already answered 403.
+
+            Runs BEFORE _pace(). A source that may not be served should not get
+            to consume a pacing bucket on its way to being refused, and the
+            cheaper check belongs first.
+            """
+            if _SOURCE_GUARD is None:
+                return True
+            src = self.client_address[0] if self.client_address else None
+            if _SOURCE_GUARD.allows(src):
+                return True
+            log.warning("agent listener: REFUSED %s %s from %s — not a local or "
+                        "VPN source (allowed: %s)", self.command, self.path,
+                        src or "<no address>", _SOURCE_GUARD.describe())
+            body = b'{"error":"source not permitted"}'
+            self.send_response(403)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+
         def _pace(self):
             """Token-bucket pacing. True = proceed, False = already answered 429.
 
@@ -3588,6 +3638,8 @@ def _start_windows_agent_listener():
             return True
 
         def do_GET(self):
+            if not self._source_ok():
+                return
             if not self._pace():
                 return
             from urllib.parse import urlparse, parse_qs
@@ -3637,6 +3689,8 @@ def _start_windows_agent_listener():
             self._json(200, {"status": status})
 
         def do_POST(self):
+            if not self._source_ok():
+                return
             if not self._pace():
                 return
             if self.path == "/enroll":
