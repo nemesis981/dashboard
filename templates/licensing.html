@@ -105,13 +105,34 @@
       </div>
     {% endif %}
 
+    {# Three categories, deliberately styled differently. Lumping them together
+       flagged this server's own node and every pre-licensing device as if they
+       were unknown machines on the VPN -- an alarm that is usually wrong, which
+       trains the operator to ignore it. #}
+    {% if known_not_entitled %}
+      <div class="note">
+        <strong>{{ known_not_entitled|length }} of your devices
+        {{ 'is' if known_not_entitled|length == 1 else 'are' }} on the VPN without a
+        remote entitlement.</strong><br>
+        These are devices Nemesis already knows &mdash; they joined before remote
+        device limits existed, or were installed as local-only. Nothing is wrong,
+        and they are not counted against your limit. They will be counted if you
+        re-issue their installer with remote access enabled.
+        <ul class="muted">
+          {% for o in known_not_entitled %}
+            <li>{{ o.device_name or o.hostname or 'unnamed' }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+
     {% if orphans %}
       <div class="note warn">
-        <strong>{{ orphans|length }} device{{ '' if orphans|length == 1 else 's' }} on your
-        VPN {{ 'has' if orphans|length == 1 else 'have' }} no enrolment record in Nemesis.</strong><br>
-        These are usually machines that were removed or rebuilt without being removed
-        from the VPN. They are not counted against your cap, but they can still reach
-        your network &mdash; review and remove any you do not recognise.
+        <strong>{{ orphans|length }} machine{{ '' if orphans|length == 1 else 's' }} on your
+        VPN {{ 'is' if orphans|length == 1 else 'are' }} not known to Nemesis at all.</strong><br>
+        Usually a device that was rebuilt or deleted without being removed from the
+        VPN. Not counted against your limit, but it can still reach your network
+        &mdash; review and remove anything you do not recognise.
         <ul class="muted">
           {% for o in orphans %}
             <li>{{ o.hostname or 'unnamed' }} &mdash; last seen {{ o.lastSeen or 'unknown' }}</li>

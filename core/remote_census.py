@@ -42,10 +42,12 @@ class Census:
     """The reconciled picture. `count` is None when it could not be established."""
 
     __slots__ = ("count", "degraded", "reason", "db_enabled",
-                 "tailnet_nodes", "matched", "db_only", "tailnet_only")
+                 "tailnet_nodes", "matched", "db_only", "tailnet_only",
+                 "known_not_entitled", "self_nodes")
 
     def __init__(self, count=None, degraded=False, reason="", db_enabled=(),
-                 tailnet_nodes=(), matched=(), db_only=(), tailnet_only=()):
+                 tailnet_nodes=(), matched=(), db_only=(), tailnet_only=(),
+                 known_not_entitled=(), self_nodes=()):
         self.count = count
         self.degraded = degraded
         self.reason = reason
@@ -54,6 +56,11 @@ class Census:
         self.matched = list(matched)
         self.db_only = list(db_only)
         self.tailnet_only = list(tailnet_only)
+        #: Enrolled devices that simply are not remote-entitled (pre-licensing or
+        #: deliberately local-only). Informational, NOT a warning.
+        self.known_not_entitled = list(known_not_entitled)
+        #: This server's own tailnet node(s). Never surfaced as a device.
+        self.self_nodes = list(self_nodes)
 
     @property
     def reconciled(self):
@@ -66,7 +73,9 @@ class Census:
                 "tailnet_nodes": len(self.tailnet_nodes),
                 "matched": len(self.matched),
                 "db_only": len(self.db_only),
-                "orphans": len(self.tailnet_only)}
+                "orphans": len(self.tailnet_only),
+                "known_not_entitled": len(self.known_not_entitled),
+                "self_nodes": len(self.self_nodes)}
 
     def __repr__(self):
         return "Census(count=%r, degraded=%r, orphans=%d)" % (
@@ -103,6 +112,50 @@ def _db_remote_enabled(db_path=None):
         return [tuple(r) for r in rows]
     finally:
         conn.close()
+
+
+def _db_all_addresses(db_path=None):
+    """{address: device_name} for EVERY agent_devices row, whatever its state.
+
+    Separate from `_db_remote_enabled` on purpose: that answers "who is entitled",
+    this answers "does Nemesis know this machine at all". Conflating them is what
+    made every pre-licensing device look like an unknown node on the VPN.
+    """
+    import sqlite3 as _s
+    try:
+        conn = _s.connect("file:%s?mode=ro" % (db_path or _db_path()), uri=True)
+    except Exception:
+        return {}
+    try:
+        return {(r[0] or "").strip(): (r[1] or "")
+                for r in conn.execute(
+                    "SELECT ip_address, device_name FROM agent_devices "
+                    "WHERE ip_address IS NOT NULL AND ip_address <> ''")}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
+
+
+def _own_tailnet_addresses():
+    """This server's own tailnet addresses, so its node is never called an orphan.
+
+    Read from the local interface table -- a measurement, not a guess. Returns an
+    empty set on failure, which degrades to the previous (merely noisy) behaviour
+    rather than mislabelling anything.
+    """
+    addrs = set()
+    try:
+        import psutil, socket
+        for iface, entries in psutil.net_if_addrs().items():
+            if not iface.startswith("tailscale"):
+                continue
+            for a in entries:
+                if a.family in (socket.AF_INET, socket.AF_INET6) and a.address:
+                    addrs.add(str(a.address).split("%")[0])
+    except Exception:
+        pass
+    return addrs
 
 
 def take(db_path=None, tailscale=None):
@@ -157,17 +210,44 @@ def take(db_path=None, tailscale=None):
         addr = (row[2] or "").strip()
         (matched if addr and addr in node_addrs else db_only).append(row)
 
+    # ── Classifying the nodes Nemesis did NOT entitle ────────────────────────
+    #
+    # The first version lumped every such node into one "no entitlement record"
+    # warning, which on a real box meant flagging the SERVER'S OWN tailnet node
+    # and every device enrolled before the licensing system existed. That reads
+    # as an alert about unknown machines on the VPN when nothing is wrong at all
+    # -- and an alarm that is usually wrong trains the operator to ignore it,
+    # which is worse than not having it.
+    #
+    # Three genuinely different things:
+    #   self       this server's own tailnet node. Never a device. Excluded.
+    #   known      HAS an agent_devices row, just not remote_enabled -- i.e. it
+    #              predates the entitlement flag, or is deliberately local-only.
+    #              Expected and benign; informational at most.
+    #   unknown    NO agent_devices row at all. The genuine leftover -- a deleted
+    #              VM, or a machine joined to the tailnet by hand. Worth review.
+    all_known = _db_all_addresses(db_path)
+    self_addrs = _own_tailnet_addresses()
+
     db_addrs = {(r[2] or "").strip() for r in db_rows}
-    tailnet_only = []
+    tailnet_only, known_not_entitled, self_nodes = [], [], []
     for n in nodes:
         addrs = [str(a) for a in (n.get("addresses") or [])]
-        if not any(a in db_addrs for a in addrs):
-            tailnet_only.append({
-                "hostname": n.get("hostname"),
-                "nodeId": n.get("nodeId") or n.get("id"),
-                "addresses": addrs,
-                "lastSeen": n.get("lastSeen"),
-                "tags": n.get("tags") or []})
+        if any(a in db_addrs for a in addrs):
+            continue                                   # already counted
+        rec = {"hostname": n.get("hostname"),
+               "nodeId": n.get("nodeId") or n.get("id"),
+               "addresses": addrs,
+               "lastSeen": n.get("lastSeen"),
+               "tags": n.get("tags") or []}
+        if any(a in self_addrs for a in addrs):
+            self_nodes.append(rec)
+        elif any(a in all_known for a in addrs):
+            rec["device_name"] = all_known.get(
+                next(a for a in addrs if a in all_known))
+            known_not_entitled.append(rec)
+        else:
+            tailnet_only.append(rec)
 
     # The cap counts entitlement, so the DB flags are the numerator. Orphans are
     # reported but NOT added: an orphan is a node Nemesis never entitled, and
@@ -182,4 +262,5 @@ def take(db_path=None, tailscale=None):
 
     return Census(count=count, degraded=False, reason=reason,
                   db_enabled=db_rows, tailnet_nodes=nodes, matched=matched,
-                  db_only=db_only, tailnet_only=tailnet_only)
+                  db_only=db_only, tailnet_only=tailnet_only,
+                  known_not_entitled=known_not_entitled, self_nodes=self_nodes)

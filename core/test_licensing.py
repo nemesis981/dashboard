@@ -374,6 +374,49 @@ def test_census_no_tailnet_configured():
         os.unlink(path)
 
 
+
+def test_census_classifies_nodes_three_ways():
+    """self / known-but-not-entitled / genuinely unknown must not be one bucket.
+
+    Lumping them together flagged this server's own tailnet node and every
+    pre-licensing device as unknown machines on the VPN. An alarm that is almost
+    always wrong is worse than no alarm: it trains the operator to ignore it.
+    """
+    print("\n[the census separates self, known-but-unentitled, and unknown]")
+    from core import remote_census as rc
+    real_self = rc._own_tailnet_addresses
+    path = _census_db(rows=[
+        ("d1", "entitled",  "100.7.0.1", "approved", 1),
+        ("d2", "preexist",  "100.7.0.2", "approved", 0),   # knows it, not entitled
+        ("d3", "localonly", "192.168.1.9", "approved", 0),
+    ])
+    try:
+        rc._own_tailnet_addresses = lambda: {"100.7.0.99"}
+        ts = _FakeTS(nodes=[
+            {"addresses": ["100.7.0.1"],  "hostname": "entitled", "nodeId": "n1"},
+            {"addresses": ["100.7.0.2"],  "hostname": "preexist", "nodeId": "n2"},
+            {"addresses": ["100.7.0.99"], "hostname": "this-server", "nodeId": "n9"},
+            {"addresses": ["100.7.0.50"], "hostname": "ghost", "nodeId": "n5"},
+        ])
+        c = rc.take(db_path=path, tailscale=ts)
+        check("count is entitlements only", c.count, 1)
+        check("the server's own node is NOT an orphan",
+              [o["hostname"] for o in c.self_nodes], ["this-server"])
+        check("a known-but-unentitled device is NOT an orphan",
+              [o["hostname"] for o in c.known_not_entitled], ["preexist"])
+        check("it carries the friendly device name",
+              c.known_not_entitled[0].get("device_name"), "preexist")
+        # Only the genuine leftover warns.
+        check("only the unknown machine is an orphan",
+              [o["hostname"] for o in c.tailnet_only], ["ghost"])
+        # CONTROL: the classifier must still be able to find an orphan at all.
+        check("CONTROL exactly one orphan", len(c.tailnet_only), 1)
+    finally:
+        rc._own_tailnet_addresses = real_self
+        os.unlink(path)
+
+
+
 if __name__ == "__main__":
     print("licensing tests")
     test_key_verification()
@@ -388,6 +431,7 @@ if __name__ == "__main__":
     test_backup_code_regeneration_supersedes()
     test_backup_code_status_levels()
     test_census_reconciles()
+    test_census_classifies_nodes_three_ways()
     test_census_refuses_to_guess()
     test_census_missing_column_is_loud()
     test_census_no_tailnet_configured()

@@ -1988,6 +1988,7 @@ def _license_view():
             "cap": ent.FREE_TIER_REMOTE_CAP, "used": None, "limit": None,
             "budget_known": False, "budget_reason": "", "orphans": [],
             "codes_remaining": 0, "codes_level": "exhausted", "codes_msg": "",
+            "known_not_entitled": [],
             "install_id": "", "install_conf": "", "error": ""}
     try:
         tier, verdict, detail = ent.license_status()
@@ -2000,7 +2001,8 @@ def _license_view():
         view.update(used=used, limit=limit,
                     budget_known=census.reconciled,
                     budget_reason=census.reason,
-                    orphans=census.tailnet_only)
+                    orphans=census.tailnet_only,
+                    known_not_entitled=getattr(census, "known_not_entitled", []))
     except Exception as e:
         view["budget_reason"] = "could not count remote devices: %s" % str(e)[:160]
 
@@ -4606,19 +4608,31 @@ def _render_remote_budget_html() -> str:
                 'limited.</span>' % (colour, used, limit, max(0, left)))
         border = "#2a3450"
 
+    # Only genuinely UNKNOWN machines get a warning here. Devices Nemesis already
+    # knows but has not entitled (pre-licensing, or local-only) are normal, and
+    # this server&#39;s own tailnet node is not a device at all -- flagging either
+    # produced an alarm that was almost always wrong.
     orphan_note = ""
     if getattr(census, "tailnet_only", None):
         n = len(census.tailnet_only)
         orphan_note = (
-            '<br><span style="color:#ffd98a;font-size:0.94em">&#9888; %d device%s '
-            'on your VPN %s no enrolment record here &mdash; usually machines '
-            'removed without being taken off the VPN. Not counted, but worth '
+            '<br><span style="color:#ffd98a;font-size:0.94em">&#9888; %d machine%s '
+            'on your VPN %s not known to Nemesis at all &mdash; usually rebuilt or '
+            'deleted without being removed from the VPN. Not counted, but worth '
             'reviewing.</span>'
-            % (n, "" if n == 1 else "s", "has" if n == 1 else "have"))
+            % (n, "" if n == 1 else "s", "is" if n == 1 else "are"))
+    known_note = ""
+    if getattr(census, "known_not_entitled", None):
+        k = len(census.known_not_entitled)
+        known_note = (
+            '<br><span style="color:#8a98b3;font-size:0.94em">%d of your devices '
+            '%s on the VPN without a remote entitlement (joined before remote '
+            'limits existed, or installed local-only). Not counted.</span>'
+            % (k, "is" if k == 1 else "are"))
 
     return ('<div style="background:#0d0d1e;border:1px solid ' + border + ';'
             'border-radius:8px;padding:11px 14px;margin:12px 0;font-size:0.85em">'
-            + body + orphan_note +
+            + body + known_note + orphan_note +
             '<br><a href="/settings/licensing" style="color:#00d4ff;'
             'font-size:0.92em;text-decoration:none">Manage licence and backup '
             'codes &rarr;</a></div>')
