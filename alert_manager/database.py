@@ -1221,6 +1221,20 @@ def init_enrollment_tokens_table():
         # column, which that helper deliberately treats as "do not revoke".
         if "preauth_key_minted_at" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN preauth_key_minted_at REAL")
+        # Migration (ADR 0001 guarded ALTER): remote_enabled = does this installer
+        # grant REMOTE (tailnet) access, and therefore consume a remote-device
+        # slot? The licensing cap counts entitlement, not observation, so this is
+        # where the entitlement is first recorded — the enrollment INSERT in
+        # hw_monitor copies it onto agent_devices.remote_enabled.
+        #
+        # DEFAULT 0. Every pre-existing token becomes local-only, which is the
+        # honest value: none of them were ever granted the entitlement, because
+        # it did not exist. The alternative — defaulting to 1 — would silently
+        # grant remote entitlement to every historic token, inventing exactly the
+        # entitlements the cap exists to meter.
+        if "remote_enabled" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens "
+                      "ADD COLUMN remote_enabled INTEGER NOT NULL DEFAULT 0")
 
         # backup_media_status: last-known free space per backup destination.
         #

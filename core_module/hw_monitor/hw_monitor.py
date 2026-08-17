@@ -3538,20 +3538,52 @@ def _create_enrollment(payload, remote_ip):
             except Exception:
                 log.exception("fingerprint match failed (non-fatal)")
 
+        # ── REMOTE ENTITLEMENT STAMPING (licensing cap, 2026-08-17) ──────────
+        #
+        # The cap counts ENTITLEMENT, not observation (operator decision closing
+        # the 2026-08-16 audit §4.2). The entitlement is decided at installer
+        # generation and recorded on the token; this carries it onto the device.
+        #
+        # Read SEPARATELY from the auto-approve claim above, deliberately: that
+        # UPDATE requires `auto_approve=1`, so a manually-approved device would
+        # never reach it — and a manually-approved device can be just as remote
+        # as an auto-approved one. Tying the entitlement to the auto-approve
+        # branch would silently under-count exactly the enrollments an admin
+        # reviewed most carefully.
+        #
+        # Absent token, absent column, or an unreadable row all yield 0. That is
+        # the correct direction: an entitlement that cannot be shown to have been
+        # granted was not granted. Failing the other way would invent grants.
+        token_remote = 0
+        if token:
+            try:
+                _tr = conn.execute(
+                    "SELECT remote_enabled FROM enrollment_tokens WHERE token=?",
+                    (token,)).fetchone()
+                token_remote = 1 if (_tr and _tr[0]) else 0
+            except Exception:
+                log.warning("enroll: could not read remote_enabled for token %s — "
+                            "recording device as LOCAL-ONLY", token[:8])
+                token_remote = 0
+
         conn.execute(
             "INSERT INTO agent_devices (device_id, device_name, os, os_version, "
             "hardware_summary, public_key, enrollment_status, ip_address, agent_last_seen, "
             "pre_enrollment_scan, enrollment_has_findings, enrolled_by, enrolled_at, "
             "hw_stable_id, hw_signals_used, hw_signal_hashes, hw_fp_confidence, "
-            "hw_fp_schema_version, hw_fp_locked_at, hw_is_virtual) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "hw_fp_schema_version, hw_fp_locked_at, hw_is_virtual, "
+            "remote_enabled, remote_enabled_at, remote_enabled_by) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (device_id, device_name, os_name, payload.get("os_version", ""),
              payload.get("hardware_summary", ""), public_key, enroll_status, remote_ip, now,
              scan_json, has_findings,
              (token_creator if enroll_status == "approved" else None),
              (now if enroll_status == "approved" else None),
              hw_stable_id, hw_signals_used, hw_signal_hashes, hw_confidence,
-             hw_schema_version, _time.time(), hw_is_virtual))
+             hw_schema_version, _time.time(), hw_is_virtual,
+             token_remote,
+             (now if token_remote else None),
+             (token_creator if token_remote else None)))
         conn.commit()   # token claim + device insert commit together (or both roll back)
         conn.close()
     except Exception:

@@ -3672,8 +3672,21 @@ def api_agent_revoke(device_id):
         # before this device was revoked?" — the question a trust-boundary check
         # has to answer. The _audit call below still records the event; this
         # records the STATE, which is what per-device logic reads.
+        # `remote_enabled=0` is NOT redundant with the status change, and the
+        # reason is the operator's own design (2026-08-17): re-admitting a
+        # revoked device must require a NEW key, so that key generation is a
+        # second, recurring enforcement point for the cap rather than a one-time
+        # gate at first enrollment.
+        #
+        # The census already ignores revoked rows, so the slot frees either way.
+        # But `api_agent_approve` restores ONLY `enrollment_status` — so leaving
+        # the flag set means a re-approved device silently regains its remote
+        # slot with no new key issued, which is precisely the enforcement point
+        # being bypassed. Clearing it here means re-approval restores local
+        # reporting, and remote access has to be granted again deliberately.
         conn.execute("UPDATE agent_devices SET enrollment_status='revoked', "
-                     "revoked_at=?, revoked_by=? WHERE device_id=?",
+                     "revoked_at=?, revoked_by=?, remote_enabled=0 "
+                     "WHERE device_id=?",
                      (datetime.now().isoformat(timespec="seconds"), _actor(),
                       device_id))
         conn.commit()
@@ -4142,6 +4155,55 @@ def api_agent_installer_generate():
             poll_interval = max(15, int(float(_pi)))
         except (TypeError, ValueError):
             poll_interval = None
+    # ── REMOTE-DEVICE CAP, seam 1 of 2 (2026-08-17) ──────────────────────────
+    #
+    # An installer is REMOTE-capable when it will carry a tailnet key -- either
+    # pasted, or minted at download. That, not the device's later observed
+    # behaviour, is the entitlement: the cap counts what was deliberately
+    # granted, per the 2026-08-17 decision closing the audit's §4.2.
+    #
+    # `remote=0` in the form forces a local-only installer, which is always
+    # permitted and never consumes a slot.
+    _rem = data.get("remote")
+    _remote_requested = 1 if (_rem is None or _rem in (True, 1)
+                              or str(_rem).strip().lower() in ("1", "true", "on", "yes")) else 0
+    remote_enabled = 1 if (_remote_requested and preauth_source != "none") else 0
+    cap_note = ""
+    if remote_enabled:
+        from core import cap_guard
+        _cap = cap_guard.check_admission()
+        if not _cap.permitted:
+            # REFUSED. Deliberately NOT an error: the operator can still generate
+            # a local-only installer, and the device will get full local
+            # protection. Withholding reach is the whole design; withholding the
+            # product would violate entitlements.py's standing instruction.
+            # The machine-readable code must match the actual CAUSE. Both
+            # refusals are 409, but "you are at your limit" and "this server has
+            # no internet" have completely different remedies, and a client that
+            # branches on `error` would tell the user to revoke a device when
+            # what they need to do is plug the network back in.
+            from core import cap_guard as _cg
+            _err = ("no_internet_connectivity"
+                    if _cap.state == _cg.REFUSE_NO_CONNECTIVITY
+                    else "remote_cap_reached")
+            _audit(action=("installer_remote_refused_offline"
+                           if _cap.state == _cg.REFUSE_NO_CONNECTIVITY
+                           else "installer_remote_refused_at_cap"))
+            return jsonify({
+                "error": _err,
+                "detail": _cap.user_message(),
+                "cap": _cap.as_dict(),
+                "hint": ("Reconnect this server to the internet, then re-issue "
+                         "the installer. Re-submit with remote=0 now to generate "
+                         "a local-only installer."
+                         if _cap.state == _cg.REFUSE_NO_CONNECTIVITY else
+                         "Re-submit with remote=0 to generate a local-only "
+                         "installer, or revoke a remote device first.")}), 409
+        cap_note = _cap.user_message()
+        if not _cap.verified:
+            log.warning("installer generate: remote entitlement granted WITHOUT "
+                        "a verified count — %s", _cap.reason)
+
     token   = secrets.token_hex(16)
     now     = time.time()
     expires = now + 2 * 3600   # short TTL (ADR 0011: 1-2h), was 24h
@@ -4151,10 +4213,11 @@ def api_agent_installer_generate():
         conn.execute(
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
-            " device_name_hint, revoked, preauth_key, poll_interval, preauth_key_id) "
-            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?)",
+            " device_name_hint, revoked, preauth_key, poll_interval, preauth_key_id, "
+            " remote_enabled) "
+            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?,?)",
             (token, creator, now, expires, auto_approve, hint, preauth_key or None,
-             poll_interval, preauth_key_id or None))
+             poll_interval, preauth_key_id or None, remote_enabled))
         # Bound how long any OTHER key lingers in plaintext. A token that is spent,
         # revoked, or expired can never legitimately serve a zip again (see
         # `_valid_installer_token`'s condition, which this is the exact complement of),
@@ -4314,7 +4377,66 @@ def install_windows_zip(token):
     prior_key_id = row["preauth_key_id"] if "preauth_key_id" in row.keys() else ""
     prior_minted_at = (row["preauth_key_minted_at"]
                        if "preauth_key_minted_at" in row.keys() else None)
-    if not preauth and tailscale_api.is_configured():
+    # ── REMOTE-DEVICE CAP, seam 2 of 2 (2026-08-17) ──────────────────────────
+    #
+    # Re-checked HERE as well as at generation, because a token created while
+    # under the cap can be downloaded after it fills. Checking only at generation
+    # would leave a hole exactly the width of the gap between the two, and that
+    # gap is unbounded -- a token lives for two hours.
+    #
+    # A token whose row predates the column, or which was generated local-only,
+    # is NOT remote and skips the check entirely.
+    # ⚠ DEPLOY NOTE: tokens generated BEFORE this column existed migrate to 0 and
+    # therefore become local-only. That is bounded and small -- enrollment tokens
+    # carry a 2h TTL (ADR 0011), so at most one TTL's worth of in-flight
+    # installers are affected, and they can simply be regenerated. Defaulting
+    # pre-existing tokens to 1 instead would have silently granted the remote
+    # entitlement to every historic token, which is the thing the cap exists to
+    # prevent.
+    _tok_remote = (row["remote_enabled"]
+                   if "remote_enabled" in row.keys() else 0) or 0
+
+    _cap_degraded_note = ""
+
+    # ⚠ THE CAP CHECK IS GATED ON `_tok_remote` ALONE — NOT on whether a key is
+    # about to be MINTED.
+    #
+    # The first version of this seam read:
+    #     _want_mint = _tok_remote and not preauth and is_configured()
+    #     if _want_mint: <cap check>
+    # which meant a PASTED key (preauth already set) skipped the cap check
+    # entirely. That is a real bypass, not a theoretical one: a user can create
+    # ONE reusable key in their own Tailscale console, paste it into every
+    # installer, and never touch the Tailscale API again — so nothing would
+    # re-check the cap at download, for any number of devices.
+    #
+    # What is being metered is the delivery of REMOTE ACCESS, not the act of
+    # calling an API. Where the key came from is irrelevant to the entitlement.
+    if _tok_remote:
+        from core import cap_guard
+        _cap2 = cap_guard.check_admission()
+        if not _cap2.permitted:
+            # DEGRADE, do not fail the download. The installer is still served --
+            # without a tailnet key, so the device installs and gets full local
+            # protection. Refusing the download outright would withhold the
+            # product, not just its reach, which is the line entitlements.py
+            # tells us not to cross.
+            _audit(action="installer_mint_refused_at_cap", rule_id=token[:8])
+            log.warning("installer zip: remote key WITHHELD for token %s (source=%s) — %s",
+                        token[:8], "pasted" if preauth else "mint", _cap2.reason)
+            # Withhold a PASTED key too. Clearing the local variable only affects
+            # what gets baked into this zip; the token row keeps its key, so a
+            # later download under the cap still works.
+            preauth = ""
+            _cap_degraded_note = _cap2.user_message()
+
+    # Mint only when the cap allowed it (an empty _cap_degraded_note) AND there is
+    # no key already. Without the note check, clearing `preauth` above would make
+    # this true and mint the very key the cap just refused.
+    _want_mint = (bool(_tok_remote) and not preauth
+                  and tailscale_api.is_configured() and not _cap_degraded_note)
+
+    if _want_mint:
         try:
             preauth, new_key_id = tailscale_api.mint_preauth_key(
                 device_hint=row["device_name_hint"] or "Windows Device",
