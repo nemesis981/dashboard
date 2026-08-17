@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall &mdash; Licence</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; padding:24px 12px; }
+    .wrap { max-width:720px; margin:0 auto; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:22px 26px; margin-bottom:18px; }
+    h1 { color:#00d4ff; margin:0 0 18px; font-size:1.35em; }
+    h2 { color:#00d4ff; margin:0 0 12px; font-size:1.02em; }
+    .row { display:flex; justify-content:space-between; gap:12px; padding:7px 0;
+           border-bottom:1px solid #ffffff0d; font-size:0.9em; }
+    .row:last-child { border-bottom:none; }
+    .k { color:#8a98b3; }
+    .v { color:#ddd; text-align:right; word-break:break-all; }
+    .big { font-size:1.6em; color:#00d4ff; font-weight:bold; }
+    .ok { color:#00ff88; } .low { color:#ffd98a; } .bad { color:#ff8888; }
+    .muted { color:#6b7689; font-size:0.82em; line-height:1.5; }
+    .note { background:#0d0d1e; border:1px solid #2a3450; border-radius:8px;
+            padding:12px 14px; margin:12px 0; font-size:0.84em; line-height:1.55; color:#ccd; }
+    .warn { background:#ffb01a1a; border:1px solid #ffb01a; color:#ffd98a; }
+    .err  { background:#ff444422; border:1px solid #ff4444; color:#ff9999; }
+    .good { background:#00ff8815; border:1px solid #00ff8855; color:#9f9; }
+    input[type=text] { width:100%; box-sizing:border-box; background:#0d0d1e;
+            border:1px solid #334; color:#eee; padding:9px 11px; border-radius:7px;
+            font-size:0.9em; font-family:ui-monospace,Menlo,Consolas,monospace; }
+    input:focus { outline:none; border-color:#00d4ff; }
+    button { background:#00d4ff; color:#062; border:none; border-radius:8px;
+             padding:9px 16px; font-size:0.92em; font-weight:bold; cursor:pointer;
+             margin-top:12px; }
+    button.ghost { background:#ff444422; color:#ff8888; border:1px solid #ff4444; }
+    code.codes { display:block; background:#0d0d1e; border:1px solid #00d4ff44;
+             border-radius:8px; padding:14px 16px; margin:12px 0; font-size:1.05em;
+             letter-spacing:1px; line-height:2; color:#00d4ff; }
+    .back { display:inline-block; margin-top:8px; color:#6b7689; font-size:0.82em;
+            text-decoration:none; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>&#128273; Licence</h1>
+
+  {% if error %}<div class="note err">{{ error }}</div>{% endif %}
+
+  <!-- ── Tier ─────────────────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Current tier</h2>
+    <div class="row"><span class="k">Tier</span>
+      <span class="v {% if tier == 'commercial' %}ok{% endif %}">{{ tier }}</span></div>
+    <div class="row"><span class="k">Licence status</span>
+      <span class="v">{{ verdict }}</span></div>
+    {% if detail %}<div class="row"><span class="k">Detail</span>
+      <span class="v muted">{{ detail }}</span></div>{% endif %}
+    <div class="row"><span class="k">Installation ID</span>
+      <span class="v">
+        {% if install_id %}
+          <span id="iid" style="font-family:ui-monospace,Menlo,Consolas,monospace;
+                font-size:0.86em">{{ install_id }}</span><br>
+          <button style="margin-top:6px;padding:4px 10px;font-size:0.8em"
+                  onclick="licCopyInstallId()">Copy</button>
+        {% else %}unavailable{% endif %}
+      </span></div>
+    {% if install_id %}
+      <div class="note">
+        <strong>Buying a licence?</strong> Send this installation ID when you
+        purchase &mdash; your key is issued for this machine specifically and will
+        not work on another. The full value is shown above; use Copy rather than
+        retyping it.
+      </div>
+    {% endif %}
+    <div class="row"><span class="k">Hardware confidence</span>
+      <span class="v {% if install_conf == 'low' %}low{% endif %}">{{ install_conf or 'unknown' }}</span></div>
+    {% if install_conf == 'low' %}
+      <div class="note warn">
+        This machine reports weak hardware identifiers (common on virtual machines).
+        The licence still works &mdash; Nemesis simply will not enforce the hardware
+        lock against a fingerprint it knows to be unreliable.
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Remote device budget ─────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Remote devices</h2>
+    {% if budget_known %}
+      <p><span class="big {% if limit and used >= limit %}bad{% elif limit and used >= limit - 1 %}low{% else %}ok{% endif %}">{{ used }}</span>
+         <span class="muted">of {{ limit if limit else 'unlimited' }} remote slots in use</span></p>
+      {% if limit %}
+        <div class="note">
+          {{ limit - used }} remote slot{{ '' if (limit - used) == 1 else 's' }} remaining.
+          Devices on your local network are <strong>not</strong> counted and are never
+          limited &mdash; this cap applies only to devices reaching Nemesis over the VPN.
+        </div>
+      {% endif %}
+    {% else %}
+      <p><span class="big low">unknown</span></p>
+      <div class="note warn">
+        The remote-device count could not be established, so no number is shown
+        rather than a possibly-wrong one.<br><br>
+        <span class="muted">{{ budget_reason }}</span>
+      </div>
+    {% endif %}
+
+    {% if orphans %}
+      <div class="note warn">
+        <strong>{{ orphans|length }} device{{ '' if orphans|length == 1 else 's' }} on your
+        VPN {{ 'has' if orphans|length == 1 else 'have' }} no enrolment record in Nemesis.</strong><br>
+        These are usually machines that were removed or rebuilt without being removed
+        from the VPN. They are not counted against your cap, but they can still reach
+        your network &mdash; review and remove any you do not recognise.
+        <ul class="muted">
+          {% for o in orphans %}
+            <li>{{ o.hostname or 'unnamed' }} &mdash; last seen {{ o.lastSeen or 'unknown' }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    {% endif %}
+  </div>
+
+  <!-- ── Activate a key ───────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Activate a licence key</h2>
+    <p class="muted">Paste the key you received when you purchased. It is checked
+       before it is saved, so a mistyped key cannot replace a working licence.</p>
+    <input type="text" id="lickey" placeholder="NEMLIC1...." autocomplete="off" spellcheck="false">
+    <button onclick="licActivate()">Activate</button>
+    <div id="licresult"></div>
+  </div>
+
+  <!-- ── Backup codes ─────────────────────────────────────────────────── -->
+  <div class="card">
+    <h2>Backup codes</h2>
+    <div class="note {% if codes_level == 'exhausted' %}err{% elif codes_level == 'low' %}warn{% endif %}">
+      {{ codes_msg }}
+    </div>
+    <p class="muted">Each code lets you move this licence to new hardware once
+       &mdash; after a reinstall, a disk replacement, or a new machine. Store them
+       somewhere separate from this server.</p>
+
+    <div id="newcodes"></div>
+
+    <button onclick="licGenerate()">
+      {% if codes_remaining %}Replace with 5 new codes{% else %}Issue 5 backup codes{% endif %}
+    </button>
+    {% if codes_remaining %}
+      <p class="muted">Replacing them invalidates the {{ codes_remaining }} you have now.</p>
+    {% endif %}
+
+    <h2 style="margin-top:22px">Use a backup code</h2>
+    <p class="muted">If this licence was issued for different hardware, redeem a code
+       to move it to this machine.</p>
+    <input type="text" id="redeemcode" placeholder="XXXX-XXXX-XXXX-XXXX" autocomplete="off">
+    <button onclick="licRedeem()">Redeem</button>
+    <div id="redeemresult"></div>
+  </div>
+
+  <a class="back" href="/settings">&larr; Back to settings</a>
+</div>
+
+<script src="/static/licensing.js"></script>
+</body>
+</html>

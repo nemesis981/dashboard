@@ -163,17 +163,54 @@ def get_tier() -> str:
     return TIER_COMMERCIAL if is_commercial() else TIER_FREE
 
 
+def remote_cap_for_license(db_path=None):
+    """The cap this install is entitled to. None means unlimited.
+
+    Precedence, and the first rule is the one that matters:
+
+      1. A `remote_cap` in the SIGNED licence payload wins. The issuing tool can
+         set it (`nemesis-license-issue --remote-cap N`), and because it is
+         inside the signature it cannot be edited by the holder. Ignoring it
+         would mean a value the vendor deliberately signed had no effect —
+         issuing a 25-device licence and silently granting unlimited instead.
+      2. Otherwise a valid commercial licence is unlimited.
+      3. Otherwise the free-tier cap.
+
+    Anything unparseable or nonsensical falls through to the free cap rather
+    than to unlimited: a corrupted number must not widen an entitlement.
+    """
+    tier, verdict, _detail = license_status(db_path)
+    if tier != TIER_COMMERCIAL:
+        return FREE_TIER_REMOTE_CAP
+
+    state = _license_state(db_path)
+    if state:
+        from core import license_key as lk
+        res = lk.verify(state[0], install_id=None)
+        if res.valid:
+            raw = res.payload.get("remote_cap")
+            if raw is not None:
+                try:
+                    n = int(raw)
+                    if n > 0:
+                        return n
+                except (TypeError, ValueError):
+                    pass
+                # Present but unusable. Fail toward the NARROWER entitlement.
+                return FREE_TIER_REMOTE_CAP
+    return COMMERCIAL_REMOTE_CAP
+
+
 def remote_device_budget(db_path=None):
     """(used, limit, census) for the REMOTE-device cap.
 
-    `limit` is None for unlimited (commercial). `used` is None when the census
-    could not be reconciled — callers MUST treat that as "unknown", never as
-    zero. The whole reason this returns a census object is so a caller cannot
-    accidentally consume a number that was never established.
+    `limit` is None for unlimited. `used` is None when the census could not be
+    reconciled — callers MUST treat that as "unknown", never as zero. The whole
+    reason this returns a census object is so a caller cannot accidentally
+    consume a number that was never established.
 
     LOCAL devices are not counted and are never capped.
     """
     from core import remote_census
     census = remote_census.take(db_path=db_path)
-    limit = None if is_commercial() else FREE_TIER_REMOTE_CAP
-    return census.count, limit, census
+    return census.count, remote_cap_for_license(db_path), census

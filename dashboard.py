@@ -99,6 +99,7 @@ import database          # module handle: canonical DDL owner (init_audit_log_ta
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table, init_recovery_codes_table,
+                      init_licensing_tables,
                       init_settings_table, init_error_tables,
                       init_conn_events_tables, init_tier2_gate_tables)
 from ip_enrichment import enrich_ip
@@ -122,6 +123,14 @@ init_users_table()
 init_login_events_table()
 init_recovery_codes_table()
 init_enrollment_tokens_table()
+# Licensing state + licence backup codes (ADR 0001 canonical DDL in
+# alert_manager/database.py). Created HERE because the dashboard is the only
+# writer: it activates keys, issues backup codes, and reads the entitlement.
+# Called unconditionally rather than lazily on first use — a CREATE that exists
+# in the repo but never runs is indistinguishable from no CREATE at all on a
+# fresh install, which is exactly the `devices`-table failure and the same trap
+# init_tier2_gate_tables was added to avoid below.
+init_licensing_tables()
 # Track C (ADR 0001 canonical DDL in alert_manager/database.py). Created here AND
 # by hw_monitor's startup — deliberately both, the same reasoning as
 # init_quarantines_table: there is no systemd ordering between the two services,
@@ -1947,6 +1956,216 @@ def _recovery_grace_active(row):
         return datetime.now() < datetime.fromisoformat(until)
     except (TypeError, ValueError):
         return False
+
+
+# ── Licensing UI (node-locked keys, remote-device budget, backup codes) ──────
+#
+# SECURITY POSTURE, stated once for all four routes below:
+#   * All are @login_required and NONE is in _AUTH_EXEMPT -- verified by
+#     test_licensing_routes.py, which resolves each endpoint name against the
+#     real url_map rather than trusting the decorator to be present.
+#   * Every state-changing route is POST-only. A GET that activates a licence or
+#     burns a backup code is CSRF-triggerable from an <img> tag under default
+#     SameSite=Lax cookies -- the exact `db_action` defect this codebase already
+#     had once.
+#   * No value reaches a shell, SQL string or crontab line; all DB access is
+#     parameterised.
+#   * Codes are returned in plaintext EXACTLY ONCE, by the route that issues
+#     them, and never stored or re-displayed.
+
+def _license_view():
+    """Everything the licensing UI needs, in one read. Never raises.
+
+    Returns a dict the template renders directly. Each field carries its own
+    honesty: `budget_known` is False when the census could not establish a real
+    number, so the template shows "unknown" rather than a plausible zero.
+    """
+    from core import entitlements as ent
+    from core import backup_codes as bc
+    from core import license_key as lk
+
+    view = {"tier": "free", "verdict": lk.Verdict.ABSENT, "detail": "",
+            "cap": ent.FREE_TIER_REMOTE_CAP, "used": None, "limit": None,
+            "budget_known": False, "budget_reason": "", "orphans": [],
+            "codes_remaining": 0, "codes_level": "exhausted", "codes_msg": "",
+            "install_id": "", "install_conf": "", "error": ""}
+    try:
+        tier, verdict, detail = ent.license_status()
+        view.update(tier=tier, verdict=verdict, detail=detail)
+    except Exception as e:
+        view["error"] = "licence state unreadable: %s" % str(e)[:160]
+
+    try:
+        used, limit, census = ent.remote_device_budget()
+        view.update(used=used, limit=limit,
+                    budget_known=census.reconciled,
+                    budget_reason=census.reason,
+                    orphans=census.tailnet_only)
+    except Exception as e:
+        view["budget_reason"] = "could not count remote devices: %s" % str(e)[:160]
+
+    try:
+        n, level, msg = bc.status()
+        view.update(codes_remaining=n, codes_level=level, codes_msg=msg)
+    except Exception as e:
+        view["codes_msg"] = "backup code state unreadable: %s" % str(e)[:160]
+
+    try:
+        from core import install_id as iid
+        fp = iid.compute()
+        view["install_id"] = fp.get("stable_id") or ""
+        view["install_conf"] = fp.get("confidence") or ""
+    except Exception as e:
+        view["install_id"] = ""
+        view["install_conf"] = "unavailable: %s" % str(e)[:80]
+    return view
+
+
+@app.route("/settings/licensing")
+@login_required
+def licensing_page():
+    """Read-only licensing overview. GET only -- it changes nothing."""
+    return render_template("licensing.html", **_license_view())
+
+
+@app.route("/api/license/activate", methods=["POST"])
+@login_required
+def api_license_activate():
+    """Install a purchased licence key. POST-only, auth-gated, audited.
+
+    The key is verified BEFORE it is stored. Storing first and validating later
+    would let a bad key overwrite a good one -- turning a typo into a lost
+    licence, which is precisely the failure backup codes exist to recover from
+    and should not be a way to CAUSE.
+    """
+    from core import license_key as lk
+    from core import install_id as iid
+
+    key = (request.form.get("license_key") or
+           (request.get_json(silent=True) or {}).get("license_key") or "").strip()
+    if not key:
+        return jsonify({"ok": False, "verdict": "absent",
+                        "detail": "No licence key supplied."}), 400
+
+    try:
+        fp = iid.compute()
+    except iid.InstallIdError as e:
+        # Cannot fingerprint -> cannot bind. Refuse rather than storing a key
+        # against an empty install id, which would match every other failure.
+        return jsonify({"ok": False, "verdict": "no_install_id",
+                        "detail": "Could not identify this machine, so the "
+                                  "licence cannot be bound to it: %s" % e}), 500
+
+    res = lk.verify(key, install_id=fp["stable_id"])
+    if not res.valid:
+        _audit(action="license_activate_rejected", rule_id=res.verdict)
+        return jsonify({"ok": False, "verdict": res.verdict,
+                        "detail": res.detail}), 400
+
+    now = datetime.now().isoformat(timespec="seconds")
+    try:
+        conn = _dm_conn()
+        conn.execute(
+            "INSERT INTO license_state (id, install_id, install_signals, "
+            "install_conf, license_key, tier, bound_at, created_at, updated_at, "
+            "updated_actor) VALUES (1,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET install_id=excluded.install_id, "
+            "install_signals=excluded.install_signals, "
+            "install_conf=excluded.install_conf, "
+            "license_key=excluded.license_key, tier=excluded.tier, "
+            "bound_at=excluded.bound_at, updated_at=excluded.updated_at, "
+            "updated_actor=excluded.updated_actor",
+            (fp["stable_id"], json.dumps(fp.get("signal_hashes") or {}),
+             fp.get("confidence"), key, res.payload.get("tier") or "commercial",
+             now, now, now, _actor()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.exception("license activate: could not store licence")
+        return jsonify({"ok": False, "verdict": "store_failed",
+                        "detail": "Licence verified but could not be saved: %s"
+                                  % str(e)[:160]}), 500
+
+    _audit(action="license_activated", rule_id=(res.payload.get("licence_id") or "")[:32])
+    return jsonify({"ok": True, "verdict": res.verdict,
+                    "tier": res.payload.get("tier"),
+                    "detail": "Licence activated."})
+
+
+@app.route("/api/license/backup-codes/generate", methods=["POST"])
+@login_required
+def api_license_backup_codes_generate():
+    """Issue a fresh batch of 5 backup codes. Returns them ONCE, in plaintext.
+
+    Regenerating SUPERSEDES any previous batch, so this is destructive to codes
+    the operator may have written down. The confirmation lives in the UI; the
+    audit record lives here.
+    """
+    from core import backup_codes as bc
+    from core import install_id as iid
+    try:
+        install = iid.compute().get("stable_id", "")
+    except Exception:
+        install = ""
+    try:
+        codes = bc.generate_batch(install_id=install, actor=_actor())
+    except Exception as e:
+        log.exception("backup code generation failed")
+        return jsonify({"ok": False,
+                        "detail": "Could not issue backup codes: %s"
+                                  % str(e)[:160]}), 500
+    _audit(action="license_backup_codes_generated")
+    n, level, msg = bc.status()
+    return jsonify({"ok": True, "codes": codes, "remaining": n,
+                    "level": level, "message": msg})
+
+
+@app.route("/api/license/backup-codes/redeem", methods=["POST"])
+@login_required
+def api_license_backup_codes_redeem():
+    """Spend a backup code to rebind this licence to the CURRENT hardware.
+
+    ⚠ INCOMPLETE BY DESIGN, and it says so rather than pretending: spending the
+    code is implemented and real, but obtaining a REPLACEMENT KEY for the new
+    install id requires the issuer, which is offline/manual today
+    (scripts/nemesis-license-issue). So this records the redemption and returns
+    the new install id for the operator to send to support -- it cannot mint a
+    key by itself. Returning success without a new key would be a lie the user
+    only discovers later.
+    """
+    from core import backup_codes as bc
+    from core import install_id as iid
+
+    code = (request.form.get("code") or
+            (request.get_json(silent=True) or {}).get("code") or "").strip()
+    if not code:
+        return jsonify({"ok": False, "detail": "No code supplied."}), 400
+
+    n_before, _lvl, _m = bc.status()
+    if n_before == 0:
+        return jsonify({"ok": False, "exhausted": True,
+                        "detail": bc.exhaustion_notice()}), 409
+
+    try:
+        install = iid.compute().get("stable_id", "")
+    except Exception as e:
+        return jsonify({"ok": False,
+                        "detail": "Could not identify this machine: %s" % e}), 500
+
+    if not bc.consume(code, new_install_id=install,
+                      ip=request.remote_addr or "unknown"):
+        _audit(action="license_backup_code_rejected")
+        return jsonify({"ok": False,
+                        "detail": "That code is not valid, or has already been "
+                                  "used."}), 400
+
+    _audit(action="license_backup_code_redeemed")
+    n, level, msg = bc.status()
+    return jsonify({"ok": True, "remaining": n, "level": level, "message": msg,
+                    "install_id": install,
+                    "next_step": "Code accepted. Send this installation ID to "
+                                 "support to receive a replacement licence key: "
+                                 "%s" % install})
 
 
 @app.route("/login/recovery", methods=["GET", "POST"])
@@ -4219,6 +4438,70 @@ def _human_age(seconds):
     return "%dd ago" % (s // 86400)
 
 
+def _render_remote_budget_html() -> str:
+    """Remote-slot budget strip for the Devices card.
+
+    Three states, and the middle one is the point:
+      * a real count      -> "N of 5 remote slots in use"
+      * NOT reconcilable  -> "unknown", with the reason. NEVER a plausible zero.
+      * commercial        -> unlimited
+
+    Rendering "0 of 5" when the count was never established would be the exact
+    §9 pattern in user-facing form: a gauge that looks authoritative while
+    measuring nothing. It is also the specific failure this cap was measured to
+    have -- counting from agent_devices alone undercounted by two on this very
+    box, because two tailnet members had no enrolment row at all.
+
+    Apostrophes are HTML entities throughout: this string is built inside a
+    Python f-string, and a raw apostrophe here is the codebase's single most
+    common defect (silent SyntaxError, page never loads).
+    """
+    try:
+        from core import entitlements as ent
+        used, limit, census = ent.remote_device_budget()
+    except Exception as e:
+        return ('<div style="background:#0d0d1e;border:1px solid #2a3450;'
+                'border-radius:8px;padding:10px 13px;margin:10px 0;font-size:0.83em;'
+                'color:#8a98b3">Remote-device budget unavailable: '
+                + html.escape(str(e)[:140]) + '</div>')
+
+    if limit is None:
+        body = ('<strong style="color:#00ff88">Unlimited</strong> remote devices '
+                '<span style="color:#888">(commercial licence)</span>')
+        border = "#00ff8855"
+    elif not census.reconciled or used is None:
+        body = ('<strong style="color:#ffd98a">Remote devices: unknown</strong>'
+                '<br><span style="color:#8a98b3;font-size:0.94em">'
+                + html.escape(census.reason or "count could not be established")
+                + '</span>')
+        border = "#ffb01a"
+    else:
+        left = limit - used
+        colour = "#ff6666" if left <= 0 else ("#ffd98a" if left <= 1 else "#00ff88")
+        body = ('<strong style="color:%s">%d of %d remote slots in use</strong>'
+                '<br><span style="color:#8a98b3;font-size:0.94em">%d remaining. '
+                'Devices on your local network are not counted and are never '
+                'limited.</span>' % (colour, used, limit, max(0, left)))
+        border = "#2a3450"
+
+    orphan_note = ""
+    if getattr(census, "tailnet_only", None):
+        n = len(census.tailnet_only)
+        orphan_note = (
+            '<br><span style="color:#ffd98a;font-size:0.94em">&#9888; %d device%s '
+            'on your VPN %s no enrolment record here &mdash; usually machines '
+            'removed without being taken off the VPN. Not counted, but worth '
+            'reviewing.</span>'
+            % (n, "" if n == 1 else "s", "has" if n == 1 else "have"))
+
+    return ('<div style="background:#0d0d1e;border:1px solid ' + border + ';'
+            'border-radius:8px;padding:11px 14px;margin:12px 0;font-size:0.85em">'
+            + body + orphan_note +
+            '<br><a href="/settings/licensing" style="color:#00d4ff;'
+            'font-size:0.92em;text-decoration:none">Manage licence and backup '
+            'codes &rarr;</a></div>')
+
+
 def _render_agent_devices_html() -> str:
     """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
     try:
@@ -4367,6 +4650,7 @@ def _render_agent_devices_html() -> str:
             f'<span style="font-size:0.84em">Pre-enrollment scan: {badge}</span><br>'
             f'{buttons}'
             '</div>')
+    h.append(_render_remote_budget_html())
     h.append('<h3 style="color:#00d4ff;font-size:0.95em;margin-top:14px">Enrolled devices</h3>')
     if not enrolled:
         h.append('<p style="color:#888;font-size:0.86em">No enrolled devices yet.</p>')
