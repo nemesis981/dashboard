@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Issue and sign Nemesis licence keys. OPERATOR TOOL — the private-key side.
+
+This is the asymmetric half of node-locked licensing. Verification ships in the
+product and is offline; SIGNING happens here and the private key never ships,
+is never in this repo, and should live on a machine that does not serve traffic.
+
+    # one-time: create the issuing keypair
+    nemesis-license-issue keygen --out ~/nemesis-issuer
+
+    # then bake the printed PUBLIC key into core/license_key.PUBLIC_KEY_B64
+
+    # issue a licence bound to a customer's install id
+    nemesis-license-issue issue --key ~/nemesis-issuer.priv \\
+        --install-id <id> --tier commercial [--days 365]
+
+    # check a key without a product install
+    nemesis-license-issue verify --pubkey <b64> --license <key> [--install-id <id>]
+
+── WHY A MANUAL SCRIPT IS THE RIGHT STARTING POINT ─────────────────────────
+Offline verification is easy; ISSUING needs somewhere to sign and something to
+decide who gets a key. An automated purchase→key pipeline is a separate build
+with its own security posture (payment webhook trust, replay, refunds). A script
+the operator runs deliberately is the honest minimum, and it does not paint the
+automated version into any corner: the key format is identical either way.
+
+── THE PRIVATE KEY ─────────────────────────────────────────────────────────
+Written 0600. Anyone holding it can mint licences for any install, so it is the
+one secret in this system that matters. It is NEVER read by the product, never
+placed under /opt/nemesis, and never committed. `keygen` refuses to write inside
+the repo for exactly that reason.
+"""
+
+import argparse
+import base64
+import json
+import os
+import sys
+import time
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+KEY_PREFIX = "NEMLIC1"
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _unb64u(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def _canonical(payload: dict) -> bytes:
+    """Byte-identical output for an identical licence, across runs and versions."""
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
+def cmd_keygen(args):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+
+    out = os.path.abspath(os.path.expanduser(args.out))
+    priv_path = out + ".priv"
+
+    # Refuse to write the signing key anywhere inside the repo. A private key in
+    # a git working tree is one `git add -A` from being published, and this repo
+    # is public.
+    if os.path.abspath(priv_path).startswith(REPO_ROOT + os.sep):
+        sys.exit("REFUSING: %s is inside the repo (%s). The signing key must "
+                 "live outside version control." % (priv_path, REPO_ROOT))
+    if os.path.exists(priv_path) and not args.force:
+        sys.exit("REFUSING: %s already exists. Overwriting it would invalidate "
+                 "every licence ever issued with it. Use --force only if you "
+                 "genuinely mean that." % priv_path)
+
+    priv = Ed25519PrivateKey.generate()
+    raw_priv = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption())
+    raw_pub = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)
+
+    fd = os.open(priv_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(_b64u(raw_priv))
+    os.chmod(priv_path, 0o600)
+
+    print("private key : %s  (mode 0600 — BACK THIS UP, keep it OFFLINE)" % priv_path)
+    print()
+    print("public key  : %s" % _b64u(raw_pub))
+    print()
+    print("Paste the public key into core/license_key.py:")
+    print('    PUBLIC_KEY_B64 = "%s"' % _b64u(raw_pub))
+    print()
+    print("Losing the private key means no new licences can be issued and no")
+    print("existing licence can be renewed. Losing CONTROL of it means anyone")
+    print("can mint licences. Treat it accordingly.")
+
+
+def cmd_issue(args):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    with open(os.path.expanduser(args.key)) as f:
+        priv = Ed25519PrivateKey.from_private_bytes(_unb64u(f.read().strip()))
+
+    install_id = args.install_id.strip()
+    if not install_id:
+        sys.exit("REFUSING: empty --install-id. An unbound licence would be "
+                 "valid on every machine, which defeats node-locking.")
+
+    payload = {
+        "install_id": install_id,
+        "tier": args.tier,
+        "licence_id": args.licence_id or _b64u(os.urandom(9)),
+        "issued_at": int(args.issued_at if args.issued_at else time.time()),
+    }
+    if args.remote_cap is not None:
+        payload["remote_cap"] = args.remote_cap
+    if args.days:
+        payload["expires_at"] = int(payload["issued_at"] + args.days * 86400)
+    if args.note:
+        payload["note"] = args.note
+
+    body = _canonical(payload)
+    sig = priv.sign(body)
+    key = "%s.%s.%s" % (KEY_PREFIX, _b64u(body), _b64u(sig))
+
+    print("payload : %s" % json.dumps(payload, sort_keys=True))
+    print()
+    print("licence key:")
+    print(key)
+    print()
+    print("length: %d chars" % len(key))
+
+
+def cmd_verify(args):
+    """Verify using the PRODUCT's own verifier, not a reimplementation here.
+
+    A separate verify implementation in the issuing tool could disagree with the
+    one that ships, and the tool would happily bless keys the product rejects.
+    """
+    if args.pubkey:
+        os.environ["NEMESIS_LICENSE_PUBKEY"] = args.pubkey
+    import importlib
+    from core import license_key as lk
+    importlib.reload(lk)          # pick up the env override
+    res = lk.verify(args.license, install_id=args.install_id)
+    print("verdict : %s" % res.verdict)
+    print("valid   : %s" % res.valid)
+    print("detail  : %s" % res.detail)
+    if res.payload:
+        print("payload : %s" % json.dumps(res.payload, sort_keys=True))
+    sys.exit(0 if res.valid else 1)
+
+
+def main():
+    p = argparse.ArgumentParser(description="Issue Nemesis licence keys (operator tool)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    g = sub.add_parser("keygen", help="create the issuing keypair (one time)")
+    g.add_argument("--out", required=True, help="path prefix, e.g. ~/nemesis-issuer")
+    g.add_argument("--force", action="store_true")
+    g.set_defaults(func=cmd_keygen)
+
+    i = sub.add_parser("issue", help="sign a licence for one install id")
+    i.add_argument("--key", required=True, help="path to the .priv signing key")
+    i.add_argument("--install-id", required=True)
+    i.add_argument("--tier", default="commercial", choices=["commercial", "free"])
+    i.add_argument("--days", type=int, default=0, help="0 = perpetual")
+    i.add_argument("--remote-cap", type=int, default=None)
+    i.add_argument("--licence-id", default="")
+    i.add_argument("--issued-at", type=int, default=0)
+    i.add_argument("--note", default="")
+    i.set_defaults(func=cmd_issue)
+
+    v = sub.add_parser("verify", help="verify a key using the product's verifier")
+    v.add_argument("--license", required=True)
+    v.add_argument("--pubkey", default="")
+    v.add_argument("--install-id", default=None)
+    v.set_defaults(func=cmd_verify)
+
+    args = p.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

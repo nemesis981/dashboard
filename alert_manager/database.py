@@ -1296,5 +1296,81 @@ def get_all_alerts():
     conn.close()
     return results
 
+def init_licensing_tables():
+    """Canonical DDL for licensing: `license_state` and `license_backup_codes`.
+
+    Core-owned and unprefixed, alongside `users` / `recovery_codes` (ADR 0001:
+    modules own prefixed tables, core owns the unprefixed ones).
+
+    ── WHY BACKUP CODES ARE A SEPARATE TABLE FROM `recovery_codes` ──────────────
+    They look identical and are deliberately not shared. `recovery_codes`
+    authenticates a HUMAN (`user_id`) to get back into an account.
+    `license_backup_codes` authorises an INSTALL to rebind its licence to new
+    hardware. Sharing one table would mean an account-recovery code could rebind
+    a licence, and a licence code could unlock an account -- two different trust
+    domains joined by an implementation detail. The PATTERN is copied; the rows
+    are not.
+
+    ── license_state: exactly one row, id=1 ────────────────────────────────────
+    A singleton enforced by `CHECK (id = 1)` rather than by convention, so a
+    second licence cannot be inserted by a bug and then silently win a
+    `SELECT ... LIMIT 1`.
+
+      install_id        the hwid stable_id computed at install (see core/install_id)
+      install_signals   JSON signal_hashes, for QUORUM matching -- ordinary
+                        hardware maintenance must not invalidate the licence, so
+                        the individual signals are kept, not just the composite
+      install_conf      'high' | 'medium' | 'low' -- a low-confidence fingerprint
+                        (VM, junk SMBIOS) is recorded and NOT enforced against
+      license_key       the signed key blob, verified OFFLINE (core/license_key)
+      tier              cached tier from the last successful verification
+      bound_at          when this install_id was bound
+      rebind_count      how many times a backup code has moved this licence
+
+    Rows are UPDATEd in place; history lives in `license_backup_codes` (which is
+    append-only) and the audit log.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS license_state (
+                id              INTEGER PRIMARY KEY CHECK (id = 1),
+                install_id      TEXT,
+                install_signals TEXT,
+                install_conf    TEXT,
+                license_key     TEXT,
+                tier            TEXT,
+                bound_at        TEXT,
+                rebind_count    INTEGER NOT NULL DEFAULT 0,
+                created_at      TEXT,
+                updated_at      TEXT,
+                updated_actor   TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS license_backup_codes (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                code_hash     TEXT NOT NULL,
+                batch_id      TEXT NOT NULL,
+                install_id    TEXT,
+                created_at    TEXT NOT NULL,
+                created_actor TEXT,
+                used_at       TEXT,
+                used_ip       TEXT,
+                used_for_install TEXT,
+                superseded_at TEXT
+            )
+        """)
+        # Lookup is always "the live codes", so the index carries the validity
+        # predicate rather than a bare column -- same shape as
+        # idx_recovery_codes_live, for the same reason.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_license_codes_live "
+                  "ON license_backup_codes(used_at, superseded_at)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     init_db()
