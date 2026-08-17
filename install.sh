@@ -1472,6 +1472,128 @@ EOF
 }
 
 
+local_connected_subnets() {
+    # Every directly-connected IPv4 network on this host, loopback excluded, as
+    # CIDR strings on stdout. Used to scope agent-channel rules to networks this
+    # machine is actually attached to instead of `from any`.
+    #
+    # Prints nothing on failure. Callers MUST treat empty as an explicit failure
+    # state and refuse to fall back to a permissive rule — an empty enumeration
+    # and "this host has no networks" are the same output here, and neither is a
+    # licence to open the port to the world.
+    # Two exclusions, both verified against live output on the dev box:
+    #   - tailscale0 — the tunnel is not a VM adapter. Its remote path is the
+    #     CGNAT range written by configure_tailnet_allow_rules(), not a rule
+    #     derived from whatever address this node happens to hold.
+    #   - /32 prefixes — a host route describes one address, not a network a
+    #     peer can be reached from, so it can never be the host PC's path in.
+    ip -o -f inet addr show scope global 2>/dev/null \
+        | awk '$2 != "tailscale0" {print $4}' \
+        | while read -r cidr; do
+            [[ -z "$cidr" ]] && continue
+            [[ "$cidr" == */32 ]] && continue
+            python3 -c \
+                "import ipaddress,sys; print(str(ipaddress.ip_interface(sys.argv[1]).network))" \
+                "$cidr" 2>/dev/null || true
+          done \
+        | sort -u
+}
+
+
+vm_agent_ufw_rules() {
+    # ── GAP 1 (2026-08-16): replaces `ufw allow from any to any port 5001` ─────
+    #
+    # The rule this replaces was a genuine world-open allow on the agent
+    # enrollment/heartbeat port, mitigated only by a printed warning asking the
+    # user to narrow it by hand afterwards. Two things make that worse than it
+    # reads:
+    #
+    #   1. INSTALL_MODE=windows_vm is set by `systemd-detect-virt` matching
+    #      oracle|vmware|kvm|virtualbox (see the OS-check step), so it is not the
+    #      niche "Windows host + agent" path — it is EVERY virtual-machine
+    #      install.
+    #   2. The final tiering model requires that the server refuse any remote
+    #      connection not arriving over the VPN. A `from any` rule contradicts
+    #      that outright.
+    #
+    # What the host PC actually needs is reachability from whichever adapter it
+    # talks to the guest on. Bridged installs are already covered by the
+    # $DETECTED_SUBNET rule above; host-only and NAT adapters are not, which is
+    # the real gap the blanket rule was papering over. So: allow 5001 from every
+    # network this box is directly attached to. Strictly narrower than `from
+    # any` in every topology, and self-configuring.
+    local override cidr count=0
+    override=$(read_conf "AGENT_HOST_CIDR" "")
+
+    if [[ -n "$override" ]]; then
+        if ! python3 -c \
+            "import ipaddress,sys; ipaddress.ip_network(sys.argv[1], strict=False)" \
+            "$override" 2>/dev/null; then
+            die "AGENT_HOST_CIDR in $CONF_FILE is not a valid network: $override"
+        fi
+        ufw allow from "$override" to any port 5001 comment "Nemesis Agent (configured host)" 2>/dev/null || true
+        ok "UFW: port 5001 allowed from $override (AGENT_HOST_CIDR)"
+        return 0
+    fi
+
+    while read -r cidr; do
+        [[ -z "$cidr" ]] && continue
+        ufw allow from "$cidr" to any port 5001 comment "Nemesis Agent (VM adapter)" 2>/dev/null || true
+        ok "UFW: port 5001 allowed from $cidr"
+        count=$((count + 1))
+    done < <(local_connected_subnets)
+
+    if (( count == 0 )); then
+        # Fail closed and loud. Opening the port to the world because we could
+        # not enumerate is exactly the "a failed read became a permissive
+        # default" shape this codebase treats as a defect class.
+        warn "Could not enumerate this machine's networks — NO port 5001 rule added."
+        warn "  The Windows agent will not be able to reach this VM until you add one:"
+        warn "    sudo ufw allow from <host-pc-subnet> to any port 5001"
+        warn "  Or set AGENT_HOST_CIDR=<host-pc-subnet> in $CONF_FILE and re-run."
+    fi
+}
+
+
+configure_tailnet_allow_rules() {
+    # ── GAP 2 (2026-08-16): the installer created no tailnet rules at all ──────
+    #
+    # Before this, ufw_and_finish() wrote rules ONLY for $DETECTED_SUBNET. With
+    # default-deny incoming, that means a fresh install had NO remote path
+    # whatsoever — the 100.64.0.0/10 rules on the development box had been added
+    # by hand and were never what a new user got.
+    #
+    # This is the inverse of the expected problem: out of the box remote access
+    # was too CLOSED, not too open. Under the current model the VPN is *the*
+    # remote path, so these rules are a first-class install step, not something
+    # to be discovered.
+    #
+    # configure_tailnet_enforcement() below already does the hard part
+    # (netfilter-mode=nodivert, so ufw governs tunnel traffic rather than being
+    # bypassed by Tailscale's own chains, plus the anti-spoof DROP that ADR
+    # 0011's enrollment trust rests on). The enforcement plumbing existed; only
+    # the allow rules were missing.
+    #
+    # Gated on Tailscale actually being present, deliberately: 100.64.0.0/10 is
+    # the shared CGNAT range, not Tailscale's exclusively, and an ISP can hand a
+    # WAN interface an address inside it. Writing the rule on a box with no
+    # tunnel would widen the allowed source set for no gain. Re-running the
+    # installer after installing Tailscale adds them (ufw allow is idempotent).
+    if ! command -v tailscale >/dev/null 2>&1; then
+        info "Tailscale not installed — no tailnet allow rules written"
+        info "  Remote access requires the VPN. After installing Tailscale, either"
+        info "  re-run this installer or add the rules by hand:"
+        info "    sudo ufw allow from 100.64.0.0/10 to any port 80"
+        info "    sudo ufw allow from 100.64.0.0/10 to any port 5001"
+        return 0
+    fi
+
+    ufw allow from 100.64.0.0/10 to any port 80   comment "Nemesis Dashboard (tailnet)"  2>/dev/null || true
+    ufw allow from 100.64.0.0/10 to any port 5001 comment "Nemesis Enrollment (tailnet)" 2>/dev/null || true
+    ok "UFW: tailnet (100.64.0.0/10) allowed on ports 80 and 5001"
+}
+
+
 ufw_and_finish() {
     step_header "9/9" "Firewall Rules & Final Checks"
 
@@ -1482,15 +1604,13 @@ ufw_and_finish() {
     ufw allow from "$DETECTED_SUBNET" to any port 22   comment "SSH"                2>/dev/null || true
     ufw allow from "$DETECTED_SUBNET" to any port 5001 comment "Nemesis Enrollment" 2>/dev/null || true
     if [[ "$INSTALL_MODE" == "windows_vm" ]]; then
-        ufw allow from any to any port 5001 comment "Nemesis Windows Agent" 2>/dev/null || true
-        ok "UFW: port 5001 open for Windows agent"
-        warn "Remember to restrict port 5001 to your host PC's IP only after install:"
-        warn "  sudo ufw delete allow 5001 && sudo ufw allow from <host-ip> to any port 5001"
+        vm_agent_ufw_rules
     fi
     configure_forkb_nat
     ufw --force enable
+    configure_tailnet_allow_rules
     configure_tailnet_enforcement
-    ok "UFW enabled with local-network-only rules"
+    ok "UFW enabled — LAN rules plus the tailnet remote path"
 
     # nginx reverse proxy: Flask runs on 5000; nginx on 80 reverse-proxies to it
     # with HTTP basic auth so the dashboard is not open to the local network unauthenticated.
