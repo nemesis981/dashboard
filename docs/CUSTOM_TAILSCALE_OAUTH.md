@@ -40,10 +40,69 @@ In the **Tailscale admin console → Settings → OAuth clients → Generate OAu
 
 1. Under **Trust credentials**, grant the **`auth_keys`** scope with **write** access (this is what
    allows minting keys).
-2. Attach the tag **`tag:nemesis-agent`** to the client (the scope is restricted to keys carrying
-   this tag).
-3. Save. Copy the generated **client ID** and **client secret** — the secret is shown **once**.
+2. Also grant the **`devices:core`** scope with **write** access. This is what allows Nemesis to
+   **remove a device from your tailnet** when you revoke it in the dashboard. See the box below —
+   without it, revoke still blocks the device in Nemesis but leaves it on your VPN.
+3. Attach the tag **`tag:nemesis-agent`** to the client (the `auth_keys` scope is restricted to
+   keys carrying this tag).
+4. Save. Copy the generated **client ID** and **client secret** — the secret is shown **once**.
    Store them straight into `/etc/nemesis.env` (Step 3); do not paste them anywhere else.
+
+> ### ⚠ Why two scopes, and what happens with only one
+>
+> The two scopes do genuinely different jobs, and **minting a key does not evict anything**:
+>
+> | Scope | Grants | Used by |
+> |---|---|---|
+> | `auth_keys` (write) | mint and revoke **pre-auth keys** | generating an installer link |
+> | `devices:core` (write) | list and **delete devices (nodes)** | revoking a device in the dashboard |
+>
+> In Tailscale a pre-auth key authorises **registration**. A device that already joined stays
+> joined when that key is later revoked — revoking a key prevents *future* enrollments and removes
+> nobody. Taking a device off the tailnet is a separate API call needing `devices:core`.
+>
+> **If you grant only `auth_keys`** (the setup this guide asked for before 2026-08-16), everything
+> continues to work *except* device removal, which fails with **HTTP 403**. The dashboard reports
+> this explicitly rather than silently: the device is blocked in Nemesis and stops reporting, but
+> it is **still on your VPN**.
+>
+> **Fixing an existing client — scopes ARE editable, no new credentials needed** (verified in
+> the admin console, 2026-08-17). Go to **Settings → Trust credentials**, open the client, and
+> on the **Scopes** step choose **Custom scopes**, then under **Devices** tick **Core → Write**.
+> Read is selected automatically and greyed out, because write implies read. The **Tags** field
+> that appears is required for the write scope — put `tag:nemesis-agent` in it.
+>
+> ⚠ **Check the whole scope list before saving.** The custom-scope form shows every category,
+> and you must end up with **both** grants, not just the new one:
+>
+> | Scope | Access | Used for |
+> |---|---|---|
+> | `auth_keys` | write | minting installer pre-auth keys — **pre-existing, must be preserved** |
+> | `devices:core` | write | removing a device from the tailnet on revoke — new |
+>
+> Losing `auth_keys` while adding `devices:core` breaks installer generation entirely, which is
+> a worse regression than the gap being closed. Verify both, then save.
+>
+> **Restart the dashboard after a scope change**, even though the client id and secret are
+> unchanged:
+>
+> ```
+> sudo systemctl restart dashboard
+> ```
+>
+> An OAuth **access token carries the scopes it was minted under**, and `_token_cache` holds one
+> for its lifetime (~1 h, minus a 2-minute margin). A dashboard process running when the scope
+> changed keeps using its pre-change token until that expires — so removal can keep returning
+> **403 for up to an hour** after the console says the scope is granted. A restart clears the
+> cache and forces a fresh token immediately.
+>
+> This also means a *freshly started* process (such as a standalone probe script) sees the new
+> scope right away while the long-running dashboard does not. If the two disagree, that is the
+> reason, and it is not a bug.
+>
+> Nemesis can tell you which state you are in without you having to trigger a revoke to find out:
+> `tailscale_api.can_manage_devices()` performs a **read-only** probe (it lists devices, never
+> deletes) and returns whether removal will actually work, plus the reason if not.
 
 Placeholders used below:
 - client ID → `<oauth-client-id>`

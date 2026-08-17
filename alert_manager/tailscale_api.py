@@ -16,14 +16,17 @@ import os
 import re
 import time
 import logging
+import urllib.parse
 
 import requests
 
 log = logging.getLogger("tailscale_api")
 
-_TOKEN_URL = "https://api.tailscale.com/api/v2/oauth/token"
-_KEYS_URL  = "https://api.tailscale.com/api/v2/tailnet/{tailnet}/keys"
-_TIMEOUT   = 15
+_TOKEN_URL   = "https://api.tailscale.com/api/v2/oauth/token"
+_KEYS_URL    = "https://api.tailscale.com/api/v2/tailnet/{tailnet}/keys"
+_DEVICES_URL = "https://api.tailscale.com/api/v2/tailnet/{tailnet}/devices"
+_DEVICE_URL  = "https://api.tailscale.com/api/v2/device/{node_id}"
+_TIMEOUT     = 15
 
 # Access-token cache: the token is valid ~1h; reuse within its life (minus a safety margin)
 # to avoid an extra round-trip per installer generate.
@@ -210,6 +213,255 @@ def revoke_key(key_id):
     log.warning("tailscale: revoke of key id=%s returned HTTP %d; it will expire on its "
                 "own TTL", str(key_id)[:12], r.status_code)
     return False
+
+
+# ── Tailnet device removal (2026-08-16) ──────────────────────────────────────
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT revoke_key().
+#
+# Operator decision, 2026-08-16: revoking a device's remote access must be a REAL
+# NETWORK FACT, not an entry in Nemesis's own bookkeeping. Two reasons, both of
+# which shaped the code below:
+#
+#   1. The user should be able to see that their remote-device limit is genuinely
+#      enforced, not merely asserted by the UI.
+#   2. Re-admitting a revoked device then requires a NEW key. That turns key
+#      generation into a second, recurring enforcement point for the cap, rather
+#      than a one-time gate at initial enrollment.
+#
+# `revoke_key()` above CANNOT deliver either. In Tailscale a pre-auth key
+# authorises *registration*; nodes already registered with it stay registered
+# when it is revoked. Revoking a key prevents future enrollments and evicts
+# nothing. Removing the node is a different API and a different scope.
+#
+# ⚠ REQUIRES AN OAUTH SCOPE THE MINTING PATH DOES NOT USE. `auth_keys` write is
+# enough to mint; deleting a node additionally needs `devices:core` write. A
+# client configured only per the original setup guide will get HTTP 403 here
+# while minting continues to work perfectly — which is exactly the kind of
+# partial failure that reads as a bug rather than as configuration. That is why
+# `Removal.FORBIDDEN` is its own outcome with its own message, and why
+# `can_manage_devices()` exists to answer the question before a user hits it.
+# See docs/CUSTOM_TAILSCALE_OAUTH.md.
+#
+# ── FAILURE DIRECTION IS THE OPPOSITE OF revoke_key()'s, DELIBERATELY ──────────
+# `revoke_key()` never raises, because it runs AFTER a replacement key was minted
+# and a failure there must leave an orphan rather than a dead installer. Here the
+# caller is asserting to a user that a device has been removed from the network.
+# Silence on failure would make that assertion FALSE while looking successful, so
+# every outcome is reported explicitly and nothing is swallowed.
+
+class Removal:
+    """Outcomes of a tailnet removal attempt. Deliberately not booleans.
+
+    NOT_FOUND is the one worth reading twice: it means no node matched, which is
+    EITHER "already gone" OR "the address/name mapping failed". Those call for
+    different responses and this code cannot tell them apart, so it refuses to
+    report either as success. Collapsing them into True would be the exact
+    'absent answer rendered as a reassuring one' defect this codebase treats as a
+    standing review item.
+    """
+    REMOVED        = "removed"          # confirmed gone from the tailnet
+    NOT_CONFIGURED = "not_configured"   # no OAuth creds; nothing was attempted
+    NOT_FOUND      = "not_found"        # no node matched — CANNOT confirm removal
+    AMBIGUOUS      = "ambiguous"        # >1 node matched — refused rather than guess
+    FORBIDDEN      = "forbidden"        # creds lack devices:core write
+    FAILED         = "failed"           # transport/HTTP failure
+
+    #: Outcomes where the device is genuinely off the tailnet. Only these may be
+    #: treated as freeing a remote-cap slot.
+    CONFIRMED = (REMOVED,)
+
+
+class RemovalResult:
+    __slots__ = ("state", "detail", "node_id")
+
+    def __init__(self, state, detail="", node_id=""):
+        self.state = state
+        self.detail = detail
+        self.node_id = node_id
+
+    @property
+    def confirmed(self):
+        return self.state in Removal.CONFIRMED
+
+    def as_dict(self):
+        return {"state": self.state, "detail": self.detail,
+                "confirmed": self.confirmed}
+
+    def __repr__(self):
+        return "RemovalResult(%s, %r)" % (self.state, self.detail[:60])
+
+
+def _tailnet():
+    return os.environ.get("TAILSCALE_TAILNET", "-").strip() or "-"
+
+
+def list_devices():
+    """Every node in the tailnet, as the API returns them. Raises on failure.
+
+    Never returns [] to mean "could not ask" — an empty tailnet and an
+    unanswerable question are different facts, and the caller has to be able to
+    tell them apart before it decides a device is absent.
+    """
+    token = _get_access_token()
+    try:
+        r = requests.get(_DEVICES_URL.format(tailnet=_tailnet()),
+                         headers={"Authorization": "Bearer " + token},
+                         timeout=_TIMEOUT)
+    except requests.RequestException as e:
+        raise TailscaleAPIError("devices endpoint unreachable: " + str(e)[:80],
+                                status=None, retryable=True)
+    if r.status_code == 403:
+        raise TailscaleAPIError(
+            "OAuth client lacks the devices:core scope (HTTP 403). Minting keys "
+            "does not require it; removing a device does. See "
+            "docs/CUSTOM_TAILSCALE_OAUTH.md.", status=403, retryable=False)
+    if r.status_code != 200:
+        raise TailscaleAPIError("devices list HTTP %d" % r.status_code,
+                                status=r.status_code,
+                                retryable=_retryable_status(r.status_code))
+    try:
+        j = r.json() or {}
+    except ValueError:
+        raise TailscaleAPIError("devices response not JSON")
+    devices = j.get("devices")
+    if devices is None:
+        raise TailscaleAPIError("devices response has no 'devices' key")
+    return devices
+
+
+def can_manage_devices():
+    """(bool, reason) — do the configured creds permit device removal?
+
+    A capability probe, run so the UI can answer 'will revoke actually work?'
+    BEFORE a user relies on it, rather than discovering the missing scope at the
+    moment they are trying to free a slot. Read-only: it lists, never deletes.
+    """
+    if not is_configured():
+        return False, "Tailscale OAuth credentials are not configured"
+    try:
+        list_devices()
+    except TailscaleAPIError as e:
+        if e.status == 403:
+            return False, ("OAuth client lacks the devices:core write scope — "
+                           "add it in the Tailscale admin console")
+        return False, "Tailscale API check failed: %s" % str(e)[:100]
+    return True, "device management available"
+
+
+def _node_matches(node, address="", hostname=""):
+    """Does this API node correspond to the device we mean?
+
+    Address is the strong key: a tailnet address is assigned by Tailscale and is
+    what the server actually OBSERVED the device connecting from, so it is a
+    fact rather than a claim. Hostname is a weak fallback and is only consulted
+    when no address was supplied, because names collide and are user-settable.
+    """
+    if address:
+        for a in (node.get("addresses") or []):
+            if str(a).strip() == address:
+                return True
+        return False
+    if hostname:
+        want = hostname.strip().lower()
+        for field in ("hostname", "name"):
+            got = str(node.get(field) or "").strip().lower()
+            # `name` is the FQDN (host.tailnet.ts.net); match its first label too.
+            if got == want or got.split(".")[0] == want:
+                return True
+    return False
+
+
+def remove_device_by_address(address="", hostname=""):
+    """Remove the node matching `address` (or `hostname`) from the tailnet.
+
+    Returns a RemovalResult. Does not raise -- every failure is a named state --
+    but unlike revoke_key() no failure is reported as success.
+    """
+    if not is_configured():
+        return RemovalResult(Removal.NOT_CONFIGURED,
+                             "Tailscale OAuth credentials are not configured, so "
+                             "the device was not removed from the VPN")
+    if not (address or hostname):
+        return RemovalResult(Removal.NOT_FOUND,
+                             "no tailnet address or hostname recorded for this "
+                             "device, so it could not be located on the tailnet")
+    try:
+        nodes = list_devices()
+    except TailscaleAPIError as e:
+        state = Removal.FORBIDDEN if e.status == 403 else Removal.FAILED
+        return RemovalResult(state, str(e)[:200])
+
+    matches = [n for n in nodes
+               if _node_matches(n, address=address, hostname=hostname)]
+    if not matches:
+        return RemovalResult(
+            Removal.NOT_FOUND,
+            "no tailnet device matches %s. It may already have been removed, or "
+            "the recorded address may be stale -- this cannot be distinguished, "
+            "so removal is NOT being reported as confirmed."
+            % (address or hostname))
+    if len(matches) > 1:
+        return RemovalResult(
+            Removal.AMBIGUOUS,
+            "%d tailnet devices match %s -- refusing to guess which to remove"
+            % (len(matches), address or hostname))
+
+    node = matches[0]
+    node_id = str(node.get("nodeId") or node.get("id") or "")
+    if not node_id:
+        return RemovalResult(Removal.FAILED,
+                             "matched a tailnet device with no usable node id")
+    return remove_device(node_id)
+
+
+def remove_device(node_id):
+    """DELETE one node by its Tailscale node id. Returns a RemovalResult.
+
+    A 404 is NOT counted as success here, unlike revoke_key()'s 404 handling.
+    There, 404 meant the key was already gone and that was the desired end state.
+    Here it means the node id did not resolve, which after a successful lookup
+    means something changed underneath us -- reporting that as a confirmed
+    removal would assert a network fact that was never observed.
+    """
+    if not node_id:
+        return RemovalResult(Removal.FAILED, "no node id supplied")
+    try:
+        token = _get_access_token()
+    except TailscaleAPIError as e:
+        return RemovalResult(Removal.FAILED, str(e)[:200])
+    # Percent-encode with an EMPTY safe set, so "/" and "." are escaped too. The
+    # node id comes from Tailscale's own API rather than from a user, so this is
+    # defence rather than a known hole -- but it is interpolated into a URL PATH,
+    # and a value containing "../" would silently retarget the DELETE at another
+    # endpoint. An unvalidated value reaching a path is the same shape as the
+    # unescaped-interpolation class this codebase already has live history with;
+    # trusted-today is not a reason to leave it unquoted.
+    safe_id = urllib.parse.quote(str(node_id), safe="")
+    try:
+        r = requests.delete(_DEVICE_URL.format(node_id=safe_id),
+                            headers={"Authorization": "Bearer " + token},
+                            timeout=_TIMEOUT)
+    except requests.RequestException as e:
+        return RemovalResult(Removal.FAILED,
+                             "device endpoint unreachable: " + str(e)[:80],
+                             node_id=node_id)
+    if r.status_code in (200, 204):
+        log.info("tailscale: removed node id=%s from the tailnet (HTTP %d)",
+                 str(node_id)[:16], r.status_code)
+        return RemovalResult(Removal.REMOVED,
+                             "device removed from the VPN", node_id=node_id)
+    if r.status_code == 403:
+        return RemovalResult(
+            Removal.FORBIDDEN,
+            "OAuth client lacks the devices:core write scope (HTTP 403) -- the "
+            "device is blocked in Nemesis but is STILL ON THE VPN. See "
+            "docs/CUSTOM_TAILSCALE_OAUTH.md.", node_id=node_id)
+    log.warning("tailscale: removal of node id=%s returned HTTP %d",
+                str(node_id)[:16], r.status_code)
+    return RemovalResult(Removal.FAILED,
+                         "tailnet removal returned HTTP %d" % r.status_code,
+                         node_id=node_id)
 
 
 def _mint_preauth_key_once(device_hint="", ttl_seconds=3600):

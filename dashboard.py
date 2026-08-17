@@ -3396,12 +3396,57 @@ def api_agent_revoke(device_id):
     route-audit defect signature is sibling routes whose posture DIVERGES, not
     sibling routes existing; same guard, different semantics is correct.
 
-    No server-side enforcement change is needed: hw_monitor's _agent_approved()
-    tests == "approved", so any other status stops that device's heartbeats
-    within one poll interval.
+    ── TAILNET REMOVAL (operator decision, 2026-08-16) ──────────────────────
+    Revocation must be a REAL NETWORK FACT, not accounting-only. Before this,
+    this route flipped a status and nothing else: the device kept its tailnet
+    membership and its network reach to this box, and only the enrollment_status
+    check stopped it. The UI said so out loud -- "Re-approving restores access
+    using the key they already hold."
+
+    So we now also remove the node from the tailnet. Re-admitting it then
+    requires a NEW key, which makes key generation a second enforcement point
+    for the remote-device cap rather than a one-time gate at first enrollment.
+
+    ORDER IS DELIBERATE: the local revoke commits FIRST, then the network call.
+    If the tailnet API is unreachable or under-scoped, the device is still
+    blocked here -- the reverse order would let a network failure leave a device
+    the owner believes is revoked fully trusted. The network outcome is returned
+    separately and is NEVER folded into `ok`, because "blocked in Nemesis" and
+    "off the VPN" are different facts and the caller must be able to see which
+    one it got. The most likely first-run failure is HTTP 403: minting keys needs
+    only `auth_keys`, removing a node also needs `devices:core`.
+
+    No server-side enforcement change is needed for the local half: hw_monitor's
+    _agent_approved() tests == "approved", so any other status stops that
+    device's heartbeats within one poll interval.
     """
     try:
         conn = _dm_conn()   # §9 batch 4 (api_agent_revoke)
+        # Read the tailnet handle BEFORE the status write. ip_address is the
+        # SERVER-OBSERVED source (hw_monitor passes client_address[0] into
+        # _update_agent_device), so for a tailnet agent it is that device's CGNAT
+        # address -- a fact we measured, not a value the agent claimed.
+        # POSITIONAL access, not by name. `_dm_conn()` deliberately resets
+        # `row_factory = None` (see its docstring -- it is called out there as the
+        # load-bearing line), so rows come back as plain TUPLES. Subscripting one
+        # by column name raises TypeError.
+        # Confirmed the hard way 2026-08-17: the first version used
+        # `_row["ip_address"]` and every revoke returned HTTP 500. The failure was
+        # safe -- it fired before the UPDATE below, so nothing partially applied --
+        # but it was invisible in the journal until the except branch below started
+        # logging.
+        _row = conn.execute(
+            "SELECT ip_address, device_name FROM agent_devices WHERE device_id=?",
+            (device_id,)).fetchone()
+        _addr = (_row[0] if _row else "") or ""
+        _name = (_row[1] if _row else "") or ""
+        # Only a CGNAT address is a tailnet handle. A LAN address is not, and
+        # passing one would produce a confident "not found" that says nothing
+        # about the tailnet -- so classify it as such explicitly instead.
+        try:
+            _is_tailnet_addr = ipaddress.ip_address(_addr.strip()) in _TAILNET_CGNAT
+        except ValueError:
+            _is_tailnet_addr = False
         # Timestamp + actor recorded ON THE ROW, mirroring the uninstall path's
         # uninstalled_at/uninstalled_by. Without these the revocation left no mark
         # on the device itself, so nothing could later ask "was this work queued
@@ -3415,9 +3460,127 @@ def api_agent_revoke(device_id):
         conn.commit()
         conn.close()
         _audit(action="agent_revoke", rule_id=device_id)
-        return jsonify({"ok": True, "status": "revoked"})
+
+        # ── network half ──────────────────────────────────────────────────────
+        # Local revoke is already committed above; nothing below can undo it.
+        tailnet_result = _revoke_tailnet_access(device_id, _addr, _name,
+                                               _is_tailnet_addr)
+        return jsonify({"ok": True, "status": "revoked",
+                        "tailnet": tailnet_result})
     except Exception as e:
+        # LOG IT. Returning the message only in the response body meant a 500 left
+        # nothing in the journal but `"POST .../revoke HTTP/1.1" 500 -`, and the
+        # browser showed a generic "try again" -- so the actual TypeError was
+        # invisible from both ends at once. Diagnosing it needed a code read.
+        log.exception("api_agent_revoke failed for %s", str(device_id)[:12])
         return jsonify({"error": str(e)}), 500
+
+
+def _tailnet_address_claimants(device_id, address):
+    """OTHER agent_devices rows still claiming the same tailnet address.
+
+    ── WHY THIS EXISTS (found against live data, 2026-08-17) ─────────────────
+    A tailnet address is a LEASE, not an identity. Verified on the production
+    tailnet: one household device's node at a single CGNAT address had THREE
+    agent_devices rows pointing at it -- two stale June enrollments and one
+    that had reported that same morning. Another address was shared by three
+    more rows.
+
+    So removing "the node at this row's ip_address" is NOT the same as removing
+    the device this row describes. Revoking a stale June enrollment would have
+    looked up the address and evicted the node currently serving a DIFFERENT,
+    ACTIVE device.
+
+    `remove_device_by_address()` already refuses when several tailnet NODES match
+    one address. This is the mirror image -- one node claimed by several DB ROWS
+    -- and it is the direction that actually occurs here.
+
+    Rows that have already given up their claim (revoked / uninstalled /
+    rejected) are excluded: they are not going to be evicted by mistake, and
+    counting them would make every second revocation of a re-enrolled device
+    permanently ambiguous.
+    """
+    try:
+        conn = _dm_conn()
+        rows = conn.execute(
+            "SELECT device_id, device_name, enrollment_status, agent_last_seen "
+            "FROM agent_devices "
+            "WHERE ip_address = ? AND device_id <> ? "
+            "  AND enrollment_status NOT IN ('revoked','uninstalled','rejected')",
+            (address, device_id)).fetchall()
+        conn.close()
+        return [tuple(r) for r in rows]
+    except Exception:
+        # An unreadable answer must not read as "no collisions". Fail toward
+        # refusing the removal rather than toward performing it.
+        log.exception("tailnet revoke: could not check address claimants for %s",
+                      str(device_id)[:12])
+        return [("<unknown>", "<check failed>", "<unknown>", None)]
+
+
+def _revoke_tailnet_access(device_id, address, device_name, is_tailnet_addr):
+    """Remove a revoked device from the tailnet. Returns a JSON-safe dict.
+
+    Never raises: the local revocation has already committed and must not be
+    reported as failed because the network half did. But it never reports an
+    unconfirmed removal as confirmed either -- `confirmed` is True only when a
+    node was actually deleted.
+    """
+    try:
+        import tailscale_api
+    except Exception as e:
+        log.warning("tailnet removal unavailable (import failed): %s", e)
+        return {"state": "failed", "confirmed": False,
+                "detail": "Tailscale integration unavailable"}
+
+    if not tailscale_api.is_configured():
+        return {"state": "not_configured", "confirmed": False,
+                "detail": "Tailscale is not configured, so this device was not "
+                          "removed from a VPN. It is blocked in Nemesis."}
+    try:
+        if is_tailnet_addr:
+            # Attribution check BEFORE the API call -- see _tailnet_address_claimants.
+            # Refusing a removal we cannot attribute is recoverable (the admin picks
+            # the right row); evicting the wrong device is not noticed until it stops
+            # working.
+            others = _tailnet_address_claimants(device_id, address)
+            if others:
+                names = ", ".join("%s (%s, %s)" % (str(d)[:12], n or "?", s)
+                                  for d, n, s, _ in others[:4])
+                log.warning("agent revoke: REFUSING tailnet removal for %s — address "
+                            "%s is also claimed by %d other active row(s): %s",
+                            str(device_id)[:12], address, len(others), names)
+                _audit(action="agent_tailnet_remove_ambiguous", rule_id=device_id)
+                return {
+                    "state": "ambiguous", "confirmed": False,
+                    "detail": ("This device is blocked in Nemesis, but it was NOT "
+                               "removed from your VPN: %d other enrolled device(s) "
+                               "share the same VPN address (%s), so Nemesis cannot "
+                               "tell which one the VPN node belongs to. Removing it "
+                               "could disconnect a device you did not revoke."
+                               % (len(others), names))}
+            res = tailscale_api.remove_device_by_address(address=address)
+        else:
+            # No tailnet address on record. Fall back to the hostname, which is
+            # weaker -- and say which key was used, so a NOT_FOUND is readable.
+            res = tailscale_api.remove_device_by_address(hostname=device_name)
+        out = res.as_dict()
+        if not is_tailnet_addr:
+            out["detail"] = ("no tailnet address on record for this device; "
+                             "matched by name instead. ") + out["detail"]
+        if res.confirmed:
+            log.info("agent revoke: %s removed from the tailnet", device_id[:12])
+            _audit(action="agent_tailnet_removed", rule_id=device_id)
+        else:
+            log.warning("agent revoke: %s is blocked in Nemesis but tailnet "
+                        "removal was NOT confirmed (%s: %s)",
+                        device_id[:12], res.state, res.detail[:120])
+            _audit(action="agent_tailnet_remove_failed", rule_id=device_id)
+        return out
+    except Exception as e:
+        log.exception("tailnet removal raised unexpectedly for %s", device_id[:12])
+        return {"state": "failed", "confirmed": False,
+                "detail": "tailnet removal error: %s" % str(e)[:120]}
 
 
 # ── Windows installer generator (token-based auto-approve enrollment) ─────────
@@ -4244,9 +4407,16 @@ def _render_agent_devices_html() -> str:
             '</div>')
     if revoked:
         h.append('<h3 style="color:#ff6666;font-size:0.95em;margin-top:14px">Revoked devices</h3>')
+        # Text corrected 2026-08-16: revocation now also removes the device from
+        # the tailnet, so the old claim ("Re-approving restores access using the
+        # key they already hold") became false. Re-approve alone restores
+        # reporting only if the device can still REACH this box -- which, once
+        # its VPN membership is gone, a remote device cannot.
         h.append('<p style="color:#888;font-size:0.8em;margin:0 0 6px">'
-                 'These devices are blocked from reporting. Re-approving restores '
-                 'access using the key they already hold.</p>')
+                 'These devices are blocked from reporting and have been removed '
+                 'from your VPN. Re-approving lets a device report again if it can '
+                 'still reach Nemesis &mdash; a remote device will also need a NEW '
+                 'installer key to rejoin the VPN.</p>')
         for r in revoked:
             did = html.escape(r["device_id"], quote=True)
             h.append(

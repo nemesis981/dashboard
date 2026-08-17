@@ -3420,3 +3420,40 @@ just committed.
           before — installing a polkit rule that's about to be retired is wasted work
           if the two land close together. If the nemesis-fwd fix is going to take a
           while, install the polkit rule for now and revisit.
+
+### [DONE — live E2E verified 2026-08-17] Tailnet device removal
+
+`tailscale_api.py`'s `remove_device`/`remove_device_by_address` and the
+`api_agent_revoke` wiring that calls them (device revoke in the dashboard now also
+removes the node from the tailnet, not just blocks it in Nemesis) were shipped
+2026-08-16 with two open gaps (mocked-only test coverage, missing `devices:core` OAuth
+scope on this box). Both closed 2026-08-17:
+
+- [x] **Live end-to-end test passed against the real Tailscale API**, not just the
+      mocked suite. A throwaway VM was enrolled with a real minted key, then revoked;
+      confirmed removed from four independent angles (local DB, this box's own
+      tailscaled peer list, the device's actual unreachability, and the attribution
+      guard's negative control). Test artifacts (VM, DB row, minted key) cleaned up and
+      verified gone.
+- [x] **`devices:core` added to this box's OAuth client** (scopes are editable in the
+      console — no new credentials needed). See `docs/CUSTOM_TAILSCALE_OAUTH.md` for the
+      how-to, including a live-found gotcha: a running dashboard process caches its
+      OAuth token for its ~1h lifetime, so it needs a restart to pick up a newly-granted
+      scope even though the console shows the change immediately.
+
+The live test also found and fixed a real bug (positional vs. by-name row access
+against `_dm_conn()`'s plain-tuple rows — every revoke 500'd) and a real gap the mocked
+tests couldn't surface (a tailnet address can be claimed by more than one
+`agent_devices` row; revoking a stale row could otherwise evict a different, currently-
+active device). Both are covered by the code in the same commit as this entry.
+
+- [ ] **Not yet true today: this box's own running `dashboard`/`hw-monitor` haven't
+      been restarted onto today's code** (per Window 1's own handoff — nothing was
+      deployed as part of building or testing this). The live E2E test exercised the
+      real Tailscale API directly; it did not exercise this box's production dashboard
+      process. Restart is a separate, State-Snapshot-gated step, not implied by this
+      entry being closed.
+- [ ] **Pre-existing, unrelated, deliberately left alone:** `_revoke_tailnet_access`
+      does a local `import tailscale_api` inside a `try`, but `dashboard.py`'s
+      module-level import already makes that except branch unreachable. Harmless
+      dead-guard pattern; Window 1's call to leave it rather than churn this change.

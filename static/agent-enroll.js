@@ -11,14 +11,55 @@ function agentReject(id) {
     .catch(function () { alert('Reject failed — try again.'); });
 }
 /* Withdraw an already-approved device. Distinct from reject (which denies a
-   pending enrollment) so the audit trail keeps the two apart. The device stops
-   reporting within one heartbeat interval; its key material is unchanged, so a
-   re-approve restores access without re-enrolling. */
+   pending enrollment) so the audit trail keeps the two apart.
+
+   Two things happen, and they can succeed independently (2026-08-16):
+     1. The device is blocked in Nemesis and stops reporting within one
+        heartbeat interval. This always happens.
+     2. The device is REMOVED FROM THE VPN. This needs the Tailscale API and an
+        OAuth client carrying the devices:core scope, so it can fail on its own.
+
+   Re-adding the device afterwards therefore requires issuing a NEW key -- the
+   old one no longer gets it onto the network. That is deliberate: it makes key
+   generation an enforcement point for the remote-device cap, not just a
+   one-time gate at first enrollment.
+
+   This deliberately does NOT reload on an unconfirmed removal. Reloading would
+   show a device sitting in "Revoked" and looking finished, while it was in fact
+   still on the VPN -- a partial result rendered as a complete one. */
 function agentRevoke(id) {
-  if (!confirm('Revoke this device? It will stop reporting until re-approved.')) return;
+  if (!confirm('Revoke this device? It will be blocked in Nemesis and removed '
+             + 'from your VPN. Re-adding it later needs a NEW installer key.')) return;
   fetch('/api/agent/' + encodeURIComponent(id) + '/revoke', { method: 'POST' })
-    .then(function () { location.reload(); })
-    .catch(function () { alert('Revoke failed — try again.'); });
+    .then(function (r) {
+      /* fetch does not reject on 4xx/5xx, so status is checked explicitly --
+         without this an error response reloaded the page and looked like it
+         had worked.
+
+         Read the BODY on failure too. The route returns {"error": "..."} with
+         its 500, and the first version threw before reading it -- so a real
+         TypeError surfaced to the user as "Revoke failed - try again" and to the
+         journal as a bare 500. The message existed; nothing displayed it. */
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          throw new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
+    .then(function (j) {
+      var t = j && j.tailnet;
+      if (t && t.confirmed) { location.reload(); return; }
+      alert('Device blocked in Nemesis, but it was NOT confirmed removed from '
+          + 'your VPN.\n\n' + ((t && t.detail) || 'No detail returned.')
+          + '\n\nThe device cannot report to Nemesis, but it may still reach '
+          + 'your network. Check Tailscale.');
+      location.reload();
+    })
+    .catch(function (e) {
+      alert('Revoke failed.\n\n' + (e && e.message ? e.message : 'Unknown error')
+          + '\n\nThe device was NOT revoked. Nothing was changed.');
+    });
 }
 /* Robust clipboard copy: navigator.clipboard needs HTTPS/localhost, so on plain-HTTP
    LAN access fall back to a hidden textarea + execCommand (FIX: copy button worked
