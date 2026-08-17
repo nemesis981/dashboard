@@ -49,8 +49,17 @@ KEY_PREFIX = "NEMLIC1"
 #: PLACEHOLDER until the real issuing keypair is generated on an offline machine
 #: and its public half pasted here. `verify()` refuses to run against the
 #: placeholder rather than silently rejecting every real key.
+#: The real issuing key, generated 2026-08-17 on the operator's machine. Its
+#: PRIVATE half lives outside every repository (`~/nemesis-issuer/`, mode 0600)
+#: and is never committed — see scripts/nemesis-license-issue, whose `keygen`
+#: actively refuses to write a private key inside this tree.
+#:
+#: Publishing the public half is the point: every install must trust the same
+#: issuer, and a public key can only verify, never sign.
 _PLACEHOLDER = "REPLACE_WITH_ISSUER_PUBLIC_KEY"
-PUBLIC_KEY_B64 = os.environ.get("NEMESIS_LICENSE_PUBKEY", _PLACEHOLDER).strip()
+_BUILTIN_PUBLIC_KEY = "kuTKVWzH-vzIR5Sl7Chf8Z5gf2_yGjE19p_slMqYaOs"
+PUBLIC_KEY_B64 = os.environ.get("NEMESIS_LICENSE_PUBKEY",
+                                _BUILTIN_PUBLIC_KEY).strip()
 
 
 class Verdict:
