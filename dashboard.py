@@ -1987,7 +1987,7 @@ def _license_view():
     view = {"tier": "free", "verdict": lk.Verdict.ABSENT, "detail": "",
             "cap": ent.FREE_TIER_REMOTE_CAP, "used": None, "limit": None,
             "budget_known": False, "budget_reason": "", "orphans": [],
-            "codes_remaining": 0, "codes_level": "exhausted", "codes_msg": "",
+            "codes_remaining": 0, "codes_level": "none_issued", "codes_msg": "",
             "known_not_entitled": [],
             "install_id": "", "install_conf": "", "error": ""}
     try:

@@ -158,6 +158,9 @@
     <div class="note {% if codes_level == 'exhausted' %}err{% elif codes_level == 'low' %}warn{% endif %}">
       {{ codes_msg }}
     </div>
+    {# 'none_issued' deliberately gets NEUTRAL styling. It is a setup prompt, not
+       a problem: red would tell a brand-new operator something is wrong when
+       nothing is. Only genuine exhaustion is an error. #}
     <p class="muted">Each code lets you move this licence to new hardware once
        &mdash; after a reinstall, a disk replacement, or a new machine. Store them
        somewhere separate from this server.</p>

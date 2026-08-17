@@ -183,13 +183,40 @@ def exhaustion_notice():
             "unchanged in the meantime.")
 
 
+def ever_issued(db_path=None):
+    """Has ANY batch ever been issued, in any state (used or superseded)?
+
+    The distinction between "never issued" and "all spent" cannot be made from
+    the live count alone -- both are zero -- and they mean opposite things to the
+    operator. One is "you have not set this up yet"; the other is "you are out of
+    recovery options, call support".
+    """
+    conn = _conn(db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM license_backup_codes").fetchone()[0] > 0
+    finally:
+        conn.close()
+
+
 def status(db_path=None):
     """(remaining, level, message) for the UI. Never a bare number.
 
-    Levels: 'ok' | 'low' | 'exhausted'. The message is what the operator should
-    actually read -- a count on its own does not tell them whether to act.
+    Levels: 'none_issued' | 'ok' | 'low' | 'exhausted'.
+
+    ⚠ `none_issued` is NOT cosmetic. Before it existed, a fresh install reported
+    "All licence backup codes have been used -- contact support", because zero
+    live codes was assumed to mean zero REMAINING. Nobody had used anything; none
+    had ever been issued. That is the standing absent-vs-zero conflation in
+    user-facing form, and it told a new operator their recovery options were
+    exhausted before they had set any up.
     """
     n = remaining(db_path)
+    if n == 0 and not ever_issued(db_path):
+        return (0, "none_issued",
+                "No backup codes have been issued yet. Issue a set now and store "
+                "them somewhere safe — each one lets you move this licence to new "
+                "hardware once, after a reinstall or a hardware change.")
     if n == 0:
         return n, "exhausted", exhaustion_notice()
     if n <= LOW_WATER:
