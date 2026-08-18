@@ -21,6 +21,43 @@ Verified working on the production server 2026-08-17:
     signals_used : ['cpu_id', 'disk_serial', 'machine_id']
     confidence   : high
 
+── ⚠⚠ THE INSTALL ID DEPENDS ON WHO IS ASKING. READ THIS BEFORE DEBUGGING. ──
+**Running this as root gives a DIFFERENT install id than the dashboard computes,
+and the dashboard's value is the one that matters.**
+
+Two of the seven canonical signals come from `/sys/class/dmi/id/` — `system_uuid`
+and `board_serial` — and those files are mode `0400 root:root`. So:
+
+    root          -> 5 signals -> one stable_id
+    paul          -> 3 signals -> a DIFFERENT stable_id
+    nemesis-dash  -> 3 signals -> the same as paul  <-- what the dashboard uses
+
+Measured on the production box 2026-08-17. This nearly caused a real mistake: an
+id read from a root shell did not match the id a licence had been signed against,
+and it looked exactly like a broken licence. It was neither — it was two
+different questions being asked of two different processes.
+
+**Rule: a licence must be signed against the id computed by the VERIFYING
+process** — the dashboard, running as `nemesis-dash`. Anything read from a root
+shell is a different measurement, and using it will produce a key that cannot be
+activated.
+
+── ⚠ AND THE TWO CHECKS ARE NOT EQUALLY STRICT ─────────────────────────────
+This asymmetry is deliberate but non-obvious, and it means the failure is loud in
+one place and silent in the other:
+
+  * **Activation** (`api_license_activate`) calls `license_key.verify(key,
+    install_id=<current stable_id>)` — an EXACT string compare. A key signed
+    against root's id is rejected outright with `wrong_install`.
+  * **Ongoing verification** (`entitlements.license_status`) calls
+    `verify_install()`, which is QUORUM-based. Verified live: a root-bound
+    fingerprint checked against the dash-computed one returns **MATCH_OK** on a
+    3-signal quorum — it would keep working indefinitely.
+
+So a wrongly-signed key fails at the door and would have been fine once inside.
+That is the right way round (bind precisely, then tolerate drift), but do not
+mistake "it verifies in a test" for "it will activate".
+
 ── QUORUM, NOT EXACT MATCH (operator decision, 2026-08-17) ─────────────────
 Exact matching would invalidate a licence on ordinary maintenance. The live
 signals are `cpu_id`, `disk_serial` and `machine_id`; `machine_id` changes on an

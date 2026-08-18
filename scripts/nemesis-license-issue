@@ -112,6 +112,19 @@ def cmd_issue(args):
         sys.exit("REFUSING: empty --install-id. An unbound licence would be "
                  "valid on every machine, which defeats node-locking.")
 
+    # ⚠ The install id DEPENDS ON WHICH USER READ IT. Two of the hardware signals
+    # live in /sys/class/dmi/id/ (mode 0400 root:root), so a root shell computes a
+    # DIFFERENT id than the dashboard (which runs as nemesis-dash). Measured on a
+    # real box 2026-08-17: root 5 signals, nemesis-dash 3, different composites.
+    #
+    # Activation does an EXACT compare, so a key signed against a root-read id
+    # cannot be activated at all. Always take the id from the dashboard's own
+    # Licensing page, never from `sudo`. See core/install_id.py.
+    print("NOTE: this id must be the one shown on the customer's Licensing page")
+    print("      (computed by the dashboard). An id read from a root shell will")
+    print("      differ and the resulting key will not activate.")
+    print()
+
     payload = {
         "install_id": install_id,
         "tier": args.tier,
