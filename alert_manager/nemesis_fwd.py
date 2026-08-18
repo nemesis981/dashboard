@@ -375,14 +375,29 @@ def load_admin(username):
 
     lock = row["lockout_until"]
     if lock:
+        from datetime import datetime
         try:
-            from datetime import datetime
-            if datetime.fromisoformat(lock) > datetime.now():
-                raise Denied("locked_out", "account is locked out")
-        except Denied:
-            raise
-        except Exception:
-            pass
+            lock_until = datetime.fromisoformat(lock)
+        except Exception as exc:                  # noqa: BLE001 - fail closed
+            # FAIL CLOSED. This previously swallowed the parse error and fell
+            # through to `return row` — i.e. an account WITH a lockout value we
+            # could not read was handed back as valid, and the lockout was
+            # simply not applied. Every other check in this function raises
+            # Denied; this was the one that could silently decline to, which is
+            # exactly backwards for a gate in a root-privileged helper.
+            #
+            # An unreadable lockout is an UNKNOWN lockout state, and the only
+            # safe reading of unknown is "locked". Same message and kind as a
+            # genuine lockout, deliberately: this function already avoids
+            # distinguishing account states to the caller (see the docstring's
+            # username-oracle note), and a distinct error here would leak that
+            # this account exists, is active, is an admin, and has a lockout
+            # row. The detail belongs in the log, not on the wire.
+            log.error("fwd: unparseable lockout_until %r for %r (%s) — "
+                      "denying access, lockout state is unknown", lock, username, exc)
+            raise Denied("locked_out", "account is locked out")
+        if lock_until > datetime.now():
+            raise Denied("locked_out", "account is locked out")
     return row
 
 
