@@ -10762,6 +10762,12 @@ def _run_local_clamscan(scan_id, path):
 
         # Parse threats from completed log
         threats = []
+        # FAIL CLOSED on an unreadable scan log — same defect, same fix as
+        # hw_monitor's `_local_clamscan_thread`. Logging the parse error was not
+        # enough on its own: `threats` stays empty either way, so the line below
+        # still recorded a scan nobody could read as "clean" in scan_jobs. A
+        # warning in the journal does not undo a reassuring verdict in the UI.
+        log_read_ok = False
         try:
             with open(log_file) as f:
                 for line in f:
@@ -10774,10 +10780,16 @@ def _run_local_clamscan(scan_id, path):
                         else:
                             file_path, threat_name = line, "Unknown"
                         threats.append((file_path, threat_name))
+            log_read_ok = True
         except Exception as e:
             log.warning("local scan log parse error: %s", e)
 
-        final_status = "threats_found" if threats else "clean"
+        if not log_read_ok:
+            final_status = "error"
+        elif threats:
+            final_status = "threats_found"
+        else:
+            final_status = "clean"
 
         conn = _dm_conn()   # §9 batch 3 (_run_local_clamscan) — INSERT scan_threats / UPDATE scan_jobs (granted)
         row = conn.execute("SELECT id, files_scanned FROM scan_jobs WHERE scan_id=?", (scan_id,)).fetchone()

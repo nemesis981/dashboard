@@ -2865,6 +2865,12 @@ def _local_clamscan_thread(scan_id, path):
         proc.wait()
         threats = []
         files_scanned = 0
+        # FAIL CLOSED on an unreadable scan log. `threats` stays empty whether the
+        # scan genuinely found nothing OR we could not read its log at all, so
+        # deriving status from `threats` alone reported a scan we cannot vouch for
+        # as "clean" — a verdict written to scan_jobs and shown to the operator as
+        # a real result. An absent answer must not render as a reassuring one.
+        log_read_ok = False
         try:
             with open(log_file) as f:
                 for line in f:
@@ -2872,9 +2878,16 @@ def _local_clamscan_thread(scan_id, path):
                         files_scanned += 1
                     if "FOUND" in line:
                         threats.append(line.strip())
+            log_read_ok = True
         except Exception:
-            pass
-        status = "threats_found" if threats else "clean"
+            log.exception("clamscan log unreadable (scan_id=%s, log=%s) — recording "
+                          "this scan as ERROR, not clean", scan_id, log_file)
+        if not log_read_ok:
+            status = "error"
+        elif threats:
+            status = "threats_found"
+        else:
+            status = "clean"
         conn = _db_connect()
         conn.execute(
             "UPDATE scan_jobs SET status=?, files_scanned=?, threats_found=?, "
