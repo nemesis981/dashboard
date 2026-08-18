@@ -1,199 +1,238 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-08, nightly closeout (Window 2)**. Overwritten each closeout (latest
+> Last updated **2026-08-17, nightly closeout (Window 2)**. Overwritten each closeout (latest
 > state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/
 > accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per
 > Rule 8.
 >
-> **This is the day's nightly closeout**, covering both today's sessions. Full detail behind
-> every claim below: session 001's own worklog (`docs/handoff/worklog/2026-08-08-001.md` — no
-> supplement was written for it, a pre-existing gap not filled retroactively here) and session
-> 002's supplement (`docs/handoff/supplements/2026-08-08-002.md`, curated) and worklog
-> (`docs/handoff/worklog/2026-08-08-002.md`, reconstructed at closeout — see that file's own
-> process-gap note).
+> Full detail behind every claim below: `docs/handoff/supplements/2026-08-17-001.md` (curated)
+> and `docs/handoff/worklog/2026-08-17-001.md` (raw log, reconstructed at closeout — see its
+> own process-gap note).
 
 ---
 
 ## 1. Live in production right now — verified, not assumed
 
-- **`origin/main` is at `6a13149`** as of this writing (confirmed `HEAD == origin/main` via
-  fresh fetch after every push today, re-confirmed at closeout). 9 commits landed and pushed
-  this session (session 002), on top of session 001's earlier work today (elevated-grants
-  correction, `ba830e2`).
-- **Nothing landed today has been deployed.** No service was restarted by Window 2 either
-  session. Today's committed-but-undeployed pile grew substantially on top of everything already
-  undeployed from 2026-08-07 (mint-at-download, DHCP mode-switch + live-run + health-observability
-  work, Track C schema v2, connectivity-notifications): the Tier 2 gate state-publication
-  interface, the Track C consent route + module + structured-error grant, the hw_monitor
-  DB-path-publish-at-startup fix, and the Data Manager core-error-ledger exemption. **This pile
-  needs a deliberate deploy decision soon — it is not shrinking on its own.**
-- **Directly verified on this box at closeout** (Rule 3 — not carried forward from narrative):
-  `sudo -n -l` shows only the long-standing installer-granted NOPASSWD set plus the one
-  previously-flagged `nemesis-suricata-rules` addition (unchanged from 2026-08-06); `getent
-  group pihole` still shows the operator's membership added 2026-08-08 session 001 (unchanged,
-  still live); `nemesis-dash`'s groups are still `nemesis-db`/`nemesis`/`nemesis-fw` only — still
-  **not** in `pihole` (confirms the DHCP polkit/group work remains gateway-test-zone-only, not
-  deployed here). All six core services (`dashboard`, `watchdog`, `alert-watcher`,
-  `malware-canary`, `diagnostics-watcher`, `vpn-dns-guard`) report `active`, unrestarted.
-- **Active, uncommitted WIP from other windows sitting in the tree right now** (not Window 2's,
-  not touched, characterized read-only for whoever picks this up): Window 1 has in-flight
-  fail-closed fixes in `alert_manager/nemesis_fwd.py` (lockout-parse error handling),
-  `core_module/hw_monitor/hw_monitor.py` + `dashboard.py` (matching clamscan-log-read verdict
-  fixes — an unreadable scan log no longer silently reports "clean"), and
-  `diagnostics/redact.py` (new `RedactionUnavailable` exception). Window 3 has 3 of an announced
-  4 batches of a read-only error-code classification sweep
-  (`docs/audits/error-code-classification-batch1/2/3-2026-08-08.md`), explicitly "awaiting
-  review before any wiring."
+- **`origin/main` is at `6597853`** as of this writing (confirmed `HEAD == origin/main` via
+  fresh fetch after every push today, re-confirmed at closeout). 15 commits landed and pushed
+  this session.
+- **Nothing landed today has been deployed to this box's running services**, except two
+  pieces Window 1 deployed itself under State Snapshot discipline mid-session (per its own
+  handoff): `dashboard` restarted 11:01:57 (after `8981f52`), and the 11:03 live Tailscale
+  E2E revoke ran through that actual production process; `hw-monitor` restarted 2026-08-16
+  19:31:39 for Gap 3b. Everything committed AFTER those two restarts — the full licensing
+  engine, cap enforcement, the fingerprint fix, the orphan-display fix, the production
+  signing key, the backup-codes fix — is **committed but not yet running** on this box.
+  `init_licensing_tables()` has never executed against the live DB; the `remote_enabled`
+  columns have never been created on the live `agent_devices` table. **This pile needs a
+  deliberate deploy decision** — same recurring note as prior closeouts, now covering a much
+  larger and more security-relevant set of changes than usual.
+- **Directly verified on this box at closeout** (Rule 3): all 8 checked services
+  (`dashboard`, `watchdog`, `alert-watcher`, `malware-canary`, `diagnostics-watcher`,
+  `vpn-dns-guard`, `hw-monitor`, `nemesis-fwd`) report `active`.
+- **Active, uncommitted WIP sitting in the tree right now**, none of it Window 2's, none of
+  it touched:
+  - `alert_manager/nemesis_fwd.py`, `diagnostics/redact.py` — fail-closed fixes, dated
+    2026-08-08 (over a week old now, unclaimed by anyone this session).
+  - `core/install_id.py`, `scripts/nemesis-license-issue` — a documented root-vs-dashboard-
+    user install-id mismatch finding (docs/comments only, no functional code change).
+  - `dashboard.py` (a `_render_license_summary_html()` function + Settings-page card wiring),
+    `alert_manager/test_licensing_routes.py` (its tests) — a Settings-page licence
+    discoverability card, ready-shaped, not yet committed.
+  - `install.sh` — a new, small (+22 line) hunk installing `python3-h2`/`python3-hpack`/
+    `python3-hyperframe` for the private L3 Tier 2 delivery gate's HTTP/2 stack. Appeared
+    mid-session, unrelated to anything else today, not touched.
+  - `docs/audits/error-code-classification-batch1/2/3-2026-08-08.md` — Window 3's read-only
+    sweep, unchanged from prior closeouts, still awaiting review.
+- **`docs/audits/nginx-config-drift-audit-2026-08-16.md` is still uncommitted**, sitting
+  since early this session's own audit. Public and Rule-8-clean, just never landed — worth
+  committing next session rather than letting it go stale.
 
-## 2. What shipped today (10 commits total across both sessions)
+## 2. What shipped today (15 commits, one session)
 
-**Session 001** (morning): elevated-access-grants recheck resolved as a timing artifact, not a
-real contradiction — HANDOFF corrected, CLAUDE.md's Morning Status formalized to check grants
-live every session going forward (`65e5bde`, `ba830e2`). Full detail: `worklog/2026-08-08-001.md`.
+Full commit-by-commit detail: `docs/handoff/supplements/2026-08-17-001.md`. Summary:
 
-**Session 002** (this closeout, 9 commits — full detail: `supplements/2026-08-08-002.md`):
-1. `033a1cb` — `gateway-mode-scoping.md` reviewed and committed; resolved its own flagged
-   ADR-0022 collision question (0022 is QUIC/nftables', unrelated).
-2. `db19c20` — Tier 2 gate state-publication interface. **Caught and fixed before landing**: the
-   DDL's init function was never wired into any production startup path — the `devices`-table
-   fresh-install failure pattern, in miniature.
-3. `080c90a` / `8a671f2` — Track C consent route (`/api/consent/<device_id>` status/grant/revoke)
-   and its backing module + structured `E-CONSENT-*` errors + Data Manager grant, landed as two
-   sequenced commits per direct instruction to avoid a shared-file race with Window 3.
-4. `9bf7561` / `99f745c` / `d910ac7` — Window 3's two Data Manager fixes (hw_monitor's DB-path
-   publish-at-startup timing bug; a core error-ledger exemption so any module can now record
-   structured errors — previously only `conn_consent` had a working grant, confirmed silently
-   broken for `dhcp` and the seeded `E-TICKETS-001` reference example both) plus Window 3's own
-   scoping audit, each as its own commit.
-5. `722f269` — this session's own roadmap-sequence delta review, written durably after first
-   being published as a Claude Artifact.
-6. `6a13149` — two follow-on roadmap captures from that review: `v2-completion-checklist.md`
-   (nine items, each needing a shipped commit or explicit deferral before v2 is called done) and
-   `dashboard-pass-freshness-review.md` (queues, doesn't perform, a staleness check on 6
-   dashboard docs).
+1. **Gap 1-3 firewall hardening + tailnet device removal** (`ca00be9`, `9df9b9e`, `21b3541`,
+   `8981f52`) — scoped VM-adapter UFW rules replacing a world-open one, tailnet allow rules
+   the installer never wrote, the dashboard bound to loopback instead of `0.0.0.0`,
+   application-layer source admission on `:5001`, and device revoke now also removes the
+   node from the tailnet (not just blocks it in Nemesis) — the last held on request pending
+   a real end-to-end test against the live Tailscale API, which found and fixed a genuine bug
+   (positional vs. by-name DB row access) before the hold was lifted.
+2. **The node-locked licensing engine** (`e25a92c`, `96cfe9b`) — install-identity
+   fingerprinting, offline Ed25519 key verification, backup codes, a remote-device census
+   reconciled against the live tailnet, and the entitlements rewrite. `FREE_TIER_REMOTE_CAP`
+   locked at **5**.
+3. **The `remote_enabled` schema + dashboard licensing UI** (`458079f`, `1b52d7c`, schema
+   first since the UI depends on the column existing) — four routes, the budget strip, backup
+   codes UI.
+4. **Cap enforcement** (`c1cd5ff`, `0a359de`) — both admission seams (generate-time and
+   download-time), closing a real bypass where a *pasted* Tailscale key skipped the cap check
+   entirely, plus connectivity-aware fail-open/fail-closed logic (a vendor API outage still
+   grants; this box having no internet at all now refuses, closing a disconnect-to-bypass
+   hole) and its own 42-assertion regression suite.
+5. **`LICENSE` + `README.md` + ADR 0022** (`326c0e8`) — the repo had no license file at all,
+   ever; both new files are explicitly marked DRAFT pending real legal review.
+6. **The hw_monitor fingerprint-loader fix** (`2c2ff14`) — two independent defects (a
+   hardcoded path-depth count broken by July's directory relocation, plus a sibling-import
+   `sys.path` issue) meant the TOFU hardware-match comparison had never once run in
+   production.
+7. **3-category orphan display** (`49efa1f`) — separates this server's own tailnet node and
+   pre-licensing/local-only devices (both benign) from genuinely unknown machines (the only
+   category that should warn).
+8. **The real production issuer public key** (`8662b14`) — verified independently three ways
+   before committing (see §4), on its own commit.
+9. **Backup-codes "never issued" vs. "all spent"** (`6597853`) — a fresh install no longer
+   reports its recovery codes as exhausted before any have been issued.
 
 ## 3. Open items to pick up first, in priority order
 
-1. **Deploy decision owed** — see §1. This has been growing across multiple closeouts now; worth
-   a deliberate look rather than letting it keep compounding.
-2. **`docs/roadmap/v2-completion-checklist.md` is now the authoritative gate for v2** — nine
-   items (gateway-mode-scoping, ADR 0019 Increment 4, Tier2 TLS's private-mirror-only public
-   visibility, the never-run clean-uninstall e2e VM test, malware Layers C/D, the broader
-   data-retention Tier A policy, the vestigial-tables audit, ADR 0022's writeup, the long
-   PUNCHLIST tail). Each needs either a shipped commit or an explicit operator deferral decision
-   before v2 is declared done — check this list at each future closeout, don't let it go stale.
-3. **`docs/roadmap/dashboard-pass-freshness-review.md`** — queued, run *before* the dashboard
-   pass starts (not now): confirm the 6 dashboard-pass docs' assumptions still hold against
-   what's shipped since capture (tiered explanations, device categorization, chat popup, DHCP
-   module, connectivity notifications).
-4. **Memory-injection/recovery is NOT ready to build** — flagged this session: both halves are
-   explicitly paused/parked in the docs with named unresolved prerequisites (see the delta
-   review, `docs/audits/roadmap-sequence-delta-2026-08-08.md`). If this is still intended as the
-   next major build item, it needs an explicit go-ahead that acknowledges reversing a documented
-   pause — not a default continuation of the stated sequence.
-5. **Other windows' in-flight WIP** (§1) — pick up and commit when ready: Window 1's fail-closed
-   fixes (3 files) and Window 3's error-code classification sweep (3 of 4 batches so far, still
-   read-only/awaiting review).
-6. **Orphaned sub-task, unresolved**: early this session, "mirror the updated HANDOFF item to
-   nemesis-internal" was asked but no pending item could be found (HANDOFF + worklog already
-   matched the mirror). Never clarified. Worth a quick check whether this was ever about
-   something real.
-7. **Vestigial-tables removal audit** (`alert_notes`, `anomaly_ai_cache`, `anomaly_ai_usage`) —
-   carried since 2026-08-06, still Window 2's, not touched. (Now also tracked in the v2
-   completion checklist, item 2 above — not duplicated tracking, just cross-referenced.)
-8. **QUIC/nftables ADR 0022 write-up** — carried since 2026-08-06, still unwritten. Confirmed
-   this session it is genuinely unrelated to gateway-mode.
-9. **The long-carried PUNCHLIST tail** — `enrich_ip()` external IP exposure, agent check-in
-   jitter, empty-alert-list read-window mismatch, install.sh default-route interface detection,
-   host-defence rule naming, Windows DHCP hostname truncation, cache-hit token skew, installer
-   token revocation, credential rotation, Concurrency Phase 3, `/api/analyze/<rule_id>`
-   GET-that-spends-money — unchanged, none newly urgent.
+1. **Deploy decision owed** — see §1. The undeployed pile now includes the entire licensing
+   feature and a real security fix (the pasted-key cap bypass); this is materially higher
+   stakes than a typical undeployed-code note. Needs a deliberate, State-Snapshot-gated pass,
+   not an incidental restart.
+2. **`docs/audits/nginx-config-drift-audit-2026-08-16.md`** — write it, then let it sit
+   uncommitted for a full session. Commit it next session; nothing about it has changed.
+3. **Three ready-shaped, uncommitted licensing-adjacent pieces** (§1): the Settings
+   discoverability card, the `install_id.py` root-vs-dashboard-user note (+ its
+   `nemesis-license-issue` companion warning). Each was deliberately left out of tonight's
+   commits per explicit scope, not because anything is wrong with them — pick up and commit
+   when ready.
+4. **The 08-08 WIP is now over a week old** (`nemesis_fwd.py`, `redact.py` fail-closed
+   fixes) — nobody has claimed it across multiple closeouts. Worth a decision: commit it, or
+   explicitly park/discard it, rather than letting it keep aging silently in the tree.
+5. **The new install.sh L3 Tier 2 HTTP/2 hunk** — unrelated to tonight's work, appeared
+   mid-session, not investigated beyond reading the diff. Flag for whoever owns the private
+   L3 Tier 2 module.
+6. **LICENSE draft's three open placeholders** (copyright holder legal name/entity,
+   commercial-licensing contact, governing law/jurisdiction) plus real legal review —
+   tracked in `PUNCHLIST.md`'s `[HIGH — legal, not just docs]` entry, not resolved tonight.
+7. **Two sudo NOPASSWD grants found live, not in this file's prior tracked list** — see §6.
+   Need a keep/revoke decision, not carried forward silently.
 
 ## 4. Verified live today, not just claimed (Rule 3 discipline)
 
-Every commit this session had its factual claims independently re-checked against live code
-before staging, not taken from the handing-off window's own summary: file/line citations
-verified by direct read (`gateway-mode-scoping.md`'s citations, both Data Manager fixes' code
-comments), test suites re-run live rather than trusted (`test_tier2_gate_state.py` 23/23,
-`test_conn_consent.py` 23/23, `test_conn_ingest.py` 46/46, `test_data_manager.py` ALL PASS,
-`test_nemesis_errors.py` 73/73 — each run fresh, more than once as the underlying files changed
-mid-session), and one real defect caught before landing (the tier2_gate DDL wiring gap, §2 item
-2). A live concurrent-edit race was caught mid-task (a stale staged `conn_consent.py`, an unwired
-new file appearing under active editing) and correctly held rather than committed blind.
+Every commit this session had its factual claims independently checked, not taken from
+Window 1's own summary: the licensing engine's Rule 10 read was independently re-scanned
+(clean); the cap-enforcement batch's Rule 10 read was **not** taken as clean — a real
+bypass-instruction disclosure was found in `cap_guard.py`/`net_reachability.py`'s public
+docstrings, sanitized, and the removed text preserved privately before commit. Test suites
+were re-run live rather than trusted throughout: `test_licensing.py` 65→71 assertions across
+the session as coverage grew, `test_licensing_routes.py`, `test_cap_enforcement.py` (48),
+`test_cap_connectivity.py` (42, confirmed independent of the enforcement suite by import and
+a standalone run), `test_match_fingerprint.py` (13, run as a real subprocess under the actual
+production `PYTHONPATH`, not the caller's own — deliberately, since that's the exact
+condition that would hide the bug it exists to catch). The `9ffac56` relocation-commit
+citation in the fingerprint-fix PUNCHLIST entry was verified against real git history before
+being written down. The production signing key was verified three independent ways (re-derived
+from the local private key file, re-derived from its offline USB backup, and a real
+already-issued license round-tripped through the product's own verifier) before its commit —
+private key material was never printed, logged, or copied at any point.
+
+One backup-codes fix (`6597853`) shipped with only manual, non-persisted verification (a
+temp-DB script run at the terminal) rather than a dedicated regression test — flagged in that
+commit's own message rather than silently presented as equally rigorous; writing a new test
+file was judged to be code-authoring outside this window's role, not something to skip
+quietly.
 
 ## 5. State snapshots
 
-None taken by Window 2 today, either session — no state-changing action (deploy/restart/live-data
-edit) happened in this repo's git-writer scope; every commit was code landing in git, not a
-running-system change.
+None taken by Window 2 today — every action this session was code landing in git, not a
+running-system change. Window 1's own two mid-session restarts (dashboard, hw-monitor; see
+§1) were performed under State Snapshot discipline per its own account; not independently
+re-verified against a snapshot artifact by Window 2 tonight.
 
 ## 6. ⚠ Standing elevated grants — REVIEW FOR REVOCATION
 
-Live-reverified 2026-08-08 session 002 (Window 2), via `sudo -n -l`, `getent group <name>`. **No
-change from session 001's re-verification earlier today** — all three tracked grants below
-confirmed still in the same state.
+Live-reverified 2026-08-17 nightly closeout, via `sudo -n -l` and `getent group <name>`.
 
-### `nemesis-suricata-rules` — added 2026-08-06, for Suricata rule deployment
-- **File:** `/etc/sudoers.d/nemesis-suricata-rules`
-- **CONFIRMED LIVE today** (`sudo -n -l` shows the three scoped NOPASSWD entries unchanged).
-- **NOT required for normal Nemesis operation.** Revoke with
-  `sudo rm /etc/sudoers.d/nemesis-suricata-rules` when rule iteration is done; re-check at each
-  closeout.
+### `<user>`'s `pihole` group membership — CONFIRMED live
+Unchanged from every prior closeout that's checked it. Still for the cardinality tool
+(`~/work/nemesis-internal/tools/pihole-cardinality.py`). Same standing note as before: worth
+its own revoke decision once that tool's current use is done, not urgent tonight.
 
-### Gateway test zone only — NOT this production box
-A polkit rule (`49-nemesis-dhcpd.rules`) and `usermod -aG pihole nemesis-dash` were added on the
-gateway test zone to get DHCP daemon control and status reads working live (2026-08-07).
-**Reconfirmed today**: `nemesis-dash`'s groups on this box are still only
-`nemesis-db`/`nemesis`/`nemesis-fw` — neither grant exists here. If/when this work is deployed to
-production, re-verify at that point, not assumed to match the test-zone state.
+### Suricata rule-deployment grants — CONFIRMED live
+`tee /etc/suricata/rules/local.rules` plus `systemctl reload/restart suricata`, matching the
+previously-tracked `nemesis-suricata-rules` grant in shape. Not required for normal Nemesis
+operation; re-check at each closeout.
 
-### `<user>`'s `pihole` group membership — CONFIRMED live, added 2026-08-08 session 001
-- For the cardinality tool (`~/work/nemesis-internal/tools/pihole-cardinality.py`).
-- **Still live today**, re-confirmed via `getent group pihole`. Same footing as the other two
-  above — worth its own revoke decision once the cardinality tool's current use is done.
+### ⚠ Two grants found live tonight, NOT in this file's prior tracked list
+- `(ALL) NOPASSWD: /usr/bin/ip, /usr/local/bin/piactl` — `piactl` is PIA VPN's control
+  binary. Likely a leftover from the PIA VPN evaluation work already noted in
+  `PUNCHLIST.md`'s `[FUTURE] PIA VPN deliberately disabled` entry, but that's inference, not
+  confirmed — **not verified against a specific prior session tonight**, flagged rather than
+  assumed.
+- `(ALL) NOPASSWD: /usr/bin/systemctl restart hw-monitor` — plausibly a convenience grant
+  from iterative hw-monitor testing (today's Gap 3b work, or earlier), also **not confirmed
+  against a specific origin tonight**.
+
+Neither line traces to `install.sh` (`grep`-checked, zero hits for `piactl` or `restart
+hw-monitor` in the installer) or to any previously-tracked grant in this file's history.
+Both are real, live, passwordless. **Flagged for an explicit keep/revoke decision next
+session** — not treated as confirmed-necessary just because they're already live, per the
+standing instruction that an unconfirmed claim gets flagged as contradicted, not written
+down as fact.
+
+The baseline `(ALL : ALL) ALL` line in the same `sudo -l` output is the standard
+password-required Ubuntu admin grant from `paul` being in the `sudo` group — not a NOPASSWD
+entry, not new, not part of this tracked list.
 
 ## 7. Known issues/gaps, not yet fixed
 
-Carried forward unchanged unless noted: the Rule-8 username finding, three unrelated temporary
-sudoers grants, `NEMESIS_AGENT_EXE`'s real home path, `migrate_to_opt.sh` fragility, missing ADR
-for the `/opt` relocation, `backupproc.md` unconfirmed for current layout, ADR 0015 vs.
-venue-guest-network tension (unresolved), no hardware baseline, legal review not started
-(employer-basis consent — `conn_consent.py` explicitly refuses it pending this), ruleset-rollback
-residual (bounded, fix deferred).
+Carried forward unchanged from prior closeouts unless noted: the Rule-8 username finding,
+`NEMESIS_AGENT_EXE`'s real home path, `migrate_to_opt.sh` fragility, missing ADR for the
+`/opt` relocation, `backupproc.md` unconfirmed for current layout, ADR 0015 vs.
+venue-guest-network tension (unresolved), no hardware baseline beyond the gauge VM, ruleset-
+rollback residual (bounded, fix deferred).
 
-**New this session:** the live worklog habit lapsed — session 002's worklog was reconstructed at
-closeout rather than written as-you-go (Rule 9). No evidence anything was lost, but flagging the
-process gap so it's re-established next session rather than repeating silently. Also: `docs/
-audits/error-code-classification-batch*` (Window 3) and the three in-flight fail-closed fixes
-(Window 1) are real, live, uncommitted work — not a gap exactly, but a pickup owed to whichever
-window resumes them.
+**New tonight:**
+- The live-worklog habit lapsed again (second time now, prior instance 2026-08-08) —
+  reconstructed at closeout rather than written as-you-go. Re-establish it live next session
+  rather than let this become the normal pattern.
+- The undeployed-but-committed pile (§1, §3 item 1) has grown to include the entire
+  licensing/cap-enforcement feature — materially higher-stakes than the usual "code is ahead
+  of the running system" note this file has carried for weeks.
+- Two unreviewed sudo NOPASSWD grants surfaced live (§6) that weren't in any prior tracked
+  list — first time this file has found something in the elevated-grants check that it wasn't
+  already watching for.
 
 ## 8. Cross-references
 
-- `docs/handoff/supplements/2026-08-08-002.md` — curated narrative, this closeout.
-- `docs/handoff/worklog/2026-08-08-002.md` — reconstructed log, this session (see its own
-  process-gap note).
-- `docs/handoff/worklog/2026-08-08-001.md` — session 001's raw log (no supplement exists for it).
-- `docs/audits/roadmap-sequence-delta-2026-08-08.md` — the operator's stated sequence vs. documented
-  state; source of the v2-completion-checklist and dashboard-pass-freshness-review below.
-- `docs/audits/data-manager-single-authority-scoping-2026-08-08.md` — Window 3's scoping for
-  both Data Manager fixes landed today.
-- `docs/roadmap/v2-completion-checklist.md` — new; the authoritative v2 completion gate.
-- `docs/roadmap/dashboard-pass-freshness-review.md` — new; queued pre-flight check.
-- `docs/roadmap/gateway-mode-scoping.md` — new today, committed `033a1cb`.
-- `~/work/nemesis-internal/handoff/` — Window 1's own context handoff, separate from this file.
-- Prior day: `docs/handoff/supplements/2026-08-07-002.md`.
+- `docs/handoff/supplements/2026-08-17-001.md` — curated narrative, this closeout.
+- `docs/handoff/worklog/2026-08-17-001.md` — reconstructed raw log (see its own process-gap
+  note).
+- `docs/audits/nginx-config-drift-audit-2026-08-16.md` — written this session, still
+  uncommitted (§1, §3).
+- `docs/architecture/0021-dos-resilience-scoping.md` — the earlier finding the nginx audit
+  extends.
+- `docs/architecture/0022-source-available-license.md` — new tonight; the LICENSE decision
+  record.
+- `known-limitations/cap-guard-bypass-disclosure-2026-08-17.md` (private mirror) — the
+  Rule-10-withheld bypass detail from the cap-enforcement commit.
+- `~/work/nemesis-internal/handoff/2026-08-16-window1-handoff.md` — Window 1's own context
+  handoff for today's build work; far more detail on design rationale than this file carries.
+- `~/work/nemesis-internal/legal/LICENSE-draft-2026-08-17.md` — reference copy of the LICENSE
+  draft, uncommitted in that repo.
+- `PUNCHLIST.md` — the `[HIGH — legal, not just docs]` LICENSE entry, and the rewritten
+  fingerprint-loader entry.
+- Prior day with a closeout: `docs/handoff/supplements/2026-08-08-002.md` (nine days prior —
+  no closeout was recorded in the intervening days).
 
-## Topology (durable, unchanged from prior handoffs)
+## Topology (durable, unchanged from prior handoffs unless noted)
 - `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`), LAN-scoped
-  SSH/HTTP rate limiting at the ufw layer plus nginx's own `limit_req`.
-- `:5000` Flask dashboard (ufw-blocked from LAN, unchanged; runs threaded). `:5001` hw-monitor
-  agent endpoint, ThreadingHTTPServer + token-bucket pacing (`MAX_BUCKETS=256` live).
-- `:5002` agent command listener — localhost-bound + unauthenticated. Rotation and attestation
-  manifest delivery are deliberately never routed through this listener's dispatcher —
-  handled only on the signature-verified path.
-- `nemesis-fwd` — Unix-socket privileged helper, peers: dashboard, alert-watcher,
-  `fail2ban` (narrow: `block_ip`/`deny_ip` only, cannot release), `write_env`/
-  `restart_dashboard` ops (dashboard peer only).
+  SSH/HTTP rate limiting at the ufw layer plus nginx's own `limit_req`. **Deployed config has
+  drifted from what `install.sh` generates** — see the still-uncommitted nginx audit (§1).
+- `:5000` Flask dashboard — **as of `9df9b9e` (committed, not yet deployed), binds to
+  `127.0.0.1` instead of `0.0.0.0`**; live production is still on the old `0.0.0.0` bind
+  until this pile is deployed. `:5001` hw-monitor agent endpoint — **as of `21b3541`
+  (committed, not yet deployed on this box's actual process), gains application-layer source
+  admission** in addition to the existing token-bucket pacing.
+- `nemesis-fwd` — Unix-socket privileged helper, peers: dashboard, alert-watcher, `fail2ban`
+  (narrow: `block_ip`/`deny_ip` only, cannot release), `write_env`/`restart_dashboard` ops
+  (dashboard peer only).
 - `nemesis_enforce` — owned nftables table (ADR 0019), priority-placed ahead of the filter
   hook, derived from `ufw`'s live state. Real DROP authority live since 2026-08-02.
+- **New tonight, committed but not deployed:** the licensing engine's tables
+  (`license_state`, `license_backup_codes`) and `agent_devices.remote_enabled*` columns do
+  not exist yet on the live DB; `core/cap_guard.py`'s enforcement is not yet active on any
+  running process.
