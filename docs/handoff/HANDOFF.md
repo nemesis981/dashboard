@@ -1,51 +1,89 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-17, nightly closeout (Window 2)**. Overwritten each closeout (latest
-> state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/
-> accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per
-> Rule 8.
+> Last full closeout: **2026-08-17, nightly (Window 2)**. **Corrected in place 2026-08-18**
+> (§1, §3, Topology) — a deployment-status claim from the 2026-08-17 closeout was found stale
+> the same day it would next have been read, and fixed immediately per standing instruction
+> rather than held for the next nightly closeout. This is a same-day correction, not a new
+> full closeout — the rest of the file (§2, §4-§8) still reflects 2026-08-17's session as
+> originally written. Overwritten each closeout (latest state wins). Durable history:
+> `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys live ONLY in
+> `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
 >
 > Full detail behind every claim below: `docs/handoff/supplements/2026-08-17-001.md` (curated)
 > and `docs/handoff/worklog/2026-08-17-001.md` (raw log, reconstructed at closeout — see its
-> own process-gap note).
+> own process-gap note). Today's (2026-08-18) commits are not yet behind their own supplement
+> — due at tonight's closeout.
 
 ---
 
 ## 1. Live in production right now — verified, not assumed
 
-- **`origin/main` is at `6597853`** as of this writing (confirmed `HEAD == origin/main` via
-  fresh fetch after every push today, re-confirmed at closeout). 15 commits landed and pushed
-  this session.
-- **Nothing landed today has been deployed to this box's running services**, except two
-  pieces Window 1 deployed itself under State Snapshot discipline mid-session (per its own
-  handoff): `dashboard` restarted 11:01:57 (after `8981f52`), and the 11:03 live Tailscale
-  E2E revoke ran through that actual production process; `hw-monitor` restarted 2026-08-16
-  19:31:39 for Gap 3b. Everything committed AFTER those two restarts — the full licensing
-  engine, cap enforcement, the fingerprint fix, the orphan-display fix, the production
-  signing key, the backup-codes fix — is **committed but not yet running** on this box.
-  `init_licensing_tables()` has never executed against the live DB; the `remote_enabled`
-  columns have never been created on the live `agent_devices` table. **This pile needs a
-  deliberate deploy decision** — same recurring note as prior closeouts, now covering a much
-  larger and more security-relevant set of changes than usual.
-- **Directly verified on this box at closeout** (Rule 3): all 8 checked services
+> **CORRECTED 2026-08-18, same day — the note below this file carried through last night's
+> closeout was already stale when written.** That version said the licensing engine and cap
+> enforcement were "committed but not yet running." **They are running.** Caught while
+> independently verifying an unrelated claim (that three fail-closed fixes were already live)
+> — checking service restart timestamps against file mtimes turned up two `dashboard`
+> restarts yesterday afternoon (`16:27:54` and `16:56:29`) and one `hw-monitor` restart
+> (`16:53:56`), both well after almost all of yesterday's commits landed on disk. Corrected
+> the same day it was found, per standing instruction not to let a known-stale deployment
+> claim sit in the record. The struck-through text is kept, not deleted, so the correction is
+> visible — same convention Window 1 used for the tailnet-deploy-status disagreement two days
+> ago.
+
+- **`origin/main` is at `4ff2bc6`** as of this writing (confirmed `HEAD == origin/main` via
+  fresh fetch, re-confirmed at this correction). 21 commits landed and pushed since yesterday
+  morning across two sessions (15 the first day, 6 today).
+- ~~**Nothing landed today has been deployed to this box's running services**, except two
+  pieces Window 1 deployed itself... Everything committed AFTER those two restarts... is
+  **committed but not yet running** on this box.~~ **WRONG, corrected same-day.** Verified
+  directly against the live system, not inferred:
+  - `dashboard` (current PID, up since `2026-08-17 16:56:29`) and `hw-monitor` (current PID,
+    up since `2026-08-17 16:53:56`) are running whatever was on disk at those moments.
+    Checked every `core/*.py` file the licensing/cap-enforcement work touched
+    (`cap_guard.py`, `net_reachability.py`, `license_key.py`, `backup_codes.py`,
+    `remote_census.py`, `entitlements.py`, `install_id.py`, `database.py`,
+    `tailscale_api.py`) plus `dashboard.py` and `hw_monitor.py` themselves — **every one of
+    them has an mtime before both restart timestamps.** `journalctl` confirms an earlier
+    `dashboard` restart at `16:27:54` too (superseded by `16:56:29`, same PID lineage).
+  - **The live database schema has already changed, confirmed by direct read-only query**:
+    `license_state` and `license_backup_codes` exist and are populated (`license_state` has
+    **1 row**: `tier=commercial, bound_at=2026-08-17T16:36:59, updated_actor=<operator-account>`);
+    `agent_devices` has `remote_enabled`/`remote_enabled_at`/`remote_enabled_by` (13 devices,
+    0 currently `remote_enabled`); `enrollment_tokens.remote_enabled` exists; 5 backup codes
+    are issued. **This is real activation, not test data** — the operator's own account
+    activated a real commercial license on this box yesterday, using the real production
+    signing key, through the actual dashboard UI, between the two restarts.
+  - **What this means practically:** the licensing engine, cap enforcement (both admission
+    seams), the fingerprint fix, the 3-category orphan display, and the loopback dashboard
+    bind (Gap 3a) are not a pending deploy decision — they are the code currently answering
+    every request this box serves. The one exception below.
+  - **Not yet live, confirmed by the same method:** `install.sh`'s three commits from today
+    (`0925273` h2 deps, `c2149c5` install-id docs, `7d56f78` discoverability card) and the
+    three fail-closed fixes from today (`865046a`, `9bbab1a`, `4ff2bc6`) — the discoverability
+    card and fail-closed-fix *content* was already on disk before the restarts above (verified
+    same way, see the fail-closed-fix commits' own messages), so those ARE live; only
+    `install.sh` itself is inert until someone runs it (not a running service). No further
+    restart has happened since `16:56:29`/`16:53:56` — confirmed via `systemctl show` at the
+    time of this correction, same PIDs.
+- **A deliberate deploy decision is still owed, but for a narrower and different reason than
+  last night's note implied**: not "is any of this safe to turn on," but "this box has been
+  running yesterday's entire licensing/cap-enforcement change set, un-reviewed-post-deploy,
+  for the better part of a day without anyone deciding that on purpose." Worth a proper
+  after-the-fact verification pass (State Snapshot discipline retroactively — at minimum,
+  confirm current behavior matches intent) rather than treating "it's already running and
+  nothing's on fire" as equivalent to a reviewed deploy.
+- **Directly verified on this box at this correction** (Rule 3): all 8 checked services
   (`dashboard`, `watchdog`, `alert-watcher`, `malware-canary`, `diagnostics-watcher`,
-  `vpn-dns-guard`, `hw-monitor`, `nemesis-fwd`) report `active`.
+  `vpn-dns-guard`, `hw-monitor`, `nemesis-fwd`) report `active`. `nemesis-fwd`,
+  `alert-watcher`, `diagnostics-watcher` last restarted `2026-08-16 17:05:0x` — unchanged
+  since before yesterday's session began; today's three fail-closed fixes landed only because
+  their file mtimes (2026-08-08 for two of them) already predated even that earlier restart.
 - **Active, uncommitted WIP sitting in the tree right now**, none of it Window 2's, none of
   it touched:
-  - `alert_manager/nemesis_fwd.py`, `diagnostics/redact.py` — fail-closed fixes, dated
-    2026-08-08 (over a week old now, unclaimed by anyone this session).
-  - `core/install_id.py`, `scripts/nemesis-license-issue` — a documented root-vs-dashboard-
-    user install-id mismatch finding (docs/comments only, no functional code change).
-  - `dashboard.py` (a `_render_license_summary_html()` function + Settings-page card wiring),
-    `alert_manager/test_licensing_routes.py` (its tests) — a Settings-page licence
-    discoverability card, ready-shaped, not yet committed.
-  - `install.sh` — a new, small (+22 line) hunk installing `python3-h2`/`python3-hpack`/
-    `python3-hyperframe` for the private L3 Tier 2 delivery gate's HTTP/2 stack. Appeared
-    mid-session, unrelated to anything else today, not touched.
   - `docs/audits/error-code-classification-batch1/2/3-2026-08-08.md` — Window 3's read-only
     sweep, unchanged from prior closeouts, still awaiting review.
 - **`docs/audits/nginx-config-drift-audit-2026-08-16.md` is still uncommitted**, sitting
-  since early this session's own audit. Public and Rule-8-clean, just never landed — worth
+  since early yesterday's own audit. Public and Rule-8-clean, just never landed — worth
   committing next session rather than letting it go stale.
 
 ## 2. What shipped today (15 commits, one session)
@@ -87,28 +125,34 @@ Full commit-by-commit detail: `docs/handoff/supplements/2026-08-17-001.md`. Summ
 
 ## 3. Open items to pick up first, in priority order
 
-1. **Deploy decision owed** — see §1. The undeployed pile now includes the entire licensing
-   feature and a real security fix (the pasted-key cap bypass); this is materially higher
-   stakes than a typical undeployed-code note. Needs a deliberate, State-Snapshot-gated pass,
-   not an incidental restart.
-2. **`docs/audits/nginx-config-drift-audit-2026-08-16.md`** — write it, then let it sit
-   uncommitted for a full session. Commit it next session; nothing about it has changed.
-3. **Three ready-shaped, uncommitted licensing-adjacent pieces** (§1): the Settings
-   discoverability card, the `install_id.py` root-vs-dashboard-user note (+ its
-   `nemesis-license-issue` companion warning). Each was deliberately left out of tonight's
-   commits per explicit scope, not because anything is wrong with them — pick up and commit
-   when ready.
-4. **The 08-08 WIP is now over a week old** (`nemesis_fwd.py`, `redact.py` fail-closed
-   fixes) — nobody has claimed it across multiple closeouts. Worth a decision: commit it, or
-   explicitly park/discard it, rather than letting it keep aging silently in the tree.
-5. **The new install.sh L3 Tier 2 HTTP/2 hunk** — unrelated to tonight's work, appeared
-   mid-session, not investigated beyond reading the diff. Flag for whoever owns the private
-   L3 Tier 2 module.
-6. **LICENSE draft's three open placeholders** (copyright holder legal name/entity,
+> **Updated 2026-08-18** — items 3-5 below (as they read last night) are now committed;
+> item 1 is reframed per §1's correction. Kept the historical numbering's intent, not
+> renumbering from scratch, so cross-references from last night's supplement still resolve.
+
+1. **Retroactive deploy review owed, reframed from "deploy decision"** — see §1's
+   correction. The licensing feature and cap enforcement (including the pasted-key bypass
+   fix) are not a pending decision; they are live and have been since yesterday afternoon.
+   What's actually owed now is a deliberate **after-the-fact verification pass** — confirm
+   the live behavior matches intent, that the real `license_state` activation (§1) is the
+   intended one, and only then treat this as a reviewed deploy rather than an accidental one.
+2. **`docs/audits/nginx-config-drift-audit-2026-08-16.md`** — still uncommitted, now two
+   sessions running. Nothing about it has changed; commit it next session.
+3. ~~Three ready-shaped, uncommitted licensing-adjacent pieces~~ **DONE 2026-08-18**: the
+   Settings discoverability card (`7d56f78`), the `install_id.py` root-vs-dashboard-user note
+   (`c2149c5`), and the install.sh h2 dependency (`0925273`) all committed and pushed.
+4. ~~The 08-08 WIP is now over a week old~~ **DONE 2026-08-18**: `nemesis_fwd.py` (`865046a`),
+   `redact.py` (`9bbab1a`), and the `hw_monitor.py`/`dashboard.py` clamscan fixes (`4ff2bc6`)
+   all committed and pushed — independently verified already running live (mtime-vs-restart
+   check) before committing, which is what surfaced §1's correction in the first place.
+5. **LICENSE draft's three open placeholders** (copyright holder legal name/entity,
    commercial-licensing contact, governing law/jurisdiction) plus real legal review —
-   tracked in `PUNCHLIST.md`'s `[HIGH — legal, not just docs]` entry, not resolved tonight.
-7. **Two sudo NOPASSWD grants found live, not in this file's prior tracked list** — see §6.
+   tracked in `PUNCHLIST.md`'s `[HIGH — legal, not just docs]` entry, still not resolved.
+6. **Two sudo NOPASSWD grants found live, not in this file's prior tracked list** — see §6.
    Need a keep/revoke decision, not carried forward silently.
+7. **New today**: confirm whether any *other* file this session touched has a similarly
+   stale "not deployed" assumption baked into a doc somewhere — this correction was found by
+   accident while verifying an unrelated claim, not by a systematic check. Worth a deliberate
+   pass rather than assuming this was the only one.
 
 ## 4. Verified live today, not just claimed (Rule 3 discipline)
 
@@ -222,17 +266,23 @@ rollback residual (bounded, fix deferred).
 - `:80` nginx (Basic-auth; auth-bypass for `/install/windows/` + `/api/health`), LAN-scoped
   SSH/HTTP rate limiting at the ufw layer plus nginx's own `limit_req`. **Deployed config has
   drifted from what `install.sh` generates** — see the still-uncommitted nginx audit (§1).
-- `:5000` Flask dashboard — **as of `9df9b9e` (committed, not yet deployed), binds to
-  `127.0.0.1` instead of `0.0.0.0`**; live production is still on the old `0.0.0.0` bind
-  until this pile is deployed. `:5001` hw-monitor agent endpoint — **as of `21b3541`
-  (committed, not yet deployed on this box's actual process), gains application-layer source
-  admission** in addition to the existing token-bucket pacing.
+- `:5000` Flask dashboard — **CORRECTED 2026-08-18: live, not pending.** Directly confirmed
+  via `ss -tlnp`: `127.0.0.1:5000`, loopback-only, matching `9df9b9e`'s change. ~~binds to
+  `127.0.0.1` instead of `0.0.0.0`... live production is still on the old `0.0.0.0` bind
+  until this pile is deployed~~ was wrong when written — see §1's correction note. `:5001`
+  hw-monitor agent endpoint — still `0.0.0.0` **by design**, not a gap: Gap 3a's fix was
+  specifically the dashboard's loopback bind, and `:5001`'s protection is `21b3541`'s
+  application-layer source guard (also confirmed live, same restart), not a loopback bind.
+  Directly confirmed via `ss -tlnp`.
 - `nemesis-fwd` — Unix-socket privileged helper, peers: dashboard, alert-watcher, `fail2ban`
   (narrow: `block_ip`/`deny_ip` only, cannot release), `write_env`/`restart_dashboard` ops
   (dashboard peer only).
 - `nemesis_enforce` — owned nftables table (ADR 0019), priority-placed ahead of the filter
   hook, derived from `ufw`'s live state. Real DROP authority live since 2026-08-02.
-- **New tonight, committed but not deployed:** the licensing engine's tables
-  (`license_state`, `license_backup_codes`) and `agent_devices.remote_enabled*` columns do
-  not exist yet on the live DB; `core/cap_guard.py`'s enforcement is not yet active on any
-  running process.
+- ~~**New tonight, committed but not deployed:** the licensing engine's tables... do not
+  exist yet on the live DB; `core/cap_guard.py`'s enforcement is not yet active on any
+  running process.~~ **WRONG, corrected same-day — see §1.** `license_state` and
+  `license_backup_codes` exist live, confirmed by direct read-only query;
+  `agent_devices.remote_enabled*` and `enrollment_tokens.remote_enabled` exist live;
+  `cap_guard.py`'s enforcement is the code currently serving `/api/agent/installer/generate`
+  and the download route on this box.
