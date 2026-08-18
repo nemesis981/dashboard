@@ -270,3 +270,132 @@ authentication (`f331620`), live in `observe` mode per its own commit (not yet `
 **Step 4 is unbuilt** — the actual Scheduler/Execution/Reporting build, the `scan_threats` →
 `malware_findings` migration, and generalizing Step 1's distribution channel fleet-wide per
 requirement (b).2 above. That is the next and only remaining step in this sequence.
+
+---
+
+## Amendment — appliance self-scan trigger design (2026-08-18)
+
+**Status: scoped, not decided, not built.** Window 3 scoping pass, placed here rather than as
+a fresh roadmap stub because it is squarely this ADR's territory and directly extends the
+Step 4 sequence above. Whether this ships **now**, as a self-contained scheduler-aware
+increment ahead of Step 4, or **waits** for the full Scheduler/Execution/Reporting build, is
+an open operator decision (see "Open questions" below) — this amendment records the design
+either way needs, not a commitment to build immediately.
+
+### Engine invocation must change before any trigger work
+
+The malware module's local-scan path shells out to the standalone scanner CLI once per file,
+which reloads the full signature database on every invocation. On appliance-class hardware
+(memory-constrained, no swap), a whole-filesystem pass at that rate cannot complete in a
+useful time budget and risks exhausting available memory outright — running a second
+full-size signature-database copy alongside the already-resident `clamd` daemon. The daemon
+client (`clamdscan`) talks to the already-running `clamd` process instead of reloading the
+database per file, and is dramatically cheaper on both dimensions. `install.sh` already
+provisions and tunes `clamd` for exactly this reason (a separate, earlier measurement pass);
+the daemon path exists and is running today, the module simply doesn't use it.
+
+**Consequence: swapping the engine invocation is a hard prerequisite for a scheduled/automatic
+scan, not an optional optimization.** "Add a timer to the existing scan path" is not a viable
+plan on its own — per Rule 2 the engine swap is its own change, verified on its own (same
+verdicts on a known-clean file and a real positive test sample), before any trigger work
+begins. Exact resource measurements and file-count figures for this box are kept in the
+private mirror (Rule 10 — see the cross-reference below) rather than published here.
+
+**Related, and worth fixing regardless of scheduling:** the existing local-scan path silently
+truncates on a file-count cap and still reports the job as completed — a default that reads as
+a real result rather than an incomplete one, the same failure shape CLAUDE.md's standing
+verification-discipline note already names. Any scheduled/automatic scan must report coverage
+explicitly and fail loud on truncation, never render a capped walk as a finished one.
+
+### Trigger design — a staleness gate, not a fixed-interval timer
+
+The agent fleet already has automatic scan coverage (a full scan is triggered on check-in
+when the last scan is older than a configured interval). The appliance has no equivalent
+event to hang that logic on — it doesn't reconnect to anything — but the load-bearing part of
+the agent's design was never the reconnect event itself; it's the staleness gate. On the
+appliance, a periodic timer tick supplies the opportunity instead, with the same gate deciding
+whether to act.
+
+**Recommended: one staleness-gated decision, two wake sources** — a periodic tick (default
+cadence to match the fleet's interval, both settings-driven) as the primary source, plus a
+delayed post-boot check as a catch-up safety net for the case where the box was powered off
+across one or more scheduled intervals. Both consult the same gate, so there's exactly one
+decision point.
+
+This shape is specifically what avoids double-scanning right after a manual run, avoids a
+scan stampede on service restart, and correctly catches up after downtime without queuing
+multiple passes — properties a plain fixed-interval timer does not have. Filesystem-event-
+driven triggering (inotify or equivalent) was considered and rejected for this increment: that
+is a *real-time protection* feature with a materially different cost profile (a watch per
+directory across the whole filesystem), a different product than *periodic assurance*, and is
+already sequenced separately as future kernel-hook-based work.
+
+A hash-keyed cache (rescan only on content change) is recommended as an explicit design
+constraint for this increment even if its implementation is deferred to a second pass — the
+scan path already computes a content hash for other purposes, so the key exists; not designing
+around its eventual use would make daily full-filesystem re-scans an ongoing cost that grows
+with the disk indefinitely.
+
+### Scope boundary — how this stays absorbable by Step 4 rather than competing with it
+
+A naively-built appliance scan timer, built without regard for the Scheduler direction decided
+above, would become exactly the kind of ad-hoc dispatch path this ADR exists to eliminate.
+Precedent for building *before* the Scheduler exists without creating that debt: the malware
+canary service was built self-contained (no dependency on the not-yet-built Scheduler) but
+scheduler-*aware* (its cadence is read fresh each loop from a setting, a seam the Scheduler can
+take over later by writing the setting rather than by surgery). The same shape applies here:
+
+1. **Do not write to the `scan_*` tables.** They remain Scheduler-owned per hinge (c) above;
+   this stays within its own module's prefixed tables for any new state it needs.
+2. **Do not drain `scan_schedules`.** Draining it is explicitly the Scheduler's job (hinge (c)
+   table above); doing so now would pre-empt that ownership decision rather than simplify the
+   eventual migration.
+3. **Read cadence fresh each cycle**, the same seam the canary service already uses, so control
+   can move to the Scheduler later by changing a setting rather than by code surgery.
+4. **No new dispatch path welded into an unrelated request handler.** This gets its own
+   service or its own timer — never a bolt-on to a handler already doing something else (the
+   exact anti-pattern fact #5 in this ADR's evidence base already names).
+
+### Execution-shape constraints
+
+- Run under the daemon client, not the per-file CLI (above). Must degrade **explicitly** if the
+  daemon is unreachable — report reduced/failed capability, never fall back silently to a path
+  that cannot finish, and never report a clean result the scan did not actually earn. This is
+  hinge (b) requirement #4 (graceful, explicit degradation), applied here.
+- Concurrency of one signature-database instance — the binding resource constraint on this
+  hardware class, independently measured twice.
+- The scan walk must be niced/ioniced: this box also forwards live traffic and runs the
+  firewall enforcement path, and a scan must never be able to degrade either.
+- Bounded, resumable, and honestly reported — see the truncation note above. An interrupted
+  run (restart, shutdown) must be recorded as interrupted, never as completed.
+- Systemd unit hardening matching the canary service's existing posture (de-privileged user,
+  strict filesystem protection, no new privileges, empty capability set) — with one real
+  tension to resolve deliberately, not discover at deploy time: a whole-filesystem *scan* only
+  needs read access, but *quarantine* needs to move files anywhere on disk, which that posture
+  does not permit. Leaving scheduled-scan findings report-only (matching the canary's existing
+  "record and alert, never auto-quarantine" behavior) avoids the conflict; granting broader
+  write access is the alternative, and would need its own documented rationale if chosen.
+- First-run cost is real on a fresh install (a full pass is long). This should be visible as
+  progress in the dashboard, not something silently kicked off during installation.
+
+### Open questions for the operator (not resolved by this amendment)
+
+1. Build this now, as a self-contained scheduler-aware increment ahead of Step 4, or wait for
+   the full Scheduler/Execution/Reporting build?
+2. Default cadence, and does it ship enabled by default on a fresh install (a multi-hour first
+   pass, unprompted) or opt-in (matching the existing pattern where a similarly heavy
+   auto-update capability ships disabled until the operator chooses)?
+3. Scheduled-scan findings: report-only, or does the quarantine-write-access tension above get
+   resolved the other way?
+4. Is the hash cache part of the first increment, or deferred to a second pass?
+
+### Cross-reference
+
+Full scoping detail, including the exact resource/timing measurements behind the engine-swap
+finding above and the verification plan for whoever builds this, is kept in the private
+mirror per Rule 10 (a live, unfixed coverage gap's specifics are attacker-relevant precision,
+not architectural direction) — same treatment as this ADR's own Step 3 note above. A related
+but independent finding from the same scoping pass — the appliance's UI can create a scan
+schedule that will never actually run, distinct from the general architectural fact already
+public in this ADR's evidence base (fact #4) — is tracked separately in `PUNCHLIST.md`, not
+folded into this amendment.

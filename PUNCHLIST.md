@@ -3553,3 +3553,53 @@ commercial use requires a paid license, no pricing figures published) and a mini
 - [ ] `LICENSE` §7 (contributions) is a placeholder pending a real Contributor License
       Agreement — not urgent while the project has no external contributors, but blocks
       soliciting any.
+
+- [ ] **Layer B is declared as "implemented" with the behavioral half unbuilt — same honesty
+      gap as Layer D, caught later.** Found by Window 3, 2026-08-18, while scoping appliance
+      self-scanning. `modules/malware_detection/module.py`'s `manifest.json` advertises Layer B
+      as "ransomware canary, file-activity, and runtime behavioral monitoring (Falco on Linux,
+      Sysmon on Windows)" — but there are zero references to Falco or Sysmon anywhere in the
+      codebase outside that sentence and historical audit docs. The `behavioral` sub-layer
+      exists in exactly three places (the `LAYERS` list, a settings default
+      `behavioral_enabled: "1"`, and a UI badge colour) and nothing reads the setting or ever
+      writes a finding with `layer='behavioral'`. The module's own docstring compounds it,
+      marking Layer B "IMPLEMENTED" when only the canary half is. `behavioral_enabled`
+      defaulting to `"1"` means it presents as an enabled, working capability out of the box.
+    - [ ] **Same shape as the Layer D fix above, left in place when that one was caught** — the
+          2026-08-06 honesty pass removed the equivalent `"ml"` (Layer D) overclaim from
+          `LAYERS` and the UI legend but left this identical-shaped one. Do both halves this
+          time: strike `"behavioral"` from `LAYERS`, drop its badge colour, remove the
+          `behavioral_enabled` default, correct the manifest sentence, and annotate the
+          docstring — the same "honesty fix, not a decision against building it" framing the
+          Layer D fix used.
+    - [ ] **Also create a roadmap stub** for runtime behavioral monitoring (the Falco/Sysmon
+          direction) so the capability stays a tracked intention rather than silently
+          disappearing when the overclaim is removed.
+    - [ ] **Why not build it instead of removing the claim:** ADR 0004 hinge (b) already places
+          Layer B behavioral detection on the endpoint, not the appliance, and ties its
+          distribution to the Step 4 fleet work — building a Falco integration now would land on
+          the wrong side of an already-decided architectural boundary.
+    - [ ] Small and self-contained — independent of the appliance-self-scan scoping it was found
+          during; can ship on its own regardless of what's decided there. Full scoping context:
+          `~/work/nemesis-internal/appliance-self-scan-scope-2026-08-18.md` §5 (private mirror).
+
+- [ ] **A scan schedule created in the dashboard UI can never actually run — `scan_schedules`
+      is write-only.** Re-confirmed by Window 3, 2026-08-18 (repo-wide grep: only DDL in
+      `database.py` references the table; nothing anywhere `SELECT`s from it or updates
+      `last_run_at`). The underlying architectural fact has been public since ADR 0004's
+      original evidence base (fact #4, "scheduled scans are DEAD — `scan_schedules` is
+      write-only; no timer/worker drains the queue") — this entry adds the concrete, user-facing
+      shape of it: `dashboard.py`'s schedule-creation UI does not warn the operator that what
+      they just created is inert. An operator can configure a recurring scan in good faith and
+      never find out it never fires, until they notice nothing is ever scanned.
+    - [ ] **Fix shape, pending ADR 0004 Step 4's disposition (see the ADR's amendment above):**
+          either drain the table for real (Scheduler work, per ADR 0004 hinge (c) — "keep, and
+          finally drain it") or, as a cheap interim fix independent of that build, surface the
+          dead-end explicitly in the UI (disable schedule creation, or label it "not yet active"
+          with an explanation) rather than letting it silently accept a configuration that does
+          nothing.
+    - [ ] Distinct from the appliance-self-scan trigger design (ADR 0004 amendment, same date):
+          that work deliberately does **not** drain `scan_schedules` either (draining it is
+          explicitly reserved as the Scheduler's job) — so building that increment does not fix
+          this entry, and this entry's fix does not require that increment to land first.
+
