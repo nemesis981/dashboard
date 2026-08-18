@@ -503,6 +503,28 @@ install_system_deps() {
     # present on Ubuntu, but the canary silently fails without it — declare it.
     apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw acl
 
+    # HTTP/2 stack for the L3 Tier 2 delivery gate (2026-08-17). Declared here
+    # rather than pip-installed for the same reason flask-login is (see below):
+    # a `pip install --user` lands in a home directory no service account can
+    # read, so the component works for whoever ran it and fails everywhere else.
+    #
+    # Distro packages specifically: Python on 26.04 is externally-managed
+    # (PEP 668), and an appliance wants a dependency that receives distro
+    # security updates rather than one pinned at install time.
+    #
+    # WHY A DEPENDENCY AT ALL, rather than hand-rolling: the gate must DECODE
+    # and RE-ENCODE HPACK to inspect HTTP/2 headers -- it cannot forward frames
+    # it has not decoded without desynchronising the connection-wide compression
+    # state. HPACK is a stateful Huffman-coded codec with its own attack surface
+    # (compression bombs, dynamic-table desync). Writing one to sit in a security
+    # gate's data path is a large surface to get wrong, and the gate's value is
+    # in its holding semantics, not in reimplementing HTTP/2 internals.
+    #
+    # Without these the gate still runs, but ALPN will not offer h2 and every
+    # HTTP/2-capable client silently falls back to HTTP/1.1 -- working, but not
+    # what the deployment thinks it is running.
+    apt-get install -y python3-h2 python3-hpack python3-hyperframe
+
     info "Installing core Python packages..."
     # flask-login is a HARD dependency of dashboard.py (module-scope import at
     # dashboard.py:109) and was missing from this list until 2026-07-29 — on this
