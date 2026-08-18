@@ -3616,3 +3616,32 @@ commercial use requires a paid license, no pricing figures published) and a mini
     - [ ] **Fix shape, not urgent:** either rename one to make the distinction unmistakable at
           the call site, or document the split explicitly at both definitions so a future reader
           doesn't have to rediscover this entry.
+
+- [ ] **The attestation manifest is built from the server's live working tree, not from any
+      committed or released build — uncommitted WIP under `nemesis_agent/` poisons the manifest
+      for the entire fleet while it sits there.** Found by Window 1, 2026-08-18, while holding
+      `membudget.py`/`test_membudget.py` uncommitted alongside the just-committed
+      `procmem.py`/`test_procmem.py`. Measured live: with both pairs sitting in the tree (one
+      committed, one not), a manifest built right now would cover 69 files; an agent actually
+      built from the last commit has 67. That two-file gap is exactly the `missing` shape that
+      makes `evaluate()` return FAILED — the tampering verdict — not from a version mismatch
+      this time, but purely from uncommitted files existing in the same directory the manifest
+      generator hashes.
+    - [ ] **Why this is a design property, not a one-off mistake:** on this appliance the repo
+          checkout IS the deploy target (established precedent — services already run
+          `/opt/nemesis` directly, no separate build/package step), so there is structurally no
+          difference between "what's on disk" and "what's shipped" the way there would be on a
+          system with a real build pipeline. The manifest generator has no notion of "the
+          released build" — it hashes `<repo>/nemesis_agent` live, whatever is there.
+    - [ ] **Not urgent today** — zero `attest_manifest` tasks have ever been dispatched to any
+          enrolled device (verified live), so nothing has actually been poisoned yet. This is a
+          standing risk for the next time it's dispatched with WIP in the tree, not a current
+          incident.
+    - [ ] **Candidate mitigations, none decided:** build the manifest from `git archive HEAD`
+          (or equivalent) instead of the live working tree, so only committed content is ever
+          eligible; refuse to dispatch an `attest_manifest` task while
+          `git status --porcelain nemesis_agent/` is non-empty; or have the manifest carry a
+          commit hash so a skew between server and agent state is visible AS skew rather than
+          being indistinguishable from tampering — the same idea `AGENT_VERSION` already serves,
+          at finer resolution. This last option is closest in spirit to the existing design.
+    - [ ] Operator decision owed on which mitigation (or combination), not a Window 2 call.
