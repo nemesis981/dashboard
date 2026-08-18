@@ -60,7 +60,24 @@ log = logging.getLogger(__name__)
 # being remembered together. Bump it when the agent's shipped files change —
 # a stale value makes every device report `absent` (build skew), which is
 # noisy-but-safe rather than falsely `attested`.
-AGENT_VERSION = "1.0.1"
+#
+# ⚠ THE ABOVE DESCRIBES BUMPING TOO EAGERLY. FORGETTING TO BUMP IS WORSE, and is
+# the case that actually occurred (2026-08-18, adding procmem.py):
+#
+#   * bumped when it needn't be  -> versions differ -> ABSENT ("build skew").
+#     Noisy, safe, self-correcting on the next agent update.
+#   * NOT bumped when it must be -> versions MATCH, file sets differ -> the
+#     server stamps a manifest describing files the agent does not have, and
+#     `evaluate()` reaches `compare()` and returns FAILED. FAILED is the
+#     TAMPERING verdict. A routine addition then presents as an attack, and the
+#     version field — whose entire purpose is telling those two apart — is
+#     silently disarmed rather than merely unhelpful.
+#
+# So the asymmetry is deliberate: when in doubt, bump. The cost of an unneeded
+# bump is a transient `absent`; the cost of a missed one is a false tampering
+# report, which is exactly the false positive that gets a security signal
+# ignored (decision A2).
+AGENT_VERSION = "1.0.2"
 
 ATTESTED = "attested"
 FAILED = "failed"
