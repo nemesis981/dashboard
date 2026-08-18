@@ -177,6 +177,42 @@ def test_budget_never_renders_a_fake_zero():
     check("no raw contraction apostrophes in the f-string block", bad, [])
 
 
+
+def test_licensing_page_is_discoverable():
+    """A page nothing links to is a page that does not exist.
+
+    /settings/licensing worked from the first commit, but the ONLY link to it sat
+    inside the Devices card's budget strip — so it was reachable only by typing
+    the URL, and the operator could not find it. Route coverage said "pass"
+    while the feature was effectively absent.
+    """
+    print("\n[the licensing page is reachable from the Settings page]")
+    links = SRC.count('href="/settings/licensing"')
+    check("at least one link exists", links >= 1, True)
+    # The Settings page itself must link to it, not only the Devices sub-card.
+    settings = SRC[SRC.index("<!-- Licence -->"):SRC.index("<!-- Danger Zone -->")]
+    check("a dedicated Licence card exists on Settings",
+          'href="/settings/licensing"' in settings, True)
+    check("the card has a heading", "<h2>" in settings, True)
+    check("it shows a summary, not just a link",
+          "_render_license_summary_html()" in settings, True)
+    # CONTROL: the slice must be the real card, not an empty string.
+    check("CONTROL the Settings slice is non-trivial", len(settings) > 400, True)
+
+
+def test_license_summary_never_fakes_a_number():
+    print("\n[the Settings summary refuses to invent a count]")
+    b = SRC[SRC.index("def _render_license_summary_html"):]
+    b = b[:b.index("\ndef _render_remote_budget_html")]
+    code = "\n".join(l for l in b.splitlines() if not l.lstrip().startswith("#"))
+    check("handles not-reconciled", "census.reconciled" in code, True)
+    check("shows unknown rather than 0", "unknown" in code, True)
+    check("surfaces the reason", "census.reason" in code, True)
+    bad = re.findall(r"(?<![\w&#;])'(?:s|t|re|ve|ll|d)\b", code)
+    check("no raw contraction apostrophes", bad, [])
+
+
+
 if __name__ == "__main__":
     print("licensing route security")
     test_routes_exist()
@@ -188,6 +224,8 @@ if __name__ == "__main__":
     test_audited()
     test_startup_wiring()
     test_budget_never_renders_a_fake_zero()
+    test_licensing_page_is_discoverable()
+    test_license_summary_never_fakes_a_number()
 
     print("\n" + "=" * 60)
     if _failures:

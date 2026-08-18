@@ -4562,6 +4562,67 @@ def _human_age(seconds):
     return "%dd ago" % (s // 86400)
 
 
+def _render_license_summary_html() -> str:
+    """Compact tier + remote-slot summary for the Settings page Licence card.
+
+    Exists because /settings/licensing was reachable ONLY by typing the URL: the
+    single link to it sat inside the Devices card&#39;s budget strip, which a user
+    has to already be scrolled to. A page nothing links to is a page that does
+    not exist, however well it works.
+
+    Same three honest states as the budget strip -- a real count, "unknown" with
+    the reason, or unlimited. It must never render a plausible zero.
+
+    Apostrophes are HTML entities: this returns into a Python f-string, where a
+    raw apostrophe is the codebase&#39;s most common defect (silent SyntaxError,
+    page never loads).
+    """
+    try:
+        from core import entitlements as ent
+        tier = ent.get_tier()
+        used, limit, census = ent.remote_device_budget()
+    except Exception as e:
+        return ('<div style="color:#8a98b3;font-size:0.84em">Licence state '
+                'unavailable: ' + html.escape(str(e)[:120]) + '</div>')
+
+    tier_label = ("Commercial" if tier == "commercial" else "Free")
+    tier_colour = "#00ff88" if tier == "commercial" else "#8a98b3"
+
+    if limit is None:
+        slots = '<span style="color:#00ff88">Unlimited remote devices</span>'
+    elif not census.reconciled or used is None:
+        slots = ('<span style="color:#ffd98a">Remote devices: unknown</span>'
+                 '<br><span style="color:#8a98b3;font-size:0.92em">'
+                 + html.escape((census.reason or "")[:160]) + '</span>')
+    else:
+        left = limit - used
+        colour = "#ff6666" if left <= 0 else ("#ffd98a" if left <= 1 else "#00ff88")
+        slots = ('<span style="color:%s">%d of %d remote slots in use</span>'
+                 % (colour, used, limit))
+
+    try:
+        from core import backup_codes as bc
+        n, level, _msg = bc.status()
+        # 'none_issued' is a SETUP PROMPT, not a fault -- neutral, never red.
+        # Only real exhaustion is an error. Rendering "0 remaining" in red on a
+        # fresh install would report a problem that does not exist.
+        code_colour = {"ok": "#8a98b3", "low": "#ffd98a",
+                       "exhausted": "#ff6666",
+                       "none_issued": "#8a98b3"}.get(level, "#8a98b3")
+        codes = ('<br><span style="color:%s;font-size:0.92em">%s</span>'
+                 % (code_colour,
+                    "Backup codes: not yet issued" if level == "none_issued"
+                    else "Backup codes: %d remaining" % n))
+    except Exception:
+        codes = ""
+
+    return ('<div style="background:#0d0d1e;border:1px solid #2a3450;'
+            'border-radius:8px;padding:11px 14px;font-size:0.86em">'
+            '<span style="color:#8a98b3">Plan:</span> '
+            '<strong style="color:' + tier_colour + '">' + tier_label + '</strong>'
+            '<br>' + slots + codes + '</div>')
+
+
 def _render_remote_budget_html() -> str:
     """Remote-slot budget strip for the Devices card.
 
@@ -7229,6 +7290,27 @@ def settings_page():
                     data-intermediate="1 = full fidelity everywhere. Higher = less frequent, still complete. Local agents are unaffected."
                     data-pro="Range {obs_n_min}&ndash;{obs_n_max}. Takes effect on the next heartbeat; no agent restart. Snapshots are always COMPLETE &mdash; cadence changes, contents do not.">Reports are always complete; only how often they arrive changes.</span>
             </p>
+        </div>
+    </div>
+
+    <!-- Licence -->
+    <div class="card">
+        <h2>&#128273; <span class="tier-text"
+            data-beginner="Your Licence"
+            data-intermediate="Licence &amp; Remote Devices"
+            data-pro="Licence">Licence &amp; Remote Devices</span></h2>
+        <div style="padding:0 4px">
+            <p style="margin:0 0 10px;font-size:0.86em;color:#bbb">
+                <span class="tier-text"
+                    data-beginner="See which plan you are on, how many devices can reach Nemesis from outside your home, and your backup codes for moving Nemesis to a new machine."
+                    data-intermediate="Tier, remote-device budget, licence activation, and backup codes for rebinding to new hardware."
+                    data-pro="Node-locked licence state, reconciled remote-device census, and one-time rebind codes.">Your plan, how many remote devices you can add, and your backup codes.</span>
+            </p>
+            {_render_license_summary_html()}
+            <a href="/settings/licensing"
+               style="display:inline-block;margin-top:10px;background:#00d4ff22;color:#00d4ff;
+                      border:1px solid #00d4ff;border-radius:7px;padding:7px 14px;
+                      font-size:0.9em;text-decoration:none">Manage licence &amp; backup codes &rarr;</a>
         </div>
     </div>
 
