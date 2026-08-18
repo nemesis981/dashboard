@@ -3603,3 +3603,16 @@ commercial use requires a paid license, no pricing figures published) and a mini
           explicitly reserved as the Scheduler's job) — so building that increment does not fix
           this entry, and this entry's fix does not require that increment to land first.
 
+- [ ] **Two similarly-named `AGENT_VERSION` constants version different things and have
+      already drifted apart.** `nemesis_agent/attest.py`'s `AGENT_VERSION` (`1.0.2` as of this
+      entry — used only by attestation: manifest stamping and the version-match check
+      `evaluate()` relies on to tell a legitimate upgrade apart from tampering) vs.
+      `nemesis_agent/installer_gui.py`'s `AGENT_VERSION` (`1.0.8`, via
+      `NEMESIS_AGENT_VERSION`). Found by Window 1, 2026-08-18, while bumping the former for the
+      `procmem.py`/`test_procmem.py` addition — pre-existing divergence, not introduced by that
+      change, flagged so it isn't lost. Neither value is wrong; they version different things.
+      The actual risk is two similarly-named constants in one package being a trap for whoever
+      bumps the wrong one expecting it to cover both meanings.
+    - [ ] **Fix shape, not urgent:** either rename one to make the distinction unmistakable at
+          the call site, or document the split explicitly at both definitions so a future reader
+          doesn't have to rediscover this entry.
