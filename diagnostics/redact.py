@@ -5,11 +5,32 @@ the current on-disk values.  Any non-empty env value longer than 7 characters
 is treated as a secret and replaced with [REDACTED] in output text.
 """
 
+import logging
 import os
 import re
 
+log = logging.getLogger("nemesis.diagnostics.redact")
+
 _ENV_FILE = "/etc/nemesis.env"
 _MIN_SECRET_LEN = 8
+
+
+class RedactionUnavailable(RuntimeError):
+    """The secret list could not be determined, so nothing can be certified scrubbed.
+
+    Distinct from "there are no secrets": an empty set is a real answer, this is
+    the absence of one. Raised only when the env file EXISTS but could not be
+    read — an absent file genuinely means no file-derived secrets.
+    """
+
+
+# Returned instead of under-redacted text. Deliberately long and unmistakable:
+# the failure mode this replaces was silent, and a subtle marker would just be
+# the same problem in a different font.
+_WITHHELD = ("[OUTPUT WITHHELD — redaction unavailable: the secret list could not be read, "
+             "so this text cannot be certified free of secrets. Check that the reading "
+             "process can read /etc/nemesis.env (mode 640 root:nemesis); see the "
+             "nemesis.diagnostics.redact log for the exact cause.]")
 
 # Keys that are definitely secrets even if short
 _SECRET_KEYS = {
@@ -24,6 +45,11 @@ _KEY_PATTERN = re.compile(
 
 
 def _load_secrets() -> set:
+    """The set of values `redact()` will strip.
+
+    Raises RedactionUnavailable when the env file exists but cannot be read —
+    see the fail-closed clause below for why that is not a silent partial answer.
+    """
     secrets = set()
     try:
         with open(_ENV_FILE) as f:
@@ -39,8 +65,24 @@ def _load_secrets() -> set:
                 # Always redact known-secret keys regardless of length
                 if key in _SECRET_KEYS or len(val) >= _MIN_SECRET_LEN:
                     secrets.add(val)
-    except Exception:
+    except FileNotFoundError:
+        # LEGITIMATELY EMPTY, not a failure. No env file means no file-derived
+        # secrets exist, so continuing with the environment-only set below is a
+        # correct and COMPLETE answer. Kept distinct from the clause after it
+        # precisely because conflating the two is what made this fail open.
         pass
+    except Exception as exc:                      # noqa: BLE001 - re-raised
+        # FAIL CLOSED. The file is there and we could not read it, so we do not
+        # know what needs redacting. Falling through would hand the caller a set
+        # that LOOKS like a real answer while covering only the few _SECRET_KEYS
+        # that happen to be in this process's own environment — every other
+        # secret in the file would pass through unredacted, into output whose
+        # entire purpose is to be shareable.
+        #
+        # The realistic trigger is mundane, which is the point: this file is
+        # mode 640 root:nemesis, so any reader outside that group gets
+        # PermissionError right here. Ordinary group membership, not corruption.
+        raise RedactionUnavailable("cannot read %s: %s" % (_ENV_FILE, exc)) from exc
     # Also pull from current process environment (systemd may have loaded them)
     for k in _SECRET_KEYS:
         v = os.environ.get(k, "")
@@ -50,10 +92,24 @@ def _load_secrets() -> set:
 
 
 def redact(text: str) -> str:
-    """Replace all known secret values in `text` with [REDACTED]."""
+    """Replace all known secret values in `text` with [REDACTED].
+
+    WITHHOLDS the text entirely if the secret list could not be determined.
+    Under-redacted output is strictly worse than no output: the caller believes
+    scrubbing happened either way, and only one of those beliefs is survivable.
+    """
     if not text:
         return text
-    for secret in _load_secrets():
+    try:
+        secrets = _load_secrets()
+    except RedactionUnavailable as exc:
+        # Loud, not silent — this is a security-relevant degradation and the
+        # operator needs to be able to find it. The returned marker says the
+        # same thing to whoever is reading the output itself.
+        log.error("redaction unavailable, WITHHOLDING output rather than "
+                  "emitting it unscrubbed: %s", exc)
+        return _WITHHELD
+    for secret in secrets:
         if secret in text:
             text = text.replace(secret, "[REDACTED]")
     return text
