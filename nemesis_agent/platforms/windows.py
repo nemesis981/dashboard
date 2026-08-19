@@ -62,12 +62,34 @@ def _route_alias(server):
 
 
 def get_lan_macs(server=None):
-    """ADR 0023 LAN-MAC correlation key. NOT YET IMPLEMENTED for windows — returns []
-    so the enrollment/heartbeat contract degrades cleanly (device simply is not
-    MAC-correlated until this lands). Follow-up: collect the physical (non-tunnel)
-    adapter MAC(s) and VERIFY ON A REAL WINDOWS VM before trusting (same discipline as
-    tools/win_priv_probe.py), never ship unverified. Must never raise."""
-    return []
+    """Physical LAN-interface MAC(s), normalised lowercase colon-form — the ADR 0023
+    correlation key matching the appliance's ARP view.
+
+    MEASURED on a real Windows 11 VM (2026-08-19): `Get-NetAdapter -Physical` returns
+    only physical NICs and excludes virtual/tunnel adapters (Tailscale); Windows
+    formats MACs dash-separated UPPERCASE, so we normalise to colon/lowercase to match
+    `devices.mac`. The interface reaching the server (via _route_alias, which already
+    skips tunnels) is listed FIRST, mirroring the Linux _route_iface ordering. NEVER
+    raises; returns [] on failure or when nothing physical resolves (correct for a
+    tunnel-only reach)."""
+    try:
+        alias = (_route_alias(server) or "").replace("'", "")   # LAN link, tunnel-skipped
+        ps = (
+            "$ri=$null; "
+            "if ('%s') { try { $ri=(Get-NetAdapter -Name '%s' -ErrorAction Stop).ifIndex } catch {} }; "
+            "Get-NetAdapter -Physical | Sort-Object @{e={$_.ifIndex -ne $ri}} | "
+            "Where-Object { $_.MacAddress } | "
+            "ForEach-Object { ($_.MacAddress -replace '-',':').ToLower() }"
+        ) % (alias, alias)
+        macs, seen = [], set()
+        for line in (_ps(ps) or "").splitlines():
+            mac = line.strip().lower()
+            if mac.count(":") == 5 and mac != "00:00:00:00:00:00" and mac not in seen:
+                seen.add(mac)
+                macs.append(mac)
+        return macs
+    except Exception:                                        # noqa: BLE001
+        return []
 
 
 def get_link_type(server=None):
