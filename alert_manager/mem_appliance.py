@@ -25,6 +25,8 @@ import logging
 import os
 import re
 
+import throttle
+
 log = logging.getLogger("nemesis.mem_appliance")
 
 __all__ = [
@@ -259,6 +261,58 @@ def why_rung_absent(component, rung):
     return entry["why_absent"].get(rung)
 
 
+# ── THROTTLE status: three distinct outcomes, deliberately NOT collapsed ──────
+# A component's throttle standing is exactly one of three, and a reader MUST be
+# able to tell a deliberate exclusion from a missing connection — mistaking one
+# for the other is the same "looks broken when it's fine / looks fine when it's
+# broken" confusion RUNG_AVAILABILITY exists to prevent.
+THROTTLE_THROTTLEABLE = "throttleable"   # has a real interval to slow; a live candidate
+THROTTLE_UNTHROTTLED  = "unthrottled"    # NEVER a candidate BY DESIGN (see the set below)
+THROTTLE_UNAVAILABLE  = "unavailable"    # SHOULD be wired but isn't yet (no interval knob)
+
+#: Structurally excluded from THROTTLE by design — never candidates. Either there
+#: is no interval of OURS to slow (suricata: third-party daemon, no control
+#: surface), or slowing it would be harmful the same way restarting it would be
+#: (clamav-daemon: throttling disarms AV; dashboard: rate-limits the operator's
+#: own console mid-diagnosis). This is DISTINCT from "no interval knob YET"
+#: (device-scanner, malware-canary), which is UNAVAILABLE and should eventually be
+#: wired. Components here MUST NEVER call throttle.register_throttle_aware() — the
+#: exclusion is a decision, not an oversight, and UNTHROTTLED makes that visible
+#: rather than leaving them merely absent from the registry (which reads as a bug).
+THROTTLE_UNTHROTTLED_COMPONENTS = frozenset({"clamav-daemon", "suricata", "dashboard"})
+
+
+def throttle_status(component):
+    """Three-way throttle standing for `component`. The report layer uses this so
+    UNTHROTTLED (excluded by design) never reads as UNAVAILABLE (not wired yet)."""
+    entry = RUNG_AVAILABILITY.get(component)
+    if entry and "throttle" in entry["available"]:
+        return THROTTLE_THROTTLEABLE
+    if component in THROTTLE_UNTHROTTLED_COMPONENTS:
+        return THROTTLE_UNTHROTTLED
+    return THROTTLE_UNAVAILABLE
+
+
+def throttle_status_map():
+    """component -> throttle_status, for logs/dashboard. Covers every component in
+    RUNG_AVAILABILITY plus the structural-exempt set. The single source of truth
+    for surfacing UNTHROTTLED vs unavailable so the two are never conflated."""
+    comps = set(RUNG_AVAILABILITY) | THROTTLE_UNTHROTTLED_COMPONENTS
+    return {c: throttle_status(c) for c in sorted(comps)}
+
+
+def assert_throttle_registerable(component):
+    """Guard for the registration path: an UNTHROTTLED component must NOT register
+    (excluded by design, loudly — never silently skipped). Raises if it tries.
+    Throttleable and (not-yet-wired) UNAVAILABLE components pass — only structural
+    exclusions are refused."""
+    if throttle_status(component) == THROTTLE_UNTHROTTLED:
+        raise ValueError(
+            "component %r is UNTHROTTLED by design (see "
+            "THROTTLE_UNTHROTTLED_COMPONENTS) and must not register throttle-aware"
+            % (component,))
+
+
 def self_test(proc_root="/proc"):
     """Prove the appliance seam works here and can tell components apart."""
     findings = []
@@ -312,3 +366,88 @@ if __name__ == "__main__":                                # pragma: no cover
         print("  %-26s %-14s obs=%-9s budget=%-9s exempt=%s"
               % (name, v["verdict"], v.get("observed_mb"), v.get("budget_mb"),
                  v.get("recovery_exempt")))
+
+
+# ── THROTTLE executor: makes the ladder's THROTTLE rung EXECUTE, not just decide ──
+#
+# The original blocker was that the ladder could DECIDE throttle but nothing could
+# ACT on it (a slow interval lives inside a separate process; systemd offers no
+# lever). The cooperative-throttle seam (alert_manager/throttle.py) closed that: a
+# throttled service reads published intent and scales its own sleep. This is the
+# other half — turning the ladder's decision into a published intent.
+
+#: A THROTTLE means "slow this component's loop by this multiple." 4x a 300s sample
+#: loop is 20 min between samples -- a real relief valve, well under throttle.py's
+#: 8x clamp.
+THROTTLE_FACTOR = 4.0
+#: Publish with a hold longer than a few evaluation cycles so ONE missed executor
+#: cycle does not drop the throttle early, but short enough that a DEAD executor
+#: lets the intent auto-expire (the fail-safe throttle.py depends on). Refreshed
+#: every cycle for still-throttled components; cleared immediately on de-escalation.
+THROTTLE_HOLD_SECONDS = 900
+
+
+def load_ladder(repo_root=None):
+    """Load the pure escalation ladder by absolute path (no sys.path insert -- it
+    imports no siblings), same mechanism as load_memory_modules."""
+    root = repo_root or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    path = os.path.join(root, "nemesis_agent", "memladder.py")
+    spec = importlib.util.spec_from_file_location("nemesis_mem_ladder", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load memladder from %s" % path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def execute_ladder_throttle(new_state, dm, *, ladder=None, policy=None, now=None):
+    """Publish/refresh/clear throttle intent from the ladder's CURRENT per-component
+    rungs. Returns a list of {component, action, ...} for the audit trail.
+
+    STATE-DRIVEN, not transition-driven, and deliberately so: a component that
+    REACHED throttle and stays there emits no new `escalate` action, but its intent
+    must be REFRESHED each cycle or it expires (throttle.py's fail-safe). So each
+    cycle we (re)publish for everything currently at/above THROTTLE and clear
+    everything that has fallen below.
+
+    RUNG_AVAILABILITY is respected twice: `decide()` already refuses to move a
+    component onto a rung it lacks, and this asserts `"throttle" in available` again
+    before publishing -- so clamav-daemon (recovery-exempt, throttle-unavailable)
+    can never be handed a throttle intent even if some future caller mis-drives it.
+    THROTTLE being SHADOW in the policy also suppresses publication (record-only).
+    """
+    ladder = load_ladder() if ladder is None else ladder
+    policy = ladder.DEFAULT_POLICY if policy is None else policy
+    avail = availability_map()
+    throttle_i = ladder.RUNGS.index(ladder.RUNG_THROTTLE)
+    live_throttle = policy["modes"].get(ladder.RUNG_THROTTLE) == ladder.MODE_LIVE
+
+    comps = (new_state or {}).get("components", {})
+    should = set()
+    if live_throttle:
+        for name, st in comps.items():
+            rung = st.get("rung", ladder.RUNG_NONE)
+            if ladder.RUNGS.index(rung) >= throttle_i \
+                    and "throttle" in avail.get(name, frozenset()):
+                should.add(name)
+
+    results = []
+    for name in sorted(should):
+        throttle.publish_throttle(
+            name, THROTTLE_FACTOR, THROTTLE_HOLD_SECONDS,
+            "memory ladder: %s at rung %s" % (name, comps[name].get("rung")),
+            dm, now=now)
+        results.append({"component": name, "action": "throttle",
+                        "factor": THROTTLE_FACTOR})
+
+    # Clear intents for components that were throttled but should no longer be.
+    try:
+        stale = throttle.live_intent_components(dm, now) - should
+    except Exception as e:                               # noqa: BLE001
+        log.warning("throttle executor: could not read live intents to clear (%s) "
+                    "-- stale intents will lapse on their own via until_ts", e)
+        stale = set()
+    for name in sorted(stale):
+        throttle.clear_throttle(name, dm, now=now)
+        results.append({"component": name, "action": "clear"})
+    return results

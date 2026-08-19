@@ -223,6 +223,110 @@ def test_ladder_consumes_the_map_end_to_end():
           ["throttle", "abort"])
 
 
+def test_throttle_executor_end_to_end():
+    """The ladder's THROTTLE rung EXECUTES: a real escalation publishes intent a
+    throttle-aware service would read, respects RUNG_AVAILABILITY (clamd never
+    throttled), refreshes while breaching, and clears on recovery."""
+    print("\n[throttle executor: real escalation -> publish -> refresh -> clear]")
+    import os, tempfile                                       # noqa: PLC0415
+    import database, data_manager, throttle                   # noqa: PLC0415
+    ladder = ma.load_ladder()
+    tmp = tempfile.mkdtemp(prefix="nem-execT-")
+    database.DB_PATH = os.path.join(tmp, "alerts.db")
+    database.init_throttle_tables()
+    dm = data_manager.DataManager(database.DB_PATH)
+    AVAIL, EXEMPT = ma.availability_map(), ma.RECOVERY_EXEMPT
+
+    def breach(names):
+        return {"state": "ok", "components": {n: {"verdict": "breach",
+                "observed_mb": 900, "budget_mb": 500, "basis": "pct_of_total"}
+                for n in names}}
+    def okv(names):
+        return {"state": "ok", "components": {n: {"verdict": "ok",
+                "observed_mb": 100, "budget_mb": 500, "basis": "pct_of_total"}
+                for n in names}}
+    def factor(comp, now):
+        return throttle.ThrottleHandle(comp, dm, now_fn=lambda: now).current_factor()
+
+    state, T = ladder.new_state(), 100000.0
+    for i in range(1, 5):                        # 4 breaches -> THROTTLE
+        state, _ = ladder.decide(breach(["hw-monitor", "clamav-daemon"]),
+                                 state, exempt=EXEMPT, available=AVAIL)
+        ma.execute_ladder_throttle(state, dm, ladder=ladder, now=T + i * 300)
+    check("hw-monitor throttled -> reads 4x", factor("hw-monitor", T + 1300), 4.0)
+    check("clamd exempt+unavailable -> never throttled",
+          factor("clamav-daemon", T + 1300), throttle.NORMAL)
+
+    for i in range(6):                           # recover_after -> drops below THROTTLE
+        state, _ = ladder.decide(okv(["hw-monitor"]), state, exempt=EXEMPT, available=AVAIL)
+        ma.execute_ladder_throttle(state, dm, ladder=ladder, now=T + (6 + i) * 300)
+    check("recovery clears intent -> back to normal", factor("hw-monitor", T + 9000),
+          throttle.NORMAL)
+
+    # CONTROL: a throttle-UNAVAILABLE component forced to rung THROTTLE is NOT published.
+    forced = {"components": {"clamav-daemon": {"rung": ladder.RUNG_THROTTLE,
+              "breach_streak": 9, "ok_streak": 0}}}
+    ma.execute_ladder_throttle(forced, dm, ladder=ladder, now=T + 9500)
+    check("availability defense: forced clamd THROTTLE not published",
+          factor("clamav-daemon", T + 9600), throttle.NORMAL)
+
+
+def test_throttle_status_three_way():
+    """UNTHROTTLED (excluded by design) must be DISTINCT from UNAVAILABLE (not wired
+    yet) and from THROTTLEABLE — a reader must never mistake one for another."""
+    print("\n[throttle status: throttleable / unthrottled / unavailable are distinct]")
+    # structural exclusions -> UNTHROTTLED
+    for c in ("clamav-daemon", "suricata", "dashboard"):
+        check("%s is UNTHROTTLED (by design)" % c, ma.throttle_status(c), ma.THROTTLE_UNTHROTTLED)
+    # not-wired-yet -> UNAVAILABLE (the generic case), NOT unthrottled
+    for c in ("device-scanner", "malware-canary"):
+        check("%s is UNAVAILABLE (pending a knob), not unthrottled" % c,
+              ma.throttle_status(c), ma.THROTTLE_UNAVAILABLE)
+    # real interval -> THROTTLEABLE
+    for c in ("hw-monitor", "watchdog", "alert-watcher", "diagnostics-watcher"):
+        check("%s is THROTTLEABLE" % c, ma.throttle_status(c), ma.THROTTLE_THROTTLEABLE)
+    # the three statuses are genuinely different strings
+    check("the three statuses are distinct",
+          len({ma.THROTTLE_THROTTLEABLE, ma.THROTTLE_UNTHROTTLED, ma.THROTTLE_UNAVAILABLE}), 3)
+
+
+def test_throttle_status_consistency_and_guard():
+    """The UNTHROTTLED set must not contradict RUNG_AVAILABILITY, and the
+    registration guard must refuse exactly the structural exclusions."""
+    print("\n[throttle status: consistency + register guard]")
+    # no UNTHROTTLED component may ALSO be marked throttle-available (contradiction)
+    for c in ma.THROTTLE_UNTHROTTLED_COMPONENTS:
+        entry = ma.RUNG_AVAILABILITY.get(c, {"available": frozenset()})
+        check("%s is not simultaneously throttle-available" % c,
+              "throttle" in entry["available"], False)
+    # the components that DO register (throttleable) are disjoint from UNTHROTTLED
+    throttleable = {c for c in ma.RUNG_AVAILABILITY
+                    if "throttle" in ma.RUNG_AVAILABILITY[c]["available"]}
+    check("registering(throttleable) set is disjoint from UNTHROTTLED",
+          bool(throttleable & ma.THROTTLE_UNTHROTTLED_COMPONENTS), False)
+    # the guard: UNTHROTTLED components raise; throttleable pass
+    import mem_appliance as _ma
+    raised = False
+    try:
+        _ma.assert_throttle_registerable("clamav-daemon")
+    except ValueError:
+        raised = True
+    check("guard REFUSES an UNTHROTTLED component (loud, not silent)", raised, True)
+    ok = True
+    try:
+        _ma.assert_throttle_registerable("hw-monitor")
+    except ValueError:
+        ok = False
+    check("guard PASSES a throttleable component", ok, True)
+    # CONTROL: a not-yet-wired component is allowed to register later (not refused)
+    passed = True
+    try:
+        _ma.assert_throttle_registerable("device-scanner")
+    except ValueError:
+        passed = False
+    check("CONTROL: UNAVAILABLE (pending) is NOT refused by the guard", passed, True)
+
+
 if __name__ == "__main__":
     print("mem_appliance — appliance half of the RAM budget work")
     test_clamd_is_budgeted_and_exempt()
@@ -238,6 +342,9 @@ if __name__ == "__main__":
     test_availability_covers_every_budgeted_component()
     test_ladder_consumes_the_map_end_to_end()
     test_self_test_passes_here()
+    test_throttle_executor_end_to_end()
+    test_throttle_status_three_way()
+    test_throttle_status_consistency_and_guard()
 
     print("\n" + "=" * 64)
     if _failures:

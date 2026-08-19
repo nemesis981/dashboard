@@ -99,6 +99,24 @@ def _read_intent_row(component, dm):
             pass
 
 
+def live_intent_components(dm, now=None):
+    """Components with a currently-live (non-expired, > NORMAL) throttle intent.
+    Used by the executor to know which intents to CLEAR when a component drops
+    below throttle. Raises on DB error rather than returning a wrong empty set
+    (which would make the executor stop clearing); the caller handles it."""
+    now = time.time() if now is None else now
+    conn = dm.connect(NAMESPACE)
+    try:
+        rows = conn.execute(
+            f"SELECT component, factor, until_ts FROM {INTENT_TABLE}").fetchall()
+    finally:
+        try:
+            conn.close()
+        except Exception:                  # noqa: BLE001
+            pass
+    return {r["component"] for r in rows if _effective_factor(r, now) > NORMAL}
+
+
 class ThrottleHandle:
     """Returned by register_throttle_aware(). A service keeps one and uses it in
     its loop in place of its previous sleep call."""
@@ -140,6 +158,14 @@ def register_throttle_aware(component, dm, *, pid=None, now=None):
     process is down' gap, same honesty principle as mem_appliance.RUNG_AVAILABILITY.
     The registry write is BEST-EFFORT: throttle correctness depends only on the
     intent reads, so a failed registration is logged, not fatal.
+
+    NOTE (appliance): a component that is UNTHROTTLED by design — no interval to
+    slow, or slowing it would be harmful the same way restarting it would be
+    (clamd, suricata, dashboard) — MUST NOT register here. That exclusion is a
+    decision, not an oversight; the appliance surfaces it as the distinct status
+    UNTHROTTLED (mem_appliance.throttle_status) rather than leaving the component
+    silently absent, and mem_appliance.assert_throttle_registerable() is the guard
+    a future appliance-service wiring calls to enforce it loudly.
     """
     now = time.time() if now is None else now
     pid = os.getpid() if pid is None else pid
