@@ -8850,6 +8850,7 @@ def diagnostics_page():
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
+    <script src="/static/throttle-status.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
                padding: 24px; max-width: 900px; margin: 0 auto; }}
@@ -8952,6 +8953,14 @@ def diagnostics_page():
     </div>
 
 {enforcement_html}
+
+    <h2><span class="tier-text"
+        data-beginner="Is Nemesis slowing down its own background work under load?"
+        data-intermediate="Throttle Status"
+        data-pro="Throttle Status (/api/throttle-status)">Throttle Status</span></h2>
+    <div class="card" id="throttle-status-card">
+        <p style="color:#888;font-size:0.85em">Loading…</p>
+    </div>
 
     <h2><span class="tier-text"
         data-beginner="Individual Checks — click Run to see results"
