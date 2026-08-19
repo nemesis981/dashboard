@@ -371,6 +371,42 @@ def test_throttle_status_report_and_log_line():
     conn.close()
 
 
+def test_run_ladder_cycle_persists_and_accumulates():
+    """The production loop: run_ladder_cycle persists state across cycles and
+    accumulates + resolves shadow records — the promotion clock the ABORT/RESTART
+    gates depend on. Without a committed test this loop could silently stop driving."""
+    print("\n[run_ladder_cycle: state persists, shadow records accumulate + resolve]")
+    import os, sqlite3, tempfile                             # noqa: PLC0415
+    import database, data_manager                            # noqa: PLC0415
+    tmp = tempfile.mkdtemp(prefix="nem-runladder-")
+    database.DB_PATH = os.path.join(tmp, "a.db")
+    database.init_memory_recovery_tables(); database.init_throttle_tables()
+    dm = data_manager.DataManager(database.DB_PATH)
+    conn = sqlite3.connect(database.DB_PATH)
+
+    _orig = ma.sample_and_evaluate
+    ma.sample_and_evaluate = lambda repo_root=None: {"state": "ok", "components":
+        {"hw-monitor": {"verdict": "breach", "observed_mb": 900, "budget_mb": 100}}}
+    try:
+        for _ in range(8):                    # abort_after=8 -> a SHADOW rung
+            ma.run_ladder_cycle(dm, conn)
+        seq = conn.execute("SELECT sample_seq FROM mem_ladder_state WHERE id=1").fetchone()[0]
+        check("state persisted across cycles (seq=8)", seq, 8)
+        rows = conn.execute("SELECT rung FROM mem_shadow_records").fetchall()
+        check("a SHADOW record accumulated (abort)", any(r[0] == "abort" for r in rows), True)
+        state, _ = ma._load_ladder_state(conn, ma.load_ladder())
+        check("streak survives reload (clock not reset)",
+              state["components"]["hw-monitor"]["breach_streak"] >= 8, True)
+        for _ in range(7):                    # accrue follow-ups -> resolve
+            ma.run_ladder_cycle(dm, conn)
+        outcome = conn.execute("SELECT outcome FROM mem_shadow_records WHERE rung='abort' "
+                               "ORDER BY id LIMIT 1").fetchone()[0]
+        check("shadow record RESOLVES over cycles (clock advances)", outcome, "correct")
+    finally:
+        ma.sample_and_evaluate = _orig
+        conn.close()
+
+
 if __name__ == "__main__":
     print("mem_appliance — appliance half of the RAM budget work")
     test_clamd_is_budgeted_and_exempt()
@@ -390,6 +426,7 @@ if __name__ == "__main__":
     test_throttle_status_three_way()
     test_throttle_status_consistency_and_guard()
     test_throttle_status_report_and_log_line()
+    test_run_ladder_cycle_persists_and_accumulates()
 
     print("\n" + "=" * 64)
     if _failures:

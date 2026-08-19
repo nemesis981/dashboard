@@ -1784,6 +1784,14 @@ def _update_agent_device(payload, remote_ip=None):
                 # flight. Without this, attestation only ever works when an
                 # operator remembers to trigger it by hand.
                 ensure_manifest_queued(conn, device_id)
+                # Tier 2: queue a challenge on cadence, and ingest any response the
+                # agent sent in the dedicated heartbeat field (parallel channel to
+                # attestation_state; the task-result channel truncates at 400 chars).
+                ensure_challenge_queued(conn, device_id)
+                _cresp = payload.get("attest_challenge_response")
+                if _cresp:
+                    from alert_manager import attestation as _att_c   # noqa: PLC0415
+                    _att_c.ingest_challenge_response(conn, device_id, _cresp)
             except Exception as _ae:                      # noqa: BLE001
                 log.warning("attestation record failed for %s: %s", device_id, _ae)
 
@@ -2498,6 +2506,35 @@ def ensure_manifest_queued(conn, device_id):
         return None
 
 
+def ensure_challenge_queued(conn, device_id):
+    """Queue a Tier 2 attest_challenge for a device on a cadence, deduped against one
+    already in flight. Parallel to ensure_manifest_queued (heartbeat-triggered), but
+    gated on: the private Tier 2 module being deployed, AND the last challenge being
+    older than attestation_interval_hours. Best-effort; never raises into the beat."""
+    try:
+        from alert_manager import attestation as _att        # noqa: PLC0415
+        if not _att.tier2_available():
+            return None
+        try:
+            interval_h = float(database.get_setting("attestation_interval_hours", "24"))
+        except Exception:                                    # noqa: BLE001
+            interval_h = 24.0
+        row = conn.execute("SELECT issued_at FROM agent_attestation_challenges "
+                           "WHERE device_id=?", (device_id,)).fetchone()
+        if row and (time.time() - float(row[0])) < interval_h * 3600:
+            return None                                      # not due yet
+        pending = conn.execute(
+            "SELECT 1 FROM scan_tasks WHERE device_id=? AND action=? "
+            "AND status IN ('pending','dispatched') LIMIT 1",
+            (device_id, _att.TIER2_CHALLENGE_ACTION)).fetchone()
+        if pending:
+            return None
+        return enqueue_task(device_id, _att.TIER2_CHALLENGE_ACTION, ttl_seconds=3600)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("could not queue challenge for %s: %s", device_id, exc)
+        return None
+
+
 def rotation_readiness():
     """Per-device rotation state for the operator, plus whether cutover is safe.
 
@@ -2744,6 +2781,20 @@ def _tasks_for_response(device_id):
                 envelopes.append(server_keys.build_task(
                     device_id, action, params, task_id=task_id,
                     sign_with=signer, now=now))
+            elif action == "attest_challenge":
+                # Tier 2 challenge, built at DELIVERY (like the manifest): the
+                # server computes code_digests, stores nonce+digests to verify the
+                # eventual response, and sends {nonce, covered}. Same build_task
+                # signer as every other task. Dropped (no envelope) if the private
+                # module is absent — a challenge with no verifiable state is worse
+                # than none.
+                from alert_manager import attestation as _attc
+                _ch = _attc.build_and_store_challenge(conn, device_id, now=None)
+                if _ch is not None:
+                    envelopes.append(server_keys.build_task(
+                        device_id, action, {"nonce": _ch["nonce"],
+                                            "covered": _ch["covered"]},
+                        task_id=task_id, sign_with=signer, now=now))
             else:
                 envelopes.append(server_keys.build_task(
                     device_id, action, params, task_id=task_id,
@@ -4215,6 +4266,8 @@ def main():
         import throttle                                  # noqa: PLC0415
         import database as _db_throttle                  # noqa: PLC0415
         _db_throttle.init_throttle_tables()
+        _db_throttle.init_memory_recovery_tables()
+        _db_throttle.init_attestation_challenge_table()
         _throttle = throttle.register_throttle_aware("hw-monitor", _dm())
         log.info("throttle: hw-monitor registered as throttle-aware")
     except Exception as exc:                             # noqa: BLE001
@@ -4286,6 +4339,26 @@ def main():
             # skipping this one on an unrelated failure would quietly stop
             # enforcing seen-set retention with nothing in the log saying so.
             reap_conn_seen()
+
+        # Memory-injection ladder cycle — the production loop that makes the ladder
+        # REAL: sample -> decide -> shadow-record -> resolve -> execute-live(throttle).
+        # Without this nothing drives the ladder, so no shadow records accumulate and
+        # RESTART/ABORT promotion stays at 0 forever. run_ladder_cycle swallows its
+        # own errors; the wiring is wrapped too so a bad cycle never stops telemetry.
+        # The SAMPLE_INTERVAL cadence IS the cadence the ladder thresholds assume.
+        try:
+            import mem_appliance as _mem_ladder             # noqa: PLC0415
+            _lc = _db_connect()
+            try:
+                _sum = _mem_ladder.run_ladder_cycle(_dm(), _lc)
+                if _sum.get("shadow_new"):
+                    log.info("mem ladder: %d new shadow decision(s), seq=%s",
+                             _sum["shadow_new"], _sum.get("seq"))
+            finally:
+                _lc.close()
+        except Exception as _e:                             # noqa: BLE001
+            log.warning("mem ladder cycle wiring error: %s", _e)
+
         _sample_sleep(SAMPLE_INTERVAL)
     log.info("hw_monitor stopped")
 

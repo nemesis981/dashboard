@@ -522,6 +522,81 @@ def get_remote_observe_every_n():
     return n
 
 
+def init_memory_recovery_tables():
+    """Canonical DDL for the production memory-injection ladder loop (mem_appliance
+    run_ladder_cycle). Two tables: the persisted ladder STATE (so streaks survive a
+    restart instead of resetting the promotion clock to zero) and the SHADOW RECORDS
+    that accumulate over real time — the evidence RESTART/ABORT promotion depends on.
+
+    Without a running loop persisting these, the promotion gate sits at '0 resolved'
+    forever, which is indistinguishable from 'not enough evidence yet' — the exact
+    missing-machinery-vs-missing-evidence confusion this codebase keeps catching.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        # Single-row ladder state (the pure decide() state dict, JSON) + the sample
+        # sequence counter it was last advanced to. id=1 CHECK keeps it single-row.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mem_ladder_state (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                state_json  TEXT    NOT NULL,
+                sample_seq  INTEGER NOT NULL,
+                updated_ts  REAL    NOT NULL
+            )
+        """)
+        # Shadow decisions awaiting evidence. follow_ups_json accumulates later
+        # samples' verdicts; outcome is NULL until classify_outcome resolves it.
+        # This is the promotion evidence, so it is APPEND-and-RESOLVE, never reset.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS mem_shadow_records (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                component        TEXT    NOT NULL,
+                rung             TEXT    NOT NULL,
+                decided_seq      INTEGER NOT NULL,
+                observed_mb      REAL,
+                budget_mb        REAL,
+                follow_ups_json  TEXT    NOT NULL DEFAULT '[]',
+                outcome          TEXT,
+                created_ts       REAL    NOT NULL,
+                resolved_ts      REAL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_mem_shadow_unresolved "
+                  "ON mem_shadow_records(outcome) WHERE outcome IS NULL")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_mem_shadow_rung "
+                  "ON mem_shadow_records(rung, outcome)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def init_attestation_challenge_table():
+    """Canonical DDL for the Tier 2 attestation issuer's per-device challenge state.
+
+    When the issuer sends a challenge it must remember, PER DEVICE, what it issued —
+    the nonce and the manifest's code_digests/python — so the eventual response can be
+    verified (freshness/anti-replay depend on the server knowing its own nonce). One
+    row per device (the latest outstanding challenge); superseded on re-issue.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_attestation_challenges (
+                device_id     TEXT    PRIMARY KEY,
+                nonce         TEXT    NOT NULL,
+                code_digests  TEXT    NOT NULL,   -- JSON {path: digest}
+                code_python   TEXT    NOT NULL,
+                issued_at     REAL    NOT NULL,
+                expires_at    REAL    NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_throttle_tables():
     """Canonical DDL for the cooperative-throttle seam (see alert_manager/throttle.py).
 

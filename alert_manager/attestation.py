@@ -36,6 +36,7 @@ separate decision once the false-positive rate is measured.
 """
 
 import datetime
+import time
 import json
 import logging
 import os
@@ -82,6 +83,70 @@ TIER2_COVERED = (
 def tier2_available() -> bool:
     """True only if the private Tier 2 module is importable (i.e. deployed)."""
     return _tier2 is not None
+
+
+#: Protocol action name for a Tier 2 challenge task (matches the private module's
+#: tier2_common.CHALLENGE_ACTION). A plain string, so it is defined even when the
+#: private module is absent (needed to enqueue/dedupe the task server-side).
+TIER2_CHALLENGE_ACTION = "attest_challenge"
+#: How long an issued challenge stays verifiable. A stale nonce past this is not
+#: accepted (freshness); the issuer re-challenges on its cadence.
+CHALLENGE_TTL_SECONDS = 3600
+
+
+def build_and_store_challenge(conn, device_id: str, agent_root: str | None = None,
+                              now: float | None = None):
+    """Build a Tier 2 challenge AT DELIVERY and record what is needed to verify it.
+
+    Computes the augmented manifest's code_digests (server-side, from source),
+    generates a fresh nonce, and stores (device_id, nonce, code_digests, python) in
+    agent_attestation_challenges so the eventual response can be verified. Returns
+    {nonce, covered} to send to the agent, or None if Tier 2 is unavailable (caller
+    drops the task rather than delivering a broken challenge). `conn` writes.
+    """
+    if not tier2_available():
+        return None
+    from nemesis_agent import attest as _attest             # noqa: PLC0415
+    root = agent_root or _attest.agent_dir()
+    manifest = {}
+    _tier2.augment_manifest(manifest, TIER2_COVERED, root)   # -> code_digests + python
+    nonce = _tier2.new_nonce()
+    now_t = time.time() if now is None else now
+    conn.execute(
+        "INSERT INTO agent_attestation_challenges "
+        "(device_id, nonce, code_digests, code_python, issued_at, expires_at) "
+        "VALUES (?,?,?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET "
+        "nonce=excluded.nonce, code_digests=excluded.code_digests, "
+        "code_python=excluded.code_python, issued_at=excluded.issued_at, "
+        "expires_at=excluded.expires_at",
+        (device_id, nonce, json.dumps(manifest["code_digests"]),
+         manifest["code_digest_python"], now_t, now_t + CHALLENGE_TTL_SECONDS))
+    return {"nonce": nonce, "covered": list(TIER2_COVERED)}
+
+
+def ingest_challenge_response(conn, device_id: str, response):
+    """Verify a Tier 2 challenge response (delivered in the dedicated heartbeat
+    field `attest_challenge_response`) against the stored challenge, record
+    tier2_state (OBSERVE-ONLY), and clear the outstanding challenge. Returns the
+    recorded state, or None if Tier 2 is unavailable or no challenge is outstanding.
+    """
+    if not tier2_available():
+        return None
+    row = conn.execute(
+        "SELECT nonce, code_digests, code_python FROM agent_attestation_challenges "
+        "WHERE device_id=?", (device_id,)).fetchone()
+    if not row:
+        return None
+    try:
+        manifest = {"code_digests": json.loads(row[1]), "code_digest_python": row[2]}
+    except Exception:                                        # noqa: BLE001
+        conn.execute("DELETE FROM agent_attestation_challenges WHERE device_id=?",
+                     (device_id,))
+        return None
+    state = verify_and_record_tier2(conn, device_id, manifest, row[0], response)
+    conn.execute("DELETE FROM agent_attestation_challenges WHERE device_id=?",
+                 (device_id,))
+    return state
 
 # How long a manifest envelope stays valid. Short enough that a captured
 # envelope is not indefinitely replayable, long enough for an agent on a slow

@@ -21,6 +21,7 @@ inheriting it.
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
 import re
@@ -509,3 +510,95 @@ def log_throttle_status(conn, now=None):
              "%d unavailable-pending; active: %s",
              n_t, len(unth), ",".join(unth) or "-", n_u, ", ".join(active) or "none")
     return rep
+
+
+# ── PRODUCTION LADDER RUNNER — the periodic loop that makes the ladder REAL ────
+# Without this driving the ladder, decide()/shadow_record() are never called in
+# production: no shadow records accumulate, and RESTART/ABORT promotion sits at
+# "0 resolved" forever (indistinguishable from "not enough evidence yet"). This is
+# the loop hw_monitor's sample cycle calls each tick (its SAMPLE_INTERVAL IS the
+# ladder cadence the policy thresholds are written against). State + shadow records
+# PERSIST across restarts so a bounce does not reset the promotion clock to zero.
+
+def _load_ladder_state(conn, ladder):
+    row = conn.execute("SELECT state_json, sample_seq FROM mem_ladder_state "
+                       "WHERE id=1").fetchone()
+    if not row:
+        return ladder.new_state(), 0
+    try:
+        return json.loads(row[0]), int(row[1] or 0)
+    except Exception:                                        # noqa: BLE001
+        return ladder.new_state(), int(row[1] or 0)
+
+
+def _save_ladder_state(conn, state, seq, now):
+    conn.execute(
+        "INSERT INTO mem_ladder_state (id, state_json, sample_seq, updated_ts) "
+        "VALUES (1, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+        "state_json=excluded.state_json, sample_seq=excluded.sample_seq, "
+        "updated_ts=excluded.updated_ts", (json.dumps(state), seq, now))
+
+
+def _insert_shadow_record(conn, rec, now):
+    conn.execute(
+        "INSERT INTO mem_shadow_records (component, rung, decided_seq, observed_mb, "
+        "budget_mb, follow_ups_json, outcome, created_ts) VALUES (?,?,?,?,?,?,?,?)",
+        (rec["component"], rec["rung"], rec["decided_at"], rec.get("observed_mb"),
+         rec.get("budget_mb"), json.dumps(rec.get("follow_ups") or []),
+         rec.get("outcome"), now))
+
+
+def _advance_and_resolve_records(conn, ladder, comps, now):
+    """Append THIS sample's verdict to every UNRESOLVED shadow record (None = the
+    component was absent this sample, which is meaningful), then classify. A follow-up
+    is a LATER sample's observation, so this runs BEFORE new records are added, so a
+    record decided this sample never gets a follow-up from its own sample."""
+    rows = conn.execute(
+        "SELECT id, component, rung, decided_seq, observed_mb, budget_mb, "
+        "follow_ups_json FROM mem_shadow_records WHERE outcome IS NULL").fetchall()
+    for rid, component, rung, decided_seq, obs, bud, fups_json in rows:
+        try:
+            fups = json.loads(fups_json or "[]")
+        except Exception:                                    # noqa: BLE001
+            fups = []
+        v = (comps or {}).get(component)
+        verdict = v.get("verdict") if v else None
+        rec = {"component": component, "rung": rung, "decided_at": decided_seq,
+               "observed_mb": obs, "budget_mb": bud, "follow_ups": fups, "outcome": None}
+        rec = ladder.observe_follow_up(rec, verdict)
+        outcome = ladder.classify_outcome(rec)
+        conn.execute(
+            "UPDATE mem_shadow_records SET follow_ups_json=?, outcome=?, resolved_ts=? "
+            "WHERE id=?", (json.dumps(rec["follow_ups"]), outcome,
+                           (now if outcome else None), rid))
+
+
+def run_ladder_cycle(dm, conn, *, repo_root=None, now=None):
+    """One production ladder cycle: sample -> decide -> resolve-existing ->
+    record-new-shadow -> persist -> execute-live(throttle). Persists state + records
+    across cycles. Best-effort: NEVER raises out — a cycle failure must not kill the
+    hw_monitor loop it rides. Returns a summary dict."""
+    now = time.time() if now is None else now
+    try:
+        ladder = load_ladder(repo_root)
+        state, seq = _load_ladder_state(conn, ladder)
+        seq += 1
+        verdicts = sample_and_evaluate(repo_root)
+        new_state, actions = ladder.decide(
+            verdicts, state, exempt=RECOVERY_EXEMPT, available=availability_map())
+        comps = verdicts.get("components", {})
+        _advance_and_resolve_records(conn, ladder, comps, now)   # follow-ups first
+        shadow_new = 0
+        for a in actions:
+            if a.get("kind") == "escalate" and a.get("mode") == ladder.MODE_SHADOW:
+                _insert_shadow_record(conn, ladder.shadow_record(a, seq), now)
+                shadow_new += 1
+        _save_ladder_state(conn, new_state, seq, now)
+        conn.commit()
+        exec_results = execute_ladder_throttle(new_state, dm, ladder=ladder, now=now)
+        return {"ran": True, "seq": seq, "shadow_new": shadow_new,
+                "throttle_actions": len(exec_results),
+                "components": len(comps)}
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("run_ladder_cycle failed: %s", e)
+        return {"ran": False, "error": str(e)}

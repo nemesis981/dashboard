@@ -35,6 +35,43 @@ try:
 except Exception:                                # ImportError or any load failure
     _tier2_agent = _tier2_common = None
 
+
+def _challenge_stash_path():
+    import os as _os                                          # noqa: PLC0415
+    return _os.path.join(_os.path.dirname(config.CONF_PATH),
+                         "attest_challenge_response.json")
+
+
+def _stash_challenge_response(resp):
+    """Persist the Tier 2 challenge response for the NEXT heartbeat's dedicated
+    `attest_challenge_response` field. The task-result channel truncates at 400
+    chars, too small for the per-path digests, so the response rides its own field."""
+    try:
+        import os as _os, json as _json                       # noqa: PLC0415
+        tmp = _challenge_stash_path() + ".tmp"
+        with open(tmp, "w") as fh:
+            _json.dump(resp, fh)
+        _os.replace(tmp, _challenge_stash_path())
+    except Exception as e:                                     # noqa: BLE001
+        log.warning("could not stash challenge response: %s", e)
+
+
+def _read_and_clear_challenge_response():
+    """Read + delete the stashed challenge response (fire-once; a lost beat is
+    re-challenged on the server's cadence). Returns the dict or None."""
+    try:
+        import os as _os, json as _json                       # noqa: PLC0415
+        path = _challenge_stash_path()
+        if not _os.path.exists(path):
+            return None
+        with open(path) as fh:
+            resp = _json.load(fh)
+        _os.remove(path)
+        return resp
+    except Exception as e:                                     # noqa: BLE001
+        log.warning("could not read challenge response stash: %s", e)
+        return None
+
 _HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
 
 logging.basicConfig(
@@ -416,6 +453,10 @@ def _collect_payload(conf):
         "connection_type": conn_type,
         "link_type":       link_type,
         "lan_macs":        lan_macs,
+        # Tier 2 challenge response (dedicated field — the task-result channel
+        # truncates at 400 chars). Present only when a challenge was answered
+        # since the last beat; read-and-clear so it is sent once.
+        "attest_challenge_response": _read_and_clear_challenge_response(),
         "timestamp":       datetime.now().isoformat(timespec="seconds"),
         "hardware":        hw,
         "security":        sec,
@@ -988,8 +1029,13 @@ def _handle_response_tasks(response, device_id):
                 # respond_to_challenge never raises; it measures LIVE __code__ of
                 # the server-named covered callables and returns a nonce-bound hash.
                 _cp = verified.get("params") or {}
-                result = _tier2_agent.respond_to_challenge(
+                _cresp = _tier2_agent.respond_to_challenge(
                     _cp.get("nonce", ""), _cp.get("covered") or [])
+                # The response is too large for the 400-char task-result channel,
+                # so stash it for the next heartbeat's dedicated field and close
+                # the TASK with a short marker.
+                _stash_challenge_response(_cresp)
+                result = {"challenge": "responded via attest_challenge_response"}
             else:
                 result = _CommandHandler._dispatch(None, verified["action"],
                                                    verified.get("params") or {})

@@ -144,5 +144,48 @@ def main():
     return 1 if _state["failed"] else 0
 
 
+
+
+def test_tier2_challenge_round_trip():
+    """Full Tier 2 issue->respond->ingest against the REAL functions + real crypto,
+    incl. the default now=None path (a missing import would crash here) and a
+    tampering control. Requires the private module on path; skips clearly if absent."""
+    import os, sys, sqlite3, tempfile
+    AGENT="/opt/nemesis/nemesis_agent"; PRIV=os.path.expanduser("~/work/nemesis-internal/attestation-tier2")
+    for pth in (PRIV, "/opt/nemesis", AGENT):
+        if pth not in sys.path: sys.path.insert(0, pth)
+    import attestation as att
+    if not att.tier2_available():
+        print("  SKIP tier2 round trip (private module not on path) — NOT a pass")
+        return
+    _cwd=os.getcwd(); os.chdir(AGENT)
+    try:
+        import tier2_agent, tasks, enrollment, attest
+        from modules import scanner
+        c=sqlite3.connect(":memory:")
+        c.execute("CREATE TABLE agent_devices (device_id TEXT PRIMARY KEY, attestation_state TEXT, tier2_state TEXT, tier2_detail TEXT, tier2_at TEXT)")
+        c.execute("INSERT INTO agent_devices VALUES ('d','attested','absent',NULL,NULL)")
+        c.execute("CREATE TABLE agent_attestation_challenges (device_id TEXT PRIMARY KEY, nonce TEXT, code_digests TEXT, code_python TEXT, issued_at REAL, expires_at REAL)")
+        ch=att.build_and_store_challenge(c,"d",agent_root=AGENT)   # default now=None
+        assert ch and ch["nonce"], "issue failed"
+        resp=tier2_agent.respond_to_challenge(ch["nonce"], ch["covered"])
+        att.ingest_challenge_response(c,"d",resp)
+        row=c.execute("SELECT attestation_state,tier2_state FROM agent_devices WHERE device_id='d'").fetchone()
+        assert row[0]=="attested", "attestation_state must be untouched (observe-only)"
+        assert row[1] in ("absent","attested","failed"), "tier2_state recorded"
+        assert c.execute("SELECT 1 FROM agent_attestation_challenges WHERE device_id='d'").fetchone() is None, "challenge cleared"
+        # tamper control
+        att.build_and_store_challenge(c,"d",agent_root=AGENT)
+        n2=c.execute("SELECT nonce FROM agent_attestation_challenges WHERE device_id='d'").fetchone()[0]
+        _o=tasks.verify_task; tasks.verify_task=lambda *a,**k:{"ok":True}
+        try:
+            att.ingest_challenge_response(c,"d",tier2_agent.respond_to_challenge(n2,list(att.TIER2_COVERED)))
+        finally: tasks.verify_task=_o
+        assert c.execute("SELECT tier2_state FROM agent_devices WHERE device_id='d'").fetchone()[0]=="failed", "tamper must be FAILED"
+        print("  PASS  tier2 challenge round trip (issue->respond->ingest, tamper->failed)")
+    finally:
+        os.chdir(_cwd)
+
 if __name__ == "__main__":
+    test_tier2_challenge_round_trip()
     sys.exit(main())
