@@ -3667,3 +3667,21 @@ commercial use requires a paid license, no pricing figures published) and a mini
           practice for a filesystem scan (they target saved mail/HTML, and `ScanMail` is
           already on) but a real, avoidable loss rather than one to absorb silently.
     - [ ] Neither blocks committing the scan-engine code itself — both block *deploying* it.
+
+- [ ] **Neither `malware-scan` canary function (`selftest_engine()` /
+      `unrestricted_read_capability()`, both in `modules/malware_detection/module.py`) asserts
+      the unit file's own effective settings.** This is the exact seam the `PrivateTmp`
+      duplicate-directive bug (found and fixed in `core_module/malware_scan/malware-scan.service`
+      before this batch was committed) fell through: both canaries prove the engine and the
+      capability work, but neither one checks that the *systemd unit* handed the process the
+      environment it's assuming — a regressed `PrivateTmp=yes` would still pass both canaries
+      today while silently scanning an empty private `/tmp` instead of the real one.
+    - [ ] **Candidate fix scoped, deliberately NOT built:** a startup guard reading
+          `/proc/self/mountinfo` to confirm `/tmp` is not privately namespaced before the scan
+          proceeds. Not built because it needs VM-level validation to trust, not local
+          confirmation — user-scope systemd (the only kind available for iterating locally)
+          does not actually enforce `PrivateTmp`, so a guard written and tested against it would
+          look correct while never having been exercised against the real system-service
+          behavior it exists to catch.
+    - [ ] Owed: build and VM-verify the mountinfo guard, or an equivalent unit-settings
+          self-check, as its own follow-up — not folded into this batch.
