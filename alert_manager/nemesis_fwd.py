@@ -351,6 +351,35 @@ def _db():
         conn.close()
 
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder: this is a root-privileged, long-lived
+# socket server with no ordering guarantee against whatever creates the error
+# tables, so registering at import would race. Own connection, not `_db()`'s
+# contextmanager — the recorder must not join the caller's own transaction.
+_ERR_CODES = {
+    "E-FWD-001": ("account lockout_until unparseable; treated as locked (fail "
+                  "closed), previously fell through as unlocked",
+                  "HIGH", "fail-open-auth"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            import sqlite3 as _sqlite3
+            _recorder = nemesis_errors.make_recorder(
+                "nemesis_fwd",
+                lambda: _sqlite3.connect(nemesis_paths.db_path(), timeout=5.0),
+                _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 def load_admin(username):
     """Layer 2. Read the account from the DB and apply every check here.
 
@@ -395,6 +424,13 @@ def load_admin(username):
             # row. The detail belongs in the log, not on the wire.
             log.error("fwd: unparseable lockout_until %r for %r (%s) — "
                       "denying access, lockout state is unknown", lock, username, exc)
+            # best_effort, not record_error: we are inside the handler for a
+            # parse failure on a root-privileged auth gate; raising here would
+            # replace the fail-closed Denied about to be raised with the error
+            # system's own failure. username omitted from context deliberately
+            # (see the docstring's username-oracle note above).
+            _errors_record("E-FWD-001", {"fn": "load_admin",
+                                         "error": f"{type(exc).__name__}: {exc}"})
             raise Denied("locked_out", "account is locked out")
         if lock_until > datetime.now():
             raise Denied("locked_out", "account is locked out")

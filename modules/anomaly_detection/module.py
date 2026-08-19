@@ -190,6 +190,35 @@ class Module(NemesisModule):
 # Database helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Registration is deferred to first use by `make_recorder`, not done at import:
+# this module is loaded by modules_loader BEFORE the error tables are guaranteed
+# to exist, and a failed registration at import time would take the whole module
+# down for a diagnostic facility.
+_ERR_CODES = {
+    "E-ANOMALY-001": ("eve_offset/eve_inode could not be set from os.stat(EVE_LOG); "
+                      "the eve-log tailer resumes from the wrong position next "
+                      "cycle", "MEDIUM", "state-not-persisted"),
+    "E-ANOMALY-002": ("dashboard-card incident/baseline counts DB read failed; "
+                      "card silently loses its statistics",
+                      "LOW", "db-read-empty-default"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "anomaly_detection", _conn, _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 def _conn():
     # ADR 0006: route anomaly_detection DB access through the Data Manager (write-own
     # access control + operation logging). Drop-in for the old get_db() — the connection's
@@ -415,8 +444,14 @@ def _build_initial_baseline() -> None:
         st = os.stat(EVE_LOG)
         _set_state("eve_offset", str(st.st_size))
         _set_state("eve_inode",  str(st.st_ino))
-    except OSError:
-        pass
+    except OSError as exc:
+        # E-ANOMALY-001 — eve_offset/eve_inode never get set, so the eve-log
+        # tailer resumes from the wrong position next cycle, affecting
+        # detection coverage. The block above already logs FileNotFoundError
+        # loudly; this swallowed every OSError silently, which was the
+        # inconsistency batch1 flagged.
+        _errors_record("E-ANOMALY-001", {"fn": "build_baseline", "file": EVE_LOG,
+                                         "error": f"{type(exc).__name__}: {exc}"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1361,8 +1396,12 @@ def _render_card(building: bool, built: bool) -> str:
             f'<span style="color:#ccc;font-size:0.82em">'
             f'Baseline domains: <strong style="color:#00d4ff">{total_baseline}</strong></span>'
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        # E-ANOMALY-002 — presentation-path (low priority per batch1), but the
+        # underlying failure is a DB read and the card silently loses its
+        # stats while otherwise looking fine.
+        _errors_record("E-ANOMALY-002", {"fn": "get_dashboard_card",
+                                         "error": f"{type(exc).__name__}: {exc}"})
 
     # Rate limit notice
     rate_notice = ""

@@ -14,6 +14,37 @@ log = logging.getLogger("nemesis.diagnostics.redact")
 _ENV_FILE = "/etc/nemesis.env"
 _MIN_SECRET_LEN = 8
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder: this module may run standalone
+# (`python3 -m diagnostics.disk_space`-style invocation) where the shared DB
+# path is not registered yet, so import/registration is done on first use, not
+# at import time. Shares the "diagnostics" namespace with
+# modules/diagnostics/module.py (batch3's classification: same namespace, two
+# packages). get_data_manager() can raise if the shared path was never
+# published (standalone run) — the recorder's own try/except below swallows
+# that the same way it swallows every other recording failure.
+_ERR_CODES = {
+    "E-REDACT-001": ("secret list could not be read from /etc/nemesis.env; "
+                     "output withheld rather than under-redacted (fail closed)",
+                     "HIGH", "fail-open-secret-leak"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            from modules import get_data_manager
+            _recorder = nemesis_errors.make_recorder(
+                "diagnostics", lambda: get_data_manager().connect("diagnostics"),
+                _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
 
 class RedactionUnavailable(RuntimeError):
     """The secret list could not be determined, so nothing can be certified scrubbed.
@@ -82,6 +113,12 @@ def _load_secrets() -> set:
         # The realistic trigger is mundane, which is the point: this file is
         # mode 640 root:nemesis, so any reader outside that group gets
         # PermissionError right here. Ordinary group membership, not corruption.
+        #
+        # best_effort, not record_error: about to raise out of this handler,
+        # and a raising recorder here would replace RedactionUnavailable with
+        # the error system's own failure.
+        _errors_record("E-REDACT-001", {"fn": "_load_secrets",
+                                        "error": f"{type(exc).__name__}: {exc}"})
         raise RedactionUnavailable("cannot read %s: %s" % (_ENV_FILE, exc)) from exc
     # Also pull from current process environment (systemd may have loaded them)
     for k in _SECRET_KEYS:

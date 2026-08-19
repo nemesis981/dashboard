@@ -912,12 +912,25 @@ class GuardedCursor:
         return iter(self._raw)
 
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Registration deferred to first use, same reasoning as every other retrofit
+# site: no ordering guarantee that the error tables exist yet.
+_ERR_CODES = {
+    "E-DM-001": ("backfill_archive_manifest: a table's archive-reference read "
+                "failed (ARCHIVE_REF_COLUMNS is static, so this most likely "
+                "means schema drift); the backfill completes looking "
+                "successful while being incomplete",
+                "LOW", "silent-partial-completion"),
+}
+
+
 class DataManager:
     """Singleton DB access layer. One per process, built from the shared DB path."""
 
     def __init__(self, db_path):
         self._db_path = db_path
         self._actor = threading.local()
+        self._error_recorder = None
         self._ensure_schema()
 
     # -- connections --
@@ -929,6 +942,24 @@ class DataManager:
         conn = sqlite3.connect(self._db_path, timeout=5.0)
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
+
+    def _errors_record(self, code, context):
+        """Record one structured error occurrence. Never raises into the caller.
+
+        Uses `_raw_connect`, deliberately NOT a guarded connection: recording a
+        Data-Manager failure THROUGH the Data Manager means the write passes
+        back through `check_write()`/`_log_op()`, and if the fault being
+        recorded is itself a DB-layer failure, the recording attempt plausibly
+        fails the same way (batch2's finding). A raw connection sidesteps that.
+        """
+        try:
+            if self._error_recorder is None:
+                import nemesis_errors
+                self._error_recorder = nemesis_errors.make_recorder(
+                    "data_manager", self._raw_connect, _ERR_CODES, logger=log)
+            return self._error_recorder(code, context=context)
+        except Exception:
+            return None
 
     def connect(self, module, enforce=True):
         """Return a :class:`GuardedConnection` for ``module``. Drop-in for the old
@@ -1227,8 +1258,14 @@ class DataManager:
                     refs.update(r[0] for r in conn.execute(
                         f"SELECT DISTINCT {column} FROM {table} "
                         f"WHERE {column} IS NOT NULL") if r[0])
-                except sqlite3.Error:
-                    pass
+                except sqlite3.Error as exc:
+                    # E-DM-001 — this table's archive references are skipped
+                    # from the backfill, which then completes looking
+                    # successful while being incomplete. best_effort: still
+                    # inside the per-table loop, must not abort the rest.
+                    self._errors_record("E-DM-001", {
+                        "fn": "backfill_archive_manifest", "table": table,
+                        "column": column, "error": f"{type(exc).__name__}: {exc}"})
             for fname in sorted(refs - known):
                 path = os.path.join(adir, fname)
                 if not os.path.isfile(path):

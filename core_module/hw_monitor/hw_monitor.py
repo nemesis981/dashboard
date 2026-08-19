@@ -183,18 +183,33 @@ def init_db():
         """)
         # Pre-populate rows for fans listed in hw_map.json (INSERT OR IGNORE so
         # we never reset ever_active state that was already recorded).
+        #
+        # NARROWED (E-HWMON-003, 2026-08-19): this used to be one broad
+        # `except Exception: pass` covering both an OPTIONAL file read
+        # (HW_MAP_PATH is legitimately absent on non-hardware installs) and a
+        # DB WRITE (INSERT OR IGNORE) — one clause could not tell "expected
+        # absence" from "unexpected write failure" apart. Split: the file
+        # half stays silent on its two genuinely expected failure shapes; the
+        # write half is wired, because a failed INSERT here is not expected.
         try:
             with open(HW_MAP_PATH) as _mf:
                 _hm = json.load(_mf)
-                for _f in _hm.get("fans", []):
-                    if "unique_key" in _f:
+        except (OSError, json.JSONDecodeError):
+            _hm = None
+        if _hm is not None:
+            for _f in _hm.get("fans", []):
+                if "unique_key" in _f:
+                    try:
                         c.execute(
                             "INSERT OR IGNORE INTO fan_status "
                             "(unique_key, label, ever_active) VALUES (?, ?, 0)",
                             (_f["unique_key"], _f.get("label", _f["unique_key"]))
                         )
-        except Exception:
-            pass
+                    except Exception as exc:
+                        _errors_record("E-HWMON-003", {
+                            "fn": "init_db", "table": "fan_status",
+                            "unique_key": _f.get("unique_key"),
+                            "error": f"{type(exc).__name__}: {exc}"})
         conn.commit()
 
         # hw_alerts is created and owned by watchdog (sole writer); this module
@@ -2211,8 +2226,15 @@ def _check_and_queue_scan_triggers(payload):
                 if hours_absent >= threshold_h:
                     detail = f"absent {int(hours_absent)}h"
                     _queue_scan(device_id, "extended_absence", detail, cpath)
-            except Exception:
-                pass
+            except Exception as exc:
+                # E-HWMON-002 — a device that SHOULD have been queued for a
+                # returning-from-extended-absence scan silently isn't: a bad
+                # stored threshold, a malformed prev_last_seen, or the queue
+                # insert itself all land here, and nothing else records that
+                # the scan never happened.
+                _errors_record("E-HWMON-002", {"fn": "process condition triggers",
+                                               "trigger": "extended_absence",
+                                               "error": f"{type(exc).__name__}: {exc}"})
 
         # ── 4. new_login ─────────────────────────────────────────────────────
         if "new_login" in conditions:
@@ -2882,9 +2904,15 @@ def _local_clamscan_thread(scan_id, path):
                     if "FOUND" in line:
                         threats.append(line.strip())
             log_read_ok = True
-        except Exception:
+        except Exception as exc:
             log.exception("clamscan log unreadable (scan_id=%s, log=%s) — recording "
                           "this scan as ERROR, not clean", scan_id, log_file)
+            # best_effort: already in a failure handler for the scan-log read;
+            # the status="error" fallback below is the load-bearing fix, this
+            # is the observability half (Rule 2 — two separate changes).
+            _errors_record("E-HWMON-004", {"fn": "_local_clamscan_thread",
+                                           "scan_id": scan_id,
+                                           "error": f"{type(exc).__name__}: {exc}"})
         if not log_read_ok:
             status = "error"
         elif threats:
@@ -3034,6 +3062,18 @@ _ERR_CODES = {
     "E-HWMON-001": ("hw device list DB read failed; empty list returned as a real "
                     "result (reads as 'no devices reporting')",
                     "MEDIUM", "db-read-empty-default"),
+    "E-HWMON-002": ("extended_absence condition trigger failed (bad threshold, "
+                    "malformed prev_last_seen, or the scan-queue insert itself); "
+                    "the device is never scanned and nothing else records it",
+                    "MEDIUM", "silent-scan-skip"),
+    "E-HWMON-003": ("fan_status pre-population INSERT failed during init_db "
+                    "(the file-read half of this site is expected-absence and "
+                    "stays silent; only the DB write is wired)",
+                    "LOW", "db-write-failed"),
+    "E-HWMON-004": ("clamscan log unreadable; scan recorded as status='error', "
+                    "not 'clean' (fail closed) — this is the observability half, "
+                    "the fail-closed fix is the status change itself",
+                    "HIGH", "fail-open-scan-result"),
 }
 _recorder = None
 

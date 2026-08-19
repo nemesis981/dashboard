@@ -1,6 +1,40 @@
 """Check: disk space usage — alert if any filesystem is >90% full."""
 
+import logging
 import subprocess
+
+log = logging.getLogger("nemesis.diagnostics.disk_space")
+
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Deferred registration via make_recorder: this module may run standalone
+# (`python3 -m diagnostics.disk_space`) where the shared DB path is not
+# registered yet, so import/registration happens on first use, not at import
+# time. Shares the "diagnostics" namespace with modules/diagnostics/module.py
+# (batch3's classification), same as diagnostics/redact.py. A failed
+# get_data_manager() (standalone run, no shared path) is swallowed by
+# _errors_record's own try/except, same as every other recording failure.
+_ERR_CODES = {
+    "E-DIAG-002": ("an unparseable df row was dropped from the warn/critical "
+                   "evaluation entirely; status can then compute as 'ok' with "
+                   "a full filesystem silently excluded",
+                   "MEDIUM", "fail-open-monitoring-check"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            from modules import get_data_manager
+            _recorder = nemesis_errors.make_recorder(
+                "diagnostics", lambda: get_data_manager().connect("diagnostics"),
+                _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
 
 # Capacity thresholds, module-level so there is exactly ONE definition of
 # "low disk" in the product. hw_monitor's sampler classifies its own
@@ -77,8 +111,13 @@ def run() -> dict:
                     critical = True
                 elif verdict == "warn":
                     warn = True
-            except (ValueError, IndexError):
-                pass
+            except (ValueError, IndexError) as exc:
+                # E-DIAG-002 — a dropped row can hide a full filesystem: status
+                # is computed as "ok" if nothing ELSE tripped. best_effort:
+                # still inside the per-row loop, must not abort the rest of
+                # the report.
+                _errors_record("E-DIAG-002", {"fn": "run", "row": line,
+                                              "error": f"{type(exc).__name__}: {exc}"})
         status = "error" if critical else ("warn" if warn else "ok")
         summary = (
             f"CRITICAL: filesystem(s) above {CRIT_PCT}% capacity" if critical

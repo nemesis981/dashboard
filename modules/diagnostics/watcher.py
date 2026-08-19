@@ -27,6 +27,32 @@ from modules.diagnostics import module as diag
 
 log = logging.getLogger("nemesis.diagnostics.watcher")
 
+# ── structured error codes (alert_manager/nemesis_errors.py) ─────────────────
+# Registration deferred to first use, same reasoning as every other retrofit
+# site. Shares diag._conn() (the "diagnostics" namespace) rather than opening
+# its own connection.
+_ERR_CODES = {
+    "E-DIAG-001": ("diagnostics_connectivity_samples retention DELETE failed "
+                   "(malformed samples_max setting); the table grows unbounded "
+                   "until it becomes a disk problem",
+                   "MEDIUM", "silent-retention-skip"),
+}
+_recorder = None
+
+
+def _errors_record(code, context):
+    """Record one structured error occurrence. Never raises into the caller."""
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors
+            _recorder = nemesis_errors.make_recorder(
+                "diagnostics", diag._conn, _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:
+        return None
+
+
 NET_TIMEOUT = 5            # seconds per network probe (mirrors vpn-watch.sh NETTO)
 LOG_BASENAME = "connectivity.log"
 _CURL_W = "http_code=%{http_code} time=%{time_total}"
@@ -414,8 +440,12 @@ def _record(flags, verdict, latency_ms, note, vpn_connected, actor, samples_max)
                 "(SELECT id FROM diagnostics_connectivity_samples ORDER BY ts DESC, id DESC LIMIT ?)",
                 (cap,),
             )
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as exc:
+            # E-DIAG-001 — retention never runs; the table grows unbounded
+            # until it becomes a disk problem. best_effort: still inside the
+            # record()/commit() path, must not abort the sample write itself.
+            _errors_record("E-DIAG-001", {"fn": "_record", "samples_max": samples_max,
+                                          "error": f"{type(exc).__name__}: {exc}"})
         conn.commit()
     finally:
         conn.close()

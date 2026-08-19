@@ -171,6 +171,10 @@ _ERR_CODES = {
     "E-WATCHDOG-002": ("hw_metrics CPU-sample read failed for a reason other than "
                        "the table being absent; empty sample set returned as real",
                        "MEDIUM", "db-read-empty-default"),
+    "E-WATCHDOG-003": ("auto-ticket for a hardware alert failed silently; the "
+                       "swallow is kept (watchdog must not crash) but nothing "
+                       "else records that the ticket was never opened",
+                       "MEDIUM", "silent-ticket-skip"),
 }
 _recorder = None
 
@@ -441,7 +445,15 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
                 priority=severity,
                 actor="system",   # actor seam: background service (watchdog)
             )
-    except Exception:
+    except Exception as exc:
+        # E-WATCHDOG-003 — the swallow itself is correct (watchdog genuinely
+        # must not crash on a ticket failure), but a hardware alert that
+        # should have opened a ticket silently didn't, and nothing else
+        # records it. best_effort: already inside the catch-all that exists
+        # specifically so a recording failure here cannot take the process
+        # down either.
+        _errors_record("E-WATCHDOG-003", {"fn": "_send_hw_alert", "key": key,
+                                          "error": f"{type(exc).__name__}: {exc}"})
         pass  # never crash watchdog
 
 
