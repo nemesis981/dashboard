@@ -30,6 +30,7 @@ log = logging.getLogger("nemesis.mem_appliance")
 __all__ = [
     "APPLIANCE_BUDGETS", "RECOVERY_EXEMPT", "PROVISIONAL_BASELINE_GB",
     "classify_process", "unit_for_pid", "sample_and_evaluate",
+    "RUNG_AVAILABILITY", "availability_map", "why_rung_absent",
     "load_memory_modules", "self_test",
 ]
 
@@ -182,6 +183,80 @@ def sample_and_evaluate(repo_root=None, budgets=None, proc_root="/proc"):
     verdicts["sample_ms"] = sample.get("sample_ms")
     verdicts["uss_state"] = sample.get("uss_state")
     return verdicts
+
+
+# ── which rungs STRUCTURALLY EXIST per component (operator decisions 2026-08-18)
+#
+# Audited read-only against the running services rather than assumed. A rung
+# absent here is one the ladder will SKIP and RECORD, instead of climbing to a
+# rung that silently does nothing — which reads, in every log and every UI, as a
+# working mitigation.
+#
+# ⚠ Skipping never accelerates escalation: the ladder waits for the skipped-to
+# rung's OWN justification threshold. See memladder.decide().
+_ALL = frozenset({"alert", "throttle", "abort", "restart"})
+
+RUNG_AVAILABILITY = {
+    # Third-party daemon. We have NO control surface over it: nothing of ours can
+    # slow it, and it has no discrete operation to cancel. Budgeted and NOT
+    # exempt, so it is still measured and alerted on — restart is its only real
+    # lever, and that is currently shadow.
+    "suricata": {"available": frozenset({"alert", "restart"}),
+                 "why_absent": {
+                     "throttle": "no control surface of ours over a third-party daemon",
+                     "abort": "no discrete operation to cancel"}},
+
+    # Operator decision: alert-only. Throttling the dashboard means rate-limiting
+    # the operator's own console — degrading the very interface used to diagnose
+    # the problem. Structurally possible, deliberately not offered.
+    "dashboard": {"available": frozenset({"alert"}),
+                  "why_absent": {
+                      "throttle": "would rate-limit the operator's own console "
+                                  "while they are diagnosing the problem",
+                      "abort": "no discrete operation; requests are the work",
+                      "restart": "operator decision: alert-only"}},
+
+    # These four expose a real interval today (audited): lengthening it is a
+    # genuine, gentle throttle.
+    "hw-monitor":          {"available": _ALL, "why_absent": {}},
+    "watchdog":            {"available": _ALL, "why_absent": {}},
+    "alert-watcher":       {"available": _ALL, "why_absent": {}},
+    "diagnostics-watcher": {"available": _ALL, "why_absent": {}},
+
+    # Sweeps with sleeps but no named interval knob yet. THROTTLE is marked
+    # absent HONESTLY until a knob exists — claiming it before then would be a
+    # rung that does nothing.
+    "device-scanner": {"available": frozenset({"alert", "abort", "restart"}),
+                       "why_absent": {"throttle": "sweep has no interval knob yet"}},
+    "malware-canary": {"available": frozenset({"alert", "abort", "restart"}),
+                       "why_absent": {"throttle": "loop has no interval knob yet"}},
+
+    # Exempt anyway; recorded for completeness so the table is not silently
+    # partial.
+    "clamav-daemon": {"available": frozenset({"alert"}),
+                      "why_absent": {"throttle": "recovery-exempt; also no control "
+                                                 "surface of ours",
+                                     "abort": "recovery-exempt",
+                                     "restart": "recovery-exempt — restarting it "
+                                                "disarms malware scanning"}},
+}
+
+
+def availability_map():
+    """component -> set of available rungs, for `memladder.decide(available=...)`."""
+    return {k: v["available"] for k, v in RUNG_AVAILABILITY.items()}
+
+
+def why_rung_absent(component, rung):
+    """Why a rung is missing, or None if it is available/unknown.
+
+    Returned so a 'blocked' ladder action can say WHY rather than leaving an
+    operator to infer that a rung is missing from its absence.
+    """
+    entry = RUNG_AVAILABILITY.get(component)
+    if not entry:
+        return None
+    return entry["why_absent"].get(rung)
 
 
 def self_test(proc_root="/proc"):

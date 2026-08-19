@@ -155,6 +155,74 @@ def test_self_test_passes_here():
     check("self_test ok", st["ok"], True)
 
 
+# ── rung availability ────────────────────────────────────────────────────────
+
+def test_availability_matches_the_audit():
+    print("\n[availability reflects what was actually audited, not assumed]")
+    am = ma.availability_map()
+    check("suricata: alert+restart only", sorted(am["suricata"]),
+          ["alert", "restart"])
+    check("dashboard: alert only (operator decision)", sorted(am["dashboard"]),
+          ["alert"])
+    check("hw-monitor has a real throttle", "throttle" in am["hw-monitor"], True)
+    check("device-scanner throttle honestly absent",
+          "throttle" in am["device-scanner"], False)
+
+
+def test_every_absent_rung_states_why():
+    """An absent rung with no reason is indistinguishable from an oversight."""
+    print("\n[every absent rung carries a reason]")
+    problems = []
+    for comp, entry in ma.RUNG_AVAILABILITY.items():
+        for rung in ("throttle", "abort", "restart", "alert"):
+            if rung not in entry["available"] and not entry["why_absent"].get(rung):
+                problems.append("%s/%s" % (comp, rung))
+    check("no unexplained absences", problems, [])
+    check("CONTROL a reason is actually retrievable",
+          bool(ma.why_rung_absent("suricata", "throttle")), True)
+    check("CONTROL an available rung has no reason",
+          ma.why_rung_absent("hw-monitor", "throttle"), None)
+
+
+def test_alert_is_available_everywhere():
+    """Nothing may be invisible: every component can at least be alerted on."""
+    print("\n[every component keeps ALERT — nothing becomes silent]")
+    missing = [c for c, e in ma.RUNG_AVAILABILITY.items()
+               if "alert" not in e["available"]]
+    check("alert present for all", missing, [])
+
+
+def test_availability_covers_every_budgeted_component():
+    print("\n[every budgeted component has an availability entry]")
+    missing = sorted(set(ma.APPLIANCE_BUDGETS) - set(ma.RUNG_AVAILABILITY))
+    check("no budgeted component left undeclared", missing, [])
+
+
+def test_ladder_consumes_the_map_end_to_end():
+    print("\n[the ladder actually honours the appliance's availability map]")
+    import importlib.util, os as _os
+    root = _os.path.dirname(_os.path.dirname(_os.path.abspath(ma.__file__)))
+    spec = importlib.util.spec_from_file_location(
+        "ml_t", _os.path.join(root, "nemesis_agent", "memladder.py"))
+    ml = importlib.util.module_from_spec(spec); spec.loader.exec_module(ml)
+
+    def V(name):
+        return {"state": "ok", "components": {name: {
+            "verdict": "breach", "observed_mb": 900.0, "budget_mb": 100.0,
+            "basis": "uss", "detail": "t"}}}
+
+    st, acts = ml.new_state(), []
+    for _ in range(20):
+        st, a = ml.decide(V("suricata"), st, ml.DEFAULT_POLICY,
+                          available=ma.availability_map())
+        acts.extend(a)
+    climbed = [x["rung"] for x in acts if x["kind"] == "escalate"]
+    check("suricata skips throttle and abort", climbed, ["alert", "restart"])
+    check("the skip is recorded",
+          [x for x in acts if x["rung"] == "restart"][0]["skipped_rungs"],
+          ["throttle", "abort"])
+
+
 if __name__ == "__main__":
     print("mem_appliance — appliance half of the RAM budget work")
     test_clamd_is_budgeted_and_exempt()
@@ -164,6 +232,11 @@ if __name__ == "__main__":
     test_table_is_coherent_at_every_plausible_baseline()
     test_every_budget_records_its_basis()
     test_generic_modules_load_without_polluting_sys_path()
+    test_availability_matches_the_audit()
+    test_every_absent_rung_states_why()
+    test_alert_is_available_everywhere()
+    test_availability_covers_every_budgeted_component()
+    test_ladder_consumes_the_map_end_to_end()
     test_self_test_passes_here()
 
     print("\n" + "=" * 64)
