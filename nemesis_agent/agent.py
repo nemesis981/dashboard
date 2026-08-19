@@ -26,6 +26,15 @@ import config
 import keyprotect
 from modules import hardware, security, scanner
 
+# Tier 2 (challenge-response) — PRIVATE module, deployed separately. Absent -> None
+# and the challenge branch below is simply never taken. Guarded so a device without
+# the Tier 2 files behaves exactly as today.
+try:
+    import tier2_agent as _tier2_agent          # noqa: PLC0415
+    import tier2_common as _tier2_common        # noqa: PLC0415
+except Exception:                                # ImportError or any load failure
+    _tier2_agent = _tier2_common = None
+
 _HERE = __import__("os").path.dirname(__import__("os").path.abspath(__file__))
 
 logging.basicConfig(
@@ -970,6 +979,17 @@ def _handle_response_tasks(response, device_id):
                 # verify_task, means the only path to it runs through a signature
                 # check against the key currently pinned.
                 result = _rotate_server_anchor(verified, device_id)
+            elif (_tier2_agent is not None and _tier2_common is not None
+                  and verified["action"] == _tier2_common.CHALLENGE_ACTION):
+                # Tier 2 challenge. Downstream of verify_task (this is a signed
+                # task) and NEVER routed through _dispatch — same hazard as
+                # ATTEST/ROTATE: the loopback listener is unauthenticated, and a
+                # local process able to answer a challenge could forge integrity.
+                # respond_to_challenge never raises; it measures LIVE __code__ of
+                # the server-named covered callables and returns a nonce-bound hash.
+                _cp = verified.get("params") or {}
+                result = _tier2_agent.respond_to_challenge(
+                    _cp.get("nonce", ""), _cp.get("covered") or [])
             else:
                 result = _CommandHandler._dispatch(None, verified["action"],
                                                    verified.get("params") or {})

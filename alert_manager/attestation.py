@@ -52,6 +52,37 @@ _KNOWN_STATES = (ATTESTED, FAILED, ABSENT)
 # The action name carried in the signed envelope.
 ACTION = "attest_manifest"
 
+
+# ── Tier 2 (challenge-response) integration — GUARDED, OBSERVE-ONLY, DORMANT ──
+# The mechanism lives in the PRIVATE attestation-tier2 module (Rule 10 carve-out),
+# deployed separately alongside the server. If it is not importable, Tier 2 is
+# simply OFF and Tier 1 is completely unaffected. Nothing here fires until BOTH
+# the private module is deployed AND the manifest/challenge issuance transport
+# exists (issuance is absent today — build_manifest_envelope has no caller — so
+# these hooks are dormant by construction, not just by flag).
+try:
+    import tier2_server as _tier2            # noqa: PLC0415  (private, deployed apart)
+except Exception:                            # ImportError or any load failure
+    _tier2 = None
+
+#: COVERED — the memory-injection detector's real entry points (FORWARD-DECLARED;
+#: they read 'absent' until the detector loads on agents, which is expected and
+#: correct) PLUS the interim real-loaded critical callables (which attest today).
+#: keyprotect is deliberately OMITTED: it is a PACKAGE and the private module's
+#: source-path resolver maps a bare name to `<name>.py`, so including it would make
+#: manifest build RAISE. Follow-up for Window 3 (package-aware path or a submodule
+#: target) — see the Window 1 handoff.
+TIER2_COVERED = (
+    "tasks:verify_task", "enrollment:_sign", "attest:build_manifest",
+    "modules.scanner:trigger_scan",
+    "procmem:sample_processes", "membudget:evaluate", "memladder:decide",
+)
+
+
+def tier2_available() -> bool:
+    """True only if the private Tier 2 module is importable (i.e. deployed)."""
+    return _tier2 is not None
+
 # How long a manifest envelope stays valid. Short enough that a captured
 # envelope is not indefinitely replayable, long enough for an agent on a slow
 # poll cadence to collect it.
@@ -113,6 +144,17 @@ def build_manifest_envelope(device_id: str, agent_version: str,
                          "manifest would be replayable onto any device")
 
     manifest = build_manifest(agent_version, agent_root)
+    # Tier 2 augmentation — guarded + best-effort. Adds code_digests/code_digest_python
+    # to the manifest so a later challenge can be verified against it. Skipped
+    # entirely (Tier 1 manifest unchanged) when the private module is absent.
+    if tier2_available():
+        try:
+            from nemesis_agent import attest as _attest      # noqa: PLC0415
+            _root = agent_root or _attest.agent_dir()
+            _tier2.augment_manifest(manifest, TIER2_COVERED, _root)
+        except Exception as e:                                # noqa: BLE001
+            log.warning("tier2: manifest augmentation skipped (%s) — Tier 1 manifest "
+                        "unaffected", e)
     envelope = {
         "task_id":    "attest-%s" % uuid.uuid4().hex[:16],
         "device_id":  device_id,
@@ -192,3 +234,26 @@ def fleet_summary(conn) -> dict:
     out["healthy"] = out[ATTESTED]
     out["not_healthy"] = out[FAILED] + out[ABSENT]
     return out
+
+
+def verify_and_record_tier2(conn, device_id: str, manifest: dict, nonce_hex: str,
+                            agent_response, now: str | None = None) -> str | None:
+    """OBSERVE-ONLY: verify a Tier 2 challenge response and record its state in the
+    SEPARATE `tier2_state` column — NEVER `attestation_state`, so Tier 2 cannot
+    affect Tier 1 health gating (decision A2, observe-first). Returns the stored
+    state, or None if Tier 2 is unavailable. Dormant until issuance delivers a
+    (manifest, nonce, response) triple; nothing calls this yet.
+    """
+    if not tier2_available():
+        return None
+    state_dict = _tier2.verify_response(manifest, nonce_hex, agent_response)
+    state = state_dict.get("state", ABSENT)
+    detail = str(state_dict.get("detail") or "")[:500]
+    stamp = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE agent_devices SET tier2_state = ?, tier2_detail = ?, tier2_at = ? "
+        "WHERE device_id = ?", (state, detail, stamp, device_id))
+    if state != ATTESTED:
+        log.info("tier2: device=%s state=%s detail=%s (observe-only)",
+                 device_id, state, detail)
+    return state

@@ -325,6 +325,13 @@ def init_db():
                 attestation_detail TEXT,
                 attestation_at TEXT,
                 attestation_version TEXT,
+                -- Tier 2 (challenge-response) OBSERVE-ONLY state — SEPARATE from
+                -- attestation_state so it never gates Tier 1 health. 'absent' by
+                -- default and dormant until Tier 2 issuance + the private module
+                -- are deployed (ADR/attestation-tier2). See alert_manager/attestation.py.
+                tier2_state TEXT NOT NULL DEFAULT 'absent',
+                tier2_detail TEXT,
+                tier2_at TEXT,
                 -- ── remote-device entitlement (licensing cap) ──────────────
                 -- Mirrors the migration entry below. NOT NULL DEFAULT 0 for the
                 -- same reason attestation_state defaults to 'absent': a device
@@ -426,6 +433,11 @@ def init_db():
                           ("attestation_state",   "TEXT NOT NULL DEFAULT 'absent'"),
                           ("attestation_detail",  "TEXT"),
                           ("attestation_at",      "TEXT"),
+                          # Tier 2 observe-only (dormant until deployment) — same
+                          # 'absent' default logic as attestation_state, separate column.
+                          ("tier2_state",         "TEXT NOT NULL DEFAULT 'absent'"),
+                          ("tier2_detail",        "TEXT"),
+                          ("tier2_at",            "TEXT"),
                           ("attestation_version", "TEXT"),
                           # ── de-enroll on uninstall (clean-uninstall build spec) ──
                           ("uninstalled_at",      "TEXT"),
