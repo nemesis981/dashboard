@@ -98,16 +98,21 @@ DEFAULT_POLICY = {
     # the escalation thresholds on purpose: coming down fast after a throttle
     # takes effect would oscillate, throttling and un-throttling forever.
     "recover_after": 6,
-    # Which rungs may actually execute. RESTART is shadow by operator decision.
-    # ABORT is live because it is the defined escalation from throttle — flip it
-    # here, in one place, if that judgement changes.
+    # Which rungs may actually execute. ALERT and THROTTLE are live (each has a
+    # proven executor). ABORT and RESTART are BOTH shadow: neither has a proven
+    # executor, and each must earn promotion to live on its OWN resolved shadow
+    # evidence — `promotion_readiness(records, rung=...)`, PER RUNG — before it
+    # could act. A harsher rung with no evidence must never fire on the strength
+    # of a different rung's history. Flip a rung here, in one place, once its own
+    # shadow evidence clears the bar.
     "modes": {
         RUNG_ALERT: MODE_LIVE,
         RUNG_THROTTLE: MODE_LIVE,
-        RUNG_ABORT: MODE_LIVE,
+        RUNG_ABORT: MODE_SHADOW,
         RUNG_RESTART: MODE_SHADOW,
     },
-    # Promotion gate for RESTART. Both must hold, and only resolved records count.
+    # Promotion gate for the shadow rungs (ABORT and RESTART), applied PER RUNG.
+    # Both must hold, and only resolved records count.
     "promote_min_resolved": 20,
     "promote_max_unnecessary_rate": 0.05,
 }
@@ -253,16 +258,21 @@ def decide(verdicts, state, policy=None, exempt=frozenset(),
     return {"components": out_state}, actions
 
 
-def promotion_readiness(records, policy=None):
-    """Is there enough evidence to promote RESTART from shadow to live?
+def promotion_readiness(records, policy=None, rung=None):
+    """Is there enough evidence to promote a SHADOW rung (ABORT or RESTART) to live?
 
     `records` are shadow decisions each carrying an `outcome`. ONLY RESOLVED
     RECORDS COUNT — an unresolved decision is not evidence, and counting it
     would let volume masquerade as confidence, which is precisely the "fixed
     timeout or a guess" the operator ruled out.
+
+    `rung` scopes the evidence: pass RUNG_ABORT or RUNG_RESTART to gate that rung
+    on ITS OWN resolved records only. A harsher rung must not inherit a gentler
+    one's history — ABORT and RESTART earn promotion independently. `rung=None`
+    (the default) counts every record, preserving the original single-rung call.
     """
     policy = policy or DEFAULT_POLICY
-    recs = list(records or [])
+    recs = [r for r in (records or []) if rung is None or r.get("rung") == rung]
     resolved = [r for r in recs if r.get("outcome") in
                 (OUTCOME_CORRECT, OUTCOME_UNNECESSARY)]
     superseded = [r for r in recs if r.get("outcome") == OUTCOME_SUPERSEDED]
@@ -279,8 +289,9 @@ def promotion_readiness(records, policy=None):
     if rate is None:
         reasons.append("no resolved decisions to compute a false-positive rate")
     elif rate > policy["promote_max_unnecessary_rate"]:
-        reasons.append("unnecessary-restart rate %.1f%% exceeds the %.1f%% ceiling"
-                       % (100 * rate, 100 * policy["promote_max_unnecessary_rate"]))
+        reasons.append("unnecessary-%s rate %.1f%% exceeds the %.1f%% ceiling"
+                       % (rung or "action", 100 * rate,
+                          100 * policy["promote_max_unnecessary_rate"]))
 
     return {
         "ready": not reasons,

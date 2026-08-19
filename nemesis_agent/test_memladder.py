@@ -95,14 +95,48 @@ def test_monotonic_holds_when_the_streak_JUMPS():
     check("mid-ladder steps to THROTTLE only", acts3[0]["rung"], ml.RUNG_THROTTLE)
 
 
-def test_restart_is_shadow_and_lower_rungs_are_live():
-    print("\n[RESTART is shadow; alert/throttle/abort are live]")
+def test_abort_and_restart_are_shadow_alert_throttle_live():
+    print("\n[ABORT and RESTART are shadow; ALERT and THROTTLE are live]")
     _, acts = run([V("breach")] * 20)
     mode = {a["rung"]: a["mode"] for a in acts if a["kind"] == "escalate"}
     check("alert live", mode[ml.RUNG_ALERT], ml.MODE_LIVE)
     check("throttle live", mode[ml.RUNG_THROTTLE], ml.MODE_LIVE)
-    check("abort live", mode[ml.RUNG_ABORT], ml.MODE_LIVE)
+    check("abort SHADOW (parity with restart)", mode[ml.RUNG_ABORT], ml.MODE_SHADOW)
     check("restart SHADOW", mode[ml.RUNG_RESTART], ml.MODE_SHADOW)
+
+
+def test_abort_shadow_parity_with_restart():
+    """ABORT gets the exact same shadow-only shape as RESTART: decided but never
+    live, promotion-gated PER RUNG on its own resolved evidence."""
+    print("\n[ABORT shadow-only parity with RESTART]")
+    _, acts = run([V("breach")] * 20)                 # reaches ABORT (8) then RESTART (12)
+    esc = {a["rung"]: a["mode"] for a in acts if a["kind"] == "escalate"}
+    check("real trace reaches ABORT", ml.RUNG_ABORT in esc, True)
+    check("ABORT action is SHADOW, never live", esc.get(ml.RUNG_ABORT), ml.MODE_SHADOW)
+    check("RESTART also shadow (parity)", esc.get(ml.RUNG_RESTART), ml.MODE_SHADOW)
+    check("THROTTLE stays live (unchanged)", esc.get(ml.RUNG_THROTTLE), ml.MODE_LIVE)
+
+    # PER-RUNG promotion: ABORT earns promotion on ITS OWN resolved records only.
+    mixed = ([{"outcome": ml.OUTCOME_CORRECT, "rung": ml.RUNG_ABORT}] * 25 +
+             [{"outcome": ml.OUTCOME_CORRECT, "rung": ml.RUNG_RESTART}] * 25)
+    r_abort = ml.promotion_readiness(mixed, rung=ml.RUNG_ABORT)
+    check("ABORT gated on its OWN 25 (not the mixed 50)", r_abort["resolved"], 25)
+    check("ABORT promotes on clean ABORT evidence", r_abort["ready"], True)
+    check("reason wording is ABORT-scoped when it blocks",
+          "abort" in ml.promotion_readiness(
+              [{"outcome": ml.OUTCOME_CORRECT, "rung": ml.RUNG_ABORT}] * 20 +
+              [{"outcome": ml.OUTCOME_UNNECESSARY, "rung": ml.RUNG_ABORT}] * 5,
+              rung=ml.RUNG_ABORT)["reasons"][0], True)
+
+    # CONTROL: a harsher rung must NOT inherit a gentler one's history.
+    only_restart = [{"outcome": ml.OUTCOME_CORRECT, "rung": ml.RUNG_RESTART}] * 25
+    r = ml.promotion_readiness(only_restart, rung=ml.RUNG_ABORT)
+    check("CONTROL: RESTART's evidence does NOT promote ABORT", r["ready"], False)
+    check("CONTROL: zero ABORT-scoped resolved", r["resolved"], 0)
+
+    # the generic evidence pipeline carries the ABORT rung
+    rec = ml.shadow_record({"component": "svc", "rung": ml.RUNG_ABORT}, 0)
+    check("shadow_record tags the ABORT rung", rec["rung"], ml.RUNG_ABORT)
 
 
 # ── the exemption ────────────────────────────────────────────────────────────
@@ -398,7 +432,8 @@ if __name__ == "__main__":
         test_single_breach_does_not_act,
         test_escalation_is_monotonic_and_ordered,
         test_monotonic_holds_when_the_streak_JUMPS,
-        test_restart_is_shadow_and_lower_rungs_are_live,
+        test_abort_and_restart_are_shadow_alert_throttle_live,
+        test_abort_shadow_parity_with_restart,
         test_exempt_component_caps_at_alert,
         test_non_exempt_control_does_escalate,
         test_indeterminate_neither_escalates_nor_decays,
