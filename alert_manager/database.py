@@ -522,6 +522,55 @@ def get_remote_observe_every_n():
     return n
 
 
+def init_throttle_tables():
+    """Canonical DDL for the cooperative-throttle seam (see alert_manager/throttle.py).
+
+    Same publish-state shape as init_tier2_gate_tables: one namespace WRITES, every
+    cooperating service READS (ADR 0001 read-any), no other coupling.
+
+    `throttle_intents` holds ONE row per component describing the CURRENT intent.
+    Like the tier2 gate's state row, a stored intent is a claim about a moment, not
+    a fact that expires on its own -- so it carries `until_ts`, and every reader
+    MUST treat now >= until_ts as NORMAL (throttle.py::_effective_factor does). If
+    the executor dies mid-throttle, the intent lapses and services return to full
+    speed on their own rather than staying stuck slow forever.
+
+    `throttle_components` is the cooperating-service registry: one row per service
+    that has declared itself throttle-aware, with a last-seen heartbeat and pid, so
+    the executor/dashboard can tell which throttle-capable services are actually
+    running and listening -- the difference between a THROTTLE that will be honoured
+    and one published into the void.
+
+    Both tables carry `actor` for the same multi-user-ready reason every other
+    state-changing table here does; the Data Manager stamps it automatically.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS throttle_intents (
+                component   TEXT    PRIMARY KEY,
+                factor      REAL    NOT NULL,
+                until_ts    REAL    NOT NULL,
+                reason      TEXT,
+                source      TEXT,
+                updated_ts  REAL    NOT NULL,
+                actor       TEXT
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS throttle_components (
+                component           TEXT    PRIMARY KEY,
+                last_registered_ts  REAL    NOT NULL,
+                pid                 INTEGER,
+                actor               TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_devices_table():
     """Canonical DDL for the core `devices` table (LAN-scan inventory).
 

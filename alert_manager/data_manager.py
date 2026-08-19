@@ -167,6 +167,16 @@ NAMESPACES = {
     # `integrity_watch`).
     "tier2_gate":         {"tables": ("tier2_gate_state", "tier2_gate_events")},
 
+    # ── cooperative throttle seam (2026-08-19) ───────────────────────────────
+    # The throttle executor publishes per-component throttle INTENT here; each
+    # throttle-aware service reads it and scales its own sleep (see
+    # alert_manager/throttle.py). Same publish-state shape as tier2_gate: this
+    # namespace WRITES both tables, cooperating services only READ (ADR 0001
+    # read-any needs no grant). EXACT-MATCH dict form on purpose -- this gates a
+    # cross-process control signal, so a stray future `throttle_*` table must not
+    # be silently pre-authorised. Adding a table here is a deliberate act.
+    "throttle":           {"tables": ("throttle_intents", "throttle_components")},
+
     # ── Track C consent grant / revoke + Requirement 0 clause 7 purge ────────
     # `alert_manager/conn_consent.py`. Deliberately NOT folded into the
     # `dashboard` namespace even though the route is served there: revocation

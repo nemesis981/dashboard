@@ -30,6 +30,8 @@ DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 WATCHER_LOG = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "alert_watcher.log")
 POLL_INTERVAL = 1.0
 SWEEP_INTERVAL = 30.0
+#: Throttle handle, set in main() once alert-watcher registers throttle-aware.
+_throttle = None
 QUARANTINE_HOURS = 1
 
 log = logging.getLogger("alert_watcher")
@@ -330,16 +332,27 @@ def expiry_sweep():
         conn.close()
 
 
+def _sweep_sleep(seconds):
+    """The expiry-sweep loop's wait, cooperatively throttled. ONLY the background
+    sweep is throttled -- never the alert `tail`, whose latency is the product's
+    whole job; lengthening THAT would be the opposite of a gentle throttle. Falls
+    back to the plain interruptible sleep when unregistered."""
+    if _throttle is not None:
+        _throttle.throttled_sleep(seconds, is_running=lambda: _running)
+    else:
+        for _ in range(int(seconds)):
+            if not _running:
+                return
+            time.sleep(1)
+
+
 def sweep_loop():
     while _running:
         try:
             expiry_sweep()
         except Exception as e:
             log.exception("sweep failed: %s", e)
-        for _ in range(int(SWEEP_INTERVAL)):
-            if not _running:
-                break
-            time.sleep(1)
+        _sweep_sleep(SWEEP_INTERVAL)
 
 
 def tail(path):
@@ -376,6 +389,21 @@ def main():
     log.info("alert_watcher starting (log=%s db=%s)", LOG_FILE, DB_PATH)
     init_alerts_db()
     init_quarantines_db()
+
+    # Cooperative throttle seam (ADR 0006). Best-effort; throttle.py fails OPEN.
+    global _throttle
+    try:
+        import throttle                                  # noqa: PLC0415
+        import data_manager                              # noqa: PLC0415
+        import database as _db_throttle                  # noqa: PLC0415
+        _db_throttle.init_throttle_tables()
+        _throttle = throttle.register_throttle_aware(
+            "alert-watcher", data_manager.DataManager(DB_PATH))
+        log.info("throttle: alert-watcher registered as throttle-aware")
+    except Exception as exc:                             # noqa: BLE001
+        _throttle = None
+        log.error("throttle: could not register alert-watcher (%s) -- sweep runs at "
+                  "normal cadence, un-throttleable, until resolved", exc)
     # No dedup cache: ufw block ops are idempotent, and the cache's empty-set-
     # on-failure behaviour is what hid the 2026-07-27 firewall outage.
     expiry_sweep()

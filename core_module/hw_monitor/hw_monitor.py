@@ -100,6 +100,9 @@ _running = True
 
 # ── Data Manager wiring (ADR 0001/0006 retrofit, 2026-07-28) ─────────────────
 _DM = None
+#: Throttle handle for the sample loop, set in main() once hw-monitor registers
+#: itself throttle-aware. None until then / if registration fails -> plain sleep.
+_throttle = None
 
 
 def _db_connect():
@@ -4038,6 +4041,18 @@ def _sleep_interruptible(seconds):
         time.sleep(1)
 
 
+def _sample_sleep(seconds):
+    """The sample loop's wait, cooperatively throttled. If hw-monitor registered
+    throttle-aware, the memory ladder can lengthen this sleep under RAM pressure;
+    otherwise it is exactly the plain interruptible sleep. Reads intent each call,
+    so a lifted/expired throttle takes effect on the next tick. Fails OPEN — a
+    throttle read error runs at normal speed (throttle.py), never stalls sampling."""
+    if _throttle is not None:
+        _throttle.throttled_sleep(seconds, is_running=lambda: _running)
+    else:
+        _sleep_interruptible(seconds)
+
+
 def main():
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
@@ -4079,6 +4094,22 @@ def main():
         log.exception("could not ensure Track C tables exist — connection ingest "
                       "will reject everything until this is resolved")
 
+    # Cooperative throttle seam (ADR 0006). Register hw-monitor so the memory
+    # escalation ladder can publish a gentle slowdown of the sample loop under RAM
+    # pressure (the loop reads that intent each tick via _sample_sleep). Best-effort:
+    # a failure must not stop telemetry ingest, and throttle.py fails OPEN.
+    global _throttle
+    try:
+        import throttle                                  # noqa: PLC0415
+        import database as _db_throttle                  # noqa: PLC0415
+        _db_throttle.init_throttle_tables()
+        _throttle = throttle.register_throttle_aware("hw-monitor", _dm())
+        log.info("throttle: hw-monitor registered as throttle-aware")
+    except Exception as exc:                             # noqa: BLE001
+        _throttle = None
+        log.error("throttle: could not register hw-monitor (%s) -- sampling runs "
+                  "at normal speed, un-throttleable, until this is resolved", exc)
+
     # Server signing keypair (ADR 0004 Stage 1). hw_monitor is the ONLY process
     # that signs task envelopes, so it is the only one that holds the private
     # half — the dashboard gets the public key alone. Created here rather than at
@@ -4108,7 +4139,7 @@ def main():
 
     _bootstrap_fan_status()
     # Sleep one interval first so the first delta covers a full window.
-    _sleep_interruptible(SAMPLE_INTERVAL)
+    _sample_sleep(SAMPLE_INTERVAL)
     while _running:
         try:
             sample = _collect_sample_with_deltas()
@@ -4143,7 +4174,7 @@ def main():
             # skipping this one on an unrelated failure would quietly stop
             # enforcing seen-set retention with nothing in the log saying so.
             reap_conn_seen()
-        _sleep_interruptible(SAMPLE_INTERVAL)
+        _sample_sleep(SAMPLE_INTERVAL)
     log.info("hw_monitor stopped")
 
 

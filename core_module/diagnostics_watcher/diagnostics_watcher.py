@@ -28,6 +28,8 @@ _HERE   = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DEFAULT_INTERVAL_SECONDS = 60
+#: Throttle handle, set in main() once diagnostics-watcher registers throttle-aware.
+_throttle = None
 # systemd sets $LOGS_DIRECTORY from the unit's LogsDirectory=, and creates it
 # owned by the service user. Preferring it avoids a hardcoded path drifting
 # from what the unit actually provisions — under ProtectSystem=strict the
@@ -143,6 +145,20 @@ def _notify(result: dict) -> None:
         log.exception("diagnostics-service: connectivity notify failed")
 
 
+def _probe_sleep(seconds):
+    """The probe loop's wait, cooperatively throttled. The interval is already read
+    fresh each loop (the scheduler-aware seam); this lets the memory ladder lengthen
+    it further under RAM pressure. Falls back to the plain interruptible sleep when
+    unregistered."""
+    if _throttle is not None:
+        _throttle.throttled_sleep(seconds, is_running=lambda: _running)
+    else:
+        slept = 0
+        while _running and slept < seconds:
+            time.sleep(1)
+            slept += 1
+
+
 def main() -> None:
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -152,6 +168,21 @@ def main() -> None:
         diag._init_db()
     except Exception:
         log.exception("diagnostics-service: _init_db failed at startup")
+
+    # Cooperative throttle seam (ADR 0006). Best-effort; throttle.py fails OPEN.
+    global _throttle
+    try:
+        import throttle                                  # noqa: PLC0415
+        import data_manager                              # noqa: PLC0415
+        import database as _db_throttle                  # noqa: PLC0415
+        _db_throttle.init_throttle_tables()
+        _throttle = throttle.register_throttle_aware(
+            "diagnostics-watcher", data_manager.DataManager(DB_PATH))
+        log.info("throttle: diagnostics-watcher registered as throttle-aware")
+    except Exception as exc:                             # noqa: BLE001
+        _throttle = None
+        log.error("throttle: could not register diagnostics-watcher (%s) -- probe "
+                  "runs at normal cadence, un-throttleable, until resolved", exc)
 
     _add_flat_log_handler()
     # journald-visible (stdout) AND flat log (the FileHandler just added).
@@ -172,11 +203,7 @@ def main() -> None:
             log.exception("diagnostics-service: probe cycle error")
 
         # Sleep in 1s increments so SIGTERM/SIGINT shut us down promptly.
-        interval = _interval_seconds()
-        slept = 0
-        while _running and slept < interval:
-            time.sleep(1)
-            slept += 1
+        _probe_sleep(_interval_seconds())
 
     log.info("diagnostics watcher stopped cleanly")
 

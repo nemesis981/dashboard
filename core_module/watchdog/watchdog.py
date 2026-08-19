@@ -21,6 +21,9 @@ SERVICES = [
 ]
 
 CHECK_INTERVAL_SECONDS = 120
+#: Throttle handle, set in main() once watchdog registers throttle-aware.
+#: None until then / if registration fails -> plain sleep.
+_throttle = None
 _HERE = os.path.dirname(os.path.abspath(__file__))
 # systemd sets $LOGS_DIRECTORY when the unit declares LogsDirectory=. Falling
 # back to _HERE keeps the pre-migration unit working unchanged.
@@ -575,10 +578,37 @@ def check_service(service: str) -> None:
         send_email_alert(service)
 
 
+def _check_sleep(seconds):
+    """Watchdog's between-checks wait, cooperatively throttled. If registered, the
+    memory ladder can lengthen it under RAM pressure; otherwise it is a plain sleep.
+    Watchdog has no _running flag (it runs `while True`), so is_running is constant
+    True -- the 1s-step throttled sleep is STRICTLY more interruptible than the old
+    single time.sleep(120) (SIGTERM lands within 1s, not up to the full interval)."""
+    if _throttle is not None:
+        _throttle.throttled_sleep(seconds, is_running=lambda: True)
+    else:
+        time.sleep(seconds)
+
+
 def main() -> None:
     logging.info("Watchdog started. Monitoring: %s", ", ".join(SERVICES))
     _init_cooldown_table()
     _load_cooldowns()
+
+    # Cooperative throttle seam (ADR 0006). Best-effort: a failure must not stop
+    # health monitoring, and throttle.py fails OPEN (read error = normal speed).
+    global _throttle
+    try:
+        import throttle                                  # noqa: PLC0415
+        import database as _db_throttle                  # noqa: PLC0415
+        _db_throttle.init_throttle_tables()
+        _throttle = throttle.register_throttle_aware(
+            "watchdog", data_manager.DataManager(HW_DB_PATH))
+        logging.info("throttle: watchdog registered as throttle-aware")
+    except Exception as exc:                             # noqa: BLE001
+        _throttle = None
+        logging.error("throttle: could not register watchdog (%s) -- checks run at "
+                      "normal cadence, un-throttleable, until resolved", exc)
     logging.info(
         "HW thresholds: cpu>%s°C gpu>%s°C ambient>%s°C nvme>%s°C "
         "fan<=%s rpm (cpu-fan when cpu>%s°C, chassis fan when load>%s%%) "
@@ -598,7 +628,7 @@ def main() -> None:
             check_hw_metrics()
         except Exception as exc:
             logging.exception("Unexpected error in check_hw_metrics: %s", exc)
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        _check_sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
