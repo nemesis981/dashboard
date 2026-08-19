@@ -327,6 +327,50 @@ def test_throttle_status_consistency_and_guard():
     check("CONTROL: UNAVAILABLE (pending) is NOT refused by the guard", passed, True)
 
 
+def test_throttle_status_report_and_log_line():
+    """Directly exercise throttle_status_report() and log_throttle_status() on the
+    DEFAULT now=None path — the exact call /api/throttle-status makes, and the path
+    a missing `import time` crashed on (the earlier tests only covered the static
+    throttle_status()/throttle_status_map(), never these DB-backed surfaces)."""
+    print("\n[throttle status surface: report + log line, default now=None]")
+    import os, sqlite3, tempfile, io, logging                # noqa: PLC0415
+    import database, data_manager, throttle                  # noqa: PLC0415
+    tmp = tempfile.mkdtemp(prefix="nem-tsr-")
+    database.DB_PATH = os.path.join(tmp, "alerts.db")
+    database.init_throttle_tables()
+    dm = data_manager.DataManager(database.DB_PATH)
+    throttle.publish_throttle("hw-monitor", 4.0, 600, "pressure", dm)   # live intent
+    throttle.register_throttle_aware("watchdog", dm)
+    conn = sqlite3.connect(database.DB_PATH)
+
+    # DEFAULT now=None — this is what crashed before `import time`.
+    rep = ma.throttle_status_report(conn)                    # no `now=` -> time.time()
+    check("report returns without crashing on default now", isinstance(rep, dict), True)
+    check("report distinguishes UNTHROTTLED from unavailable",
+          (rep["clamav-daemon"]["status"], rep["device-scanner"]["status"]),
+          (ma.THROTTLE_UNTHROTTLED, ma.THROTTLE_UNAVAILABLE))
+    check("report shows the live throttle on hw-monitor", rep["hw-monitor"]["throttled"], True)
+
+    # log_throttle_status also defaults now=None -> same path
+    buf = io.StringIO(); h = logging.StreamHandler(buf); h.setLevel(logging.INFO)
+    ma.log.addHandler(h); ma.log.setLevel(logging.INFO)
+    try:
+        rep2 = ma.log_throttle_status(conn)                 # no `now=`
+    finally:
+        ma.log.removeHandler(h)
+    check("log_throttle_status returns without crashing on default now",
+          isinstance(rep2, dict), True)
+    check("log line names UNTHROTTLED-by-design",
+          "UNTHROTTLED-by-design" in buf.getvalue(), True)
+
+    # graceful: missing throttle tables -> static-only, still default now=None, no crash
+    c2 = sqlite3.connect(":memory:")
+    rep3 = ma.throttle_status_report(c2)                     # no `now=`, no tables
+    check("static-only when tables absent (no crash on default now)",
+          rep3["clamav-daemon"]["status"], ma.THROTTLE_UNTHROTTLED)
+    conn.close()
+
+
 if __name__ == "__main__":
     print("mem_appliance — appliance half of the RAM budget work")
     test_clamd_is_budgeted_and_exempt()
@@ -345,6 +389,7 @@ if __name__ == "__main__":
     test_throttle_executor_end_to_end()
     test_throttle_status_three_way()
     test_throttle_status_consistency_and_guard()
+    test_throttle_status_report_and_log_line()
 
     print("\n" + "=" * 64)
     if _failures:

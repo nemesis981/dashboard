@@ -24,6 +24,7 @@ import importlib.util
 import logging
 import os
 import re
+import time
 
 import throttle
 
@@ -451,3 +452,60 @@ def execute_ladder_throttle(new_state, dm, *, ladder=None, policy=None, now=None
         throttle.clear_throttle(name, dm, now=now)
         results.append({"component": name, "action": "clear"})
     return results
+
+
+# ── THROTTLE STATUS SURFACE — makes throttle_status_map() (incl. UNTHROTTLED) visible ──
+# Combines the STATIC classification (throttleable / unthrottled / unavailable) with the
+# LIVE DB state (throttle_intents + throttle_components) so a reader sees, in one place,
+# both "is this a candidate by design" AND "is it throttled right now". UNTHROTTLED reads
+# distinctly from unavailable — the whole point.
+
+def throttle_status_report(conn, now=None):
+    """{component: {status, throttled, factor, reason, source, registered}}.
+
+    `conn` is any live DB connection (reads are read-any; SELECT is not guarded).
+    Missing throttle tables (never initialised) degrade to static-status-only rather
+    than raising — the surface still shows the design classification.
+    """
+    now = time.time() if now is None else now
+    smap = throttle_status_map()
+    intents, reg = {}, {}
+    try:
+        for r in conn.execute("SELECT component, factor, until_ts, reason, source "
+                              "FROM throttle_intents").fetchall():
+            intents[r[0]] = (r[1], r[2], r[3], r[4])
+        for r in conn.execute("SELECT component FROM throttle_components").fetchall():
+            reg[r[0]] = True
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("throttle status: could not read live state (%s) — showing "
+                    "static classification only", e)
+    out = {}
+    for comp in sorted(set(smap) | set(intents) | set(reg)):
+        factor, reason, source = 1.0, None, None
+        if comp in intents:
+            f, until, rsn, src = intents[comp]
+            factor = throttle._effective_factor({"factor": f, "until_ts": until}, now)
+            reason, source = rsn, src
+        out[comp] = {
+            "status": smap.get(comp, THROTTLE_UNAVAILABLE),
+            "throttled": factor > throttle.NORMAL,
+            "factor": round(factor, 2),
+            "reason": reason,
+            "source": source,
+            "registered": comp in reg,
+        }
+    return out
+
+
+def log_throttle_status(conn, now=None):
+    """Emit ONE summary log line distinguishing UNTHROTTLED (by design) from
+    UNAVAILABLE (not wired yet), plus any currently-active throttles."""
+    rep = throttle_status_report(conn, now)
+    n_t = sum(1 for r in rep.values() if r["status"] == THROTTLE_THROTTLEABLE)
+    unth = [c for c, r in rep.items() if r["status"] == THROTTLE_UNTHROTTLED]
+    n_u = sum(1 for r in rep.values() if r["status"] == THROTTLE_UNAVAILABLE)
+    active = ["%s %.0fx" % (c, r["factor"]) for c, r in rep.items() if r["throttled"]]
+    log.info("throttle status: %d throttleable, %d UNTHROTTLED-by-design (%s), "
+             "%d unavailable-pending; active: %s",
+             n_t, len(unth), ",".join(unth) or "-", n_u, ", ".join(active) or "none")
+    return rep

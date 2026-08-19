@@ -5259,6 +5259,34 @@ def api_vpn_status():
     return jsonify({**vpn, "split_tunnel_apps": split_tunnel})
 
 
+@app.route("/api/throttle-status")
+def api_throttle_status():
+    """Live throttle status surface: each component's design classification
+    (throttleable / UNTHROTTLED-by-design / unavailable-pending) plus its live
+    state (throttled now? factor/reason/source, registered?). Read-only, behind
+    the dashboard auth. Also emits one summary log line so the state is visible
+    in the journal too, per Item 2. UNTHROTTLED reads distinctly from unavailable.
+    """
+    try:
+        import mem_appliance as _ma                      # noqa: PLC0415
+    except Exception as e:                               # noqa: BLE001
+        return jsonify({"error": "throttle status unavailable: %s" % e}), 503
+    conn = _dm_conn()
+    try:
+        report = _ma.log_throttle_status(conn)   # logs the line AND returns the report
+    finally:
+        conn.close()
+    return jsonify({
+        "components": report,
+        "legend": {
+            "throttleable": "has a real interval to slow; a live candidate",
+            "unthrottled": "NEVER a candidate by design (no interval, or slowing "
+                           "would be harmful like restarting)",
+            "unavailable": "should be wired but has no interval knob yet",
+        },
+    })
+
+
 @app.route("/api/vpn/<action>", methods=["POST"])
 def api_vpn_action(action):
     """Connect/disconnect the VPN. POST-only, and not forgeable cross-origin.
