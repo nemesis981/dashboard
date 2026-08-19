@@ -3645,3 +3645,25 @@ commercial use requires a paid license, no pricing figures published) and a mini
           being indistinguishable from tampering — the same idea `AGENT_VERSION` already serves,
           at finer resolution. This last option is closest in spirit to the existing design.
     - [ ] Operator decision owed on which mitigation (or combination), not a Window 2 call.
+
+- [ ] **`install.sh` is not wired for the appliance self-scan service, and two clamd.conf
+      settings are missing — both open items on the ADR 0004 amendment's build, flagged so
+      whoever picks up `install.sh` next doesn't have to rediscover them.** Found by Window 3
+      while building the engine switch (`core_module/malware_scan/`, held pending review as of
+      this entry).
+    - [ ] **`install.sh` does not create the new service.** The unit reuses the existing
+          `nemesis-canary` user and `nemesis-db` group rather than a new identity — defensible
+          (same module, same DB access, same privilege profile) but a deliberate choice worth
+          ratifying, not an accident; a dedicated `nemesis-scan` user would be cleaner
+          separation if preferred. `install.sh` also needs to grant the new
+          `CAP_DAC_READ_SEARCH` capability the unit requires (see the entry above) — this
+          wasn't part of Window 3's original framing of this gap and is added here since it's
+          new since that framing.
+    - [ ] **`AlertPhishingSSLMismatch` and `AlertPhishingCloak` are not set in `clamd.conf`.**
+          The retired per-file CLI scanner passed these as flags; the daemon client silently
+          ignores unsupported CLI flags for settings that are daemon-side config only.
+          `install.sh` should set both in `clamd.conf` (and reload the daemon) to preserve the
+          detection capability the engine switch would otherwise quietly drop. Small in
+          practice for a filesystem scan (they target saved mail/HTML, and `ScanMail` is
+          already on) but a real, avoidable loss rather than one to absorb silently.
+    - [ ] Neither blocks committing the scan-engine code itself — both block *deploying* it.
