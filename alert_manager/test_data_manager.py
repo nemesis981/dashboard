@@ -101,6 +101,14 @@ def test_access_control(dm):
         check(True, f"{module} may CREATE/own {table}")
         conn.close()
 
+    # ADR 0023: agent_device_macs grant asserted DIRECTLY — behavioural tests build
+    # tables on plain sqlite3 and never pass through this guard, so a missing grant
+    # would surface only as a production WOULD-DENY with correlation silently empty.
+    check(dm_mod.check_write("hw_monitor", "agent_device_macs", "insert"),
+          "hw_monitor may WRITE agent_device_macs (ADR 0023 correlation)")
+    check(not dm_mod.check_write("hw_monitor", "not_a_real_table", "insert"),
+          "CONTROL: the grant is exact — a foreign table is refused")
+
     # reads across any table are allowed (read-any)
     conn = dm.connect("tickets")
     conn.execute("SELECT * FROM ai_usage")  # cross-module READ ok

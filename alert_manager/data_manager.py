@@ -225,6 +225,11 @@ NAMESPACES = {
             "hw_metrics", "hw_notifications", "hw_anomaly_snapshots",
             "scan_jobs", "scan_queue", "scan_conditions",
             "agent_devices", "correlation_events",
+            # agent_device_macs (ADR 0023): hw_monitor ingests reported LAN MACs
+            # at enroll/heartbeat. ⚠ Missing this name = silent WOULD-DENY (the
+            # behavioural tests build tables on plain sqlite3 and never hit this
+            # guard) -> correlation would just never populate. test asserts it.
+            "agent_device_macs",
             # Track C (2026-08-07): hw_monitor is the ingest point for agent
             # connection telemetry, so it writes the events and reaps them on
             # retention. `conn_consent` is the server-side consent record it

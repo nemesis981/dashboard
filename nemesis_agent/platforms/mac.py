@@ -70,6 +70,15 @@ def _route_iface_mac(server):
     return iface
 
 
+def get_lan_macs(server=None):
+    """ADR 0023 LAN-MAC correlation key. NOT YET IMPLEMENTED for mac — returns []
+    so the enrollment/heartbeat contract degrades cleanly (device simply is not
+    MAC-correlated until this lands). Follow-up: collect the physical (non-tunnel)
+    adapter MAC(s) and VERIFY ON A REAL MAC VM before trusting (same discipline as
+    tools/win_priv_probe.py), never ship unverified. Must never raise."""
+    return []
+
+
 def get_link_type(server=None):
     """'wifi' | 'ethernet' | 'unknown' for the physical link to the Nemesis server."""
     try:

@@ -311,12 +311,25 @@ def _detect_link_type(conf):
     return "unknown"
 
 
+def _detect_lan_macs(conf):
+    """Physical LAN-interface MAC(s) for the heartbeat — the ADR 0023 correlation
+    key, re-reported each beat so it self-heals when a NIC/MAC changes. [] on any
+    failure or on a platform that cannot collect them yet."""
+    try:
+        if _platform_mod and hasattr(_platform_mod, "get_lan_macs"):
+            return _platform_mod.get_lan_macs(conf.get("nemesis_ip"))
+    except Exception as e:
+        log.debug("lan_macs detection error: %s", e)
+    return []
+
+
 def _collect_payload(conf):
     device_id   = conf.get("device_id", "unknown")
     device_name = conf.get("device_name", socket.gethostname())
     device_type = _platform_name.lower().replace("darwin", "mac")
     conn_type   = _detect_connection_type(conf)
     link_type   = _detect_link_type(conf)
+    lan_macs    = _detect_lan_macs(conf)
 
     # Hardware
     raw_hw = {}
@@ -393,6 +406,7 @@ def _collect_payload(conf):
         "device_type":     device_type,
         "connection_type": conn_type,
         "link_type":       link_type,
+        "lan_macs":        lan_macs,
         "timestamp":       datetime.now().isoformat(timespec="seconds"),
         "hardware":        hw,
         "security":        sec,

@@ -2779,6 +2779,12 @@ def get_network_devices():
         cols = ["mac", "ip", "friendly_name", "device_type", "trusted"] + extra
         c.execute(f"SELECT {', '.join(cols)} FROM devices ORDER BY ip")
         db_devices = c.fetchall()
+        # ADR 0023: correlate devices.mac against approved agents' reported LAN MACs
+        # (agent_device_macs) — the real join replacing the ip_address 2/13. MUST run
+        # while `conn` is still OPEN: a query on a closed connection raises
+        # ProgrammingError, which approved_agent_macs would surface (it now logs), but
+        # the correct fix is ordering, not relying on the error path.
+        _agent_macs = hw_monitor.approved_agent_macs(conn)
         conn.close()
 
         import nemesis_device_category as _cat
@@ -2808,16 +2814,13 @@ def get_network_devices():
                 # built from whatever was actually SELECTed.
                 "hostname": row.get("hostname"),
             }
-            # has_agent is NOT passed yet. Correlating a `devices` row to an
-            # enrolled agent needs a join that does not exist: `devices` is
-            # MAC-keyed, `agent_devices` uses a 32-char id, and the only shared
-            # field is ip_address — which resolves 2 of 13 agents (measured
-            # 2026-08-06). Shipping "Agent Connected" on that would label 11
-            # protected devices as unprotected, so it waits for a MAC recorded
-            # at enrollment. Until then no device is claimed as agent-connected
-            # from this view, and the UI says so rather than showing an empty
-            # group that reads as "you have no agents".
-            cat, reason = _cat.classify(entry)
+            # has_agent from the ADR 0023 correlation: this device's MAC matches
+            # an APPROVED agent's reported LAN MAC. Replaces the old ip_address
+            # heuristic (2/13). A device with no matching MAC yet is simply not
+            # claimed as agent-connected (honest "unknown", not "unprotected") —
+            # correlation converges as agents re-report lan_macs on heartbeat.
+            has_agent = (entry.get("mac") or "").strip().lower() in _agent_macs
+            cat, reason = _cat.classify(entry, has_agent=has_agent)
             entry["category"] = cat
             entry["category_label"] = _cat.LABELS[cat]
             entry["category_reason"] = reason

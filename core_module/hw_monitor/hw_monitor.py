@@ -344,6 +344,24 @@ def init_db():
         # schema rule. Reconciling the rest is its own cleanup.
         c.execute("CREATE INDEX IF NOT EXISTS idx_agent_devices_seen ON agent_devices(agent_last_seen)")
 
+        # agent_device_macs (ADR 0023): the device<->agent correlation key. An
+        # agent reports the MAC(s) of its physical LAN interface(s) at enroll and
+        # each heartbeat; those match `devices.mac` (the appliance's ARP view),
+        # giving a reliable join the ip_address heuristic could not (2/13). One
+        # agent -> many MACs (dock / WiFi+ethernet), so it is its own table keyed
+        # (device_id, mac); `last_seen` lets a stale MAC age out without rewriting
+        # the agent row. Owned/written here (hw_monitor ingest); read-any elsewhere.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_device_macs (
+                device_id  TEXT NOT NULL,
+                mac        TEXT NOT NULL,
+                last_seen  REAL NOT NULL,
+                PRIMARY KEY (device_id, mac)
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_agent_device_macs_mac "
+                  "ON agent_device_macs(mac)")
+
         # scan_jobs: tracks malware scan executions per device.
         c.execute("""
             CREATE TABLE IF NOT EXISTS scan_jobs (
@@ -1642,6 +1660,46 @@ def _nemesis_payload_to_metrics(payload):
     }
 
 
+def _persist_lan_macs(conn, device_id, lan_macs, now=None):
+    """Upsert reported LAN MAC(s) into agent_device_macs (ADR 0023 correlation key),
+    within the caller's transaction. Normalises to lowercase colon-form and skips
+    malformed/all-zero. Best-effort: never raises the enroll/heartbeat off course."""
+    if not device_id or not lan_macs:
+        return
+    now = time.time() if now is None else now
+    try:
+        for raw in lan_macs:
+            mac = (raw or "").strip().lower()
+            if mac.count(":") != 5 or mac == "00:00:00:00:00:00":
+                continue
+            conn.execute(
+                "INSERT INTO agent_device_macs (device_id, mac, last_seen) "
+                "VALUES (?,?,?) ON CONFLICT(device_id, mac) DO UPDATE SET "
+                "last_seen = excluded.last_seen",
+                (device_id, mac, now))
+    except Exception as e:                                   # noqa: BLE001
+        log.warning("could not persist lan_macs for %s: %s", device_id, e)
+
+
+def approved_agent_macs(conn):
+    """Set of normalised LAN MACs belonging to APPROVED agents (ADR 0023). The
+    caller matches devices.mac against this to compute has_agent. Read-any join."""
+    try:
+        rows = conn.execute(
+            "SELECT m.mac FROM agent_device_macs m "
+            "JOIN agent_devices a ON a.device_id = m.device_id "
+            "WHERE a.enrollment_status = 'approved'").fetchall()
+    except Exception as e:                                   # noqa: BLE001
+        # A failed read must SURFACE, never default silently to a legal-looking
+        # empty set — an empty result here reads as "no device is agent-connected",
+        # indistinguishable from a real answer, and would silently disable the
+        # whole ADR 0023 correlation (exactly how a use-after-close hid here once).
+        log.error("approved_agent_macs read FAILED (%s) — correlation degraded to "
+                  "empty; has_agent will be False for all devices this call", e)
+        return set()
+    return {(r[0] or "").strip().lower() for r in rows if r and r[0]}
+
+
 def _update_agent_device(payload, remote_ip=None):
     """Upsert agent_devices row from a nemesis_agent POST."""
     device_id   = payload.get("device_id", "local")
@@ -1695,6 +1753,7 @@ def _update_agent_device(payload, remote_ip=None):
                         last_scan_result= excluded.last_scan_result
                 """, (device_id, device_name, device_type, conn_type,
                       ts, suri_run, suri_prof, last_scan, last_result))
+            _persist_lan_macs(conn, device_id, payload.get("lan_macs"))
             lt = payload.get("link_type")
             if lt:
                 conn.execute("UPDATE agent_devices SET link_type=? WHERE device_id=?",
@@ -3702,6 +3761,7 @@ def _create_enrollment(payload, remote_ip):
              token_remote,
              (now if token_remote else None),
              (token_creator if token_remote else None)))
+        _persist_lan_macs(conn, device_id, payload.get("lan_macs"), now=_time.time())
         conn.commit()   # token claim + device insert commit together (or both roll back)
         conn.close()
     except Exception:

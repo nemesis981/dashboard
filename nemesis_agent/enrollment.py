@@ -330,6 +330,22 @@ def _link_type(conf):
         return "unknown"
 
 
+def _lan_macs(conf):
+    """Physical LAN-interface MAC(s) for the enrollment payload — the ADR 0023
+    device<->agent correlation key. Same platform dispatch as _link_type; never
+    raises (returns [] on any platform that cannot collect them yet)."""
+    try:
+        if os.name == "nt":
+            from platforms import windows as pm
+        elif getattr(os, "uname", None) and os.uname().sysname == "Darwin":
+            from platforms import mac as pm
+        else:
+            from platforms import linux as pm
+        return pm.get_lan_macs(conf.get("nemesis_ip"))
+    except Exception:
+        return []
+
+
 def _scan_roots():
     """Platform-aware scan roots. Generic system roots only — NO per-user paths
     stored or transmitted (Rule 8). Detected via os.name, not stdlib `platform`
@@ -454,6 +470,7 @@ def enroll(conf=None):
         "signature": _sign(message),
         "pre_enrollment_scan": json.dumps(scan),
         "link_type": _link_type(conf),
+        "lan_macs": _lan_macs(conf),
         "hardware_fingerprint": _fingerprint(),
     }
     # Single-use installer token (if the installer baked one in) → server auto-approves.

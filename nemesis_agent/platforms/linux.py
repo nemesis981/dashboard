@@ -114,6 +114,46 @@ def _route_iface(server):
     return iface
 
 
+def _mac_of(iface):
+    """Normalised lowercase MAC of one interface, or None (missing/all-zero)."""
+    try:
+        with open("/sys/class/net/%s/address" % iface) as f:
+            mac = f.read().strip().lower()
+    except OSError:
+        return None
+    return mac if mac and mac != "00:00:00:00:00:00" else None
+
+
+def get_lan_macs(server=None):
+    """MAC(s) of the physical (non-tunnel, non-loopback) interfaces — the LAN
+    identity the Nemesis appliance sees via ARP, the ADR 0023 correlation key.
+    The interface actually reaching the server (the confirmed LAN link) is listed
+    first; other physical NICs follow (multi-NIC / dock). NEVER raises; returns []
+    if nothing physical can be read (correct for a tunnel-only reach)."""
+    macs, seen = [], set()
+
+    def add(iface):
+        if not iface or iface == "lo" or iface.startswith(_TUNNEL_PREFIXES):
+            return
+        mac = _mac_of(iface)
+        if mac and mac not in seen:
+            seen.add(mac)
+            macs.append(mac)
+
+    try:
+        add(_route_iface(server))                 # confirmed LAN link to the server, first
+        try:
+            for iface in sorted(os.listdir("/sys/class/net")):
+                # Physical NICs carry a /device symlink; docker0/virbr*/lo/tun* do not.
+                if os.path.exists("/sys/class/net/%s/device" % iface):
+                    add(iface)
+        except OSError:
+            pass
+    except Exception:                             # noqa: BLE001
+        return macs
+    return macs
+
+
 def get_link_type(server=None):
     """'wifi' | 'ethernet' | 'unknown' for the physical link carrying traffic to the
     Nemesis server (never the Tailscale tunnel)."""
