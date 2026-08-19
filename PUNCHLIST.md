@@ -3685,3 +3685,43 @@ commercial use requires a paid license, no pricing figures published) and a mini
           behavior it exists to catch.
     - [ ] Owed: build and VM-verify the mountinfo guard, or an equivalent unit-settings
           self-check, as its own follow-up — not folded into this batch.
+
+- [ ] **Test-isolation gap: `modules.set_shared_db_path()` does NOT redirect every
+      script that touches the DB — only code that resolves its path through
+      `modules.get_shared_db_path()`/`get_data_manager()` honors it.** Found live
+      2026-08-19 (Window 2), the hard way: a verification script called
+      `modules.set_shared_db_path(<tmp path>)` before `import hw_monitor`, intending
+      to sandbox `hw_monitor.init_db()`'s guarded migration against a throwaway DB.
+      It did not work. `hw_monitor.py`'s own `DB_PATH` is a module-level constant
+      resolved independently via `nemesis_paths.db_path()`, which checks the
+      relocated production path (`/var/lib/nemesis/alerts.db`) first and uses it
+      because it exists on this box — `set_shared_db_path()` was never consulted.
+      `init_db()` ran directly against the **live production database**, adding
+      three real (harmless, additive-only) columns to `agent_devices` before the
+      commit shipping that migration had even landed. Caught immediately, reported,
+      state-snapshotted after the fact (see `nemesis-state-backups/2026-08-19-1451-
+      after-the-fact-tier2-schema-migration/STATE.txt`) — outcome was benign (same
+      guarded/idempotent migration the held commit would have applied on next
+      restart anyway, integrity-checked clean, no data touched), but the PROCESS
+      gap is real: a state-changing DB call ran with no pre-change snapshot and no
+      pause for go-ahead, exactly what the State Snapshots discipline exists to
+      prevent.
+    - [ ] **Root cause:** two DIFFERENT DB-path mechanisms coexist in this codebase
+          — the `modules` package's shared-path indirection (for code that calls
+          `get_data_manager()`/`get_db()`) and each `core_module` daemon's own
+          `DB_PATH` constant via `nemesis_paths.db_path()` (checks `NEMESIS_DB_PATH`
+          env var, then the relocated path, then a legacy default). They look like
+          they should compose but don't — nothing in either mechanism warns a
+          caller that redirecting one leaves the other pointed at production.
+    - [ ] **Candidate fix:** a documented/enforced convention that ANY verification
+          calling a real `init_db()`/migration function sets the `NEMESIS_DB_PATH`
+          environment variable (the actual override `nemesis_paths.db_path()`
+          honors) to a throwaway path — never relies on `set_shared_db_path()`
+          alone — or runs inside an isolated VM instead of this box. Worth checking
+          whether `watchdog.py`/`alert_watcher.py`/`diagnostics_watcher.py` share
+          the same fallback-to-relocated-path shape (unverified) — if so this is a
+          repo-wide trap, not an hw_monitor-specific one.
+    - [ ] Not urgent to build tooling for today — flagging so the next verification
+          pass (any window) checks `NEMESIS_DB_PATH` explicitly rather than trusting
+          a shared-path redirect it hasn't confirmed the target module actually
+          uses.
