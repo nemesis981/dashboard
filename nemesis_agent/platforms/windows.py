@@ -10,6 +10,7 @@ import psutil
 import win_run
 from platforms import lhm_inproc
 
+import agent_errors
 log = logging.getLogger("nemesis_agent.platforms.windows")
 
 
@@ -24,14 +25,17 @@ def get_hardware_metrics():
         hw["cpu_pct"] = round(psutil.cpu_percent(interval=0.3), 1)
     except Exception as e:
         log.warning("psutil cpu_percent failed: %s", e)
+        agent_errors.record("E-AGENT-040", "cpu_percent: %s" % e)
     try:
         hw["ram_mb"] = round(psutil.virtual_memory().used / (1024 ** 2), 0)
     except Exception as e:
         log.warning("psutil virtual_memory failed: %s", e)
+        agent_errors.record("E-AGENT-041", "virtual_memory: %s" % e)
     try:
         hw.update(lhm_inproc.read_sensors())
     except Exception as e:
         log.warning("in-process sensor read failed: %s", e)
+        agent_errors.record("E-AGENT-042", "sensor read: %s" % e)
     return hw
 
 

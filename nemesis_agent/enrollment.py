@@ -18,6 +18,7 @@ import os
 import shutil
 import subprocess
 import threading
+import agent_errors
 import win_run
 import sys
 import socket
@@ -481,7 +482,8 @@ def enroll(conf=None):
         r = requests.post(_base_url(conf) + "/enroll", json=payload, timeout=10)
         d = r.json()
         return d.get("device_id"), d.get("status")
-    except Exception:
+    except Exception as _e:
+        agent_errors.record("E-AGENT-050", "enroll request failed: %s" % _e)
         return None, None
 
 
@@ -494,7 +496,8 @@ def check_status(conf=None, device_id=None):
         r = requests.get(_base_url(conf) + "/enrollment_status",
                          params={"device_id": device_id}, timeout=10)
         return r.json().get("status")
-    except Exception:
+    except Exception as _e:
+        agent_errors.record("E-AGENT-051", "status check failed: %s" % _e)
         return None
 
 

@@ -38,6 +38,7 @@ import time
 import threading
 import logging
 
+import agent_errors
 log = logging.getLogger("nemesis_agent.l2_windivert")
 
 # Narrow filter: outbound TCP SYN-flagged packets = connection handshakes in BOTH
@@ -86,6 +87,8 @@ def _watchdog():
         if ps is not None and (time.monotonic() - ps) > _stall_timeout:
             log.error("L2 STALL: packet in-processing %.1fs > %.1fs — force-closing "
                       "handle (FAIL-OPEN)", time.monotonic() - ps, _stall_timeout)
+            agent_errors.record("E-AGENT-003", "stalled %.1fs > %.1fs, force-closed"
+                                % (time.monotonic() - ps, _stall_timeout))
             _stalled = True
             try:
                 if _handle is not None:
@@ -103,6 +106,7 @@ def _loop(conf):
     except Exception as e:
         log.warning("L2 disabled: pydivert/WinDivert unavailable (%s) — traffic "
                     "untouched (fail-open)", e)
+        agent_errors.record("E-AGENT-001", "pydivert/WinDivert unavailable: %s" % e)
         return
 
     try:
@@ -111,6 +115,7 @@ def _loop(conf):
     except Exception as e:
         log.warning("L2 disabled: WinDivert handle failed to open (%s) — traffic "
                     "untouched (fail-open)", e)
+        agent_errors.record("E-AGENT-002", "handle open failed: %s" % e)
         _handle = None
         return
 
@@ -140,6 +145,7 @@ def _loop(conf):
                 # Per-packet failure must never block: reinject best-effort, then continue.
                 _stats["errors"] += 1
                 log.warning("L2 per-packet error (%s) — reinjecting (fail-open)", e)
+                agent_errors.record("E-AGENT-004", "per-packet error: %s" % e)
                 try:
                     _handle.send(packet)
                 except Exception:

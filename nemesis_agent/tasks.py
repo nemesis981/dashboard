@@ -26,6 +26,7 @@ import base64
 import hashlib
 import json
 import logging
+import agent_errors
 import os
 from datetime import datetime, timedelta
 
@@ -256,7 +257,8 @@ def record_result(task_id: str, ok: bool, detail: str = "",
                        "ok": bool(ok),
                        "detail": str(detail)[:RESULT_DETAIL_MAX],
                        "recorded_at": now.isoformat(timespec="seconds")}, fh)
-    except Exception:
+    except Exception as _e:
+        agent_errors.record("E-AGENT-062", "task result write failed: %s" % _e)
         return False
     return True
 

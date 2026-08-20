@@ -52,6 +52,7 @@ import logging
 import os
 import sys
 
+import agent_errors
 log = logging.getLogger(__name__)
 
 # The build this agent believes it is. ONE constant, deliberately: the runtime
@@ -173,9 +174,11 @@ def load_manifest(root: str | None = None):
         return None
     except Exception as exc:                     # noqa: BLE001
         log.warning("attest: manifest unreadable (%s) — treating as ABSENT", exc)
+        agent_errors.record("E-AGENT-020", "manifest unreadable: %s" % exc)
         return None
     if not isinstance(m, dict) or not isinstance(m.get("files"), dict):
         log.warning("attest: manifest malformed — treating as ABSENT")
+        agent_errors.record("E-AGENT-021", "manifest malformed")
         return None
     return m
 

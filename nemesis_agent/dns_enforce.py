@@ -29,6 +29,7 @@ import sys
 import logging
 
 import config
+import agent_errors
 try:
     import win_run
 except Exception:  # pragma: no cover - win_run always ships beside the agent
@@ -50,6 +51,7 @@ def _ps(script):
         return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
     except Exception as e:
         log.warning("powershell invocation failed: %s", e)
+        agent_errors.record("E-AGENT-005", "powershell invocation failed: %s" % e)
         return 1, "", str(e)
 
 
@@ -166,6 +168,7 @@ def restore():
         return ok
     except Exception as e:
         log.warning("dns restore failed: %s", e)
+        agent_errors.record("E-AGENT-008", "dns restore failed: %s" % e)
         return False
 
 
@@ -203,11 +206,13 @@ def enforce_if_configured(conf):
         adapter = active_adapter()
         if not adapter:
             log.warning("dns enforce: no active adapter — skipping (fail-open)")
+            agent_errors.record("E-AGENT-007", "no active adapter to enforce DNS on")
             return
         save_state(adapter)
         servers = [s.strip() for s in target.split(",") if s.strip()]
         if not set_dns(adapter, servers):
             log.warning("dns enforce: set failed — restoring (fail-open)")
+            agent_errors.record("E-AGENT-006", "set_dns failed; restored")
             restore()
     except Exception:
         log.exception("dns enforce failed — restoring (fail-open)")

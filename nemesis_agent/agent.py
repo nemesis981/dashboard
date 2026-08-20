@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import platform
+import agent_errors
 import signal
 import socket
 import sys
@@ -220,9 +221,11 @@ def _unlock_key_material():
         except keyprotect.KeyProtectError as e:
             # Corrupt/locked-out/unavailable are not retryable by typing again.
             log.error("cannot unlock device key: %s", e)
+            agent_errors.record("E-AGENT-031", "cannot unlock key: %s" % e)
             return False
     log.error("device key not unlocked after %d attempts — agent will not report",
               MAX_UNLOCK_ATTEMPTS)
+    agent_errors.record("E-AGENT-031", "key not unlocked after %d attempts" % MAX_UNLOCK_ATTEMPTS)
     return False
 
 
@@ -390,6 +393,7 @@ def _collect_payload(conf):
             raw_hw = _platform_mod.get_hardware_metrics()
         except Exception as e:
             log.warning("hardware collection error: %s", e)
+            agent_errors.record("E-AGENT-043", "hardware collection error: %s" % e)
     hw = hardware.normalize(raw_hw)
 
     # Security
@@ -961,6 +965,7 @@ def _sign_heartbeat(device_id, body: bytes):
         if isinstance(e, keyprotect.KeyProtectError):
             raise
         log.warning("could not sign heartbeat (sending unsigned): %s", e)
+        agent_errors.record("E-AGENT-030", "signing failed, sent unsigned: %s" % e)
         return None, None
 
 
@@ -1125,6 +1130,7 @@ def _handle_response_tasks(response, device_id):
         except Exception as exc:
             log.error("task %s (%s) failed: %s",
                       verified["task_id"][:8], verified["action"], exc)
+            agent_errors.record("E-AGENT-061", "task %s failed: %s" % (verified["action"], exc))
             task_mod.record_result(verified["task_id"], False, str(exc),
                                    verified["action"])
 
