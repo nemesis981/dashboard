@@ -147,8 +147,14 @@ def sample_processes(classifier=None,
 
     # ── enumeration ──────────────────────────────────────────────────────────
     try:
+        # "status" is requested so a zombie is DISTINGUISHABLE from a live
+        # process that merely has 0 RSS. Without it both look identical here
+        # (verified: psutil reports a zombie with memory_info.rss == 0, not an
+        # exception, so zombies were already enumerated -- just unlabelled).
+        # Consumed by alert_manager/ram_recovery.py.
         procs = list(psutil.process_iter(
-            ["pid", "ppid", "name", "username", "create_time", "memory_info"]))
+            ["pid", "ppid", "name", "username", "create_time", "memory_info",
+             "status"]))
     except Exception as exc:
         # "No processes" is not a legal answer on a running host. Same stance as
         # the agent's process-enumeration layer.
@@ -176,6 +182,9 @@ def sample_processes(classifier=None,
                 "name": info.get("name"),
                 "username": info.get("username"),
                 "create_time": info.get("create_time"),
+                # None when the platform/psutil build does not supply it -- an
+                # explicit unknown, never defaulted to a legal-looking state.
+                "status": info.get("status"),
                 "rss_mb": round(getattr(mi, "rss", 0) / _MB, 2),
                 "uss_mb": None,          # filled only if actually measured
             }

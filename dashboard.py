@@ -5287,6 +5287,119 @@ def api_throttle_status():
     })
 
 
+@app.route("/api/ram-recovery/candidates")
+def api_ram_recovery_candidates():
+    """Manual RAM recovery: what is safely reclaimable RIGHT NOW.
+
+    Read-only GET, auth-gated (absent from _AUTH_EXEMPT). Deliberately NOT the
+    memory ladder: that is automated, evidence-gated and scoped to the four
+    wired services; this is a direct user-triggered reclaim of things already
+    dead. See alert_manager/ram_recovery for the full scope rationale, including
+    why semaphores and leak-pattern processes are excluded from v1.
+
+    A detection failure returns 503 with the reason, NEVER an empty candidate
+    list -- an empty list is a legal, reassuring-looking answer indistinguishable
+    from a genuinely clean box.
+    """
+    try:
+        import ram_recovery as _rr                           # noqa: PLC0415
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "ram recovery unavailable: %s" % e}), 503
+
+    try:
+        _rr.self_test()      # the classifier proves BOTH answers before use
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "orphan classifier self-test FAILED: %s" % e}), 503
+
+    zombies = []
+    zombie_error = None
+    try:
+        import procmem as _pm                                # noqa: PLC0415
+        sample = _pm.sample_processes(want_uss=False)
+        zombies = _rr.find_zombies(sample)
+    except Exception as e:                                   # noqa: BLE001
+        # Surfaced to the caller, never swallowed into "no zombies found".
+        zombie_error = str(e)[:200]
+
+    try:
+        inv = _rr.shm_inventory()
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "shm orphan detection failed: %s" % e}), 503
+
+    orphans = [s for s in inv["segments"] if s["orphan"]]
+    return jsonify({
+        "zombies": zombies,
+        "zombie_error": zombie_error,
+        "shm_orphans": orphans,
+        "shm_considered": inv["segments"],
+        "maps_scanned": inv["maps_scanned"],
+        "maps_unreadable": inv["maps_unreadable"],
+        "reclaimable_bytes": sum(s["bytes"] for s in orphans),
+        "notes": {
+            "zombies": "Reaping a zombie frees a process-table slot, NOT memory "
+                       "-- a zombie has already released its maps. Nemesis asks "
+                       "the parent to reap via SIGCHLD and never kills anything.",
+            "excluded": "Semaphores and leak-pattern processes are excluded by "
+                        "design: the kernel exposes no holder information for "
+                        "SysV semaphores, and nothing here measures memory "
+                        "GROWTH, so a steady large cache is indistinguishable "
+                        "from a leak.",
+        },
+    })
+
+
+@app.route("/api/ram-recovery/clean", methods=["POST"])
+def api_ram_recovery_clean():
+    """Act on the user's checked selections. POST + JSON content-type only.
+
+    Same CSRF reasoning as api_vpn_action: POST alone is insufficient (a form
+    can POST cross-origin), but a form cannot produce a JSON content-type and a
+    cross-origin fetch that sets it is blocked by CORS preflight. Paired with
+    SESSION_COOKIE_SAMESITE that is two independent reasons a forged request
+    fails -- which matters here because this route DESTROYS state.
+
+    Every shm release re-verifies orphan status at the moment of action; the
+    candidate list is a proposal, never a licence to act. Failures are recorded
+    to the error ledger (E-RAMREC-*); successes are returned for display only,
+    per the failures-only decision.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
+    try:
+        import ram_recovery as _rr                           # noqa: PLC0415
+        import nemesis_errors as _ne                         # noqa: PLC0415
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "ram recovery unavailable: %s" % e}), 503
+
+    selections = (request.get_json(silent=True) or {}).get("selections") or []
+    if not isinstance(selections, list):
+        return jsonify({"error": "selections must be a list"}), 400
+
+    conn = _dm_conn()
+    try:
+        try:
+            _ne.init_error_tables(conn)
+            _rr.register_codes(conn, _ne)
+        except Exception:                                    # noqa: BLE001
+            # Registration failure must not block the reclaim itself; the
+            # recorder below degrades to a no-op rather than raising.
+            pass
+
+        def _recorder(code, context):
+            _ne.record_error_best_effort(conn, code, context=context,
+                                         actor=_actor())
+
+        results = _rr.clean_selected(selections, recorder=_recorder)
+    finally:
+        conn.close()
+
+    freed = sum(r.get("bytes_freed", 0) for r in results if r.get("ok"))
+    _audit(action="ram_recovery_clean",
+           rule_id="%d selected, %d ok, %d bytes" % (
+               len(selections), sum(1 for r in results if r.get("ok")), freed))
+    return jsonify({"results": results, "bytes_freed": freed})
+
+
 @app.route("/api/vpn/<action>", methods=["POST"])
 def api_vpn_action(action):
     """Connect/disconnect the VPN. POST-only, and not forgeable cross-origin.
@@ -12915,6 +13028,7 @@ def dashboard():
     <script src="/static/tier.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
+    <script src="/static/ram-recovery.js"></script>
     {incident_js_html}
     {chat_js_html}
     <script>{incident_state_js}</script>
@@ -13035,6 +13149,9 @@ def dashboard():
                     <div class="hw-label"><span class="tier-text" data-beginner="RAM / Memory Used" data-intermediate="RAM Used" data-pro="RAM %">RAM Used</span></div>
                     <div class="hw-value" id="hwRamPct">{_fmt(hw_ram_pct, "%")}</div>
                     <div class="hw-label" id="hwRamFree" style="margin-top:3px;font-size:0.85em">{_fmt(hw_ram_free_gb, " GB free") if hw_ram_free_gb is not None else ""}</div>
+                    <button id="btnRamRecovery" onclick="event.stopPropagation();openRamRecovery()"
+                            title="Reclaim orphaned memory left behind by crashed processes"
+                            style="margin-top:6px;padding:3px 8px;font-size:0.75em;background:#2c2c44;color:#ccc;border:1px solid #444;border-radius:4px;cursor:pointer">Reclaim&hellip;</button>
                 </div>
                 <div class="hw-stat hw-clickable" onclick="openSensorPopup('disk_pct_used')" title="Click for sensor history">
                     <div class="hw-label"><span class="tier-text" data-beginner="Disk Space Used" data-intermediate="Disk Used" data-pro="Disk %">Disk Used</span></div>
