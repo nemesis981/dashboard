@@ -414,6 +414,26 @@ systemctl daemon-reload
 systemctl enable "$SERVICE_NAME" >/dev/null 2>&1
 ok "service created and enabled (runs the venv interpreter)"
 
+# ── The log file has TWO writers, and it must exist before either one runs ──
+#
+# systemd opens `StandardOutput=append:` as ROOT, before dropping to
+# User=${AGENT_USER}. agent.py then opens the SAME path itself, as the service
+# user, via logging.FileHandler (agent.py:83). If systemd creates the file
+# first it lands root:root 0644, the agent's own open() gets EACCES, and the
+# handler is constructed at import time -- so the agent dies before main(),
+# every time, and systemd restarts it forever. Measured live 2026-08-20: a
+# clean install crash-looped at "restart counter is at 3" with
+# PermissionError on nemesis_agent.log and never reached enrollment at all.
+#
+# The `chown -R` in section 5 cannot cover this: the file does not exist yet
+# when it runs -- systemd creates it here, two sections later. So pre-create it
+# owned by the service user; systemd then appends to an existing file it does
+# not own, which it is perfectly happy to do.
+touch "${INSTALL_DIR}/nemesis_agent.log"
+chown "$AGENT_USER": "${INSTALL_DIR}/nemesis_agent.log"
+chmod 640 "${INSTALL_DIR}/nemesis_agent.log"
+ok "log file pre-created owned by ${AGENT_USER} (both systemd and the agent append to it)"
+
 # ── 8. Start + verify ───────────────────────────────────────────────────────
 step "Starting Nemesis Agent..."
 systemctl restart "$SERVICE_NAME"
