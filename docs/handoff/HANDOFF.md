@@ -1,29 +1,38 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-20, mid-session pause (Window 2)** — NOT a nightly closeout, the
-> operator opened a fresh window mid-day. Overwritten each closeout (latest state wins).
-> Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys
-> live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
+> Last updated **2026-08-20, post-restart session (Window 2)** — NOT a nightly closeout,
+> the operator restarted this window mid-day for a tool update, then resumed the same
+> session. Overwritten each closeout (latest state wins). Durable history:
+> `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/keys live ONLY in
+> `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
 >
-> Full detail behind every claim below: `docs/handoff/supplements/2026-08-20-001.md`
-> (curated) and `docs/handoff/worklog/2026-08-20-001.md` (raw log, reconstructed at this
-> pause rather than kept fully live — flagged, not hidden). Prior day:
-> `docs/handoff/supplements/2026-08-19-001.md`.
+> Full detail behind every claim below: `docs/handoff/supplements/2026-08-20-002.md`
+> (curated) and `docs/handoff/worklog/2026-08-20-002.md` (raw log, kept live this session).
+> Prior: `docs/handoff/supplements/2026-08-20-001.md` / `2026-08-19-001.md`.
 
 ---
 
-## 1. FIRST THING NEXT SESSION — two commits held, need a push decision
+## 1. Push resolved this session — all clear, `origin/main` == local HEAD
+
+All four commits held at the prior pause (plus one committed this session) are pushed and
+verified synced:
 
 ```
+a4dfd40  feat(agent): non-interactive venv installer + cryptography dep fix (Window 3)
+8948e09  docs(handoff): mid-session pause closeout (Window 2, 2026-08-20)
 f812583  feat(agent-errors,tickets): server-side ingest + self-reported ticket bridge (stages c/d)
 f91db98  feat(tickets): error-ledger -> ticket bridge, server-side scanner (piece 2)
 ```
 
-Both committed and independently reviewed/tested THIS session (full detail in the
-supplement) — **do not re-verify from scratch.** Just: `git fetch && git log --oneline
-@{u}..HEAD` to confirm nothing else landed since, list the commits, get the operator's
-push confirmation, push, verify `HEAD == origin/main`. Rule 10 is already resolved public
-for both — nothing to decide there either.
+`git rev-parse HEAD` == `git rev-parse origin/main` == `a4dfd405caa3bf73ab4be9d3bb8d7d0538e65c62`,
+verified post-push. **Nothing pending push as of this writing.**
+
+`a4dfd40` (Window 3's held installer batch — `install_linux.sh` + `REQUIREMENTS.md`) was
+committed this session after resolving a mismatch: the prior pause's do-not-touch list
+(§4 below, now corrected) had lumped these two files in with Window 1's genuinely in-flight
+GUI/tray build. They were actually separate, finished, held work — confirmed by reading
+`~/work/nemesis-internal/handoff/2026-08-20-window3-handoff.md` §1 before acting. Full
+reasoning: `docs/handoff/supplements/2026-08-20-002.md`.
 
 ## 2. What's live in production vs. what's only committed
 
@@ -39,24 +48,30 @@ chronological-comparison fix (a second, related bug, found this session, fixed b
 independently reproduced by this window under `TZ=Asia/Tokyo` before committing); the
 agent-error-reporting arc stages (a) local recorder and (b) heartbeat transport.
 
-**Committed but NOT pushed** (§1): stages (c)/(d) of the agent-error-reporting arc — server
-ingest into a new `agent_error_reports` table, plus both ticket-bridge scanners
-(server-observed errors AND agent self-reports). **Not live anywhere** until pushed and
-deployed (this repo has no auto-deploy; a push here still needs a service restart on the
-box to take effect, same as every other change today).
+**Pushed this session, not yet deployed**: `a4dfd40` — Window 3's rewritten
+`install_linux.sh` + `REQUIREMENTS.md` fix. Server ingest/ticket-bridge stages (c)/(d)
+(`f812583`) and the tickets error-ledger scanner (`f91db98`) are likewise now pushed but
+not deployed. **Not live anywhere** until an operator-driven install/deploy — this repo has
+no auto-deploy; a push still needs a service restart (or, for `install_linux.sh`, an actual
+install run) to take effect, same as every other change today.
 
 **Not deployed regardless of push status**: none of today's commits have triggered a
-`systemctl restart` — check `docs/handoff/HANDOFF.md`-adjacent worklog/supplement history
-or just ask the operator what's actually been restarted before assuming any of today's
-code is running.
+`systemctl restart` or an install run — check the worklog/supplement history or just ask
+the operator what's actually been restarted/installed before assuming any of today's code
+is running.
 
 ## 3. Open items, priority order
 
-1. **Push `f812583` + `f91db98`** (§1) — the immediate next action.
-2. **Close the PUNCHLIST loose end**: the `agent_errors.restore()` test-coverage entry
+1. **Close the PUNCHLIST loose end**: the `agent_errors.restore()` test-coverage entry
    (added this session, `0611d8c`) was actually closed by `f91db98` (restore() now has
    full test coverage) but the checkbox was never flipped. Mark it done, don't re-open it,
    don't re-add coverage that already exists.
+2. **`nemesis_agent/requirements.txt` still lacks a declared `cryptography` dependency** —
+   Window 3 fixed `REQUIREMENTS.md` (all 3 platforms) this session but deliberately left
+   `requirements.txt` alone since another window had uncommitted changes there. Confirm
+   that window's file is settled, then add it — `enrollment.py`/`keyprotect/` import it at
+   module level; a clean venv install will not start without it (Ubuntu's system-wide
+   `python3-cryptography` package was hiding the gap on non-venv installs).
 3. **The three 08-08 error-code-classification batches** — now many days unclaimed,
    unchanged again today.
 4. **`docs/audits/roadmap-state-audit-2026-08-19.md`** — this morning's audit baseline,
@@ -73,18 +88,26 @@ code is running.
 
 ## 4. Do NOT touch — another window's live, in-flight work
 
-Confirmed via `git diff --stat` catching it mid-edit during this session (not carried
-forward speculation — directly observed growing across the session): `nemesis_agent/agent.py`
-(157+ uncommitted lines as of this pause), `config.py`, `install_linux.sh`,
-`installer_gui.py`, `uninstaller_gui.py`, `build_installer.py`, `REQUIREMENTS.md`,
-`requirements.txt`, `.github/workflows/build-windows-agent.yml`, plus new untracked
-`agent_gui.py`, `agent_gui_core.py`, `agent_tray.py`, `test_agent_gui_core.py`,
-`test_agent_gui_render.py`, `test_agent_tray.py`. Reads as a GUI/tray build — matches
-Window 1's own morning handoff note ("GUI core — NOT STARTED yet... tomorrow: tray+freeze"),
-apparently started today. **This is also why `test_loopback_retirement.py` failed in this
-session's regression runs** — an AST check against `agent.py`'s in-progress shape, not a
-real regression from anything this session touched. If it's still failing next session,
-check whether `agent.py` is still mid-edit before assuming it's a real bug.
+**Corrected this session (2026-08-20-002):** the previous version of this list included
+`install_linux.sh` and `REQUIREMENTS.md`, attributing them to Window 1's GUI/tray build.
+That was wrong — those two files were actually separate, finished work held by Window 3
+for Window 2 to commit (confirmed via `~/work/nemesis-internal/handoff/2026-08-20-window3-
+handoff.md` §1, which explicitly labels them "HELD... I cannot commit"). They were caught
+in the same working-tree snapshot as Window 1's real in-flight files purely by coincidence
+of timing. Both are now committed and pushed as `a4dfd40` — removed from this list.
+
+Confirmed via `git diff --stat` catching it mid-edit during the prior session (not carried
+forward speculation — directly observed growing across that session), **still open and
+still off-limits**: `nemesis_agent/agent.py`, `config.py`, `installer_gui.py`,
+`uninstaller_gui.py`, `build_installer.py`, `requirements.txt`,
+`.github/workflows/build-windows-agent.yml`, plus untracked `agent_gui.py`,
+`agent_gui_core.py`, `agent_tray.py`, `test_agent_gui_core.py`, `test_agent_gui_render.py`,
+`test_agent_tray.py`. Reads as a GUI/tray build — matches Window 1's own morning handoff
+note ("GUI core — NOT STARTED yet... tomorrow: tray+freeze"), apparently started 2026-08-20.
+**`test_loopback_retirement.py`, previously flagged as failing against `agent.py`'s
+in-progress shape, passed cleanly (21/21) in this session's regression run** — that concern
+appears resolved on its own; if it fails again, check whether `agent.py` is still mid-edit
+before assuming a real bug.
 
 ## 5. Verified live today, not just claimed (Rule 3 discipline)
 
@@ -118,8 +141,10 @@ true without re-verification.
 
 ## 8. Cross-references
 
-- `docs/handoff/supplements/2026-08-20-001.md` — curated narrative, this pause.
-- `docs/handoff/worklog/2026-08-20-001.md` — chronological detail, reconstructed at pause.
+- `docs/handoff/supplements/2026-08-20-002.md` — curated narrative, this session.
+- `docs/handoff/worklog/2026-08-20-002.md` — chronological detail, kept live this session.
+- `docs/handoff/supplements/2026-08-20-001.md` / `worklog/2026-08-20-001.md` — the pre-
+  restart session earlier today.
 - `docs/briefing/2026-08-20.md` — this morning's Morning Status briefing.
 - `~/work/nemesis-internal/audits/agent-auth-audit-2026-08-20-tz-replay-floor.md` — the
   replay-floor finding + independent verification, full detail.
