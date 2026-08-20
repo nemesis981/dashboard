@@ -14,25 +14,41 @@
 
 ## 1. Push resolved this session — all clear, `origin/main` == local HEAD
 
-All four commits held at the prior pause (plus one committed this session) are pushed and
-verified synced:
+Seven commits landed and pushed this session (public repo), all independently
+reviewed/tested by this window before committing:
 
 ```
+f0bdbeb  fix(agent): pre-create the agent log file so systemd doesn't own it first
+bebd346  fix(agent): enrollment idempotence gate -- don't re-enroll an already-known device
+133449c  fix(agent): stop running agent before reinstalling to prevent concurrent enrollment
+4e2d4bf  docs(handoff): post-restart push resolution + do-not-touch correction (Window 2, 2026-08-20)
 a4dfd40  feat(agent): non-interactive venv installer + cryptography dep fix (Window 3)
 8948e09  docs(handoff): mid-session pause closeout (Window 2, 2026-08-20)
 f812583  feat(agent-errors,tickets): server-side ingest + self-reported ticket bridge (stages c/d)
 f91db98  feat(tickets): error-ledger -> ticket bridge, server-side scanner (piece 2)
 ```
 
-`git rev-parse HEAD` == `git rev-parse origin/main` == `a4dfd405caa3bf73ab4be9d3bb8d7d0538e65c62`,
-verified post-push. **Nothing pending push as of this writing.**
+`git rev-parse HEAD` == `git rev-parse origin/main` == `f0bdbebbc90b3a879c49b440c49d908bcf38e206`,
+verified post-push. **Nothing pending push in the public repo as of this writing.**
 
-`a4dfd40` (Window 3's held installer batch — `install_linux.sh` + `REQUIREMENTS.md`) was
-committed this session after resolving a mismatch: the prior pause's do-not-touch list
-(§4 below, now corrected) had lumped these two files in with Window 1's genuinely in-flight
-GUI/tray build. They were actually separate, finished, held work — confirmed by reading
-`~/work/nemesis-internal/handoff/2026-08-20-window3-handoff.md` §1 before acting. Full
-reasoning: `docs/handoff/supplements/2026-08-20-002.md`.
+`a4dfd40` and the three `fix(agent)` commits are all Window 3's `install_linux.sh` work,
+committed by Window 2 in stages after resolving a mismatch: the prior pause's do-not-touch
+list (§4 below, now corrected) had lumped these files in with Window 1's genuinely
+in-flight GUI/tray build. They were actually separate, finished, held work — confirmed by
+reading `~/work/nemesis-internal/handoff/2026-08-20-window3-handoff.md` before acting. The
+three `fix(agent)` commits are a single +88-line diff Window 3 handed off as one block but
+which needed splitting into three commits per Rule 2 (one variable at a time) — split at
+its natural hunk boundaries, each verified independently applicable before being treated as
+separable, each checked with `bash -n`/`py_compile` against the actual commit blob (not the
+working tree) and a full regression-suite run before the next was applied.
+
+**Also this session, in the separate private `nemesis-internal` repo** (local+usb remotes,
+not GitHub): committed and pushed `7f606a9` — Window 3's `vm-fleet/VM-FLEET-LOG.md` entry,
+outside their narrow git-write grant (their own handoff file only), staged by exact path
+with a large amount of unrelated other-window content in that same working tree left
+untouched. Verified `local` HEAD == `local` remote == `usb` remote, all `7f606a9`.
+
+Full reasoning for all of the above: `docs/handoff/supplements/2026-08-20-002.md`.
 
 ## 2. What's live in production vs. what's only committed
 
@@ -48,12 +64,15 @@ chronological-comparison fix (a second, related bug, found this session, fixed b
 independently reproduced by this window under `TZ=Asia/Tokyo` before committing); the
 agent-error-reporting arc stages (a) local recorder and (b) heartbeat transport.
 
-**Pushed this session, not yet deployed**: `a4dfd40` — Window 3's rewritten
-`install_linux.sh` + `REQUIREMENTS.md` fix. Server ingest/ticket-bridge stages (c)/(d)
-(`f812583`) and the tickets error-ledger scanner (`f91db98`) are likewise now pushed but
-not deployed. **Not live anywhere** until an operator-driven install/deploy — this repo has
-no auto-deploy; a push still needs a service restart (or, for `install_linux.sh`, an actual
-install run) to take effect, same as every other change today.
+**Pushed this session, not yet deployed**: `a4dfd40` plus the three follow-on `fix(agent)`
+commits (`133449c`, `bebd346`, `f0bdbeb`) — together the complete rewritten
+`install_linux.sh` (venv, enrollment-aware, idempotence gate, stop-before-reinstall, log
+pre-create) + the `REQUIREMENTS.md` `cryptography` fix. Server ingest/ticket-bridge stages
+(c)/(d) (`f812583`) and the tickets error-ledger scanner (`f91db98`) are likewise now
+pushed but not deployed. **Not live anywhere** until an operator-driven install/deploy —
+this repo has no auto-deploy; a push still needs a service restart (or, for
+`install_linux.sh`, an actual install run on a real or test host) to take effect, same as
+every other change today.
 
 **Not deployed regardless of push status**: none of today's commits have triggered a
 `systemctl restart` or an install run — check the worklog/supplement history or just ask
@@ -152,6 +171,10 @@ true without re-verification.
   the one informational finding on the licensing rebind route.
 - `~/work/nemesis-internal/handoff/2026-08-20-window1-handoff.md` /
   `2026-08-20-window3-handoff.md` — the other windows' own context, not reconstructed here.
+  Window 3's §4.2 has the full duplicate-enrollment root-cause narrative behind the three
+  `fix(agent)` commits above.
+- `~/work/nemesis-internal/vm-fleet/VM-FLEET-LOG.md` — fleet log, updated this session
+  (`7f606a9`) with the Linux provisioning fix + duplicate-enrollment repro entries.
 - Prior day: `docs/handoff/supplements/2026-08-19-001.md`.
 
 ## Topology (durable, unchanged from prior handoffs unless noted)
