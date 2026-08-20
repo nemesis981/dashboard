@@ -320,6 +320,51 @@ if srv_key:
     except Exception as e:
         print("    [!!] could not pin server key: %s" % e)
 
+# ── IDEMPOTENCE GATE — do not enroll a host that is already enrolled ────────
+#
+# enroll() is a POST, and the server mints a FRESH device_id on every one of
+# them (hw_monitor._create_enrollment: `device_id = uuid4().hex`, with no
+# dedupe on public_key -- deliberately, so a genuine reinstall is a new device
+# and `first_connect` fires). Calling it unconditionally therefore made a
+# second run of this installer create a SECOND agent_devices row for one
+# machine, orphan the first as a permanently-stale pending row, and repoint
+# the conf at the new id. Both rows carry the SAME public key, because
+# ensure_provisioned() correctly does not re-provision -- so the duplicate is
+# invisible as a key mismatch and shows up only as an inflated device count.
+#
+# Reproduced deliberately on a throwaway VM 2026-08-20: one install -> 1 row;
+# a second install of the same source on the same host -> 2 rows, same name,
+# same IP, both pending_unverified, one shared public key.
+#
+# ⚠ The three answers below are NOT interchangeable:
+#   real status ("pending_unverified"/"approved"/...) -> the server KNOWS this
+#       device. Never re-enroll; just resync the local status string.
+#   "unknown" -> the server genuinely does not have this device_id (row deleted,
+#       or conf carried over from another machine). Enrolling is correct.
+#   None      -> the question could not be ASKED (server unreachable, bad JSON).
+#       That is a FAILED READ, not an answer, and must not be treated as
+#       "unknown" -- doing so is exactly how a transient network blip during a
+#       re-run mints a duplicate. Fail closed: leave the existing enrollment
+#       alone and say so.
+existing = (conf.get("device_id") or "").strip()
+if existing:
+    known = enrollment.check_status(conf, existing)
+    if known is None:
+        print("    [!!] already enrolled (device_id=%s...) but the server could not be "
+              "reached to confirm -- NOT re-enrolling" % existing[:8])
+        print("    [..] leaving the existing enrollment intact; the agent will retry on start")
+        sys.exit(0)
+    if known != "unknown":
+        conf["enrollment_status"] = known
+        config.save(conf)
+        print("    [OK] already enrolled: device_id=%s... status=%s (not re-enrolling)"
+              % (existing[:8], known))
+        if known not in ("approved",):
+            print("    [..] awaiting owner approval in the Nemesis dashboard")
+        sys.exit(0)
+    print("    [..] conf carries device_id=%s... but the server does not know it "
+          "-- enrolling fresh" % existing[:8])
+
 device_id, status = enrollment.enroll(conf)
 if not device_id:
     print("    [FAIL] server did not answer -- check that ${SERVER}:${PORT} is reachable")
