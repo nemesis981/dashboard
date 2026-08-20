@@ -18,7 +18,7 @@ import shutil
 import socket
 import ipaddress
 import uuid as _uuid_mod
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # Root logger configuration. UNRELATED to the Data Manager work below — this
 # restores visibility that was already coded and silently discarded.
@@ -4886,6 +4886,37 @@ def _render_remote_budget_html() -> str:
             'codes &rarr;</a></div>')
 
 
+#: Severity -> chip colour for the agent-error digest strip (stage d). Semantic,
+#: separate from the accent hue: high=red, medium=amber, low=grey.
+_AGENT_ERR_SEV_COLOR = {"high": "#ff6666", "medium": "#ffcc00", "low": "#9a9ab0"}
+
+
+def _agent_error_digest_html(entries) -> str:
+    """A compact per-device SELF-REPORTED error strip for the enrolled-device card
+    (stage d). Reuses the devices view rather than a new page. `entries` is the
+    device's last-24h digest [{code, severity, n, last}], already bounded by the
+    ~20-code catalog. Empty -> a quiet 'no errors reported' line.
+
+    These are the AGENT'S OWN CLAIMS (self-reported) — labelled as such so the
+    reader does not mistake them for server-observed facts.
+    """
+    if not entries:
+        return ('<div style="color:#4a7a4a;font-size:0.78em;margin:4px 0">'
+                '&#10003; no self-reported errors (24h)</div>')
+    chips = []
+    for e in entries[:12]:                      # hard cap the strip
+        col = _AGENT_ERR_SEV_COLOR.get((e.get("severity") or "").lower(), "#9a9ab0")
+        code = html.escape(str(e.get("code") or "?"))
+        n = html.escape(str(e.get("n") or 0))
+        chips.append(
+            '<span style="background:%s22;color:%s;border:1px solid %s55;'
+            'font-size:0.72em;padding:1px 7px;border-radius:9px;margin:0 4px 3px 0;'
+            'display:inline-block">%s &times;%s</span>' % (col, col, col, code, n))
+    return ('<div style="margin:5px 0"><span style="color:#c98fb0;font-size:0.75em;'
+            'font-weight:bold;letter-spacing:0.03em">SELF-REPORTED (24h):</span> '
+            + "".join(chips) + '</div>')
+
+
 def _render_agent_devices_html() -> str:
     """Settings -> Devices: pending enrollments (approve/reject) + enrolled list."""
     try:
@@ -4896,6 +4927,21 @@ def _render_agent_devices_html() -> str:
             "enrollment_status, connection_type, lhm_available, agent_last_seen, "
             "pre_enrollment_scan, enrollment_has_findings, link_type "
             "FROM agent_devices ORDER BY agent_last_seen DESC").fetchall()
+        # Stage (d): each device's recent SELF-REPORTED error digest, aggregated by
+        # code over the last 24h, bounded. One query, before the connection closes.
+        # Best-effort: the table may not exist on an un-migrated DB -> empty map.
+        agent_errs = {}
+        try:
+            _cut = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat(timespec="seconds")
+            for er in conn.execute(
+                    "SELECT device_id, code, severity, SUM(count) AS n, MAX(last_ts) AS last "
+                    "FROM agent_error_reports WHERE received_at >= ? "
+                    "GROUP BY device_id, code ORDER BY device_id, n DESC", (_cut,)).fetchall():
+                agent_errs.setdefault(er["device_id"], []).append(
+                    {"code": er["code"], "severity": er["severity"],
+                     "n": er["n"], "last": er["last"]})
+        except Exception:
+            agent_errs = {}
         conn.close()
     except Exception:
         return ('<div class="card" id="section-devices-enroll"><h2>&#128421; Devices</h2>'
@@ -5069,6 +5115,7 @@ def _render_agent_devices_html() -> str:
             f'<span style="color:#888">{checkin_label}</span> &middot; '
             f'<span style="color:#888">{lhm}</span>{wifi_note}<br>'
             f'{checkin_note}'
+            f'{_agent_error_digest_html(agent_errs.get(r["device_id"], []))}'
             f'<button onclick="agentRevoke(\'{did}\')" style="background:#ff444422;color:#ff6666;'
             'border:1px solid #ff4444;border-radius:6px;padding:4px 12px;cursor:pointer;'
             'margin-top:6px;font-size:0.92em">Revoke</button>'

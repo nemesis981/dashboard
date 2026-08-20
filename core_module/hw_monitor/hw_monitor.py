@@ -9,6 +9,7 @@ import json
 import logging
 import hashlib
 import os
+import re as _re
 import signal
 import sqlite3
 import data_manager
@@ -152,6 +153,28 @@ def init_db():
                 disk_pct_used REAL
             )
         """)
+
+        # Agent SELF-REPORTED error digest (stage c, 2026-08-20). Kept SEPARATE
+        # from the authoritative server error ledger (error_occurrences) on
+        # purpose: these are what an agent CLAIMS about itself — a compromised
+        # agent can fabricate or suppress them (the attest.py framing), so they
+        # are diagnostic hints, never authoritative, and must not sit
+        # indistinguishably beside the server's own evidence. Append-only.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS agent_error_reports (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id   TEXT NOT NULL,
+                code        TEXT NOT NULL,
+                severity    TEXT,
+                count       INTEGER NOT NULL,
+                first_ts    TEXT,
+                last_ts     TEXT,
+                context     TEXT,
+                received_at TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_aer_device ON agent_error_reports(device_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_aer_code   ON agent_error_reports(code)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_hw_metrics_ts ON hw_metrics(timestamp)")
         # Idempotent migrations for columns added after initial schema.
         existing = {row[1] for row in c.execute("PRAGMA table_info(hw_metrics)").fetchall()}
@@ -1712,6 +1735,73 @@ def approved_agent_macs(conn):
     return {(r[0] or "").strip().lower() for r in rows if r and r[0]}
 
 
+#: Bounds on the agent-self-reported error digest (stage c). Everything below is
+#: UNTRUSTED input from the endpoint (arriving on an authenticated heartbeat, so
+#: bound to THIS device, but the CONTENTS are the agent's own claims). Cap the
+#: entry count and string lengths so a buggy/hostile agent cannot flood the
+#: server or smuggle oversized fields; validate the code shape; parameterize the
+#: write; never make a security DECISION off these (they are hints).
+_AGENT_ERR_CODE_RE = _re.compile(r"^E-AGENT-\d{3}$")
+_AGENT_ERR_MAX_ENTRIES = 32        # > the ~20-code catalog, still hard-bounded
+_AGENT_ERR_MAX_CONTEXT = 300
+_AGENT_ERR_MAX_TS = 40
+
+
+def _ingest_agent_errors(payload, device_id, conn):
+    """Store the authenticated device's self-reported E-AGENT digest, bounded and
+    append-only. Best-effort — NEVER raises out; a bad digest must not break the
+    heartbeat it rode in on (same posture as ingest_connection_events). Returns
+    how many entries were stored.
+
+    Trust boundary: `device_id` is the AUTHENTICATED device (per-device
+    isolation — an agent reports only its own), but the entries are the agent's
+    own claims. Validate/bound every field; store as hints, decide nothing.
+    """
+    try:
+        reports = payload.get("agent_errors")
+        if not isinstance(reports, list) or not reports:
+            return 0
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        stored = 0
+        for e in reports[:_AGENT_ERR_MAX_ENTRIES]:      # cap ENTRIES
+            if not isinstance(e, dict):
+                continue
+            code = e.get("code")
+            if not isinstance(code, str) or not _AGENT_ERR_CODE_RE.match(code):
+                continue                                # validate ^E-AGENT-\d{3}$
+            try:
+                count = int(e.get("count") or 0)
+            except (TypeError, ValueError):
+                continue
+            if count <= 0:
+                continue
+            # Agent-sent severity — the agent's own catalog is the source of truth,
+            # so the server stores it and gates on it rather than keeping its own
+            # map. Only accept the canonical values; anything else -> NULL (a
+            # pre-severity agent, or junk), and the ticket bridge treats NULL as
+            # "cannot rank -> do not ticket" (conservative during rollout).
+            sev = e.get("severity")
+            if sev not in ("low", "medium", "high"):
+                sev = None
+            ctx = e.get("context")
+            if ctx is not None:
+                ctx = str(ctx)[:_AGENT_ERR_MAX_CONTEXT]  # cap CONTEXT
+            first = (str(e.get("first"))[:_AGENT_ERR_MAX_TS] if e.get("first") else None)
+            last = (str(e.get("last"))[:_AGENT_ERR_MAX_TS] if e.get("last") else None)
+            conn.execute(                                # PARAMETERIZED
+                "INSERT INTO agent_error_reports "
+                "(device_id, code, severity, count, first_ts, last_ts, context, "
+                " received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (device_id, code, sev, count, first, last, ctx, now))
+            stored += 1
+        if stored:
+            conn.commit()
+        return stored
+    except Exception as e:                              # noqa: BLE001
+        log.warning("agent_error ingest failed for %s: %s", device_id, e)
+        return 0
+
+
 def _update_agent_device(payload, remote_ip=None):
     """Upsert agent_devices row from a nemesis_agent POST."""
     device_id   = payload.get("device_id", "local")
@@ -1829,7 +1919,6 @@ def _update_agent_device(payload, remote_ip=None):
 
 # ── Scan queue trigger engine ─────────────────────────────────────────────────
 
-import re as _re
 import uuid as _uuid_mod
 import urllib.request as _urllib_req
 
@@ -4109,6 +4198,22 @@ def _start_windows_agent_listener():
                 if _c["received"]:
                     log.info("conn ingest: %s", _c)
                 _update_agent_device(payload, remote_ip=remote_ip)
+                # Agent self-reported error digest (stage c). AFTER the auth gate
+                # so it is bound to THIS authenticated device (per-device
+                # isolation), and best-effort so a bad digest never breaks the
+                # heartbeat. Its own connection, closed here.
+                try:
+                    _aer_conn = _db_connect()
+                    try:
+                        _aer_n = _ingest_agent_errors(
+                            payload, payload.get("device_id", "local"), _aer_conn)
+                        if _aer_n:
+                            log.info("agent_error ingest: device=%s stored=%d",
+                                     payload.get("device_id"), _aer_n)
+                    finally:
+                        _aer_conn.close()
+                except Exception:
+                    log.exception("agent_error ingest wrapper failed (non-fatal)")
                 insert_sample(metrics)
                 device_id = payload.get("device_id", "local")
                 _dispatch_pending_scans(device_id, remote_ip)
@@ -4383,10 +4488,16 @@ def main():
         if time.time() - _last_error_ticket_scan >= 120:
             _last_error_ticket_scan = time.time()
             try:
-                from modules.tickets.module import scan_error_ledger_for_tickets
+                from modules.tickets.module import (
+                    scan_error_ledger_for_tickets,
+                    scan_agent_error_reports_for_tickets)
                 _n = scan_error_ledger_for_tickets()
                 if _n:
                     log.info("error->ticket bridge: opened %d error_notice ticket(s)", _n)
+                _na = scan_agent_error_reports_for_tickets()
+                if _na:
+                    log.info("agent-error->ticket bridge: opened %d self-reported "
+                             "ticket(s)", _na)
             except Exception:
                 log.exception("error->ticket bridge scan failed (non-fatal)")
 

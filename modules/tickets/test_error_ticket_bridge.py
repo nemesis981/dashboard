@@ -149,6 +149,73 @@ def main():
     check("  ...and never raises", raised, False)
     os.unlink(db)
 
+    # ── piece (3): agent-error self-reported source ──────────────────────
+    print("\n=== AGENT-error bridge (piece 3) ===")
+    db = tempfile.mktemp(suffix=".db")
+
+    def mk3():
+        c = sqlite3.connect(db); c.row_factory = sqlite3.Row; return c
+    tk._conn = mk3; tk._init_done = False; tk._init_db()
+    c = mk3()
+    c.execute("""CREATE TABLE agent_error_reports(id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id TEXT NOT NULL, code TEXT NOT NULL, severity TEXT, count INTEGER NOT NULL,
+        first_ts TEXT, last_ts TEXT, context TEXT, received_at TEXT NOT NULL)""")
+    # AGENT-SENT severity drives the gate now (no server-side map). high tickets,
+    # low is skipped, and a NULL severity (pre-fix agent) is NOT ticketed.
+    c.executemany("INSERT INTO agent_error_reports (device_id,code,severity,count,received_at) "
+                  "VALUES (?,?,?,?,'t')",
+                  [("devX","E-AGENT-001","high",3),("devX","E-AGENT-001","high",1),  # dup code
+                   ("devX","E-AGENT-040","low",2),                          # low -> skip
+                   ("devX","E-AGENT-030","high",1),                          # high, other code
+                   ("devY","E-AGENT-001","high",1),                          # same code, other dev
+                   ("devZ","E-AGENT-001",None,1)])                          # NULL sev -> skip
+    c.commit()
+
+    opened3 = []
+    def fake3(**kw):
+        cc = mk3()
+        cc.execute("INSERT INTO tickets (type,category,sensor_key,title,body,status,"
+                   "ticket_number,created_at,updated_at) VALUES('ticket',?,?,?,?,'Open',"
+                   "'NF-X',datetime('now'),datetime('now'))",
+                   (kw["category"], kw["sensor_key"], kw["title"], kw["body"]))
+        cc.commit(); opened3.append(kw); return 1
+    tk.open_ticket = fake3
+
+    check("agent scan is a separate opt-in (off by default -> 0)",
+          tk.scan_agent_error_reports_for_tickets(), 0)
+    _set(mk3, "auto_ticket_on_agent_error", "true")
+    n = tk.scan_agent_error_reports_for_tickets()
+    check("opens 3: devX 001, devX 030, devY 001 (low 040 skipped, devX 001 collapsed)", n, 3)
+    keys = sorted(t["sensor_key"] for t in opened3)
+    check("  sensor_keys are device-scoped (agent:<dev>:<code>)", keys,
+          ["agent:devX:E-AGENT-001", "agent:devX:E-AGENT-030", "agent:devY:E-AGENT-001"])
+    check("  low-severity agent code never ticketed",
+          any("E-AGENT-040" in t["sensor_key"] for t in opened3), False)
+    check("  marked SELF-REPORTED in title", all("[SELF-REPORTED]" in t["title"] for t in opened3), True)
+    check("  body warns against automated action off it",
+          all("do NOT drive any automated action" in t["body"] for t in opened3), True)
+    check("  all category=error_notice", all(t["category"] == "error_notice" for t in opened3), True)
+    check("  priority from agent-sent severity (HIGH)",
+          sorted(set(t["priority"] for t in opened3)), ["HIGH"])
+    check("  a NULL-severity entry (pre-fix agent) is NOT ticketed",
+          any("devZ" in t["sensor_key"] for t in opened3), False)
+
+    print("\nhwm: rescan opens nothing; a new same-(dev,code) is deduped while open")
+    check("rescan opens 0", tk.scan_agent_error_reports_for_tickets(), 0)
+    c = mk3(); c.execute("INSERT INTO agent_error_reports (device_id,code,count,received_at) "
+                         "VALUES ('devX','E-AGENT-001',9,'t')"); c.commit()
+    check("recurrence of an open (dev,code) opens 0", tk.scan_agent_error_reports_for_tickets(), 0)
+
+    print("\nper-device rate-limit caps concurrent open agent tickets")
+    _set(mk3, "agent_error_ticket_max_per_device", "2")  # devX already has 2 open (001,030)
+    c = mk3(); c.execute("INSERT INTO agent_error_reports (device_id,code,severity,count,received_at) "
+                         "VALUES ('devX','E-AGENT-002','high',1,'t')"); c.commit()  # a 3rd HIGH code
+    before = len(opened3)
+    tk.scan_agent_error_reports_for_tickets()
+    check("devX at cap (2): the 3rd HIGH code does NOT open a ticket",
+          len(opened3), before)
+    os.unlink(db)
+
     passed = sum(1 for _, ok in _results if ok)
     print("\n%d/%d checks passed" % (passed, len(_results)))
     if passed != len(_results):

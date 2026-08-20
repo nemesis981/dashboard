@@ -79,6 +79,15 @@ _SETTINGS_DEFAULTS = {
     # bar the alert side uses) become tickets, deduped one-per-code.
     "auto_ticket_on_error":          False,
     "min_severity_for_error_ticket": "HIGH",
+    # Agent SELF-REPORTED errors -> tickets (piece 3, 2026-08-20). A SEPARATE
+    # opt-in from the server-side one on purpose: agent reports are self-reported
+    # (a compromised agent can fabricate), a lower trust level, so an operator can
+    # enable server-error tickets without also trusting agent claims. Default off.
+    "auto_ticket_on_agent_error":       False,
+    # Belt-and-suspenders past HIGH-floor + per-(device,code) dedup: cap the
+    # concurrent OPEN agent-sourced error_notice tickets one device may hold, so a
+    # looping/hostile agent cannot fill the queue even if the catalog grows.
+    "agent_error_ticket_max_per_device": 10,
 }
 
 
@@ -456,6 +465,117 @@ def search(keyword: str) -> list:
     except Exception:
         log.exception("tickets: search(%s) failed", keyword)
         return []
+
+
+def scan_agent_error_reports_for_tickets(conn=None):
+    """Open a SELF-REPORTED `error_notice` ticket for each new HIGH agent error.
+
+    Piece 3 of the bridge — the second source, `agent_error_reports` (stage c),
+    which is what an agent CLAIMS about itself. Distinct from the server-side
+    scanner in three ways the trust level demands:
+      * SEPARATE opt-in (`auto_ticket_on_agent_error`, default off).
+      * SELF-REPORTED marking — the ticket title/body say so, and the sensor_key
+        is `agent:<device>:<code>` so per-(device,code) dedup is device-scoped.
+      * PER-DEVICE RATE-LIMIT — beyond HIGH-floor + dedup, cap the concurrent
+        open agent-sourced tickets one device may hold.
+
+    And the rule that outranks all of it: a ticket opened from a self-report is a
+    diagnostic HINT. Nothing here (or downstream) may drive an automated security
+    decision off it — it only ever opens a ticket for a human to triage.
+
+    Best-effort; never raises out. Returns tickets opened this pass.
+    """
+    try:
+        _init_db()
+        settings = _get_settings()
+        if not settings.get("auto_ticket_on_agent_error"):
+            return 0
+        min_sev = settings.get("min_severity_for_error_ticket") or "HIGH"
+        try:
+            cap = int(settings.get("agent_error_ticket_max_per_device") or 10)
+        except (TypeError, ValueError):
+            cap = 10
+        import nemesis_severity as _sev
+        own = conn is None
+        conn = conn or _conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM tickets_settings WHERE key='agent_error_ticket_hwm'"
+            ).fetchone()
+            hwm = int(row["value"]) if row and row["value"] else 0
+        except Exception:
+            hwm = 0
+        try:
+            rows = conn.execute(
+                "SELECT id AS rid, device_id AS dev, code, severity, count, first_ts, "
+                "       last_ts, context, received_at "
+                "FROM agent_error_reports WHERE id > ? ORDER BY id", (hwm,)).fetchall()
+        except Exception:
+            if own:
+                conn.close()
+            return 0
+
+        opened, max_id, seen, per_dev = 0, hwm, set(), {}
+        for r in rows:
+            max_id = max(max_id, r["rid"])
+            code, dev, sev = r["code"], r["dev"], r["severity"]
+            # Gate on the AGENT-SENT severity (its catalog is the source of truth).
+            # A NULL/absent severity (a pre-severity agent, or junk the ingest
+            # rejected) cannot be ranked -> not ticketed, conservative by design.
+            if not sev or not _sev.meets_threshold(sev, min_sev):
+                continue
+            key = "agent:%s:%s" % (dev, code)          # device-scoped dedup key
+            if key in seen:
+                continue
+            # per-(device,code) dedup: already an open ticket?
+            dup = conn.execute(
+                "SELECT 1 FROM tickets WHERE type='ticket' AND category='error_notice' "
+                "AND sensor_key=? AND status IN ('Open','Investigating') LIMIT 1",
+                (key,)).fetchone()
+            if dup:
+                seen.add(key)
+                continue
+            # per-device rate-limit on concurrent open agent-sourced tickets
+            if dev not in per_dev:
+                per_dev[dev] = conn.execute(
+                    "SELECT COUNT(*) FROM tickets WHERE type='ticket' "
+                    "AND category='error_notice' AND status IN ('Open','Investigating') "
+                    "AND sensor_key LIKE ?", ("agent:%s:%%" % dev,)).fetchone()[0]
+            if per_dev[dev] >= cap:
+                log.warning("agent-error bridge: device %s at open-ticket cap (%d), "
+                            "skipping %s", dev, cap, code)
+                continue
+            try:
+                open_ticket(
+                    sensor_key=key,
+                    title="[SELF-REPORTED] %s on %s" % (code, dev),
+                    body=("SELF-REPORTED by agent device %s (an agent CLAIM, not a "
+                          "server-observed fact - do NOT drive any automated action "
+                          "off it).\n\nAgent error %s x%s, first %s last %s.\n\n"
+                          "Context: %s"
+                          % (dev, code, r["count"], r["first_ts"], r["last_ts"],
+                             (r["context"] or "")[:400])),
+                    priority=(sev or "").upper(),
+                    category="error_notice",
+                    actor="agent-error-bridge")
+                opened += 1
+                seen.add(key)
+                per_dev[dev] = per_dev.get(dev, 0) + 1
+            except Exception:
+                log.exception("agent-error bridge: open_ticket failed for %s", key)
+        try:
+            conn.execute(
+                "INSERT INTO tickets_settings(key, value) VALUES('agent_error_ticket_hwm', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(max_id),))
+            conn.commit()
+        except Exception:
+            log.exception("agent-error bridge: high-water-mark advance failed")
+        if own:
+            conn.close()
+        return opened
+    except Exception:
+        log.exception("agent-error bridge: scan failed")
+        return 0
 
 
 # ── error-ledger -> ticket bridge (2026-08-20) ────────────────────────────────

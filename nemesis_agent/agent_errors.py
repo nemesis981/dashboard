@@ -132,6 +132,14 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _severity_of(code):
+    """The catalog severity for a code (low/medium/high). The agent is the source
+    of truth for this — it ships in the digest so the SERVER never has to keep a
+    second copy of the severity map (which would drift). Unknown code -> None."""
+    spec = E_AGENT_CODES.get(code)
+    return spec[2] if spec else None
+
+
 def record(code, context=None):
     """Record one occurrence of `code`. BEST-EFFORT: never raises.
 
@@ -178,13 +186,15 @@ def drain():
     stage-(b) heartbeat field will call each beat, so a report is sent once and
     the payload stays bounded to what accrued since the last beat.
 
-    Returns a list of {code, count, first, last, context} (context = the last
-    one seen; capped). Empty list when nothing accrued.
+    Returns a list of {code, severity, count, first, last, context}. `severity`
+    (low/medium/high) is looked up from the catalog and sent so the server gates
+    on it without keeping its own severity map. Empty list when nothing accrued.
     """
     try:
         with _lock:
-            out = [{"code": c, "count": v["count"], "first": v["first"],
-                    "last": v["last"], "context": v.get("last_context")}
+            out = [{"code": c, "severity": _severity_of(c), "count": v["count"],
+                    "first": v["first"], "last": v["last"],
+                    "context": v.get("last_context")}
                    for c, v in _counters.items()]
             _counters.clear()
         return out
