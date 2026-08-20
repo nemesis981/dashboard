@@ -25,8 +25,30 @@
         var d = document.createElement("div");
         d.id = "fwCredModal";
         d.setAttribute("onclick", "if(event.target===this)fwCredCancel()");
+        /* z-index 90000, deliberately, and NOT an arbitrary bump.
+         *
+         * This is a BLOCKING prompt: whenever it is shown it must be the thing
+         * the operator can actually reach. At its original 2000 that held only
+         * because every caller invoked it from ordinary page context, where
+         * nothing competes. The first caller with its own overlay
+         * (ram-recovery.js, z-index 9999) rendered this modal BEHIND itself --
+         * visible but unusable, password uneditable.
+         *
+         * The value is picked against the measured stacking landscape rather
+         * than guessed:
+         *     <=1000  ordinary page chrome
+         *      9999   app overlays (ram-recovery popup)
+         *  -> 90000   this modal: above any app overlay
+         *     99998   nemesis-idle-lock warning bar
+         *     99999   nemesis-idle-lock session lock
+         *
+         * ABOVE app overlays, and DELIBERATELY BELOW the idle lock. Raising it
+         * over 99999 would let a credential prompt sit on top of the session
+         * lock screen, which is a security regression -- the lock must always
+         * win. Any new full-screen overlay belongs below 90000.
+         */
         d.style.cssText = "display:none;position:fixed;top:0;left:0;width:100%;" +
-                          "height:100%;background:rgba(0,0,0,0.75);z-index:2000";
+                          "height:100%;background:rgba(0,0,0,0.75);z-index:90000";
         d.innerHTML =
             '<div style="background:#0d1117;border:1px solid #1e2d4e;border-radius:8px;' +
                  'padding:24px;max-width:420px;margin:12% auto;position:relative">' +

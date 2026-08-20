@@ -30,12 +30,21 @@ Usage:  python3 make_orphan_shm.py orphan|live|zombie|both [--size-mb N]
 """
 
 import ctypes
+import errno
 import os
 import signal
 import sys
 import time
 
 IPC_CREAT = 0o1000
+#: IPC_EXCL is NOT optional here. Without it, shmget() on an ALREADY-TAKEN key
+#: silently returns the EXISTING segment instead of creating one -- and the
+#: memset below would then write 0xAB over the first 1 MB of a live
+#: application's shared memory, after which this fixture's "orphan" would be
+#: offered to the reclaim feature for deletion. With IPC_EXCL a collision fails
+#: loudly (EEXIST) instead. Required before this is safe to run anywhere other
+#: than a throwaway VM.
+IPC_EXCL = 0o2000
 IPC_RMID = 0
 
 _libc = ctypes.CDLL("libc.so.6", use_errno=True)
@@ -60,8 +69,15 @@ def create_and_attach(size_bytes, key):
     correct while it was never actually exercised."""
     ctypes.set_errno(0)
     shmid = _libc.shmget(ctypes.c_int(key), ctypes.c_size_t(size_bytes),
-                         IPC_CREAT | 0o600)
+                         IPC_CREAT | IPC_EXCL | 0o600)
     if shmid < 0:
+        err = ctypes.get_errno()
+        if err == errno.EEXIST:
+            raise SystemExit(
+                "REFUSING: key 0x%x is already in use by an existing segment. "
+                "Without IPC_EXCL this would have silently adopted and then "
+                "OVERWRITTEN a live application's shared memory. Re-run to get "
+                "a different pid-derived key." % key)
         _fail("shmget")
     ctypes.set_errno(0)
     addr = _libc.shmat(ctypes.c_int(shmid), None, 0)
