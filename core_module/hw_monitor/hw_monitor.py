@@ -3466,10 +3466,32 @@ def _verify_agent_heartbeat(headers, body, device_id):
         return False, "signed_at outside +/-%ds tolerance (skew=%ds)" % (
             _AGENT_AUTH_SKEW_S, int(skew))
 
+    # Replay floor: signed_at must be strictly newer than the last accepted one.
+    # Compared CHRONOLOGICALLY, not lexically. The prior code did a raw string
+    # `<=` on the ISO values, whose ADR-0004-step-2 premise ("local ISO strings
+    # compare correctly lexicographically") held only while every heartbeat from
+    # a device used the SAME format. The 2026-08-20 naive-local -> aware-UTC
+    # switch breaks that during the per-device transition: a device EAST of UTC
+    # whose stored floor is an old naive-local string (e.g. "..T21:18:51",
+    # 9pm local) and whose next, genuinely newer heartbeat arrives as aware UTC
+    # ("..T12:23:51+00:00") compares lexically LOWER at the hour digit, so the
+    # real beat is falsely rejected as a replay for up to ~offset hours after
+    # upgrade. West of UTC (e.g. CDT) happens to still order correctly, which is
+    # why the CDT-only fleet did not surface it. Normalising both sides to aware
+    # UTC before comparing makes the check frame-independent. `ts` is the already
+    # -parsed signed_at; a naive value is interpreted as LOCAL, consistent with
+    # the skew check above (naive.astimezone(UTC) treats it as local time).
     floor = _agent_last_signed_at(device_id)
-    if floor and signed_at <= floor:
-        # Local ISO strings compare correctly lexicographically (ADR 0004 step 2).
-        return False, "replay: signed_at %s not newer than %s" % (signed_at, floor)
+    if floor:
+        sat_utc = ts.astimezone(timezone.utc)
+        try:
+            floor_utc = datetime.fromisoformat(floor).astimezone(timezone.utc)
+        except Exception:
+            floor_utc = None
+        replayed = (sat_utc <= floor_utc) if floor_utc is not None \
+            else (signed_at <= floor)   # unparseable stored floor: conservative fallback
+        if replayed:
+            return False, "replay: signed_at %s not newer than %s" % (signed_at, floor)
 
     digest = hashlib.sha256(body).hexdigest()
     message = "%s|%s|%s" % (device_id, signed_at, digest)
