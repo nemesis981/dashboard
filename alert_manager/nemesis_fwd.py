@@ -158,7 +158,7 @@ READ_OPS = {"list_blocked", "list_rules"}
 # tunnel-sourced forwarded traffic at all (Tailscale's ts-forward ACCEPTs it ahead
 # of every ufw chain), so there is no route op for these names to become.
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
-             "write_env", "restart_dashboard"}
+             "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie"}
 NO_CREDENTIAL_OPS = {"ping", "drop_credential"}
 
 #: audit_log action name per op. Introduced 2026-07-31, replacing a hardcoded
@@ -181,6 +181,16 @@ AUDIT_ACTION = {
     # restart filed under fw_* would mislead anyone reading the audit trail.
     "write_env":         "svc_write_env",
     "restart_dashboard": "svc_restart_dashboard",
+    # mem_ rather than fw_ or svc_: this is neither a firewall operation nor a
+    # service lifecycle one. Filing it under fw_* would mislead anyone reading
+    # or prefix-filtering the audit trail, which is the exact reason the svc_
+    # names were introduced in the first place.
+    "reclaim_shm":       "mem_reclaim_shm",
+    # mem_ for the same reason as reclaim_shm: neither a firewall nor a service
+    # lifecycle operation. It IS capable of restarting a unit, but the reason it
+    # happens is memory/process-table hygiene, and the audit trail should read
+    # by intent rather than by mechanism.
+    "reap_zombie":       "mem_reap_zombie",
 }
 
 
@@ -205,7 +215,7 @@ def audit_action_for(op):
 PEER_POLICY = {
     "dashboard": {
         "ops": {"list_blocked", "list_rules", "block_ip", "deny_ip", "unblock_ip",
-                "write_env", "restart_dashboard"},
+                "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -1019,8 +1029,130 @@ def op_restart_dashboard(params):
     return {"restarting": True, "unit": "dashboard"}
 
 
+def op_reclaim_shm(params):
+    """Release ONE orphaned SysV shared-memory segment, as root.
+
+    WHY THIS LIVES HERE AND NOT IN THE DASHBOARD. Measured 2026-08-19:
+    `shmctl(2)` IPC_RMID requires the caller to be the segment's owner or
+    creator, or hold CAP_SYS_ADMIN. The dashboard runs as `nemesis-dash`
+    (uid 973) with an empty CapabilityBoundingSet and a live CapEff of 0, so it
+    could DETECT an orphan and then fail EPERM on every real one -- orphans in
+    the field belong to whatever crashed (a nemesis-* service, a desktop user,
+    root), essentially never to nemesis-dash. Proven with a differential: the
+    same segment that returned EPERM for an unprivileged non-owner was removed
+    successfully as root.
+
+    The alternative -- granting the dashboard CAP_SYS_ADMIN -- was rejected.
+    That capability is close to root and would be a severe, permanent widening
+    of the dashboard's privilege for one convenience feature.
+
+    THE RE-VERIFICATION RUNS HERE, ON THE PRIVILEGED SIDE, DELIBERATELY. If the
+    caller vouched for orphan status the helper would be trusting exactly the
+    unprivileged process this split exists to constrain, and the listing->action
+    race would still be open on the wrong side of the boundary. The helper
+    re-derives all three conditions itself (nattch==0, absent from every
+    /proc/*/maps, creator pid dead) and refuses if any no longer holds. The
+    caller supplies only an integer shmid.
+    """
+    shmid = params.get("shmid")
+    if isinstance(shmid, bool) or not isinstance(shmid, int) or shmid < 0:
+        raise Denied("bad_request", "shmid must be a non-negative integer")
+
+    try:
+        import ram_recovery as _rr                           # noqa: PLC0415
+    except Exception as exc:                                 # noqa: BLE001
+        raise Denied("internal", "ram_recovery unavailable: %s" % exc)
+
+    # Prove the classifier can produce BOTH answers before trusting it to
+    # authorise a destructive op. A classifier stuck on "orphan" would look
+    # identical to a working one right up until it deleted something live.
+    try:
+        _rr.self_test()
+    except Exception as exc:                                 # noqa: BLE001
+        raise Denied("internal",
+                     "orphan classifier self-test FAILED, refusing: %s" % exc)
+
+    ok, detail, _code = _rr.release_shm(shmid)
+    if not ok:
+        # Covers both "no longer orphaned" (the interlock) and a genuine
+        # shmctl failure. Either way nothing was removed.
+        raise Denied("reclaim_refused", detail)
+    log.info("fwd: reclaim_shm released shmid=%s", shmid)
+    return {"released": True, "shmid": shmid, "detail": detail}
+
+
+def op_reap_zombie(params):
+    """Clear ONE zombie process, as root, re-deriving EVERY fact server-side.
+
+    WHY THIS LIVES HERE AND NOT IN THE DASHBOARD. Measured 2026-08-19, then
+    diagnosed 2026-08-20: both real zombies on the build box failed with
+    "not permitted to terminate parent" (EPERM). The dashboard is `nemesis-dash`
+    (uid 973) with CapEff=0, and `kill(2)` needs matching uid or CAP_KILL. But
+    privilege was only half of it -- the CLASSIFICATION was also wrong, and for
+    a reason that had nothing to do with capabilities: `systemctl --user` needs
+    a runtime dir this nologin account does not have, so pid->unit resolution
+    fell back to system scope and answered with the container unit for every
+    user process. See ram_recovery.proc_cgroup_unit for the replacement, which
+    is context-independent.
+
+    THE CALLER SENDS ONE INTEGER AND VOUCHES FOR NOTHING -- not the parent, not
+    the case, not the unit, not the starttime. Identical contract to
+    op_reclaim_shm, for the identical reason.
+
+    THE INTERLOCK THAT BOUNDS THIS OP is not the credential: it is that
+    ram_recovery.reap_zombie_verified confirms the named pid is ACTUALLY a
+    zombie (state Z) before it will act on that pid's parent. Without it, a
+    compromised dashboard could name any live pid and have root signal its
+    parent -- an arbitrary-kill primitive handed to the least trusted side of
+    the boundary. Everything else here is defence in depth around that check.
+
+    ⚠ NOTE FOR ANYONE WIDENING THIS: it takes a pid, never a unit name, for the
+    same reason op_restart_dashboard takes no parameters at all. The unit that
+    gets restarted is DERIVED from the pid's cgroup on this side. A unit-name
+    parameter would be an injection surface into `systemctl restart`, and there
+    is no version of that which is worth the convenience.
+    """
+    pid = params.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        raise Denied("bad_request", "pid must be an integer greater than 1")
+
+    try:
+        import ram_recovery as _rr                           # noqa: PLC0415
+    except Exception as exc:                                 # noqa: BLE001
+        raise Denied("internal", "ram_recovery unavailable: %s" % exc)
+
+    # Prove the classifier can still produce ALL THREE answers before trusting
+    # it to authorise a destructive act. A classifier stuck on "terminate"
+    # looks identical to a working one right up until it kills a live desktop
+    # application -- which is exactly the failure the session interlock exists
+    # to prevent, so the check that the interlock still works runs first.
+    try:
+        _rr.zombie_self_test()
+    except Exception as exc:                                 # noqa: BLE001
+        raise Denied("internal",
+                     "zombie classifier self-test FAILED, refusing: %s" % exc)
+
+    ok, detail, code, info = _rr.reap_zombie_verified(pid)
+    if not ok:
+        # Refusals and failures are distinguished by KIND, so the caller records
+        # the right ledger code without parsing prose.
+        raise Denied(_rr.REAP_CODE_KIND.get(code, "reap_failed"), detail)
+
+    log.info("fwd: reap_zombie pid=%s case=%s unit=%s -- %s",
+             pid, info.get("case"), info.get("unit"), detail)
+    return {"reaped": True, "pid": pid, "detail": detail,
+            "case": info.get("case"), "unit": info.get("unit"),
+            "ppid": info.get("ppid"), "parent_name": info.get("parent_name"),
+            # "regenerated" | "clear" | "unknown" -- three-valued on purpose, so
+            # "we could not check" can never be read as "it did not come back".
+            "regeneration": info.get("regeneration"),
+            "regenerated_pid": info.get("regenerated_pid")}
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
+    "reclaim_shm": op_reclaim_shm,
+    "reap_zombie": op_reap_zombie,
     "list_blocked": op_list_blocked,
     "list_rules": op_list_rules,
     "block_ip": op_block_ip,

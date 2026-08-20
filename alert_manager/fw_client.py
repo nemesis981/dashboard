@@ -175,6 +175,38 @@ def restart_dashboard(username, session_id, password):
     return _request("restart_dashboard", {}, username, session_id, password)
 
 
+def reclaim_shm(shmid, username, session_id, password):
+    """Release one orphaned SysV shared-memory segment, via the privileged helper.
+
+    Only an integer shmid crosses the boundary. This side deliberately does NOT
+    send an "it is orphaned" assertion: the helper re-derives all three orphan
+    conditions itself (nattch==0, absent from every /proc/*/maps, creator pid
+    dead) immediately before removing anything. Vouching from here would both
+    trust the unprivileged process the split exists to constrain, and leave the
+    listing->action race open on the wrong side of the boundary.
+    """
+    return _request("reclaim_shm", {"shmid": int(shmid)},
+                    username, session_id, password)
+
+
+def reap_zombie(pid, username, session_id, password):
+    """Clear one zombie process, via the privileged helper.
+
+    Only an integer pid crosses the boundary -- deliberately NOT the parent,
+    the case, the unit or the starttime, even though this side computed all of
+    them for the listing. The helper re-derives every one of them, and confirms
+    the pid really is a zombie before acting on its parent.
+
+    That is not redundancy. This process cannot terminate or restart anything
+    it does not own (uid 973, CapEff=0), so the privilege genuinely lives over
+    there; and the values this side computed came from a classifier that, run
+    from here, CANNOT see a user's systemd manager. Sending them would be
+    forwarding a known-unreliable answer under the authority of a root helper.
+    """
+    return _request("reap_zombie", {"pid": int(pid)},
+                    username, session_id, password)
+
+
 def list_blocked(username, session_id, password=None):
     """Password may be omitted if the helper still holds a live cached
     verification for this (peer, user, session). The helper decides — the
