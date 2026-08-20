@@ -114,6 +114,12 @@ def _init_schema() -> None:
         CREATE TABLE IF NOT EXISTS tickets (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             type              TEXT    NOT NULL,
+            -- alert | error_notice. Distinct from `type` (ticket|note): `type`
+            -- is the record STRUCTURE, `category` is what the ticket is ABOUT.
+            -- Default 'alert' so every pre-existing ticket backfills correctly
+            -- (all current tickets are alert- or manually-sourced). error_notice
+            -- is the error->ticket bridge (2026-08-20).
+            category          TEXT    DEFAULT 'alert',
             rule_id           TEXT,
             sensor_key        TEXT,
             src_ip            TEXT,
@@ -153,6 +159,10 @@ def _init_schema() -> None:
     existing = {row[1] for row in conn.execute("PRAGMA table_info(tickets)").fetchall()}
     if "created_by" not in existing:
         conn.execute("ALTER TABLE tickets ADD COLUMN created_by TEXT")
+    if "category" not in existing:
+        # Existing rows -> 'alert' via the DEFAULT (all current tickets are
+        # alert/manual). The error->ticket bridge writes 'error_notice'.
+        conn.execute("ALTER TABLE tickets ADD COLUMN category TEXT DEFAULT 'alert'")
     conn.commit()
     conn.close()
 
@@ -322,7 +332,8 @@ def get_notes(key: str) -> list:
 def open_ticket(rule_id: str = None, sensor_key: str = None,
                 title: str = None, body: str = None, priority: str = None,
                 src_ip: str = None, dst_ip: str = None,
-                ai_analysis_ref: str = None, actor: str = "admin") -> int:
+                ai_analysis_ref: str = None, actor: str = "admin",
+                category: str = "alert") -> int:
     """
     Create a new ticket. Auto-assigns NF-XXXX number and scores related items.
     Returns the new ticket id, or 0 on failure.
@@ -337,12 +348,13 @@ def open_ticket(rule_id: str = None, sensor_key: str = None,
         ticket_number = _next_ticket_number()
         cur = conn.execute(
             """INSERT INTO tickets
-                 (type, rule_id, sensor_key, src_ip, dst_ip, priority,
+                 (type, category, rule_id, sensor_key, src_ip, dst_ip, priority,
                   title, body, status, ticket_number, ai_analysis_ref,
                   relevance_scores, created_by, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Open', ?, ?, ?, ?, ?, ?)""",
             (
                 "ticket",
+                "error_notice" if category == "error_notice" else "alert",
                 rule_id, sensor_key, src_ip, dst_ip, priority,
                 (title or "")[:200],
                 (body or "")[:8000],
@@ -827,28 +839,53 @@ function loadTickets() {{
         }});
 }}
 
+function categoryChip(cat) {{
+    // Per-row label so the type is visible even outside its section.
+    if (cat === "error_notice")
+        return "<span style='background:#25324a;color:#7fb2ff;font-size:0.68em;font-weight:bold;padding:1px 6px;border-radius:8px;margin-right:6px'>ERROR NOTICE</span>";
+    return "<span style='background:#3a2130;color:#ff9a9a;font-size:0.68em;font-weight:bold;padding:1px 6px;border-radius:8px;margin-right:6px'>ALERT</span>";
+}}
+
+function ticketRowHtml(t) {{
+    var statusColors = {{Open:"#ffaa00",Investigating:"#00d4ff",Resolved:"#00ff88",Closed:"#555"}};
+    var sc = statusColors[t.status] || "#888";
+    var titleText = escH(t.title || (t.body||"").substring(0,60));
+    return "<tr>"
+        +"<td style='color:#bbb;font-size:0.8em;white-space:nowrap'>"+escH(t.ticket_number||"—")+"</td>"
+        +"<td>"+categoryChip(t.category)+"<span style='color:#eee'>"+titleText+"</span>"
+        +"<div style='color:#bbb;font-size:0.75em;margin-top:2px;white-space:pre-wrap'>"+escH((t.body||"").substring(0,100))+"</div></td>"
+        +"<td style='color:#ccc;font-size:0.8em'>"+escH(t.rule_id||t.sensor_key||"")+"</td>"
+        +"<td style='font-size:0.8em'><span style='color:"+(t.priority==="HIGH"||t.priority==="CRITICAL"?"#ff4444":t.priority==="MEDIUM"?"#ffaa00":"#aaa")+"'>"+escH(t.priority||"—")+"</span></td>"
+        +"<td><span style='color:"+sc+";font-size:0.82em;font-weight:bold'>"+escH(t.status||"")+"</span></td>"
+        +"<td style='color:#bbb;font-size:0.78em;white-space:nowrap'>"+escH((t.created_at||"").substring(0,16).replace("T"," "))+"</td>"
+        +"<td><button class='btn btn-sm' onclick='openEditModal("+t.id+","+JSON.stringify(t.status||"")+","+JSON.stringify(t.resolution_notes||"")+")'>Edit</button></td>"
+        +"</tr>";
+}}
+
+function sectionHeader(label, color, n) {{
+    return "<tr><td colspan='7' style='background:#16161f;color:"+color+";font-weight:bold;"
+        +"font-size:0.82em;letter-spacing:0.04em;padding:7px 8px;border-top:2px solid "+color+"'>"
+        +label+" <span style='color:#888;font-weight:normal'>("+n+")</span></td></tr>";
+}}
+
 function renderTickets(items) {{
     if (!items.length) {{
         document.getElementById("ticketRows").innerHTML =
             "<tr><td colspan='7' style='color:#bbb'>No tickets found.</td></tr>";
         return;
     }}
-    var statusColors = {{Open:"#ffaa00",Investigating:"#00d4ff",Resolved:"#00ff88",Closed:"#555"}};
-    var rows = items.map(function(t){{
-        var sc = statusColors[t.status] || "#888";
-        var titleText = escH(t.title || (t.body||"").substring(0,60));
-        return "<tr>"
-            +"<td style='color:#bbb;font-size:0.8em;white-space:nowrap'>"+escH(t.ticket_number||"—")+"</td>"
-            +"<td><span style='color:#eee'>"+titleText+"</span>"
-            +"<div style='color:#bbb;font-size:0.75em;margin-top:2px;white-space:pre-wrap'>"+escH((t.body||"").substring(0,100))+"</div></td>"
-            +"<td style='color:#ccc;font-size:0.8em'>"+escH(t.rule_id||t.sensor_key||"")+"</td>"
-            +"<td style='font-size:0.8em'><span style='color:"+(t.priority==="HIGH"||t.priority==="CRITICAL"?"#ff4444":t.priority==="MEDIUM"?"#ffaa00":"#aaa")+"'>"+escH(t.priority||"—")+"</span></td>"
-            +"<td><span style='color:"+sc+";font-size:0.82em;font-weight:bold'>"+escH(t.status||"")+"</span></td>"
-            +"<td style='color:#bbb;font-size:0.78em;white-space:nowrap'>"+escH((t.created_at||"").substring(0,16).replace("T"," "))+"</td>"
-            +"<td><button class='btn btn-sm' onclick='openEditModal("+t.id+","+JSON.stringify(t.status||"")+","+JSON.stringify(t.resolution_notes||"")+")'>Edit</button></td>"
-            +"</tr>";
-    }}).join("");
-    document.getElementById("ticketRows").innerHTML = rows;
+    // GROUP the two categories under distinct sections rather than one blended
+    // list. Alerts first (security detections), then Error Notices (operational).
+    var alerts = [], errs = [];
+    items.forEach(function(t){{ (t.category === "error_notice" ? errs : alerts).push(t); }});
+    var html = "";
+    if (alerts.length)
+        html += sectionHeader("&#128276; ALERTS", "#ff9a9a", alerts.length)
+              + alerts.map(ticketRowHtml).join("");
+    if (errs.length)
+        html += sectionHeader("&#9881; ERROR NOTICES", "#7fb2ff", errs.length)
+              + errs.map(ticketRowHtml).join("");
+    document.getElementById("ticketRows").innerHTML = html;
 }}
 
 function openNewTicketModal() {{
