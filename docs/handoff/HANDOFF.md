@@ -91,9 +91,11 @@ Full commit-by-commit detail: `docs/handoff/supplements/2026-08-19-001.md`.
    scoping pass whenever someone picks up the Windows side — SysV shm's orphan category may
    not exist as a problem there at all; zombies' nearest analogue (handle leaks) is a
    different diagnostic, not a port.
-4. **`LICENSE` draft's three open placeholders** (copyright holder, commercial contact,
-   governing law) plus real legal review — unchanged, still open.
-5. **The 08-08 error-code-classification batches** — now 11 days unclaimed, unchanged.
+4. **`LICENSE` draft's real legal review** — still open. The three placeholders (copyright
+   holder, commercial contact, governing law) are filled as of `b6c9985` (2026-08-20:
+   "nemesis-sw" / `license@nemesis-sw.com` / Texas) — filling in the values doesn't close the
+   legal-review item, which remains unstarted.
+5. **The 08-08 error-code-classification batches** — now 12 days unclaimed, unchanged.
 6. **The undeployed-but-committed pile continues to be worth watching, though tonight
    narrowed it substantially** — most of today's memory-work batches are now genuinely live
    (see §1), which is real progress against the standing "committed vs. running" gap flagged
