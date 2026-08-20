@@ -188,6 +188,29 @@ else
 fi
 
 # ── 4. Copy agent files (FILTERED — see header) ─────────────────────────────
+#
+# STOP A RUNNING AGENT FIRST -- this is an enrollment-correctness step, not
+# just tidiness. On a re-install the previously-installed agent keeps running
+# through section 6, and if its conf carries no device_id yet it is sitting in
+# ensure_enrolled()'s poll loop, ready to POST /enroll of its own accord. The
+# server mints a fresh device_id per POST, so the installer and that live agent
+# can enroll the SAME machine CONCURRENTLY and produce two rows timestamped in
+# the same second -- which is the signature seen on the 2026-08-20
+# installer-test-node pair (two rows, one shared public key, identical
+# agent_last_seen), as distinct from the minutes-apart pair a sequential re-run
+# produces.
+#
+# ⚠ INFERRED, not reproduced: the concurrent race is deduced from that shared
+# timestamp plus the absence of any stop here. The sequential re-run path WAS
+# reproduced directly (see the idempotence gate in section 6). Stopping first
+# also avoids swapping agent.py underneath a live process.
+if systemctl list-unit-files "${SERVICE_NAME}.service" >/dev/null 2>&1 \
+   && systemctl is-active --quiet "$SERVICE_NAME"; then
+    step "Stopping the running agent before reinstalling..."
+    systemctl stop "$SERVICE_NAME" || warn "could not stop ${SERVICE_NAME}; continuing"
+    ok "existing agent stopped (prevents a concurrent second enrollment)"
+fi
+
 step "Installing agent files to ${INSTALL_DIR}..."
 tar -C "$SCRIPT_DIR" \
     --exclude='./nemesis_agent.conf' \
