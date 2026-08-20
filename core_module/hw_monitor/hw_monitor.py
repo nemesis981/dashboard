@@ -17,7 +17,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from logging.handlers import RotatingFileHandler
 
@@ -3451,7 +3451,17 @@ def _verify_agent_heartbeat(headers, body, device_id):
         ts = datetime.fromisoformat(signed_at)
     except Exception:
         return False, "unparseable signed_at"
-    skew = abs((datetime.now() - ts).total_seconds())
+    # TIMEZONE-CORRECT skew (fixed 2026-08-20). Current agents send an
+    # offset-AWARE UTC stamp; compare it against an aware UTC clock so the result
+    # is independent of the server's own local zone. The previous code did
+    # `datetime.now() - ts` with a naive LOCAL now, which only agreed with the
+    # agent when both were in the same zone -- true same-machine, false for a
+    # CDT agent vs this UTC server (measured skew 18000s, every beat rejected).
+    # A naive `ts` means a LEGACY agent (pre-fix) that stamps naive local time;
+    # keep comparing those against naive local `now` so they are unaffected
+    # during rollout, and never mix aware/naive (which would raise TypeError).
+    now = datetime.now(timezone.utc) if ts.tzinfo is not None else datetime.now()
+    skew = abs((now - ts).total_seconds())
     if skew > _AGENT_AUTH_SKEW_S:
         return False, "signed_at outside +/-%ds tolerance (skew=%ds)" % (
             _AGENT_AUTH_SKEW_S, int(skew))

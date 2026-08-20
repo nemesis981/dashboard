@@ -16,7 +16,7 @@ import sys
 import time
 import threading
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import psutil
@@ -134,6 +134,12 @@ _wake = threading.Event()
 _last_beat_at = 0.0
 _early_beat_reasons = []
 _early_beat_lock = threading.Lock()
+
+# Memory budget/ladder state, held across poll cycles. The long-lived poll
+# process IS the persistence (the agent has no DB); it re-arms to a fresh state
+# on restart, which is acceptable for shadow observation exactly as the
+# appliance ladder re-arms. None until the first beat initialises it.
+_mem_ladder_state = None
 
 
 def request_early_beat(reason: str) -> bool:
@@ -411,6 +417,7 @@ def _collect_payload(conf):
     # Observation layer (technique-independent foundation). None on a deferred
     # beat for a remote device -- see _observation_for_beat().
     observation = _observation_for_beat(conn_type)
+    memory_ladder = _memory_ladder_for_beat()
 
     # Agent health
     uptime = int(time.time() - _agent_start_time)
@@ -461,6 +468,11 @@ def _collect_payload(conf):
         "hardware":        hw,
         "security":        sec,
         "agent_health":    agent_health,
+        # Agent self-memory budget/ladder, SHADOW telemetry only -- what the
+        # ladder observed about the agent's own footprint and what it WOULD do,
+        # never what it did (it executes nothing on an endpoint). Unknown key is
+        # ignored by hw_monitor's specific .get() reads until a display follows.
+        "memory_ladder":   memory_ladder,
         "observation":     observation,
         "suricata_alerts": suri_alerts,
         "scan_result":     None,
@@ -490,22 +502,29 @@ def _pending_task_results():
 
 
 def _migrate_key_material():
-    """Offer to protect an unencrypted signing key. NEVER blocks startup.
+    """At startup: NOTE an unprotected key. NEVER prompt, NEVER block.
 
-    Operator decision 2026-08-03 — migrate-or-continue. Every currently-enrolled
-    device is tier 4, so refusing to start without a password would brick agents
-    for users who have no idea one is now required. Declining therefore keeps the
-    agent running on the unencrypted key and reports `key_protection_tier: none`,
-    which is the honest answer: the fleet view shows exactly which devices are
-    still unprotected rather than the product quietly pretending otherwise.
+    Operator decision 2026-08-03 — migrate-or-continue: an unprotected key must
+    never stop the agent. Revised 2026-08-20 — the *offer* to protect it no
+    longer happens here at all.
 
-    Every failure path leaves the existing key untouched and usable — the
-    migration deletes the plaintext copy only after proving the protected one
-    works (see keyprotect/migrate.py).
+    WHY THE PROMPT WAS REMOVED FROM STARTUP. The agent runs as a Task Scheduler
+    task with `-LogonType Interactive`, so at logon it runs inside a real desktop
+    session where tkinter genuinely renders. A modal "protect your key?" dialog
+    therefore DID appear at every unattended start and block the poll loop behind
+    it, waiting for a human who — on a headless/overnight machine — is not there.
+    (This is a DIFFERENT failure from the invisible-dialog bug `secret_prompt.
+    _require_viewable` already fixed: that one was a dialog that could not be
+    shown; this one shows fine and waits forever.) `needs_migration()` carries no
+    "already declined" memory either, so it re-appeared on every restart.
+
+    The durable fix is structural, not a suppression flag that can be missed:
+    startup CANNOT prompt because the prompt is not here. Key protection is now
+    an explicit, interactive action the user takes in the settings GUI — see
+    `offer_key_protection()`, which the GUI calls. Nothing is lost: an
+    unprotected device still reports `key_protection_tier: none`, and the fleet
+    view still shows exactly which devices are unprotected, same as before.
     """
-    import enrollment
-    import secret_prompt
-
     keys_dir = config.keys_dir()
     try:
         if not keyprotect.needs_migration(keys_dir):
@@ -513,27 +532,46 @@ def _migrate_key_material():
     except Exception as e:
         log.debug("could not evaluate key migration: %s", e)
         return
-
+    # Unprotected, but that is a fleet-visible state, not a startup blocker. Note
+    # it and continue — the offer to fix it lives in the settings GUI now.
     log.warning("this device's signing key is stored UNENCRYPTED on disk; "
-                "offering to protect it")
+                "reporting tier 'none'. Protect it from the Nemesis settings "
+                "app (Task-Scheduler startup never prompts, by design).")
+
+
+def offer_key_protection(secret_provider):
+    """INTERACTIVE key protection. Called by the settings GUI, never at startup.
+
+    `secret_provider()` returns a new device password (or None if the user
+    cancelled). Kept as a callback rather than a raw prompt so this function has
+    NO tkinter/console dependency of its own — the caller owns how the secret is
+    obtained, which is what lets the same migration mechanism serve the Tk GUI, a
+    future CLI `--setup`, or a test, without any of them being wired in here.
+    This is the ONLY path that may block on a human, and it only ever runs in a
+    context a human actually opened.
+
+    Returns (ok: bool, detail: str). Never raises for an ordinary
+    decline/failure — the existing key is left untouched on every non-success
+    path (keyprotect/migrate.py deletes the plaintext copy only after proving the
+    protected one works).
+    """
+    import enrollment
+
+    keys_dir = config.keys_dir()
     try:
-        secret = secret_prompt.prompt_secret_auto(
-            kind=keyprotect.SECRET_PASSWORD, mode=secret_prompt.CREATE)
-    except secret_prompt.NoPromptAvailable as e:
-        log.warning("cannot ask for a device password here (%s) — continuing with "
-                    "an UNENCRYPTED key", e)
-        return
+        if not keyprotect.needs_migration(keys_dir):
+            return True, "key is already protected"
+    except Exception as e:                                   # noqa: BLE001
+        return False, "could not evaluate key state: %s" % e
+
+    secret = secret_provider()
     if secret is None:
-        log.warning("device key protection DECLINED — continuing with an "
-                    "UNENCRYPTED key; this device will report tier 'none'")
-        return
+        return False, "cancelled — key remains unprotected (tier 'none')"
 
     try:
         backend, _pub = keyprotect.migrate_legacy(secret, keys_dir)
     except keyprotect.KeyProtectError as e:
-        log.error("key protection FAILED (%s) — the existing key is untouched, "
-                  "continuing", e)
-        return
+        return False, "protection failed (%s) — existing key untouched" % e
 
     enrollment.set_backend(backend)
     # The conf pointer now names a file that no longer exists. An actively-false
@@ -543,9 +581,10 @@ def _migrate_key_material():
         if conf.get("private_key_path"):
             conf["private_key_path"] = ""
             config.save(conf)
-    except Exception as e:
+    except Exception as e:                                   # noqa: BLE001
         log.debug("could not clear private_key_path: %s", e)
     log.info("device key is now protected (tier=%s)", backend.tier_id)
+    return True, "device key is now protected (tier=%s)" % backend.tier_id
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +671,31 @@ def _clamp_observe_n(raw):
         log.warning("ignoring out-of-range observe_every_n: %r", raw)
         return None
     return max(_OBSERVE_N_MIN, min(_OBSERVE_N_MAX, int(raw)))
+
+
+def _memory_ladder_for_beat() -> dict:
+    """One SHADOW memory-ladder cycle, as heartbeat telemetry. Best-effort.
+
+    Governs only the AGENT'S OWN footprint and executes nothing on the endpoint
+    -- see mem_agent for the full safety model. Wrapped so any failure degrades
+    to an explicit "unavailable" report rather than either raising into the
+    poll loop or fabricating a clean result. hw_monitor reads this with specific
+    .get() calls, so reporting it now is safe and the dashboard display follows,
+    same "report now, display follows" pattern as key_protection_tier.
+    """
+    global _mem_ladder_state
+    try:
+        import mem_agent                                     # noqa: PLC0415
+        if _mem_ladder_state is None:
+            _mem_ladder_state = mem_agent.new_ladder_state()
+        _mem_ladder_state, report = mem_agent.run_ladder_cycle_shadow(
+            _mem_ladder_state)
+        return report
+    except Exception as e:                                   # noqa: BLE001
+        # Explicit unavailable, never a silent empty dict that would read as
+        # "measured, all clear".
+        log.debug("memory ladder telemetry failed: %s", e)
+        return {"state": "unavailable", "reason": str(e)[:200]}
 
 
 def _observation_for_beat(conn_type: str) -> dict:
@@ -873,7 +937,16 @@ def _sign_heartbeat(device_id, body: bytes):
     try:
         import hashlib
         from enrollment import _sign
-        signed_at = datetime.now().isoformat(timespec="seconds")
+        # UTC, offset-AWARE, deliberately. Was datetime.now() (naive LOCAL),
+        # which only matched the server when both ran in the same timezone --
+        # true on a same-machine install, FALSE for a real agent reporting to a
+        # server in another zone. Measured 2026-08-20: a CDT agent vs a UTC
+        # server produced signed_at 18000s (5h) off, outside the +/-300s replay
+        # window, so EVERY heartbeat was rejected. An aware-UTC stamp compares
+        # correctly against the server's UTC clock regardless of either party's
+        # local zone. (The server change to `datetime.now(timezone.utc)` for
+        # aware stamps ships alongside this.)
+        signed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         digest = hashlib.sha256(body).hexdigest()
         return signed_at, _sign(f"{device_id}|{signed_at}|{digest}")
     except Exception as e:

@@ -197,13 +197,34 @@ def main():
         # ── agent wiring ──────────────────────────────────────────────────
         print("\nagent wiring")
         src = open(os.path.join(HERE, "agent.py")).read()
-        check("migration runs after the unlock gate",
+        check("migration check runs after the unlock gate",
               src.index("_unlock_key_material()") < src.index("_migrate_key_material()"),
               True)
-        check("CONTROL declining does NOT stop the agent (migrate-or-continue)",
-              "DECLINED" in src and "return" in src, True)
         check("private_key_path is cleared after a successful migration",
               'conf["private_key_path"] = ""' in src, True)
+
+        # ── the durable unattended-startup guard (2026-08-20) ──────────────
+        # The regression this locks down: a modal key-protection prompt at
+        # startup blocked the poll loop on an unattended box, waiting for a
+        # human who was not there. The fix is STRUCTURAL -- startup cannot
+        # prompt because the prompt is not in the startup path. These checks
+        # fail loudly if anyone reintroduces one.
+        print("\nunattended-startup prompt guard")
+        mig_start = src.index("def _migrate_key_material()")
+        mig_end = src.index("def offer_key_protection(")
+        startup_body = src[mig_start:mig_end]
+        check("startup migration NEVER constructs a secret prompt",
+              "prompt_secret_auto" not in startup_body and "CREATE" not in startup_body,
+              True)
+        check("startup migration imports no prompt module",
+              "import secret_prompt" not in startup_body, True)
+        check("the interactive offer exists, SEPARATE from startup",
+              "def offer_key_protection(" in src, True)
+        check("the interactive offer is the ONLY holder of the migrate mechanism",
+              src.index("migrate_legacy(secret") > src.index("def offer_key_protection("),
+              True)
+        check("CONTROL declining still does NOT stop the agent (offer returns, never raises)",
+              "return False, \"cancelled" in src, True)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
