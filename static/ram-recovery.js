@@ -55,6 +55,16 @@
   function close() {
     var o = document.getElementById("ramRecoveryOverlay");
     if (o && o.parentNode) { o.parentNode.removeChild(o); }
+    /* Dismiss any credential prompt this popup opened. Without this the shared
+     * modal is left displayed and its pending promise still registered after
+     * the reclaim popup goes away, so the next attempt resolves the OLD
+     * promise -- whose .then() writes into a panel that is no longer in the
+     * document. That is the "retrying does nothing" half of the reported bug;
+     * the z-index fix alone would not have covered it. */
+    var m = document.getElementById("fwCredModal");
+    if (m && m.style.display !== "none" && window.fwCredCancel) {
+      window.fwCredCancel();
+    }
   }
 
   function row(labelText, subText, checked) {
@@ -166,6 +176,15 @@
         verb = "Restart " + p.unit;
         sub = "restarts the service that owns it — it should come back "
             + "automatically; frees no memory";
+        /* The dashboard cannot reach a logged-in user's systemd manager (no
+         * /run/user/<its own uid>), so for a user service it genuinely does
+         * not know CanStart yet. Say so rather than presenting a proposal as
+         * a settled fact -- nemesis-fwd re-derives it and refuses if it still
+         * cannot confirm. */
+        if (p.canstart !== "yes") {
+          sub += " — restartability is confirmed at action time, and the "
+               + "action is refused if it cannot be";
+        }
       } else {
         verb = "Terminate " + parent;
         sub = "TERMINATES the parent application — it will NOT be relaunched "
@@ -231,8 +250,6 @@
       "border-radius:5px;cursor:pointer;");
     if (!controls.length) { go.disabled = true; go.style.opacity = ".5"; }
     go.addEventListener("click", function () {
-      go.disabled = true;
-      go.textContent = "Cleaning…";
       var sel = [];
       controls.forEach(function (cb) {
         if (!cb.checked) { return; }
@@ -243,31 +260,77 @@
             bytes: parseInt(cb.getAttribute("data-bytes"), 10)
           });
         } else {
-          var st = cb.getAttribute("data-starttime");
+          /* THE PID ONLY. The parent, case, unit and starttime rendered above
+           * are display data for the human -- they are deliberately NOT sent.
+           * nemesis-fwd re-derives every one of them as root and confirms the
+           * pid is genuinely a zombie before acting, so anything asserted from
+           * here would be either ignored or, worse, trusted. Same contract as
+           * the shm reclaim, which sends only a shmid. */
           sel.push({
             kind: "zombie",
-            pid: parseInt(cb.getAttribute("data-pid"), 10),
-            ppid: parseInt(cb.getAttribute("data-ppid"), 10),
-            "case": cb.getAttribute("data-case"),
-            unit: cb.getAttribute("data-unit") || null,
-            user_scope: cb.getAttribute("data-user-scope") === "1",
-            // Carried from list time so the server can detect PID reuse.
-            starttime: st === null ? null : parseInt(st, 10)
+            pid: parseInt(cb.getAttribute("data-pid"), 10)
           });
         }
       });
-      fetch(CLEAN_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ selections: sel })
-      }).then(function (r) { return r.json(); })
-        .then(function (res) { renderResults(container, res); })
-        .catch(function (e) {
-          container.appendChild(el("p", {
-            text: "Cleanup request failed: " + e,
-            style: "color:#ff8080;"
-          }));
-        });
+      /* BOTH kinds are performed by nemesis-fwd as root now, so both carry the
+       * same admin re-authentication as every other privileged op. Zombie
+       * actions used to run in-process and needed no password; they failed
+       * EPERM every time, and moving them behind the helper (2026-08-20) means
+       * they are privileged operations like any other. */
+      var kinds = {};
+      sel.forEach(function (s) { kinds[s.kind] = true; });
+      var needsCred = !!(kinds.shm || kinds.zombie);
+      var label = kinds.shm && kinds.zombie
+        ? "reclaim orphaned memory and clear zombie processes"
+        : (kinds.shm ? "reclaim orphaned shared memory"
+                     : "clear zombie processes");
+      var credPromise = needsCred && window.fwPrompt
+        ? window.fwPrompt(label)
+        : Promise.resolve(null);
+
+      credPromise.then(function (password) {
+        if (needsCred && !password) { return; }   /* cancelled — do nothing */
+        go.disabled = true;
+        go.textContent = "Cleaning…";
+        var payload = { selections: sel };
+        if (password) { payload.password = password; }
+        fetch(CLEAN_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }).then(function (r) { return r.json(); })
+          .then(function (res) {
+            if (res && res.error && window.fwHandleError) {
+              window.fwHandleError(res, "Reclaim failed.");
+              go.disabled = false;
+              go.textContent = "Clean selected";
+              return;
+            }
+            /* If the popup was dismissed while the request was in flight, the
+             * panel is detached and rendering into it would silently go
+             * nowhere -- the reclaim would appear never to complete even
+             * though the server did the work. Re-open a panel so the outcome
+             * is always visible. */
+            var target = container;
+            if (!container.isConnected) {
+              var o2 = overlay();
+              var p2 = panel();
+              o2.appendChild(p2);
+              o2.addEventListener("click", function (ev) {
+                if (ev.target === o2) { close(); }
+              });
+              document.body.appendChild(o2);
+              target = p2;
+            }
+            renderResults(target, res);
+          })
+          .catch(function (e) {
+            container.appendChild(el("p", {
+              text: "Cleanup request failed: " + e,
+              style: "color:#ff8080;"
+            }));
+          });
+      });
     });
 
     bar.appendChild(cancel);
@@ -283,11 +346,30 @@
       style: "margin:0 0 12px 0;"
     }));
     (res.results || []).forEach(function (r) {
+      /* A reap that succeeded and was immediately undone must NOT read as a
+       * plain green OK. Measured in production: reaping the speech-dispatcher
+       * zombie restarts the unit, the fresh instance probes its output modules,
+       * one dies unreaped, and an equivalent zombie exists within the same
+       * second. Every reap genuinely worked and the list looked unchanged --
+       * which reads as a broken feature when the feature is working. Amber and
+       * "CAME BACK" say the true thing instead of the merely-accurate one.
+       * "unknown" is kept distinct from "clear" so a check that could not run
+       * is never displayed as a check that passed. */
+      var label, colour;
+      if (!r.ok) {
+        label = "FAILED   "; colour = "#ff8080";
+      } else if (r.regeneration === "regenerated") {
+        label = "CAME BACK   "; colour = "#c8a04a";
+      } else if (r.regeneration === "unknown") {
+        label = "OK (unconfirmed)   "; colour = "#c8a04a";
+      } else {
+        label = "OK   "; colour = "#9fd39f";
+      }
       container.appendChild(el("div", {
-        text: (r.ok ? "OK   " : "FAILED   ") +
+        text: label +
               (r.kind === "shm" ? ("shmid " + r.shmid) : ("pid " + r.pid)) +
               " — " + (r.detail || ""),
-        style: "font-size:.85em;padding:4px 0;color:" + (r.ok ? "#9fd39f" : "#ff8080") + ";"
+        style: "font-size:.85em;padding:4px 0;color:" + colour + ";"
       }));
     });
     var bar = el("div", { style: "margin-top:16px;text-align:right;" });

@@ -5314,7 +5314,16 @@ def api_ram_recovery_candidates():
     zombies = []
     zombie_error = None
     try:
-        import procmem as _pm                                # noqa: PLC0415
+        # `import procmem` does NOT work here and a plain import was the bug:
+        # procmem lives in nemesis_agent/, and dashboard.service's PYTHONPATH is
+        # alert_manager + core_module/hw_monitor only, so it raised
+        # "No module named 'procmem'" in production while every local test
+        # passed (a shell with a wider path). Reuse mem_appliance's existing
+        # by-absolute-path loader -- the sanctioned way to reach the agent-side
+        # memory modules from the appliance -- rather than adding a sys.path
+        # insert or widening the unit's PYTHONPATH for one import.
+        import mem_appliance as _ma                          # noqa: PLC0415
+        _pm, _ = _ma.load_memory_modules()
         sample = _pm.sample_processes(want_uss=False)
         zombies = _rr.find_zombies(sample)
     except Exception as e:                                   # noqa: BLE001
@@ -5358,22 +5367,46 @@ def api_ram_recovery_clean():
     SESSION_COOKIE_SAMESITE that is two independent reasons a forged request
     fails -- which matters here because this route DESTROYS state.
 
-    Every shm release re-verifies orphan status at the moment of action; the
-    candidate list is a proposal, never a licence to act. Failures are recorded
-    to the error ledger (E-RAMREC-*); successes are returned for display only,
-    per the failures-only decision.
+    SHM RELEASE GOES THROUGH nemesis-fwd, NOT THIS PROCESS. `shmctl(2)` IPC_RMID
+    requires the caller be the segment's owner/creator or hold CAP_SYS_ADMIN,
+    and this process is `nemesis-dash` with CapEff=0 -- measured EPERM on a real
+    orphan, with a control proving the same segment removes cleanly as root.
+    Orphans in the field belong to whatever crashed (a nemesis-* service, a
+    desktop user, root), essentially never to nemesis-dash, so doing it here
+    would fail on every real case. Granting this process CAP_SYS_ADMIN was
+    rejected -- that is close to root, for a convenience feature.
+
+    The helper re-derives orphan status itself before removing anything; this
+    side sends only an integer shmid and never an "it is orphaned" claim. Same
+    reasoning as the credential: there is deliberately nothing here for a
+    compromised dashboard to assert.
+
+    Failures are recorded to the error ledger (E-RAMREC-*); successes are
+    returned for display only, per the failures-only decision.
     """
     if not request.is_json:
         return jsonify({"error": "JSON content-type required"}), 415
     try:
         import ram_recovery as _rr                           # noqa: PLC0415
         import nemesis_errors as _ne                         # noqa: PLC0415
+        import fw_client                                     # noqa: PLC0415
     except Exception as e:                                   # noqa: BLE001
         return jsonify({"error": "ram recovery unavailable: %s" % e}), 503
 
-    selections = (request.get_json(silent=True) or {}).get("selections") or []
+    # Same accessors every other privileged call site uses. The credential is
+    # read from the POST body and forwarded unverified -- this process has no
+    # way to assert "already verified", by design.
+    _fw_actor, _fw_sid, _fw_cred = _actor(), _fw_session_id(), _fw_credential()
+
+    body = request.get_json(silent=True) or {}
+    selections = body.get("selections") or []
     if not isinstance(selections, list):
         return jsonify({"error": "selections must be a list"}), 400
+
+    shm_sel = [s for s in selections if s.get("kind") == "shm"]
+    zombie_sel = [s for s in selections if s.get("kind") == "zombie"]
+    other_sel = [s for s in selections
+                 if s.get("kind") not in ("shm", "zombie")]
 
     conn = _dm_conn()
     try:
@@ -5389,7 +5422,99 @@ def api_ram_recovery_clean():
             _ne.record_error_best_effort(conn, code, context=context,
                                          actor=_actor())
 
-        results = _rr.clean_selected(selections, recorder=_recorder)
+        # Anything that is neither shm nor zombie: no privileged path exists,
+        # so it falls through to clean_selected, which reports it as an unknown
+        # selection kind rather than silently ignoring it.
+        results = _rr.clean_selected(other_sel, recorder=_recorder) \
+            if other_sel else []
+
+        # ── zombies: privileged, one helper round trip per zombie ──
+        #
+        # ROUTED THROUGH nemesis-fwd AS OF 2026-08-20, for two independent
+        # reasons -- and the second is the one that is easy to miss:
+        #
+        # 1. PRIVILEGE. `kill(2)` needs a matching uid or CAP_KILL, and this
+        #    process is `nemesis-dash` (uid 973, CapEff=0). Measured 2026-08-19:
+        #    both real zombies failed EPERM ("not permitted to terminate
+        #    parent"). Restarting a user unit needs the same privilege it does
+        #    not have.
+        # 2. CLASSIFICATION. `systemctl --user` needs $XDG_RUNTIME_DIR and a
+        #    session bus; this nologin account has no /run/user/973, so pid->unit
+        #    resolution silently fell back to system scope and answered with the
+        #    CONTAINER unit for every user process. That is why speech-dispatcher
+        #    -- a perfectly restartable service -- was routed to SIGTERM instead
+        #    of a restart. The privilege fix alone would NOT have corrected that;
+        #    it would just have made the wrong action succeed.
+        #
+        # So only the pid is sent. The helper re-derives the parent, the unit,
+        # the case and the starttime, and confirms the pid really is a zombie
+        # before acting on its parent -- see op_reap_zombie.
+        for sel in zombie_sel:
+            zpid = sel.get("pid")
+            try:
+                res = fw_client.reap_zombie(zpid, _fw_actor, _fw_sid, _fw_cred)
+                regen = res.get("regeneration")
+                if regen == "regenerated":
+                    # The reap SUCCEEDED, so this is not a failed action -- but
+                    # a parent that recreates its zombie on every restart is a
+                    # real defect an operator wants to see accumulate in the
+                    # ledger, rather than 40 isolated successes. See
+                    # E-RAMREC-009 for why this is in a failures-only ledger.
+                    try:
+                        _recorder("E-RAMREC-009",
+                                  {"selection": sel,
+                                   "unit": res.get("unit"),
+                                   "reaped_pid": zpid,
+                                   "returned_as_pid": res.get("regenerated_pid"),
+                                   "detail": str(res.get("detail"))[:300]})
+                    except Exception:                        # noqa: BLE001
+                        pass
+                results.append({"kind": "zombie", "pid": zpid,
+                                "ppid": res.get("ppid"),
+                                "case": res.get("case"), "unit": res.get("unit"),
+                                "ok": True,
+                                "detail": res.get("detail", "reaped"),
+                                "regeneration": regen,
+                                "bytes_freed": 0, "via": "nemesis-fwd"})
+            except Exception as exc:                         # noqa: BLE001
+                kind = getattr(exc, "kind", "unavailable")
+                # Mapped from the helper's error KIND, never from its message
+                # text. An unrecognised kind (transport failure, peer refusal)
+                # falls back to the generic action-failed code rather than
+                # guessing at a more specific one.
+                code = _rr.REAP_KIND_CODE.get(kind, "E-RAMREC-005")
+                try:
+                    _recorder(code, {"selection": sel, "kind": kind,
+                                     "detail": str(exc)[:300]})
+                except Exception:                            # noqa: BLE001
+                    pass
+                results.append({"kind": "zombie", "pid": zpid, "ok": False,
+                                "detail": str(exc)[:300], "bytes_freed": 0,
+                                "via": "nemesis-fwd"})
+
+        # ── shm: privileged, one helper round trip per segment ──
+        for sel in shm_sel:
+            shmid = sel.get("shmid")
+            try:
+                res = fw_client.reclaim_shm(
+                    shmid, _fw_actor, _fw_sid, _fw_cred)
+                results.append({"kind": "shm", "shmid": shmid, "ok": True,
+                                "detail": res.get("detail", "released"),
+                                "bytes_freed": sel.get("bytes", 0),
+                                "via": "nemesis-fwd"})
+            except Exception as exc:                         # noqa: BLE001
+                kind = getattr(exc, "kind", "unavailable")
+                # A refused/failed reclaim is exactly what the ledger is for.
+                code = "E-RAMREC-003" if kind == "reclaim_refused" \
+                    else "E-RAMREC-002"
+                try:
+                    _recorder(code, {"selection": sel, "kind": kind,
+                                     "detail": str(exc)[:300]})
+                except Exception:                            # noqa: BLE001
+                    pass
+                results.append({"kind": "shm", "shmid": shmid, "ok": False,
+                                "detail": str(exc)[:300], "bytes_freed": 0,
+                                "via": "nemesis-fwd"})
     finally:
         conn.close()
 
