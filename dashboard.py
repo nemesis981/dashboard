@@ -1960,7 +1960,7 @@ def _recovery_grace_active(row):
 
 # ── Licensing UI (node-locked keys, remote-device budget, backup codes) ──────
 #
-# SECURITY POSTURE, stated once for all four routes below:
+# SECURITY POSTURE, stated once for all five routes below:
 #   * All are @login_required and NONE is in _AUTH_EXEMPT -- verified by
 #     test_licensing_routes.py, which resolves each endpoint name against the
 #     real url_map rather than trusting the decorator to be present.
@@ -1972,6 +1972,16 @@ def _recovery_grace_active(row):
 #     parameterised.
 #   * Codes are returned in plaintext EXACTLY ONCE, by the route that issues
 #     them, and never stored or re-displayed.
+#   * There is exactly ONE path by which a licence is installed
+#     (`_verify_and_store_license`). Both the manual paste and the automatic
+#     rebind collection use it, so a key arriving from the licence server is
+#     verified against this machine as strictly as one typed in by hand. Two
+#     routes doing the same job with separately-written checks is the shape that
+#     produced the `db_action`/`set_action` divergence; test_licensing_routes.py
+#     fails if either route grows its own copy.
+#   * The licence server is NOT trusted. It is reached over HTTPS, its answers
+#     are distinguished from unreachability, and any key it returns is verified
+#     locally before being stored.
 
 def _license_view():
     """Everything the licensing UI needs, in one read. Never raises.
@@ -2030,10 +2040,15 @@ def licensing_page():
     return render_template("licensing.html", **_license_view())
 
 
-@app.route("/api/license/activate", methods=["POST"])
-@login_required
-def api_license_activate():
-    """Install a purchased licence key. POST-only, auth-gated, audited.
+def _verify_and_store_license(key):
+    """Verify a licence key against THIS machine and store it. Returns (dict, status).
+
+    The single path by which a licence is installed. Both the manual paste
+    (`/api/license/activate`) and the automatic rebind collection
+    (`/api/license/rebind-status`) go through here deliberately: two routes doing
+    the same conceptual job with separately-written verification is the exact
+    shape that produced this codebase's past route-security defects, and it is
+    how one of them quietly ends up with a weaker check than the other.
 
     The key is verified BEFORE it is stored. Storing first and validating later
     would let a bad key overwrite a good one -- turning a typo into a lost
@@ -2043,26 +2058,24 @@ def api_license_activate():
     from core import license_key as lk
     from core import install_id as iid
 
-    key = (request.form.get("license_key") or
-           (request.get_json(silent=True) or {}).get("license_key") or "").strip()
     if not key:
-        return jsonify({"ok": False, "verdict": "absent",
-                        "detail": "No licence key supplied."}), 400
+        return {"ok": False, "verdict": "absent",
+                "detail": "No licence key supplied."}, 400
 
     try:
         fp = iid.compute()
     except iid.InstallIdError as e:
         # Cannot fingerprint -> cannot bind. Refuse rather than storing a key
         # against an empty install id, which would match every other failure.
-        return jsonify({"ok": False, "verdict": "no_install_id",
-                        "detail": "Could not identify this machine, so the "
-                                  "licence cannot be bound to it: %s" % e}), 500
+        return {"ok": False, "verdict": "no_install_id",
+                "detail": "Could not identify this machine, so the "
+                          "licence cannot be bound to it: %s" % e}, 500
 
     res = lk.verify(key, install_id=fp["stable_id"])
     if not res.valid:
         _audit(action="license_activate_rejected", rule_id=res.verdict)
-        return jsonify({"ok": False, "verdict": res.verdict,
-                        "detail": res.detail}), 400
+        return {"ok": False, "verdict": res.verdict,
+                "detail": res.detail}, 400
 
     now = datetime.now().isoformat(timespec="seconds")
     try:
@@ -2084,14 +2097,24 @@ def api_license_activate():
         conn.close()
     except Exception as e:
         log.exception("license activate: could not store licence")
-        return jsonify({"ok": False, "verdict": "store_failed",
-                        "detail": "Licence verified but could not be saved: %s"
-                                  % str(e)[:160]}), 500
+        return {"ok": False, "verdict": "store_failed",
+                "detail": "Licence verified but could not be saved: %s"
+                          % str(e)[:160]}, 500
 
     _audit(action="license_activated", rule_id=(res.payload.get("licence_id") or "")[:32])
-    return jsonify({"ok": True, "verdict": res.verdict,
-                    "tier": res.payload.get("tier"),
-                    "detail": "Licence activated."})
+    return {"ok": True, "verdict": res.verdict,
+            "tier": res.payload.get("tier"),
+            "detail": "Licence activated."}, 200
+
+
+@app.route("/api/license/activate", methods=["POST"])
+@login_required
+def api_license_activate():
+    """Install a purchased licence key. POST-only, auth-gated, audited."""
+    key = (request.form.get("license_key") or
+           (request.get_json(silent=True) or {}).get("license_key") or "").strip()
+    body, status = _verify_and_store_license(key)
+    return jsonify(body), status
 
 
 @app.route("/api/license/backup-codes/generate", methods=["POST"])
@@ -2122,18 +2145,72 @@ def api_license_backup_codes_generate():
                     "level": level, "message": msg})
 
 
+#: The vendor's licence server. A PRODUCT constant, not an environment-specific
+#: one -- it is the same host for every install, the way an update server is.
+#: Overridable so a self-hosted or test deployment can point elsewhere without
+#: patching source.
+#:
+#: ⚠ The hostname below is not yet provisioned -- see the licensing-backend
+#: design doc. Until DNS exists, rebind falls back to the manual support path
+#: exactly as it did before, which is why that fallback is preserved rather
+#: than replaced.
+LICENSE_SERVER = (os.environ.get("NEMESIS_LICENSE_SERVER")
+                  or "https://license.nemesis-sw.com").rstrip("/")
+
+#: Deliberately short. This call sits inside a request the user is waiting on,
+#: and the fallback (manual support) is always available -- so a slow licence
+#: server should degrade to that quickly rather than hang the page.
+_LICENSE_SERVER_TIMEOUT = 10
+
+
+def _license_server_post(path, payload):
+    """POST JSON to the licence server. Returns (status, dict) or (None, None).
+
+    (None, None) means "could not reach it at all" and is deliberately
+    distinguishable from any HTTP status: the caller must be able to tell a
+    refusal (which is an answer) from an unreachable server (which is not), and
+    only the latter should fall back to the manual support path.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    try:
+        req = urllib.request.Request(
+            LICENSE_SERVER + path, data=_json.dumps(payload).encode(),
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=_LICENSE_SERVER_TIMEOUT) as r:
+            return r.status, _json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, _json.loads(e.read().decode() or "{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        log.warning("licence server unreachable (%s%s): %s", LICENSE_SERVER,
+                    path, e)
+        return None, None
+
+
 @app.route("/api/license/backup-codes/redeem", methods=["POST"])
 @login_required
 def api_license_backup_codes_redeem():
     """Spend a backup code to rebind this licence to the CURRENT hardware.
 
-    ⚠ INCOMPLETE BY DESIGN, and it says so rather than pretending: spending the
-    code is implemented and real, but obtaining a REPLACEMENT KEY for the new
-    install id requires the issuer, which is offline/manual today
-    (scripts/nemesis-license-issue). So this records the redemption and returns
-    the new install id for the operator to send to support -- it cannot mint a
-    key by itself. Returning success without a new key would be a lie the user
-    only discovers later.
+    The code is spent locally (atomically, so a race cannot double-spend it),
+    then the licence server is asked to reissue a key for the new install id --
+    the half this box structurally cannot do, because minting requires the
+    private key and that never ships.
+
+    ── THE CODE IS SPENT EITHER WAY, AND WE SAY SO ─────────────────────────
+    If the licence server is unreachable, the code has STILL been consumed: it
+    was spent before the network was ever touched, and un-spending it would mean
+    a non-atomic rollback of the one operation here that must not be. So the
+    response reports the spend honestly and falls back to the original manual
+    support path, rather than implying the user can simply try again with the
+    same code. Reporting "failed" on an operation that half-succeeded is the
+    lie this endpoint's previous version was careful not to tell, and that does
+    not change now that there is a network call in the middle.
     """
     from core import backup_codes as bc
     from core import install_id as iid
@@ -2163,11 +2240,118 @@ def api_license_backup_codes_redeem():
 
     _audit(action="license_backup_code_redeemed")
     n, level, msg = bc.status()
-    return jsonify({"ok": True, "remaining": n, "level": level, "message": msg,
-                    "install_id": install,
-                    "next_step": "Code accepted. Send this installation ID to "
-                                 "support to receive a replacement licence key: "
-                                 "%s" % install})
+
+    manual_fallback = ("Code accepted. Send this installation ID to support to "
+                       "receive a replacement licence key: %s" % install)
+    out = {"ok": True, "remaining": n, "level": level, "message": msg,
+           "install_id": install}
+
+    # The current (now superseded) key is what proves to the licence server that
+    # we hold this licence. Without one there is nothing to authenticate with,
+    # so the manual path is the only option.
+    current_key = ""
+    try:
+        conn = _dm_conn()
+        row = conn.execute(
+            "SELECT license_key FROM license_state WHERE id = 1").fetchone()
+        conn.close()
+        current_key = (row[0] if row else "") or ""
+    except Exception:
+        log.exception("rebind: could not read the current licence key")
+
+    if not current_key:
+        out["next_step"] = manual_fallback
+        return jsonify(out)
+
+    status, body = _license_server_post(
+        "/rebind", {"license_key": current_key, "new_install_id": install})
+
+    if status is None:
+        # Unreachable -- not a refusal. Fall back, and say why.
+        out["next_step"] = ("Code accepted, but the licence server could not be "
+                            "reached. " + manual_fallback)
+        return jsonify(out)
+
+    if status == 202 and (body or {}).get("request_id"):
+        _audit(action="license_rebind_requested")
+        out["rebind_request_id"] = body["request_id"]
+        out["rebinds_remaining"] = body.get("rebinds_remaining")
+        out["next_step"] = ("Code accepted. Requesting a replacement licence "
+                            "key -- this usually takes under a minute.")
+        return jsonify(out)
+
+    # The server gave a real answer and it was "no". Surface ITS reason rather
+    # than a generic failure: "this licence has been moved the maximum number of
+    # times" and "the server is down" call for completely different user action.
+    detail = (body or {}).get("detail") or ""
+    out["rebind_error"] = (body or {}).get("error") or "refused"
+    out["next_step"] = ("Code accepted. " + (detail or manual_fallback))
+    return jsonify(out)
+
+
+@app.route("/api/license/rebind-status", methods=["POST"])
+@login_required
+def api_license_rebind_status():
+    """Poll the licence server for a queued rebind, and install the key if ready.
+
+    POST rather than GET: on success this STORES a new licence, which is a state
+    change. A GET that installs a licence would be CSRF-triggerable from an
+    <img> tag -- the exact defect class this codebase has already been bitten by
+    once (`db_action`).
+
+    Collection goes through `_verify_and_store_license`, the same path a manual
+    paste uses, so a key arriving automatically is verified against this machine
+    exactly as strictly as one typed in by hand. The licence server is not
+    trusted to have sent a key that fits this box; it is checked.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    request_id = (request.form.get("request_id") or
+                  (request.get_json(silent=True) or {}).get("request_id")
+                  or "").strip()
+    if not request_id:
+        return jsonify({"ok": False, "detail": "No request id supplied."}), 400
+
+    try:
+        req = urllib.request.Request(
+            "%s/issuance/%s" % (LICENSE_SERVER, request_id), method="GET")
+        with urllib.request.urlopen(req, timeout=_LICENSE_SERVER_TIMEOUT) as r:
+            body = _json.loads(r.read().decode() or "{}")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return jsonify({"ok": False, "status": "unknown",
+                            "detail": "The licence server has no record of that "
+                                      "request. Contact support."}), 404
+        return jsonify({"ok": False, "status": "error",
+                        "detail": "Licence server error (%s)." % e.code}), 502
+    except Exception as e:
+        log.warning("rebind status: licence server unreachable: %s", e)
+        return jsonify({"ok": False, "status": "unreachable",
+                        "detail": "Could not reach the licence server. It is "
+                                  "safe to check again shortly."}), 503
+
+    status = (body or {}).get("status")
+    if status != "issued":
+        return jsonify({"ok": True, "status": status or "pending",
+                        "detail": (body or {}).get("detail") or ""})
+
+    stored, code = _verify_and_store_license((body.get("license_key") or "").strip())
+    if not stored.get("ok"):
+        # A key arrived but does not fit this machine. Do NOT report success --
+        # the user would believe they were licensed and find out otherwise later.
+        log.error("rebind: issued key failed local verification: %s",
+                  stored.get("detail"))
+        return jsonify({"ok": False, "status": "verification_failed",
+                        "detail": "A replacement licence arrived but could not "
+                                  "be verified on this machine. Contact support. "
+                                  "(%s)" % stored.get("detail", "")}), code
+
+    _audit(action="license_rebind_completed")
+    return jsonify({"ok": True, "status": "issued",
+                    "tier": stored.get("tier"),
+                    "detail": "Replacement licence installed."})
 
 
 @app.route("/login/recovery", methods=["GET", "POST"])
