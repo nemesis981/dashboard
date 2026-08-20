@@ -477,6 +477,13 @@ def _collect_payload(conf):
         # never what it did (it executes nothing on an endpoint). Unknown key is
         # ignored by hw_monitor's specific .get() reads until a display follows.
         "memory_ladder":   memory_ladder,
+        # Agent self-reported error digest (stage b). drain()ed here — a compact,
+        # aggregated (code->count+first/last) failure-only report, bounded to the
+        # catalog size. The server ignores this unknown key until stage (c) stores
+        # it ("report now, display follows", same as memory_ladder). Drained (not
+        # snapshot) so it is sent once; _post_payload restore()s it on any POST
+        # failure so a report is retried, never lost, exactly when comms are bad.
+        "agent_errors":    agent_errors.drain(),
         "observation":     observation,
         "suricata_alerts": suri_alerts,
         "scan_result":     None,
@@ -1217,10 +1224,13 @@ def _post_payload(conf, payload):
             _handle_response_tasks(r, payload.get("device_id", ""))
         else:
             log.warning("Nemesis returned %d: %s", r.status_code, r.text[:200])
+            agent_errors.restore(payload.get("agent_errors"))
     except requests.exceptions.ConnectionError:
         log.warning("Cannot reach Nemesis at %s (will retry)", url)
+        agent_errors.restore(payload.get("agent_errors"))
     except Exception as e:
         log.error("POST failed: %s", e)
+        agent_errors.restore(payload.get("agent_errors"))
 
 
 def _poll_loop():

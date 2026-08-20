@@ -22,9 +22,10 @@ DISCIPLINES, inherited verbatim from the server ledger — none optional:
   last context), so memory is bounded by the size of the catalog (~dozens of
   codes), not by how often a site fires. A stuck error cannot grow it.
 
-NOT WIRED TO TRANSPORT YET. Stage (a) is the catalog + recorder + the per-site
-wires. `drain()` is the read-and-clear the stage-(b) heartbeat field will call;
-until then this simply accumulates locally and is inspectable via `snapshot()`.
+TRANSPORT (stage b, wired): the poll loop `drain()`s this into the heartbeat's
+`agent_errors` field each beat and `restore()`s it if the POST fails, so a report
+rides the next authenticated beat. The server ignores the unknown key until it
+stores it (stage c) — "report now, display follows", same as `memory_ladder`.
 
 CODE FORMAT: `E-AGENT-NNN`. One flat namespace — the agent is one "module" from
 the server's point of view. Grouped by category in `E_AGENT_CODES` with reserved
@@ -35,7 +36,7 @@ import threading
 from datetime import datetime, timezone
 
 __all__ = [
-    "E_AGENT_CODES", "record", "drain", "snapshot", "reset",
+    "E_AGENT_CODES", "record", "drain", "restore", "snapshot", "reset",
     "CODE_RE", "self_test",
 ]
 
@@ -189,6 +190,45 @@ def drain():
         return out
     except Exception:               # noqa: BLE001
         return []
+
+
+def restore(digest):
+    """Merge a previously-`drain()`ed digest BACK into the counters — best-effort,
+    never raises.
+
+    The transport safety valve: the poll loop `drain()`s into the heartbeat at
+    collect time, then calls this if the POST fails, so a report is retried on
+    the next beat instead of being lost. Losing it on failure would
+    systematically drop the MOST valuable reports — unsigned-heartbeat /
+    enrollment / status errors happen exactly when the POST is failing. Counts
+    add; the earliest `first` and latest `last` win; a code that re-fired since
+    the drain is merged, not overwritten.
+    """
+    try:
+        for e in (digest or []):
+            code = e.get("code")
+            if not isinstance(code, str) or not CODE_RE.match(code):
+                continue
+            cnt = int(e.get("count") or 0)
+            if cnt <= 0:
+                continue
+            with _lock:
+                cur = _counters.get(code)
+                if cur is None:
+                    _counters[code] = {
+                        "count": cnt,
+                        "first": e.get("first"), "last": e.get("last"),
+                        "last_context": e.get("context")}
+                else:
+                    cur["count"] += cnt
+                    # earliest first, latest last (ISO strings sort chronologically
+                    # here because all agent stamps are aware-UTC).
+                    if e.get("first") and (cur.get("first") is None or e["first"] < cur["first"]):
+                        cur["first"] = e["first"]
+                    if e.get("last") and (cur.get("last") is None or e["last"] > cur["last"]):
+                        cur["last"] = e["last"]
+    except Exception:                   # noqa: BLE001 — restore must never raise
+        pass
 
 
 def reset():
