@@ -3764,3 +3764,14 @@ commercial use requires a paid license, no pricing figures published) and a mini
           regression here fails a test instead of only a production log line.
           Not a Window 2 fix — code content, needs Window 1 (or whoever owns
           `data_manager.py` next).
+
+### [ ] `agent_errors.restore()` has no committed test coverage (found 2026-08-20)
+`nemesis_agent/agent_errors.py`'s `restore()` (added in the stage-b heartbeat-transport
+commit, `d351783`) — the merge-back-on-failed-POST safety valve — ships with **zero**
+committed test coverage: not exercised by `self_test()`, not in `test_agent_errors.py`.
+Independently verified correct before that commit (standalone 10/10 check: basic merge,
+merge-into-existing-counter, malformed/hostile input never raises and is dropped, and a
+drain→restore→drain round-trip proving no double-counting) — the logic is right, but
+nothing guards it against a future regression. Add a committed test mirroring that
+coverage to `test_agent_errors.py` (or fold into `self_test()`, matching the existing
+record/drain pattern). Not a Window 2 fix — code content, needs Window 1.
