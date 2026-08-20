@@ -1,16 +1,15 @@
 ══════════════════════════════════════════════════════════════════════════
- DRAFT — NOT FINAL. Pending Paul's review and real legal review before this
- is treated as binding. See docs/architecture/0022-source-available-license.md
- for the reasoning behind this shape, and PUNCHLIST.md for open items
- (including that at least one product mode — commercial firewall-only use —
- currently has NO technical enforcement and depends entirely on this
- document for its terms to mean anything).
+ DRAFT — NOT FINAL. Pending real legal review before this is treated as
+ binding. See docs/architecture/0022-source-available-license.md for the
+ reasoning behind this shape, and PUNCHLIST.md for open items (including
+ that at least one product mode — commercial firewall-only use — currently
+ has NO technical enforcement and depends entirely on this document for
+ its terms to mean anything).
 ══════════════════════════════════════════════════════════════════════════
 
 Nemesis Firewall — Source-Available License
 
-Copyright (c) 2026 [COPYRIGHT HOLDER NAME — Paul to confirm: personal name
-or a business entity]
+Copyright (c) 2026 nemesis-sw
 
 1. DEFINITIONS
 
@@ -58,8 +57,7 @@ does not technically prevent a particular Commercial Use, this License is
 the only thing that makes that use unauthorized — the absence of a
 technical block is not permission.
 
-To inquire about a Commercial License, contact: [COMMERCIAL LICENSING
-CONTACT — email or process, to be added].
+To inquire about a Commercial License, contact: license@nemesis-sw.com.
 
 4. SOURCE AVAILABILITY IS NOT AN OPEN-SOURCE GRANT
 
@@ -99,13 +97,11 @@ not yet needed while the project has no external contributors.]
 
 8. GOVERNING LAW
 
-[JURISDICTION — to be specified. Not decided in this draft.]
+This License is governed by the laws of the State of Texas, United States,
+without regard to its conflict-of-laws principles.
 
 ══════════════════════════════════════════════════════════════════════════
  END OF DRAFT. Open items before this can be finalized:
-   - Copyright holder legal name/entity (Section header)
-   - Commercial licensing contact (Section 3)
-   - Governing law / jurisdiction (Section 8)
    - Real legal review of the enforceability and wording throughout —
      this was drafted by Window 2 (Claude) as a starting point, not by
      a lawyer, and should not be treated as legally sound until reviewed.

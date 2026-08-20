@@ -126,7 +126,7 @@ if ((Get-Content $confPath) -match "REPLACE_ME") {
     (Get-Content $confPath) -replace "REPLACE_ME", $ip | Set-Content $confPath
 }
 
-$dn = Read-Host "Enter a friendly name for this device (e.g. 'Paul's Laptop') [press Enter to keep current]"
+$dn = Read-Host "Enter a friendly name for this device (e.g. 'My Laptop') [press Enter to keep current]"
 if ($dn) {
     (Get-Content $confPath) -replace "device_name = .*", "device_name = $dn" | Set-Content $confPath
 }

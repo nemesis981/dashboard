@@ -3542,9 +3542,11 @@ commercial use requires a paid license, no pricing figures published) and a mini
       were drafted by Window 2 (Claude) using the general shape of comparable real-world
       source-available licenses (Sentry/BSL-family), not by a lawyer. Enforceability, exact
       wording, and jurisdiction were not verified against real legal standards.
-- [ ] **Fill in the placeholders `LICENSE` explicitly leaves open:** copyright holder legal
+- [x] **Fill in the placeholders `LICENSE` explicitly leaves open:** copyright holder legal
       name/entity, commercial-licensing contact, governing law/jurisdiction. Operator's call
-      on all three — not guessed at in the draft.
+      on all three — not guessed at in the draft. **Done 2026-08-20**: copyright holder
+      "nemesis-sw", commercial contact license@nemesis-sw.com, governing law Texas. Real legal
+      review (the item above) is still outstanding — filling in the values doesn't close that.
 - [ ] **This is more urgent than a typical doc gap.** Per the locked tiering model,
       commercial firewall-only use is licensed with **no technical enforcement at all** —
       the license document IS the entire enforcement mechanism for that mode, not backup
