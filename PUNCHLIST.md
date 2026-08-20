@@ -3725,3 +3725,40 @@ commercial use requires a paid license, no pricing figures published) and a mini
           pass (any window) checks `NEMESIS_DB_PATH` explicitly rather than trusting
           a shared-path redirect it hasn't confirmed the target module actually
           uses.
+
+- [ ] **`mem_ladder_state`/`mem_shadow_records`/`agent_attestation_challenges` were
+      never added to `hw_monitor`'s Data Manager namespace grant in
+      `alert_manager/data_manager.py` — a gap in `059da4b` (the production
+      memory-ladder-loop commit), found LIVE tonight, currently harmless only
+      because DataManager write enforcement is still WARN-only.** Confirmed via
+      `journalctl -u hw-monitor`: `mem_ladder_state` is hitting `WOULD DENY
+      (warn-only) module='hw_monitor' op=INSERT table='mem_ladder_state' — not in
+      its namespace` on every ladder cycle since the 2026-08-19 18:34:58 restart
+      (`sample_seq` is at 23 as of this closeout, confirming the loop genuinely
+      runs and the write is currently ALLOWED despite the warning).
+      `mem_shadow_records` has 0 rows so far (no sustained breach yet to produce a
+      SHADOW-mode record) but would hit the identical gap the moment one occurs.
+      `agent_attestation_challenges` hasn't fired because Tier 2 issuance stays
+      dormant in production (private module not on path) — same latent gap,
+      just not yet exercised.
+    - [ ] **This is exactly the failure shape `agent_device_macs`'s own comment in
+          the same NAMESPACES dict warns about** ("⚠ Missing this name = silent
+          WOULD-DENY... behavioural tests build tables on plain sqlite3 and never
+          hit this guard"): `test_mem_appliance.py`'s new production-loop test
+          (`test_run_ladder_cycle_persists_and_accumulates`) builds its own
+          throwaway DB directly, bypassing the DataManager guard the same way, so
+          it could not have caught this either — the same test-shape gap, not a
+          one-off miss.
+    - [ ] **No production impact today** — WARN mode allows the write regardless,
+          and `run_ladder_cycle`'s own try/except means even a hard DENY would
+          degrade to "no ladder this tick" rather than crash hw_monitor. But this
+          MUST be fixed before DataManager enforcement is ever flipped to
+          MODE_ENFORCE, or the ladder loop and Tier 2 issuance both go silently
+          dark at that moment.
+    - [ ] **Candidate fix:** add `mem_ladder_state`, `mem_shadow_records`, and
+          `agent_attestation_challenges` to `hw_monitor`'s table tuple in
+          `data_manager.py`'s `NAMESPACES`, plus a direct grant-assertion test
+          (same shape as `test_data_manager.py`'s `agent_device_macs` check) so a
+          regression here fails a test instead of only a production log line.
+          Not a Window 2 fix — code content, needs Window 1 (or whoever owns
+          `data_manager.py` next).
