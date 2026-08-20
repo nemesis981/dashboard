@@ -2154,6 +2154,7 @@ def ingest_connection_events(payload):
 #: Wall-clock of the last retention sweep. Module-level so the loop can rate
 #: limit it without a class or a closure.
 _last_conn_reap = 0.0
+_last_error_ticket_scan = 0.0
 
 
 def reap_conn_events():
@@ -4371,6 +4372,23 @@ def main():
             # skipping this one on an unrelated failure would quietly stop
             # enforcing seen-set retention with nothing in the log saying so.
             reap_conn_seen()
+
+        # Error-ledger -> ticket bridge (2026-08-20). Time-gated at 120s: errors
+        # are not time-critical to ticket, and this is a JOIN + a few inserts at
+        # most. OPT-IN (auto_ticket_on_error, default off) so this is a cheap
+        # no-op until an operator turns it on; best-effort inside so a bridge
+        # hiccup never disturbs the sample loop. Separate cadence var so retuning
+        # SAMPLE_INTERVAL does not silently change how often it runs.
+        global _last_error_ticket_scan
+        if time.time() - _last_error_ticket_scan >= 120:
+            _last_error_ticket_scan = time.time()
+            try:
+                from modules.tickets.module import scan_error_ledger_for_tickets
+                _n = scan_error_ledger_for_tickets()
+                if _n:
+                    log.info("error->ticket bridge: opened %d error_notice ticket(s)", _n)
+            except Exception:
+                log.exception("error->ticket bridge scan failed (non-fatal)")
 
         # Memory-injection ladder cycle — the production loop that makes the ladder
         # REAL: sample -> decide -> shadow-record -> resolve -> execute-live(throttle).

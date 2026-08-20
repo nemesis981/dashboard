@@ -72,6 +72,13 @@ _SETTINGS_DEFAULTS = {
     "auto_ticket_on_alert":         True,
     "min_severity_for_auto_ticket": "HIGH",
     "max_related_results":          5,
+    # Error-ledger -> ticket bridge (2026-08-20). OPT-IN: default OFF, because
+    # unlike the alert stream this one has never been ticket-gated and a surprise
+    # flood is the main risk — turn on after observing real error volume. When on,
+    # only errors whose CATALOG severity meets this floor (default HIGH, the same
+    # bar the alert side uses) become tickets, deduped one-per-code.
+    "auto_ticket_on_error":          False,
+    "min_severity_for_error_ticket": "HIGH",
 }
 
 
@@ -449,6 +456,105 @@ def search(keyword: str) -> list:
     except Exception:
         log.exception("tickets: search(%s) failed", keyword)
         return []
+
+
+# ── error-ledger -> ticket bridge (2026-08-20) ────────────────────────────────
+def scan_error_ledger_for_tickets(conn=None):
+    """Open an `error_notice` ticket for each NEW high-severity error occurrence.
+
+    THE BRIDGE that deliberately doesn't exist by default: `record_error()` is NOT
+    modified — this is a separate periodic CONSUMER (same "consumer, not hook"
+    shape as the alert->ticket paths), so recording an error stays a lightweight
+    core write and this ranking/dedup logic lives out here.
+
+    Design, per the 2026-08-20 scope:
+    * OPT-IN — returns 0 immediately unless `auto_ticket_on_error` is set; default
+      off, since this stream has never been ticket-gated.
+    * SEVERITY FLOOR — only occurrences whose CATALOG severity meets
+      `min_severity_for_error_ticket` (default HIGH, `nemesis_severity` — the same
+      comparison the alert side makes) qualify. Low/medium observability noise
+      never tickets.
+    * DEDUP — one OPEN ticket per distinct error code (`sensor_key`=code). A
+      recurrence while the ticket is open is skipped; after it is closed a fresh
+      occurrence opens a new one. Also deduped WITHIN a single scan.
+    * HIGH-WATER-MARK — scans only `error_occurrences.id` past a stored mark, so
+      each occurrence is evaluated once; the mark advances over everything
+      evaluated (including skipped rows), never re-scanning them.
+
+    Best-effort: never raises out (it may ride a service loop). Returns the count
+    of tickets opened this pass.
+    """
+    try:
+        _init_db()
+        settings = _get_settings()
+        if not settings.get("auto_ticket_on_error"):
+            return 0
+        min_sev = settings.get("min_severity_for_error_ticket") or "HIGH"
+        own = conn is None
+        conn = conn or _conn()
+        try:
+            row = conn.execute(
+                "SELECT value FROM tickets_settings WHERE key='error_ticket_hwm'"
+            ).fetchone()
+            hwm = int(row["value"]) if row and row["value"] else 0
+        except Exception:
+            hwm = 0
+        try:
+            rows = conn.execute(
+                "SELECT o.id AS oid, o.code AS code, o.ts AS ts, o.context AS ctx, "
+                "       c.severity AS sev, c.description AS descr "
+                "FROM error_occurrences o JOIN error_codes c ON o.code = c.code "
+                "WHERE o.id > ? ORDER BY o.id", (hwm,)).fetchall()
+        except Exception:
+            # error ledger not present yet (fresh install, nothing recorded)
+            if own:
+                conn.close()
+            return 0
+
+        import nemesis_severity as _sev
+        opened, max_id, seen = 0, hwm, set()
+        for r in rows:
+            max_id = max(max_id, r["oid"])
+            if not _sev.meets_threshold(r["sev"], min_sev):
+                continue
+            code = r["code"]
+            if code in seen:
+                continue                     # same code twice in one scan
+            dup = conn.execute(
+                "SELECT 1 FROM tickets WHERE type='ticket' AND category='error_notice' "
+                "AND sensor_key=? AND status IN ('Open','Investigating') LIMIT 1",
+                (code,)).fetchone()
+            if dup:
+                seen.add(code)
+                continue
+            try:
+                open_ticket(
+                    sensor_key=code,
+                    title="%s: %s" % (code, (r["descr"] or "")[:120]),
+                    body=("Error %s (severity %s) recorded at %s.\n\n%s\n\n"
+                          "Context: %s"
+                          % (code, r["sev"], r["ts"], r["descr"] or "",
+                             (r["ctx"] or "")[:400])),
+                    priority=(r["sev"] or "").upper(),
+                    category="error_notice",
+                    actor="error-bridge")
+                opened += 1
+                seen.add(code)
+            except Exception:
+                log.exception("error-bridge: open_ticket failed for %s", code)
+        try:
+            conn.execute(
+                "INSERT INTO tickets_settings(key, value) VALUES('error_ticket_hwm', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (str(max_id),))
+            conn.commit()
+        except Exception:
+            log.exception("error-bridge: high-water-mark advance failed")
+        if own:
+            conn.close()
+        return opened
+    except Exception:
+        log.exception("error-bridge: scan failed")
+        return 0
 
 
 # ── Flask route handlers ──────────────────────────────────────────────────────

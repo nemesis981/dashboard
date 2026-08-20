@@ -76,6 +76,67 @@ def main():
     check("10k records of one code -> still ONE entry", len(ae.snapshot()), 1)
     check("  ...with the real count", ae.snapshot()["E-AGENT-001"]["count"], 10000)
 
+    print("\nrestore() — the merge-back-on-failed-POST safety valve")
+    ae.reset()
+    # basic merge: a drained digest restores intact
+    ae.record("E-AGENT-001", "a"); ae.record("E-AGENT-030", "b")
+    d = ae.drain()
+    check("drain cleared before restore", ae.snapshot(), {})
+    ae.restore(d)
+    check("restore re-populates the drained codes",
+          set(ae.snapshot()), {"E-AGENT-001", "E-AGENT-030"})
+    check("  ...with the original counts", ae.snapshot()["E-AGENT-001"]["count"], 1)
+
+    # merge INTO an existing counter (new occurrences accrued after the drain)
+    ae.reset()
+    ae.record("E-AGENT-001", "first")
+    d = ae.drain()                          # count 1, cleared
+    ae.record("E-AGENT-001", "accrued-after-drain")   # count 1 again, live
+    ae.restore(d)                           # merge the drained 1 back
+    check("restore MERGES into a live counter (1 drained + 1 new = 2)",
+          ae.snapshot()["E-AGENT-001"]["count"], 2)
+
+    # earliest first / latest last survive the merge
+    ae.reset()
+    ae.restore([{"code": "E-AGENT-002", "count": 3,
+                 "first": "2026-08-20T10:00:00+00:00",
+                 "last":  "2026-08-20T10:05:00+00:00", "context": "old"}])
+    ae.record("E-AGENT-002", "new")         # stamps now (>= 2026), count -> 4
+    snap = ae.snapshot()["E-AGENT-002"]
+    check("merged count adds (3 restored + 1 new)", snap["count"], 4)
+    check("earliest first is kept", snap["first"], "2026-08-20T10:00:00+00:00")
+
+    # malformed / hostile input never raises, and is dropped
+    for bad in (None, "x", 12345, [{"code": "E-AGENT-NOPE", "count": 1}],
+                [{"code": "not-a-code", "count": 5}], [{"count": 2}],
+                [{"code": "E-AGENT-001", "count": 0}],
+                [{"code": "E-AGENT-001", "count": -3}]):
+        ae.reset()
+        try:
+            ae.restore(bad); raised = False
+        except Exception:
+            raised = True
+        check("restore(%.30r) never raises" % (bad,), raised, False)
+    ae.reset()
+    ae.restore([{"code": "E-AGENT-NOPE", "count": 1}])
+    check("a malformed code in a digest is DROPPED, not stored", ae.snapshot(), {})
+    ae.reset()
+    ae.restore([{"code": "E-AGENT-001", "count": 0}])
+    ae.restore([{"code": "E-AGENT-001", "count": -3}])
+    check("zero/negative counts are dropped", ae.snapshot(), {})
+
+    # THE ROUND-TRIP that proves no double-counting: drain -> restore -> drain
+    ae.reset()
+    ae.record("E-AGENT-001"); ae.record("E-AGENT-001"); ae.record("E-AGENT-030")
+    d1 = ae.drain()                         # [001:2, 030:1], cleared
+    ae.restore(d1)                          # failed POST -> merged back
+    d2 = ae.drain()                         # retried next beat, cleared again
+    by = {e["code"]: e["count"] for e in d2}
+    check("drain->restore->drain yields the SAME counts (no double-count)",
+          by, {"E-AGENT-001": 2, "E-AGENT-030": 1})
+    check("  ...and the recorder is empty after the second drain", ae.snapshot(), {})
+    ae.reset()
+
     print("\nthread-safe under concurrent records")
     ae.reset()
     def worker():
