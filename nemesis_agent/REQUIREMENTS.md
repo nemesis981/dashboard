@@ -18,7 +18,8 @@
 - **Administrator privileges** during agent install (Task Scheduler requires elevation)
 - **Windows Defender exclusion** for `C:\nemesis-agent\` — prevents false positive on agent files
   - Added automatically by `install_windows.ps1`
-- **Python packages:** `requests psutil watchdog plyer pywin32`
+- **Python packages:** `requests psutil cryptography watchdog plyer pywin32`
+  - `cryptography` is REQUIRED, not optional: `enrollment.py` and `keyprotect/` import it at module level, so without it enrollment raises ModuleNotFoundError and the agent will not start. It was missing from this list until 2026-08-20 — the gap stayed hidden because Ubuntu ships `python3-cryptography` system-wide, so installs against the system interpreter picked it up by accident. A clean virtualenv does not.
 - *Optional for local IDS:* Suricata for Windows + Npcap (see above)
 - *Optional for local scanning:* ClamAV for Windows — https://www.clamav.net/downloads
 
@@ -38,7 +39,8 @@
 - **Full Disk Access** — required for file system monitoring:
   - System Settings → Privacy & Security → Full Disk Access → add Terminal / Python
 - **Network Filter permission** — required for Suricata packet capture if local IDS enabled
-- **Python packages:** `requests psutil watchdog plyer`
+- **Python packages:** `requests psutil cryptography watchdog plyer`
+  - `cryptography` is REQUIRED, not optional: `enrollment.py` and `keyprotect/` import it at module level, so without it enrollment raises ModuleNotFoundError and the agent will not start. It was missing from this list until 2026-08-20 — the gap stayed hidden because Ubuntu ships `python3-cryptography` system-wide, so installs against the system interpreter picked it up by accident. A clean virtualenv does not.
 - *Optional for local IDS:*
   ```
   brew install suricata
@@ -57,9 +59,14 @@
 - **libpcap-dev** — for Suricata if local IDS enabled: `apt install libpcap-dev`
 - **notify-send** — for desktop notifications (usually pre-installed with GNOME/KDE):
   `apt install libnotify-bin`
-- **Python packages:** `requests psutil watchdog plyer`
+- **Python packages:** `requests psutil cryptography watchdog plyer`
+  - `cryptography` is REQUIRED, not optional: `enrollment.py` and `keyprotect/` import it at module level, so without it enrollment raises ModuleNotFoundError and the agent will not start. It was missing from this list until 2026-08-20 — the gap stayed hidden because Ubuntu ships `python3-cryptography` system-wide, so installs against the system interpreter picked it up by accident. A clean virtualenv does not.
+  - Ubuntu 24.04+/Debian 12+ enforce PEP 668, so a bare `pip3 install` into the system
+    interpreter fails with `externally-managed-environment`. Use `install_linux.sh`,
+    which creates a self-contained virtualenv, or make one yourself:
   ```
-  pip3 install requests psutil watchdog plyer
+  python3 -m venv ~/nemesis-agent-venv
+  ~/nemesis-agent-venv/bin/pip install requests psutil cryptography watchdog plyer
   ```
 - *Optional for local IDS:* `apt install suricata`
 - *Optional for local scanning:* `apt install clamav`
