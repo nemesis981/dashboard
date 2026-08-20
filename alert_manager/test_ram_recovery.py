@@ -11,11 +11,20 @@ The load-bearing tests are the ones that can FAIL for a real reason:
 Run: python3 test_ram_recovery.py
 """
 
+import io
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ram_recovery as rr                                    # noqa: E402
+
+
+def _w(path, text):
+    """Write a fake /proc file."""
+    with io.open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
 
 _state = {"ran": 0, "failed": 0}
 
@@ -136,75 +145,146 @@ def main():
             return (1, "", "no match")
         return _run
 
-    svc_run = mkrun({
-        "status 900": (0, "\u25cf speech-dispatcher.service - Common interface\n", ""),
-        "show speech-dispatcher.service": (0, "yes\n", ""),
-    })
-    scope_run = mkrun({
-        "status 901": (0, "\u25cf app-gnome-term-901.scope - Application launched\n", ""),
-        "show app-gnome-term-901.scope": (0, "no\n", ""),
-    })
-    none_run = mkrun({})
+    def cg(unit, uid=None):
+        base = "/user.slice/user-%d.slice/user@%d.service/app.slice/" % (uid, uid) \
+            if uid is not None else "/system.slice/"
+        return {"unit": unit, "user_uid": uid,
+                "path": base + (unit or "")}
 
-    c = rr.classify_parent(900, _run=svc_run, _self_pid=os.getpid())
-    check("restartable .service -> CASE_SERVICE", c["case"], rr.CASE_SERVICE)
-    check("  ...and names the unit", c["unit"], "speech-dispatcher.service")
+    def canstart(val):
+        """Fake systemctl answering CanStart; rc=1 means 'could not read'."""
+        return (lambda cmd: (0, val + "\n", "")) if val is not None \
+            else (lambda cmd: (1, "", "no bus"))
 
-    c = rr.classify_parent(901, _run=scope_run, _self_pid=os.getpid())
-    check("a .scope -> CASE_TERMINATE (NOT restartable)", c["case"], rr.CASE_TERMINATE)
+    # _self_pid=1 throughout: init is never in our ancestor chain, so interlock
+    # 1 CANNOT fire and each result below is genuinely interlock 2 / unit-type
+    # logic doing the work. Without this the tests would pass for the wrong
+    # reason -- exactly the "instrument that can only produce one answer" trap.
+    def cls(unit, uid=None, cs="yes"):
+        return rr.classify_parent(900, _cgroup=cg(unit, uid), _self_pid=1,
+                                  _run=canstart(cs))
+
+    c = cls("cups.service")
+    check("system .service, CanStart=yes -> CASE_SERVICE", c["case"], rr.CASE_SERVICE)
+    check("  ...and names the unit", c["unit"], "cups.service")
+
+    c = cls("speech-dispatcher.service", uid=1000)
+    check("USER .service, CanStart=yes -> CASE_SERVICE", c["case"], rr.CASE_SERVICE)
+    check("  ...and carries the owning uid (which manager to talk to)",
+          c["user_uid"], 1000)
+    check("  ...and is marked user_scope", c["user_scope"], True)
+
+    c = cls("app-gnome-term-901.scope")
+    check("SYSTEM-scope .scope -> CASE_TERMINATE (no live user to protect)",
+          c["case"], rr.CASE_TERMINATE)
     check("  ...and says why (no ExecStart / not a service)",
           "not a service" in c["why"], True)
 
-    c = rr.classify_parent(902, _run=none_run, _self_pid=os.getpid())
-    check("no unit at all -> CASE_TERMINATE", c["case"], rr.CASE_TERMINATE)
+    c = cls(None)
+    check("no unit at all, system scope -> CASE_TERMINATE", c["case"], rr.CASE_TERMINATE)
+
+    c = rr.classify_parent(900, _cgroup=None, _self_pid=1)
+    check("UNREADABLE cgroup -> CASE_REFUSED (unknown is not 'no unit')",
+          c["case"], rr.CASE_REFUSED)
+    check("  ...and says the ownership is UNKNOWN", "UNKNOWN" in c["why"], True)
+
+    c = cls("weird.service", cs=None)
+    check("CanStart unreadable -> still proposed, but canstart=None",
+          (c["case"], c["canstart"]), (rr.CASE_SERVICE, None))
+    check("  ...and the listing admits it is unconfirmed",
+          "could not be read" in c["why"], True)
+
+    c = cls("nostart.service", cs="no")
+    check("system .service CanStart=no -> CASE_TERMINATE", c["case"], rr.CASE_TERMINATE)
+
+    print("\n== INTERLOCK 2: live interactive sessions (root has no EPERM) ==")
+    # THE REGRESSION THIS EXISTS FOR. Measured 2026-08-20: ptyxis (141640) is an
+    # ancestor of an operator shell but NOT of `dashboard` (707418) or
+    # `nemesis-fwd` (702432). Interlock 1 therefore does not fire inside either
+    # service. While the dashboard was unprivileged, EPERM hid that. Root has no
+    # EPERM -- so without interlock 2 this exact case becomes a SUCCESSFUL kill
+    # of the operator's terminal.
+    c = cls("app-gnome-xdg-terminal-exec-141640.scope", uid=1000)
+    check("live-session .scope -> CASE_REFUSED, NOT terminate",
+          c["case"], rr.CASE_REFUSED)
+    check("  ...refusal names the human consequence",
+          "out from under that user" in c["why"], True)
+    check("  ...and interlock 1 provably did NOT fire (self_pid=1)",
+          "ancestor" in c["why"], False)
+
+    c = cls("nostart.service", uid=1000, cs="no")
+    check("live-session unrestartable .service -> CASE_REFUSED too",
+          c["case"], rr.CASE_REFUSED)
 
     print("\n== CONTAINER-UNIT guard (found live: would have restarted the whole session) ==")
-    # `systemctl status <pid>` in SYSTEM scope answers with the container unit
-    # for any user process. Measured on the build box: pid 210451 ->
-    # user@1000.service (1707 tasks) in system scope, but
-    # speech-dispatcher.service in user scope. Restarting the container would
-    # tear down the entire desktop session.
     for u, want in (("user@1000.service", True), ("user.slice", True),
                     ("system.slice", True), ("session-3.scope", True),
                     ("init.scope", True), ("speech-dispatcher.service", False),
                     ("app-gnome-term-901.scope", False)):
         check("container-unit guard: %-28s" % u, rr._is_container_unit(u), want)
 
-    container_run = mkrun({
-        "--user status 903": (1, "", "no user unit"),
-        "status 903": (0, "● user@1000.service - User Manager for UID 1000\n", ""),
-        "show user@1000.service": (0, "yes\n", ""),
-    })
-    c = rr.classify_parent(903, _run=container_run, _self_pid=os.getpid())
+    c = cls("user@1000.service", uid=1000)
     check("a container unit is NEVER offered as restartable",
-          c["case"], rr.CASE_TERMINATE)
+          c["case"], rr.CASE_REFUSED)
     check("  ...and the unit is cleared so nothing can restart it",
           c["unit"], None)
     check("  ...and says why", "whole session" in c["why"], True)
 
-    # User scope must be preferred over system scope (the ordering half).
-    both_run = mkrun({
-        "--user status 904": (0, "● speech-dispatcher.service - x\n", ""),
-        "--user show speech-dispatcher.service": (0, "yes\n", ""),
-        "status 904": (0, "● user@1000.service - User Manager\n", ""),
-    })
-    c = rr.classify_parent(904, _run=both_run, _self_pid=os.getpid())
-    check("USER scope preferred over SYSTEM scope (most specific wins)",
-          c["unit"], "speech-dispatcher.service")
-    check("  ...and is marked user_scope", c["user_scope"], True)
+    print("\n== cgroup resolution (the replaced instrument) ==")
+    check("cgroup unescaping turns \\x2d back into '-'",
+          rr._cg_unescape("app-gnome-xdg\\x2dterminal\\x2dexec-1.scope"),
+          "app-gnome-xdg-terminal-exec-1.scope")
+    own = rr.proc_cgroup_unit(os.getpid())
+    check("our own cgroup resolves to a real unit", bool(own and own["unit"]), True)
+    check("an impossible pid resolves to None (explicit, not a default)",
+          rr.proc_cgroup_unit(4294967), None)
+    check("proc_ppid of our own pid matches os.getppid()",
+          rr.proc_ppid(os.getpid()), os.getppid())
+    check("proc_ppid of an impossible pid is None",
+          rr.proc_ppid(4294967), None)
 
-    print("\n== THE ANCESTOR INTERLOCK (would kill our own session) ==")
-    own = sorted(rr.ancestor_pids())
-    check("our own ancestor chain is non-empty", len(own) > 0, True)
+    print("\n== THE ANCESTOR INTERLOCK (interlock 1, still required) ==")
+    own_chain = sorted(rr.ancestor_pids())
+    check("our own ancestor chain is non-empty", len(own_chain) > 0, True)
     check("our OWN pid is in it", os.getpid() in rr.ancestor_pids(), True)
-    # Classify one of our real ancestors -- must refuse even though it may well
-    # have a perfectly restartable unit.
-    anc = own[-1] if own else os.getpid()
-    c = rr.classify_parent(anc, _run=svc_run)
+    anc = own_chain[-1] if own_chain else os.getpid()
+    c = rr.classify_parent(anc, _run=canstart("yes"))
     check("an ANCESTOR pid -> CASE_REFUSED regardless of unit type",
           c["case"], rr.CASE_REFUSED)
     check("  ...refusal explains the consequence",
           "kill the session" in c["why"], True)
+
+    print("\n== _systemctl routes to the RIGHT manager, or fails explicitly ==")
+    seen = []
+    rr._systemctl(["show", "x.service"], None, _run=lambda c: seen.append(c) or (0, "", ""))
+    check("system scope: no --user flag", "--user" in seen[-1], False)
+    rr._systemctl(["show", "x.service"], 1000, _run=lambda c: seen.append(c) or (0, "", ""))
+    check("user scope: --user flag present", seen[-1][:2], ["systemctl", "--user"])
+
+    _euid = os.geteuid
+    try:
+        # An account that is neither root nor the target must NOT silently
+        # answer from the wrong manager -- that silent wrong answer, made by
+        # nemesis-dash (uid 973) against uid 1000's units, is the original bug.
+        os.geteuid = lambda: 973
+        rc, out, err = rr._systemctl(["show", "x.service"], 1000)
+        check("uid 973 asking about uid 1000's manager -> explicit failure",
+              rc != 0, True)
+        check("  ...and says it cannot reach it (not an empty answer)",
+              "cannot reach" in err, True)
+        rc, out, err = rr._systemctl(["show", "x.service"], 424242)
+        check("a uid with no /run/user/<uid> -> explicit failure", rc != 0, True)
+        check("  ...naming the missing runtime dir", "no running user manager" in err, True)
+    finally:
+        os.geteuid = _euid
+
+    check("_unit_property returns None (unknown) when the read fails",
+          rr._unit_property("x.service", "CanStart", None,
+                            _run=lambda c: (1, "", "boom")), None)
+
+    print("\n== the classifier proves its own premise on every call ==")
+    check("zombie_self_test passes (all three answers reachable)",
+          rr.zombie_self_test(), True)
 
     print("\n== process-table primitives (real, on this box) ==")
     check("proc_state of our own pid is a live state, not None",
@@ -265,7 +345,7 @@ def main():
         return False, "NOT CONFIRMED: still a zombie"
 
     ok, d, code = rr.reap_zombie(50, 900, rr.CASE_SERVICE,
-                                 unit="speech-dispatcher.service", user_scope=True,
+                                 unit="speech-dispatcher.service", user_uid=1000,
                                  starttime=1, _run=run_ok, _verify=verify_yes)
     check("CASE_SERVICE runs systemctl restart", ok, True)
     check("  ...with --user and the unit",
@@ -324,12 +404,161 @@ def main():
     def _denied(_p, _s):
         raise PermissionError()
 
+    # A FAKE /proc, deliberately. This previously used pid 60 against the real
+    # /proc -- which on this box is the live kernel thread `migration/7`, so the
+    # test's outcome depended on what happened to occupy a low pid. It passed,
+    # but not for the reason it claimed.
+    fake = tempfile.mkdtemp(prefix="nem-proc-")
+    zpid, zppid = 60, 905
+    os.makedirs(os.path.join(fake, str(zpid)))
+    os.makedirs(os.path.join(fake, str(zppid)))
+    # field 3 = state, field 22 (rest[19]) = starttime
+    rest = ["Z"] + ["0"] * 18 + ["12345"]
+    _w(os.path.join(fake, str(zpid), "stat"),
+       "%d (zomb) %s\n" % (zpid, " ".join(rest)))
+    _w(os.path.join(fake, str(zpid), "status"), "Name:\tzomb\nPPid:\t%d\n" % zppid)
+    _w(os.path.join(fake, str(zpid), "comm"), "zomb\n")
+    _w(os.path.join(fake, str(zppid), "comm"), "someparent\n")
+    # system-scope .scope -> CASE_TERMINATE, so SIGTERM is genuinely attempted
+    _w(os.path.join(fake, str(zppid), "cgroup"),
+       "0::/system.slice/stray-905.scope\n")
+
     res = rr.clean_selected(
-        [{"kind": "zombie", "pid": 60, "ppid": 905, "case": rr.CASE_TERMINATE,
-          "starttime": 1}],
-        recorder=recorder, _kill=_denied)
+        [{"kind": "zombie", "pid": zpid}],
+        recorder=recorder, _kill=_denied, _proc=fake)
     check("failed zombie action logs E-RAMREC-005", logged, ["E-RAMREC-005"])
+    check("  ...and it really was the SIGTERM path (EPERM), not a refusal",
+          "not permitted" in res[0]["detail"], True)
     check("  ...and reports 0 bytes freed", res[0]["bytes_freed"], 0)
+
+    print("\n== reap_zombie_verified: caller vouches for NOTHING ==")
+    # The interlock that bounds this op: a caller naming a LIVE pid must not be
+    # able to get root to signal that process's parent.
+    _w(os.path.join(fake, str(zpid), "stat"),
+       "%d (zomb) %s\n" % (zpid, " ".join(["S"] + rest[1:])))
+    ok, detail, code, info = rr.reap_zombie_verified(zpid, _proc=fake,
+                                                     _kill=_denied)
+    check("a pid that is NOT a zombie is refused outright", ok, False)
+    check("  ...and says so explicitly", "not a zombie" in detail, True)
+    _w(os.path.join(fake, str(zpid), "stat"),
+       "%d (zomb) %s\n" % (zpid, " ".join(rest)))
+
+    ok, detail, code, info = rr.reap_zombie_verified(4294967, _proc=fake)
+    check("an absent pid is 'nothing to reap', not a failure", ok, True)
+
+    check("bad pid types are rejected",
+          rr.reap_zombie_verified("60", _proc=fake)[0], False)
+
+    # live-session .scope -> refused with 008, and NOTHING is signalled
+    _w(os.path.join(fake, str(zppid), "cgroup"),
+       "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+       "app-gnome-term-905.scope\n")
+    signalled = []
+    ok, detail, code, info = rr.reap_zombie_verified(
+        zpid, _proc=fake, _kill=lambda p, s: signalled.append(p))
+    check("live-session parent -> refused with E-RAMREC-008", code, "E-RAMREC-008")
+    check("  ...and NO signal was sent at all", signalled, [])
+
+    # a restartable user service, with CanStart unreadable -> FAIL CLOSED
+    _w(os.path.join(fake, str(zppid), "cgroup"),
+       "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+       "thing.service\n")
+    ok, detail, code, info = rr.reap_zombie_verified(
+        zpid, _proc=fake, _run=lambda cmd: (1, "", "no bus"),
+        _kill=lambda p, s: signalled.append(p))
+    check("CanStart unreadable -> REFUSED (fail closed, not assumed yes)",
+          ok, False)
+    check("  ...and still no signal sent", signalled, [])
+    shutil.rmtree(fake, ignore_errors=True)
+
+    print("\n== REGENERATION: a reap that is immediately undone ==")
+    # The pure matcher first -- both answers, on fixtures.
+    A = (1, "sd_espeak-ng-mb", "speech-dispatcher.service", "speech-dispatch")
+    def match(cand, unit="speech-dispatcher.service", pcomm="speech-dispatch",
+              args=A):
+        return rr._is_equivalent_zombie(cand, *args, cand_parent_unit=unit,
+                                        cand_parent_comm=pcomm)
+    check("same comm + same parent UNIT -> equivalent",
+          match({"pid": 2, "ppid": 20, "comm": "sd_espeak-ng-mb"}), True)
+    check("  ...even though the parent pid is different (restart gives a new one)",
+          match({"pid": 2, "ppid": 999, "comm": "sd_espeak-ng-mb"}), True)
+    check("a DIFFERENT child comm -> not equivalent",
+          match({"pid": 2, "ppid": 20, "comm": "other"}), False)
+    check("a different parent unit -> not equivalent",
+          match({"pid": 2, "ppid": 20, "comm": "sd_espeak-ng-mb"},
+                unit="cups.service"), False)
+    check("the pid we just reaped is never its own regeneration",
+          match({"pid": 1, "ppid": 20, "comm": "sd_espeak-ng-mb"}), False)
+    check("no unit -> falls back to parent COMM",
+          rr._is_equivalent_zombie({"pid": 2, "ppid": 20, "comm": "child"},
+                                   1, "child", None, "theparent",
+                                   cand_parent_unit=None,
+                                   cand_parent_comm="theparent"), True)
+    check("  ...and refuses to match on comm when neither anchor is known",
+          rr._is_equivalent_zombie({"pid": 2, "ppid": 20, "comm": "child"},
+                                   1, "child", None, None,
+                                   cand_parent_unit=None,
+                                   cand_parent_comm=None), False)
+
+    # Now the scan, against a fake /proc holding a REAL regeneration.
+    f2 = tempfile.mkdtemp(prefix="nem-regen-")
+    UNIT = ("0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+            "speech-dispatcher.service\n")
+    st = ["Z"] + ["0"] * 18 + ["999"]
+    for zp, pp in ((60, 905), (61, 906)):
+        os.makedirs(os.path.join(f2, str(zp)))
+        os.makedirs(os.path.join(f2, str(pp)))
+        _w(os.path.join(f2, str(zp), "stat"), "%d (z) %s\n" % (zp, " ".join(st)))
+        _w(os.path.join(f2, str(zp), "status"), "PPid:\t%d\n" % pp)
+        _w(os.path.join(f2, str(zp), "comm"), "sd_espeak-ng-mb\n")
+        _w(os.path.join(f2, str(pp), "comm"), "speech-dispatch\n")
+        _w(os.path.join(f2, str(pp), "cgroup"), UNIT)
+
+    state, detail, m = rr.detect_regeneration(
+        60, "sd_espeak-ng-mb", "speech-dispatcher.service", "speech-dispatch",
+        timeout=0, _proc=f2)
+    check("an equivalent zombie under the same unit -> 'regenerated'",
+          state, "regenerated")
+    check("  ...and names the pid it came back as", m["pid"], 61)
+    check("  ...and says clearing it again will not help",
+          "will not help" in detail, True)
+
+    shutil.rmtree(os.path.join(f2, "61"))
+    state, detail, m = rr.detect_regeneration(
+        60, "sd_espeak-ng-mb", "speech-dispatcher.service", "speech-dispatch",
+        timeout=0, _proc=f2)
+    check("with no equivalent zombie -> 'clear' (the SAME code path)",
+          state, "clear")
+
+    state, detail, m = rr.detect_regeneration(
+        60, "x", "u.service", "p", timeout=0, _proc="/nonexistent-proc-xyz")
+    check("an unreadable /proc -> 'unknown', NOT 'clear'", state, "unknown")
+    check("  ...so 'could not check' can never read as 'it did not come back'",
+          state == "clear", False)
+
+    print("\n== reap_zombie_verified reports the recurrence, end to end ==")
+    os.makedirs(os.path.join(f2, "61"))
+    _w(os.path.join(f2, "61", "stat"), "61 (z) %s\n" % " ".join(st))
+    _w(os.path.join(f2, "61", "status"), "PPid:\t906\n")
+    _w(os.path.join(f2, "61", "comm"), "sd_espeak-ng-mb\n")
+    ok, detail, code, info = rr.reap_zombie_verified(
+        60, _proc=f2, _run=lambda cmd: (0, "yes\n", ""),
+        _verify=lambda pid, s0, _proc=None, _sleep=None: (True, "entry gone"),
+        _regen_timeout=0)
+    check("the reap itself still reports SUCCESS (it did work)", ok, True)
+    check("  ...but is flagged as regenerated", info["regeneration"], "regenerated")
+    check("  ...records E-RAMREC-009", code, "E-RAMREC-009")
+    check("  ...and the detail says the zombie came back",
+          "CAME BACK" in detail, True)
+
+    shutil.rmtree(os.path.join(f2, "61"))
+    ok, detail, code, info = rr.reap_zombie_verified(
+        60, _proc=f2, _run=lambda cmd: (0, "yes\n", ""),
+        _verify=lambda pid, s0, _proc=None, _sleep=None: (True, "entry gone"),
+        _regen_timeout=0)
+    check("a clean reap is NOT flagged", info["regeneration"], "clear")
+    check("  ...and records no code", code, None)
+    shutil.rmtree(f2, ignore_errors=True)
 
     print("\n== error codes are well-formed for registration ==")
     check("all codes carry (short, desc, severity)",
@@ -338,8 +567,11 @@ def main():
           all(c.startswith("E-RAMREC-") for c in rr.E_CODES), True)
     check("retired E-RAMREC-001 is NOT registered (nothing can emit it)",
           "E-RAMREC-001" in rr.E_CODES, False)
-    emitted = {"E-RAMREC-002", "E-RAMREC-003", "E-RAMREC-004",
-               "E-RAMREC-005", "E-RAMREC-006", "E-RAMREC-007"}
+    # Derived from the SOURCE, not a hand-maintained set. A hardcoded list here
+    # is a second source of truth that goes stale the moment a code is added --
+    # and a stale list fails in the direction that looks like a real defect.
+    _src = io.open(rr.__file__, encoding="utf-8").read()
+    emitted = {c for c in rr.E_CODES if ('"%s"' % c) in _src}
     check("every registered code is one a real site can emit",
           set(rr.E_CODES) == emitted, True)
 

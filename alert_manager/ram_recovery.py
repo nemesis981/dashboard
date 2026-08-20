@@ -49,6 +49,8 @@ the reclaim actions themselves.
 import ctypes
 import errno
 import os
+import pwd
+import re
 import signal
 import subprocess
 import time
@@ -58,7 +60,9 @@ __all__ = [
     "find_zombies", "find_orphan_shm", "shm_inventory",
     "reap_zombie", "release_shm", "clean_selected",
     "classify_parent", "ancestor_pids", "verify_zombie_gone",
-    "proc_state", "proc_starttime",
+    "proc_state", "proc_starttime", "proc_ppid", "proc_cgroup_unit",
+    "reap_zombie_verified", "zombie_self_test", "detect_regeneration",
+    "REAP_KIND_CODE", "REAP_CODE_KIND",
     "CASE_SERVICE", "CASE_TERMINATE", "CASE_REFUSED",
     "SHM_DEST", "OrphanCheck",
 ]
@@ -135,7 +139,53 @@ E_CODES = {
         "Terminating this process would kill the session Nemesis itself is "
         "running under. Refused by the ancestor interlock.",
         "medium"),
+    # 008 exists because the 007 interlock STOPS WORKING once classification
+    # moves to root (2026-08-20). 007 asks "is this parent an ancestor of MY
+    # process?" -- a question whose answer depends entirely on who is asking.
+    # Measured on the build box: ptyxis (141640) IS an ancestor of an operator
+    # shell, so 007 fires there; it is NOT an ancestor of `dashboard` (707418)
+    # or `nemesis-fwd` (702432), so 007 does not fire in the helper at all.
+    # While the dashboard was unprivileged that gap was masked by EPERM. Root
+    # has no EPERM, so porting 007 alone would have turned a harmless failure
+    # into a successful kill of the operator's terminal.
+    # In the ledger DESPITE the reap succeeding, which is a deliberate
+    # exception to the failures-only rule rather than a drift from it. The
+    # ledger exists for "a fault an operator would want to know happened", and
+    # a parent that regenerates its zombie on every restart IS one -- it is
+    # just not OUR fault. Recording it is the difference between "you cleaned
+    # this 40 times" and "this parent is broken"; without it the recurrence is
+    # invisible in history and each reap looks like an isolated success.
+    "E-RAMREC-009": (
+        "Zombie reappeared immediately after a successful reap",
+        "The reap worked and the original zombie is gone, but an equivalent "
+        "zombie (same child process name, same parent unit) appeared right "
+        "after. The parent is producing zombies faster than clearing them "
+        "helps, so the action treats the symptom and the cause is upstream.",
+        "low"),
+    "E-RAMREC-008": (
+        "Refused to terminate a process in a live interactive session",
+        "The zombie's parent belongs to a logged-in user's systemd session "
+        "and cannot be restarted (it is a .scope, or reports CanStart=no). "
+        "Terminating it would close a running desktop application out from "
+        "under the person using it, and a zombie reap frees no memory -- so "
+        "the interlock refuses rather than acting.",
+        "medium"),
 }
+
+#: The zombie op crosses a process boundary, so the failure REASON has to
+#: survive the trip. nemesis_fwd raises Denied(kind); the dashboard maps that
+#: kind back to the ledger code. Defined here -- the one module both sides
+#: already import -- so there is a single definition rather than two that drift.
+#:
+#: Deliberately NOT message-text matching on the receiving side: prose gets
+#: reworded, and a caller keying on it would start mis-filing codes silently.
+REAP_KIND_CODE = {
+    "reap_refused_ancestor": "E-RAMREC-007",
+    "reap_refused_session":  "E-RAMREC-008",
+    "reap_unconfirmed":      "E-RAMREC-006",
+    "reap_failed":           "E-RAMREC-005",
+}
+REAP_CODE_KIND = {v: k for k, v in REAP_KIND_CODE.items()}
 
 MODULE_NAME = "alert_manager/ram_recovery"
 
@@ -243,30 +293,100 @@ def ancestor_pids(pid=None, _proc=None):
     return out
 
 
-def _systemctl_unit_for(pid, user_scope, _run=None):
-    """Resolve pid -> unit name in the given systemd scope, or None."""
-    run = _run or _run_cmd
-    cmd = ["systemctl"] + (["--user"] if user_scope else []) + \
-          ["status", str(pid), "--no-pager", "-n", "0"]
-    rc, out, _err = run(cmd)
-    for line in (out or "").splitlines():
-        stripped = line.strip().lstrip("●").strip()
-        if not stripped:
+# ── unit resolution: the CGROUP, not `systemctl status <pid>` ────────────────
+# REPLACED 2026-08-20. The previous resolver shelled out to
+# `systemctl [--user] status <pid>` and parsed the header line. It returned a
+# DIFFERENT ANSWER DEPENDING ON WHICH ACCOUNT RAN IT, which is the whole reason
+# the zombie feature failed in production:
+#
+#     as the desktop user:  speech-dispatcher.service   <- correct
+#     as nemesis-dash:      user@<uid>.service          <- the container unit
+#
+# `systemctl --user` needs $XDG_RUNTIME_DIR and a session bus. `nemesis-dash`
+# is a nologin system account with no /run/user/973, so the --user probe could
+# never work there; it fell back to SYSTEM scope, which answers with the
+# container unit for ANY user process. The container blocklist then correctly
+# refused that, leaving unit=None -> SIGTERM -> EPERM. Every layer behaved as
+# written; the input was wrong.
+#
+# /proc/<pid>/cgroup has none of those properties. World-readable, no bus, no
+# runtime dir, no privilege, and it is the same data systemd itself uses to
+# answer this question. Verified against every relevant case on the build box,
+# each producing a DISTINGUISHABLE answer rather than one uniform one:
+#     ptyxis 141640       -> app-gnome-xdg-terminal-exec-141640.scope  uid 1000
+#     speech-disp 210451  -> speech-dispatcher.service                 uid 1000
+#     dashboard 707418    -> dashboard.service                         uid None
+#     user@1000 manager   -> init.scope                                uid 1000
+#     pid 999999          -> None (explicit failure, not a default)
+_CG_ESCAPE = re.compile(r"\\x([0-9a-fA-F]{2})")
+_UNIT_SUFFIXES = (".service", ".scope", ".socket", ".mount", ".slice")
+
+
+def _cg_unescape(name):
+    """systemd escapes unit names inside cgroup paths (`\\x2d` for `-`)."""
+    return _CG_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), name)
+
+
+def proc_cgroup_unit(pid, _proc=None):
+    """Resolve pid -> {unit, user_uid, path} from /proc/<pid>/cgroup.
+
+    Returns None if the cgroup cannot be read AT ALL -- an explicit "I do not
+    know", never an empty-but-legal-looking answer. Callers must treat None as
+    a refusal to act, not as "no unit owns this".
+
+    `user_uid` is the owning login uid when the process sits under a
+    `user@<uid>.service` manager, else None for a system-scope process. That
+    single field is what tells a caller whether acting on this process would
+    reach into a live human session.
+    """
+    try:
+        with open(os.path.join(_proc or _PROC, str(pid), "cgroup"), "r") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+
+    # cgroup v2 is the `0::<path>` line. v1 controller lines are ignored: they
+    # do not carry the unit for a systemd-managed process on this box.
+    path = None
+    for line in data.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[0] == "0" and parts[1] == "":
+            path = parts[2]
+            break
+    if path is None:
+        return None
+
+    unit, user_uid = None, None
+    for comp in path.split("/"):
+        if not comp:
             continue
-        token = stripped.split()[0]
-        if "." in token and any(token.endswith(s) for s in
-                                (".service", ".scope", ".slice", ".socket")):
-            return token
-        break
+        name = _cg_unescape(comp)
+        if name.startswith("user@") and name.endswith(".service"):
+            try:
+                user_uid = int(name[len("user@"):-len(".service")])
+            except ValueError:
+                pass
+        # LAST unit-like component wins: the leaf is the actual owning unit,
+        # everything above it is the slice/manager hierarchy.
+        if any(name.endswith(suf) for suf in _UNIT_SUFFIXES):
+            unit = name
+    return {"unit": unit, "user_uid": user_uid, "path": path}
+
+
+def proc_ppid(pid, _proc=None):
+    """Parent pid from /proc/<pid>/status. None if unreadable.
+
+    Read SERVER-SIDE so the parent is never a caller-supplied claim: the helper
+    must decide for itself whose parent it is about to act on.
+    """
+    try:
+        with open(os.path.join(_proc or _PROC, str(pid), "status"), "r") as fh:
+            for line in fh:
+                if line.startswith("PPid:"):
+                    return int(line.split()[1])
+    except (OSError, ValueError):
+        return None
     return None
-
-
-def _unit_property(unit, prop, user_scope, _run=None):
-    run = _run or _run_cmd
-    cmd = ["systemctl"] + (["--user"] if user_scope else []) + \
-          ["show", unit, "-p", prop, "--value"]
-    rc, out, _err = run(cmd)
-    return (out or "").strip() if rc == 0 else None
 
 
 def _run_cmd(cmd, timeout=8):
@@ -275,6 +395,82 @@ def _run_cmd(cmd, timeout=8):
         return r.returncode, r.stdout, r.stderr
     except Exception as exc:                                 # noqa: BLE001
         return 1, "", str(exc)
+
+
+def _run_cmd_as(cmd, uid, env, timeout=8):
+    """Run `cmd` as `uid` (None = unchanged) with `env` overlaid.
+
+    ⚠ `preexec_fn` runs between fork and exec and is only async-signal-safe in a
+    SINGLE-THREADED parent. That holds today: nemesis_fwd.serve() is a plain
+    accept loop with no threading, and the dashboard never reaches this branch
+    (it is not root). If either ever becomes threaded, this must move to
+    `subprocess.run(..., user=, group=, extra_groups=)` (Python 3.9+), which
+    does the same work inside CPython's own safe child setup.
+    """
+    def _drop():
+        os.setgroups([])
+        os.setgid(pwd.getpwuid(uid).pw_gid)
+        os.setuid(uid)
+
+    full = dict(os.environ)
+    full.update(env or {})
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=full, preexec_fn=_drop if uid is not None else None)
+        return r.returncode, r.stdout, r.stderr
+    except Exception as exc:                                 # noqa: BLE001
+        return 1, "", str(exc)
+
+
+def _systemctl(args, user_uid=None, _run=None):
+    """`systemctl` in the right manager for `user_uid`.
+
+    user_uid None  -> the system manager.
+    user_uid set   -> that login's `--user` manager.
+
+    WHEN WE ARE ROOT we do NOT talk to the user manager as root. We DROP TO
+    THAT UID first and run as them. Two reasons, both deliberate:
+      * it is the identity that legitimately owns the unit, so no polkit or
+        cross-uid bus-policy question arises at all; and
+      * it bounds the blast radius -- a bug in an argument we build can only
+        ever reach one unprivileged user's own session, never the system
+        manager.
+    Any account that is neither root nor the target returns an explicit
+    failure rather than silently answering from the wrong manager -- that
+    silent wrong answer is precisely the bug this replaced.
+    """
+    cmd = ["systemctl"] + (["--user"] if user_uid is not None else []) + list(args)
+    if _run is not None:
+        return _run(cmd)
+    if user_uid is None:
+        return _run_cmd(cmd)
+
+    runtime_dir = "/run/user/%d" % user_uid
+    if not os.path.isdir(runtime_dir):
+        return 1, "", ("uid %d has no %s -- no running user manager"
+                       % (user_uid, runtime_dir))
+    env = {"XDG_RUNTIME_DIR": runtime_dir,
+           "DBUS_SESSION_BUS_ADDRESS": "unix:path=%s/bus" % runtime_dir}
+    euid = os.geteuid()
+    if euid == user_uid:
+        return _run_cmd_as(cmd, None, env)
+    if euid != 0:
+        return 1, "", ("uid %d cannot reach uid %d's systemd manager"
+                       % (euid, user_uid))
+    return _run_cmd_as(cmd, user_uid, env)
+
+
+def _unit_property(unit, prop, user_uid=None, _run=None):
+    """One unit property, or None if it could not be READ.
+
+    None means "unknown", never "no". Callers that are about to ACT must treat
+    unknown as a refusal (see reap_zombie_verified), because a property that
+    failed to load is indistinguishable from a real answer to anything that
+    defaults it.
+    """
+    rc, out, _err = _systemctl(["show", unit, "-p", prop, "--value"],
+                               user_uid, _run=_run)
+    return (out or "").strip() if rc == 0 else None
 
 
 #: Units that CONTAIN large numbers of unrelated processes. Restarting one to
@@ -293,58 +489,103 @@ def _is_container_unit(unit):
     return any(unit.startswith(p) for p in _CONTAINER_UNIT_PREFIXES)
 
 
-def classify_parent(ppid, _proc=None, _run=None, _self_pid=None):
+def classify_parent(ppid, _proc=None, _run=None, _self_pid=None, _cgroup=None):
     """Three-way classification of a zombie's parent.
 
-    Returns {case, unit, user_scope, why}. The ancestor interlock is checked
-    FIRST and overrides everything: a restartable unit that happens to be our
-    own ancestor is still refused.
+    Returns {case, unit, user_uid, user_scope, canstart, why}. Two interlocks
+    run before anything can be classified as actionable, and both override a
+    perfectly restartable-looking unit.
     """
+    # ── interlock 1: our own ancestors ──
+    # Cheap, and still correct as far as it goes -- but see interlock 2 for why
+    # it is NOT sufficient on its own once this runs as root.
     mine = ancestor_pids(_self_pid, _proc=_proc)
     if ppid in mine:
-        return {"case": CASE_REFUSED, "unit": None, "user_scope": None,
+        return {"case": CASE_REFUSED, "unit": None, "user_uid": None,
+                "user_scope": None, "canstart": None,
                 "why": "pid %d is an ancestor of the Nemesis process; acting "
                        "on it would kill the session Nemesis is running in"
                        % ppid}
 
-    # USER scope FIRST, deliberately. `systemctl status <pid>` in SYSTEM scope
-    # answers with the CONTAINER unit for any user process -- measured: pid
-    # 210451 resolves to `user@1000.service` (the User Manager, 1707 tasks)
-    # in system scope but to the correct `speech-dispatcher.service` in user
-    # scope. Restarting the container would tear down the operator's entire
-    # desktop session -- far worse than the single-app termination this
-    # feature is meant to avoid. Most specific answer wins.
-    for user_scope in (True, False):
-        unit = _systemctl_unit_for(ppid, user_scope, _run=_run)
-        if not unit:
-            continue
-        if _is_container_unit(unit):
-            # Ordering alone is not enough: if user-scope resolution fails for
-            # any reason we would fall back to system scope and get exactly the
-            # container unit again. This refuses it outright.
-            return {"case": CASE_TERMINATE, "unit": None,
-                    "user_scope": user_scope,
-                    "why": "resolved only to the container unit %s, which owns "
-                           "the whole session and must never be restarted for "
-                           "one zombie" % unit}
-        if not unit.endswith(".service"):
-            return {"case": CASE_TERMINATE, "unit": unit,
-                    "user_scope": user_scope,
-                    "why": "unit %s is a %s, not a service -- it has no "
-                           "ExecStart and cannot be restarted (systemd: 'Job "
-                           "type restart is not applicable')"
-                           % (unit, unit.rsplit(".", 1)[-1])}
-        can = _unit_property(unit, "CanStart", user_scope, _run=_run)
-        if can == "yes":
-            return {"case": CASE_SERVICE, "unit": unit,
-                    "user_scope": user_scope,
-                    "why": "restartable service unit"}
-        return {"case": CASE_TERMINATE, "unit": unit, "user_scope": user_scope,
-                "why": "unit %s reports CanStart=%r -- not restartable"
-                       % (unit, can)}
+    info = _cgroup if _cgroup is not None else proc_cgroup_unit(ppid, _proc=_proc)
+    if info is None:
+        # A failed read is NOT "no unit owns this process". Refuse.
+        return {"case": CASE_REFUSED, "unit": None, "user_uid": None,
+                "user_scope": None, "canstart": None,
+                "why": "cannot read the cgroup of pid %d, so what owns it is "
+                       "UNKNOWN -- refusing rather than guessing" % ppid}
 
-    return {"case": CASE_TERMINATE, "unit": None, "user_scope": None,
-            "why": "no systemd unit owns this process"}
+    unit, user_uid = info.get("unit"), info.get("user_uid")
+    in_session = user_uid is not None
+
+    def not_restartable(why, keep_unit=None):
+        """The parent cannot be RESTARTED. Terminate it, or refuse outright.
+
+        ── interlock 2: live interactive sessions (added 2026-08-20) ──
+        The ancestor interlock above asks "is this an ancestor of MY process?",
+        and that answer depends on who is asking. Measured on the build box:
+        ptyxis (141640) is an ancestor of an operator shell -- so the check
+        fires there -- but NOT of `dashboard` (707418) or `nemesis-fwd`
+        (702432), so it does not fire in either service. While the dashboard
+        was unprivileged that gap was hidden by EPERM: the kill was refused by
+        the kernel, and the failure was read as the interlock working. Root has
+        no EPERM. Porting interlock 1 alone into the helper would therefore have
+        converted a harmless failure into a SUCCESSFUL kill of the operator's
+        terminal.
+
+        So the real question is not "is it my ancestor" but "does a human have
+        this on screen right now". A process under a `user@<uid>.service`
+        manager belongs to a live login session; terminating it closes a
+        running application out from under whoever is using it, with no
+        systemd restart to bring it back. Weighed against a reap that frees
+        NO memory at all (only a process-table slot), that trade is never
+        worth making -- so it is refused, not attempted.
+
+        A system-scope parent has no such user, and SIGTERM stays available.
+        """
+        if in_session:
+            return {"case": CASE_REFUSED, "unit": keep_unit,
+                    "user_uid": user_uid, "user_scope": True, "canstart": None,
+                    "why": "%s, and it belongs to the live session of uid %d "
+                           "-- terminating it would close a running "
+                           "application out from under that user, to free no "
+                           "memory" % (why, user_uid)}
+        return {"case": CASE_TERMINATE, "unit": keep_unit, "user_uid": None,
+                "user_scope": False, "canstart": None, "why": why}
+
+    if not unit:
+        return not_restartable("no systemd unit owns pid %d" % ppid)
+
+    if _is_container_unit(unit):
+        # unit is CLEARED so nothing downstream can restart the container.
+        return not_restartable(
+            "pid %d resolved only to the container unit %s, which owns the "
+            "whole session and must never be restarted for one zombie"
+            % (ppid, unit))
+
+    if not unit.endswith(".service"):
+        return not_restartable(
+            "unit %s is a %s, not a service -- it has no ExecStart and cannot "
+            "be restarted (systemd: 'Job type restart is not applicable')"
+            % (unit, unit.rsplit(".", 1)[-1]), keep_unit=unit)
+
+    canstart = _unit_property(unit, "CanStart", user_uid, _run=_run)
+    if canstart == "yes":
+        return {"case": CASE_SERVICE, "unit": unit, "user_uid": user_uid,
+                "user_scope": in_session, "canstart": "yes",
+                "why": "restartable service unit"}
+    if canstart is None:
+        # UNKNOWN, not "no". Listing runs in the dashboard, which cannot reach
+        # a user manager -- so it may legitimately not know. The listing is a
+        # PROPOSAL and says so; reap_zombie_verified re-derives this on the
+        # privileged side and fails closed if it still cannot confirm.
+        return {"case": CASE_SERVICE, "unit": unit, "user_uid": user_uid,
+                "user_scope": in_session, "canstart": None,
+                "why": "unit %s looks restartable, but CanStart could not be "
+                       "read from here -- to be confirmed before any action"
+                       % unit}
+    return not_restartable(
+        "unit %s reports CanStart=%r" % (unit, canstart), keep_unit=unit)
 
 
 def verify_zombie_gone(pid, starttime0, timeout=8.0, _proc=None, _sleep=None):
@@ -420,7 +661,12 @@ def find_zombies(sample, _proc=None, _run=None):
             "starttime": proc_starttime(pid, _proc=_proc),
             "case": cls["case"],
             "unit": cls["unit"],
-            "user_scope": cls["user_scope"],
+            "user_scope": cls.get("user_scope"),
+            "user_uid": cls.get("user_uid"),
+            # Carried so the UI can be honest that the listing is a PROPOSAL:
+            # None means the restartability of the unit is not yet confirmed
+            # and the privileged side will decide.
+            "canstart": cls.get("canstart"),
             "why": cls["why"],
             "actionable": cls["case"] != CASE_REFUSED,
             # Stated explicitly so the UI cannot imply otherwise: a zombie has
@@ -440,7 +686,7 @@ def _comm(pid, _proc=None):
         return None
 
 
-def reap_zombie(zpid, ppid, case, unit=None, user_scope=False, starttime=None,
+def reap_zombie(zpid, ppid, case, unit=None, user_uid=None, starttime=None,
                 _kill=None, _run=None, _proc=None, _sleep=None, _verify=None):
     """Clear a zombie by acting on its PARENT, then VERIFY it actually left.
 
@@ -476,9 +722,7 @@ def reap_zombie(zpid, ppid, case, unit=None, user_scope=False, starttime=None,
                 "E-RAMREC-007")
 
     if case == CASE_SERVICE and unit:
-        cmd = ["systemctl"] + (["--user"] if user_scope else []) + \
-              ["restart", unit]
-        rc, _out, err = (_run or _run_cmd)(cmd)
+        rc, _out, err = _systemctl(["restart", unit], user_uid, _run=_run)
         if rc != 0:
             return (False, "restart of %s failed: %s" % (unit, (err or "").strip()[:180]),
                     "E-RAMREC-005")
@@ -505,6 +749,271 @@ def reap_zombie(zpid, ppid, case, unit=None, user_scope=False, starttime=None,
     if ok:
         return True, "%s; verified: %s" % (action, detail), None
     return False, "%s; but %s" % (action, detail), "E-RAMREC-006"
+
+
+def zombie_self_test(_proc=None):
+    """Prove the zombie classifier can produce ALL THREE answers before it is
+    trusted to authorise an action -- the same premise-check `self_test` does
+    for the orphan classifier, and required for the same reason: a classifier
+    stuck on one answer looks identical to a working one until it acts.
+
+    Runs on FIXTURES, not live processes, so it is deterministic and cannot be
+    made to pass by the state of the box.
+    """
+    def fixed(cg, canstart="yes"):
+        return classify_parent(
+            424242, _cgroup=cg, _self_pid=1,
+            _run=lambda cmd: (0, canstart + "\n", ""))
+
+    sysd = fixed({"unit": "cups.service", "user_uid": None, "path": "/system.slice/cups.service"})
+    if sysd["case"] != CASE_SERVICE:
+        raise OrphanCheck("zombie self-test: a restartable system service did "
+                          "not classify as %s (got %s)" % (CASE_SERVICE, sysd["case"]))
+
+    orphan_proc = fixed({"unit": None, "user_uid": None, "path": "/"})
+    if orphan_proc["case"] != CASE_TERMINATE:
+        raise OrphanCheck("zombie self-test: an unowned system process did not "
+                          "classify as %s (got %s)"
+                          % (CASE_TERMINATE, orphan_proc["case"]))
+
+    # The one that matters: a desktop .scope must be REFUSED, not terminated.
+    scope = fixed({"unit": "app-gnome-term-1.scope", "user_uid": 1000,
+                   "path": "/user.slice/user-1000.slice/user@1000.service/"
+                           "app.slice/app-gnome-term-1.scope"})
+    if scope["case"] != CASE_REFUSED:
+        raise OrphanCheck("zombie self-test: a live-session .scope classified "
+                          "as %s -- it MUST be %s" % (scope["case"], CASE_REFUSED))
+
+    # The REGENERATION MATCHER must be able to say both things. One that can
+    # only ever answer "no" silently restores the unqualified success this was
+    # built to remove, and looks identical to a working one from the outside.
+    same = {"pid": 2, "ppid": 20, "comm": "sd_espeak-ng-mb"}
+    args = (1, "sd_espeak-ng-mb", "speech-dispatcher.service", "speech-dispatch")
+    if not _is_equivalent_zombie(same, *args,
+                                 cand_parent_unit="speech-dispatcher.service",
+                                 cand_parent_comm="speech-dispatch"):
+        raise OrphanCheck("zombie self-test: the regeneration matcher failed "
+                          "to recognise an equivalent zombie")
+    if _is_equivalent_zombie({"pid": 3, "ppid": 30, "comm": "something-else"},
+                             *args, cand_parent_unit="speech-dispatcher.service",
+                             cand_parent_comm="speech-dispatch"):
+        raise OrphanCheck("zombie self-test: the regeneration matcher matched "
+                          "a DIFFERENT child process")
+    if _is_equivalent_zombie({"pid": 1, "ppid": 20, "comm": "sd_espeak-ng-mb"},
+                             *args, cand_parent_unit="speech-dispatcher.service",
+                             cand_parent_comm="speech-dispatch"):
+        raise OrphanCheck("zombie self-test: the matcher matched the very pid "
+                          "that was just reaped")
+
+    # And an unreadable cgroup must refuse, never fall through to terminate.
+    unknown = classify_parent(424242, _cgroup=None, _self_pid=1,
+                              _proc="/nonexistent-proc")
+    if unknown["case"] != CASE_REFUSED:
+        raise OrphanCheck("zombie self-test: an UNREADABLE cgroup classified "
+                          "as %s -- unknown must refuse" % unknown["case"])
+    return True
+
+
+def _scan_zombies(_proc=None):
+    """Every zombie currently in the process table: [{pid, ppid, comm}].
+
+    Raises OrphanCheck if /proc itself cannot be listed -- an unreadable /proc
+    must never degrade into "no zombies", which is a legal-looking answer that
+    is indistinguishable from a real one.
+    """
+    proc = _proc or _PROC
+    try:
+        entries = os.listdir(proc)
+    except OSError as exc:
+        raise OrphanCheck("cannot list %s: %s" % (proc, exc))
+
+    out = []
+    for name in entries:
+        if not name.isdigit():
+            continue
+        pid = int(name)
+        if proc_state(pid, _proc=proc) != "Z":
+            continue
+        out.append({"pid": pid, "ppid": proc_ppid(pid, _proc=proc),
+                    "comm": _comm(pid, _proc=proc)})
+    return out
+
+
+def _is_equivalent_zombie(cand, reaped_pid, child_comm, parent_unit,
+                          parent_comm, cand_parent_unit, cand_parent_comm):
+    """Is `cand` the same zombie in all but identity? PURE -- no I/O.
+
+    Split out from the scan specifically so it can be self-tested on fixtures:
+    a matcher that can only ever answer "no" would silently restore the exact
+    unqualified-success behaviour this whole check exists to remove, and would
+    look identical to a working one.
+
+    "Equivalent" is same child process name AND same parent. Parent identity is
+    the UNIT where there is one -- a restart gives the parent a new pid, so
+    matching on pid would never fire for the case this is most needed for. With
+    no unit (a terminated system process) the parent's comm is the best
+    available anchor, and is labelled as weaker in the caller's message.
+    """
+    if cand.get("pid") == reaped_pid:
+        return False                      # the one we just reaped
+    if not child_comm or cand.get("comm") != child_comm:
+        return False
+    if parent_unit:
+        return cand_parent_unit == parent_unit
+    if parent_comm:
+        return cand_parent_comm == parent_comm
+    return False
+
+
+def detect_regeneration(reaped_pid, child_comm, parent_unit, parent_comm,
+                        timeout=3.0, _proc=None, _sleep=None):
+    """Did an EQUIVALENT zombie reappear after a successful reap?
+
+    WHY THIS EXISTS (measured in production 2026-08-20). Reaping the
+    speech-dispatcher zombie restarts the unit; the fresh instance probes its
+    output modules at startup, one of them dies, and it is not reaped -- so a
+    NEW zombie exists within the same second. Observed three times, one per
+    restart: 210451->210471, 878435->878448, 878877->878890. Every reap
+    genuinely succeeded and the list looked unchanged, which reads as a broken
+    feature when the feature is working exactly as designed.
+
+    Reporting an unqualified success there is a true statement that leaves the
+    operator with a false belief. This makes the recurrence visible instead.
+
+    Returns (state, detail, match) with state one of:
+        "regenerated" -- an equivalent zombie is back
+        "clear"       -- none appeared within the window
+        "unknown"     -- /proc could not be read, so NEITHER can be claimed
+    """
+    sleep = _sleep or time.sleep
+    deadline = time.time() + max(0.0, timeout)
+
+    while True:
+        try:
+            zombies = _scan_zombies(_proc=_proc)
+        except OrphanCheck as exc:
+            return ("unknown",
+                    "could not check whether the zombie came back: %s" % exc,
+                    None)
+
+        for cand in zombies:
+            cppid = cand.get("ppid")
+            cinfo = proc_cgroup_unit(cppid, _proc=_proc) if cppid else None
+            if _is_equivalent_zombie(
+                    cand, reaped_pid, child_comm, parent_unit, parent_comm,
+                    (cinfo or {}).get("unit"), _comm(cppid, _proc=_proc)):
+                anchor = ("parent unit %s" % parent_unit if parent_unit
+                          else "parent name %r (no unit -- a weaker match)"
+                               % parent_comm)
+                return ("regenerated",
+                        "the zombie CAME BACK: %s reappeared as pid %s under "
+                        "the same %s. The reap worked, but this parent "
+                        "recreates the zombie, so clearing it again will not "
+                        "help -- the cause is in the parent."
+                        % (child_comm, cand.get("pid"), anchor),
+                        cand)
+
+        if time.time() >= deadline:
+            return ("clear",
+                    "checked for %.0fs afterwards and no equivalent zombie "
+                    "came back" % max(0.0, timeout),
+                    None)
+        sleep(0.25)
+
+
+def reap_zombie_verified(pid, _proc=None, _run=None, _kill=None, _sleep=None,
+                         _verify=None, _regen_timeout=3.0):
+    """Clear a zombie, RE-DERIVING every fact from the pid alone.
+
+    THE PRIVILEGED ENTRY POINT. The caller sends one integer and vouches for
+    nothing -- no parent, no case, no unit, no starttime. Same contract as
+    `release_shm`, and for the same reason: the unprivileged dashboard is
+    modelled as potentially compromised, so any fact it asserted would be a
+    fact an attacker simply asserts differently.
+
+    What that buys, concretely: THE HELPER ONLY EVER ACTS ON THE PARENT OF A
+    PROCESS IT HAS ITSELF CONFIRMED IS A ZOMBIE. Without the state check below,
+    a caller could name any live pid and have root SIGTERM its parent -- an
+    arbitrary-process-kill primitive handed to the least trusted side of the
+    boundary. That check, not the credential, is what bounds this op.
+
+    Returns (ok, detail, code, info).
+    """
+    info = {"pid": pid}
+
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return False, "pid must be an integer greater than 1", "E-RAMREC-005", info
+
+    # ── the interlock: it must ACTUALLY be a zombie, right now ──
+    state = proc_state(pid, _proc=_proc)
+    if state is None:
+        return (True, "pid %d is no longer in the process table; nothing to "
+                      "reap" % pid, None, info)
+    if state != "Z":
+        return (False,
+                "REFUSED: pid %d is not a zombie (state=%s). Only a confirmed "
+                "zombie's parent may be acted on." % (pid, state),
+                "E-RAMREC-005", info)
+
+    # Captured HERE, not accepted from the caller: it is the PID-reuse guard
+    # the post-action check depends on, so a caller-supplied value could
+    # manufacture a "successfully reaped" verdict for a reap that never
+    # happened.
+    starttime = proc_starttime(pid, _proc=_proc)
+    ppid = proc_ppid(pid, _proc=_proc)
+    info.update({"ppid": ppid, "starttime": starttime,
+                 "name": _comm(pid, _proc=_proc),
+                 "parent_name": _comm(ppid, _proc=_proc) if ppid else None})
+
+    if not ppid or ppid <= 1:
+        return (False, "zombie %d has no actionable parent (ppid=%r); init "
+                       "will reap it" % (pid, ppid), "E-RAMREC-005", info)
+
+    cls = classify_parent(ppid, _proc=_proc, _run=_run)
+    info.update({"case": cls["case"], "unit": cls["unit"],
+                 "user_uid": cls.get("user_uid"),
+                 "user_scope": cls.get("user_scope"),
+                 "why": cls["why"]})
+
+    if cls["case"] == CASE_REFUSED:
+        # Which interlock refused decides which code is recorded -- 007 is the
+        # ancestor check, 008 the live-session one. Distinguishable on purpose:
+        # they fail for different reasons and one of them only exists because
+        # the other stops working under root.
+        code = "E-RAMREC-007" if "ancestor" in cls["why"] else "E-RAMREC-008"
+        return False, "REFUSED: %s" % cls["why"], code, info
+
+    if cls["case"] == CASE_SERVICE and cls.get("canstart") != "yes":
+        # FAIL CLOSED. `canstart is None` means the property could not be read,
+        # which is not permission to restart -- see _unit_property.
+        return (False,
+                "REFUSED: cannot confirm %s is restartable (CanStart=%r); "
+                "refusing to act on an unverified unit"
+                % (cls["unit"], cls.get("canstart")), "E-RAMREC-005", info)
+
+    ok, detail, code = reap_zombie(
+        pid, ppid, cls["case"], unit=cls["unit"], user_uid=cls.get("user_uid"),
+        starttime=starttime, _kill=_kill, _run=_run, _proc=_proc,
+        _sleep=_sleep, _verify=_verify)
+    if not ok:
+        return ok, detail, code, info
+
+    # ── did it just come straight back? ──
+    # A reap that succeeds and is immediately undone is still a success, and
+    # saying only that leaves the operator believing something untrue. The
+    # qualifier is attached HERE rather than left to the UI so every caller of
+    # this function gets it, including any future non-UI one.
+    state, regen_detail, match = detect_regeneration(
+        pid, info.get("name"), cls["unit"], info.get("parent_name"),
+        timeout=_regen_timeout, _proc=_proc, _sleep=_sleep)
+    info["regeneration"] = state
+    if match:
+        info["regenerated_pid"] = match.get("pid")
+    if state == "regenerated":
+        # ok stays True: the reap DID work. The code records the recurrence,
+        # which is a real defect in the parent even though our action succeeded.
+        return True, "%s -- BUT %s" % (detail, regen_detail), "E-RAMREC-009", info
+    return True, "%s; %s" % (detail, regen_detail), code, info
 
 
 # ── shared memory ────────────────────────────────────────────────────────────
@@ -737,14 +1246,15 @@ def clean_selected(selections, *, sample=None, recorder=None,
     for sel in selections or []:
         kind = sel.get("kind")
         if kind == "zombie":
-            ppid = sel.get("ppid")
-            ok, detail, code = reap_zombie(
-                sel.get("pid"), ppid, sel.get("case", CASE_TERMINATE),
-                unit=sel.get("unit"), user_scope=bool(sel.get("user_scope")),
-                starttime=sel.get("starttime"),
-                _kill=_kill, _run=_run, _proc=_proc, _sleep=_sleep)
-            results.append({"kind": "zombie", "ppid": ppid, "pid": sel.get("pid"),
-                            "case": sel.get("case"), "unit": sel.get("unit"),
+            # ONE code path, and it starts from the pid alone. Everything the
+            # caller may have put in `sel` about the parent, case or unit is
+            # deliberately IGNORED and re-derived -- see reap_zombie_verified.
+            ok, detail, code, info = reap_zombie_verified(
+                sel.get("pid"), _kill=_kill, _run=_run, _proc=_proc,
+                _sleep=_sleep)
+            results.append({"kind": "zombie", "pid": sel.get("pid"),
+                            "ppid": info.get("ppid"), "case": info.get("case"),
+                            "unit": info.get("unit"),
                             "ok": ok, "detail": detail, "bytes_freed": 0})
         elif kind == "shm":
             shmid = sel.get("shmid")
