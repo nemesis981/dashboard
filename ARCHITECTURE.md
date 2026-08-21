@@ -31,7 +31,7 @@ flowchart TD
 
     subgraph modules["modules/ (pluggable)"]
         anomaly["anomaly_detection\nBehavioral baseline + scoring"]
-        ai["ai_engine\nAll Anthropic API calls\nTeaching / Automated mode"]
+        ai["ai_engine\nAll Anthropic API calls\nL0-L4 authority ladder"]
         tickets["tickets\nUnified notes + tickets"]
         community["community_queue\nThreat submission queue"]
         dhcp["dhcp\nPi-hole DHCP takeover"]
@@ -202,6 +202,60 @@ Modules own their routes, own their databases, and can be toggled without affect
 - **device_id** on `hw_metrics` enables multi-device hardware monitoring (`'local'` = Nemesis host)
 - **Port 5001** — Nemesis listens for agent payloads
 - **Port 5002** — each agent listens for commands (scan, notify, rule updates)
-- **Teaching Mode** — AI shows copyable commands, user runs them in their own terminal
-- **Automated Mode** — AI executes with tiered approval (LOW=click OK, MEDIUM=confirm, HIGH=type YES)
+- **AI authority — the L0–L4 ladder** (see below). Replaces the earlier "Teaching Mode /
+  Automated Mode with LOW/MEDIUM/HIGH approval" description, which never existed in code
 - **JS in Python f-strings** — always use single quotes for JS or `json.dumps()`. English contractions (it's, machine's) must use `&#39;` — this has caused multiple bugs
+
+---
+
+## AI authority — the L0–L4 ladder
+
+**This is the real approval model.** It supersedes the "Teaching Mode / Automated Mode"
+note that stood here until 2026-08-21. Being precise about what was and was not true of
+that note, because the difference matters:
+
+- **"Teaching Mode" describes something real**, under a name the code does not use. The
+  chat system prompt instructs the assistant to name the read-only commands that would
+  answer a question and explain how to read the output, under a hard rule — *"ONLY EVER
+  SUGGEST COMMANDS THAT READ STATE."* That behaviour exists and is worth keeping; only the
+  label was fictional.
+- **"Automated Mode" describes nothing.** No code path executes an AI-chosen action, and
+  the `LOW=click OK / MEDIUM=confirm / HIGH=type YES` vocabulary appears nowhere in the
+  tree (`teaching_mode`, `automated_mode`, `auto_execute`: zero hits).
+
+What shipped instead is a per-capability ladder, and it is the stronger model: authority
+attaches to a **class of action**, not to how emphatically the user is asked. "Type YES"
+is a prompt style; a ceiling is a permission.
+
+Defined in `modules/ai_engine/module.py` (`L0_OBSERVE`–`L4_GOVERN`):
+
+| Level | Name | What the AI may do |
+|---|---|---|
+| 0 | `L0_OBSERVE` | Explain a finding and how to investigate it. Read-only commands may be suggested; no changes recommended, no action offered. |
+| 1 | `L1_RECOMMEND` | Recommend a specific action with reasoning. Cannot execute — every recommendation is a proposal a human approves. |
+| 2 | `L2_ACT_REVERSIBLE` | May offer to carry out a **reversible** action, through the system's gated action path, after explicit confirmation. |
+| 3 | `L3_ACT_DISRUPTIVE` | As above, for actions with real disruption potential. |
+| 4 | `L4_GOVERN` | Reserved. Nothing is granted this today. |
+
+**Authority is per action class, not global** (`ACTION_CLASS_CEILINGS`): e.g.
+`ip_quarantine_external` ceilings at L3, `ip_block_permanent` at L2, and both
+`ip_action_internal` and `malware_file_quarantine` are pinned at L1 — the AI may recommend
+quarantining a file, never do it.
+
+**The effective level is `min()` of three terms** (`effective_ceiling()`): what has been
+*earned* (`ai_authority.current_level`), the *hard* code-level ceiling for that class, and
+any *user standing rule*. Standing rules **narrow only** — there is deliberately no rule
+type that raises a term, so no wording of a rule can widen authority. That is a structural
+guarantee, not a matter of the model interpreting an instruction conservatively.
+
+⚠ **Current state (2026-08-21): the ladder is INERT.** `ai_authority`, `ai_proposals` and
+`ai_standing_rules` exist as schema with **no production writer**, so `earned` resolves to
+L0 on every install and `effective_ceiling()` returns 0 for every class. In practice the AI
+is explain-only everywhere, and today it gates only what the chat may *say* — no execution
+path consults it, because nothing executes. Wiring L1 (propose + approve/reject) is the
+next step; see the scoping note in the private mirror.
+
+⚠ **One known incoherence, not yet fixed:** the alert-verdict path
+(`/api/analyze/<rule_id>`) writes `alerts.action` without consulting `effective_ceiling()`
+at all, while chat on the same alert is fully gated. Reconcile before granting any real
+authority, or the permission model is false on its face.
