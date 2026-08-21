@@ -3778,3 +3778,80 @@ nothing guarded it against a future regression.
 `restore()` suite (basic merge, merge-into-live-counter, chronological first/last
 survival, malformed/hostile input, drain→restore→drain round-trip) — file total 36/36.
 No further action needed.
+
+### [MEDIUM] Malware Layer-C AI verdicts are computed, billed, and stored — never shown (found 2026-08-21)
+Filed independent of any future AI-automation-mode work (Window 3's AI-surfacing audit,
+`~/work/nemesis-internal/audits/ai-surfacing-audit-2026-08-21.md`, §3 F1) — this is a
+present-day bug, not a scoping concern.
+
+`malware_detection/module.py`'s `_ai_verdict_for_finding()` runs on the live scan path,
+enabled by default for any finding scoring ≥ the configured threshold, and is billed +
+cached for 30 days. The result is stored (`ai_verdict` column) and sent to the browser in
+the finding-detail JSON payload — but the detail-view renderer never reads it; every other
+field on that payload is rendered, `ai_verdict` alone is not. The identical pattern is
+implemented correctly for the other two AI-verdict producers (anomaly incidents, community
+queue), both of which render their result and state truthfully that it was shown — malware
+is the only one where the render step is missing.
+
+**Compounding:** the chat prompt for a malware finding injects the literal line "Verdict
+already shown to the user," which is false whenever this bug is live — handing the model a
+false premise it will then reference in conversation.
+
+**Candidate fix:** add the missing renderer call in the finding-detail JS (mirror
+`_format_ai_report_html()`'s pattern from `anomaly_detection/module.py`), and drop the
+now-inaccurate "already shown" line from the chat prompt until it is.
+
+### [LOW] `ARCHITECTURE.md` documents an approval vocabulary the shipped code doesn't use (found 2026-08-21)
+Filed independent of any future AI-automation-mode work (same audit, §3 F9) — a docs/code
+consistency gap, not a defect in running behavior.
+
+`ARCHITECTURE.md` describes "Teaching Mode" and "Automated Mode" with a LOW/MEDIUM/HIGH
+tiered-approval vocabulary (click OK / confirm / type YES). Neither string appears anywhere
+in the codebase (`teaching_mode` / `automated_mode` / `auto_execute`: 0 hits). What actually
+shipped is a different, better design — a graduated L0_OBSERVE→L4_GOVERN authority ladder
+with per-action-class ceilings (`ai_engine/module.py`) — but the doc was never updated to
+match, so the product currently describes two incompatible approval models on paper.
+
+**Candidate fix:** retire the LOW/MEDIUM/HIGH language from `ARCHITECTURE.md` and document
+the L0–L4 ladder as the real design. Small, no code change — but worth doing before anyone
+scopes automation work against the stale description.
+
+### [HIGH — private writeup] A second AI code path bypasses every control the engine provides (found 2026-08-21)
+Filed independent of any future AI-automation-mode work (same audit, §6 S1) — a present-day
+governance gap in shipped code, kept private per Rule 10 (describes exactly which controls
+an existing path evades). Full detail:
+`~/work/nemesis-internal/audits/ai-surfacing-audit-2026-08-21.md` §6 S1.
+
+A second, separate call site sends data to the AI vendor's API directly, outside the
+`ai_engine` module entirely — a different model, no rate limiting, no spend-cap
+accounting, no Anthropic-incident circuit-breaker, and no pseudonymization. Every dollar
+figure the product currently shows the user is understated by whatever this path costs,
+because it never touches the usage ledger the rest of the product relies on.
+
+**Also a live functional bug, safe to state plainly:** the caller invokes this path with a
+flag intended to make it run non-interactively, but the called script has no argument
+parsing at all — the flag is silently ignored, and the script contains interactive prompts
+that can block the calling request until a hard timeout.
+
+**Candidate fix:** either route this path through `ai_engine`'s existing choke point (reuse
+the rate/spend/circuit-breaker/pseudonymization it already has) or document it as a
+deliberate, scoped exception — but it must stop being invisible to the spend figures shown
+to users. Fix the non-interactive-flag bug regardless of which direction is chosen.
+
+### [HIGH — private writeup] AI pseudonymization is applied to one path only, but the privacy notice reads product-wide (found 2026-08-21)
+Filed independent of any future AI-automation-mode work (same audit, §6 S2) — a present-day
+privacy gap in shipped code, kept private per Rule 10 (specific detail on which prompts send
+which real identifiers). Full detail:
+`~/work/nemesis-internal/audits/ai-surfacing-audit-2026-08-21.md` §6 S2.
+
+Only one of the several surfaces that call the AI vendor scrubs identifying data before the
+call. The others send real, unscrubbed identifiers from the customer's own network in the
+prompt. Meanwhile the in-product privacy notice describes AI pseudonymization as if it
+applies broadly — accurate for the one surface that does it, misleading about the others
+that don't.
+
+**Candidate fix:** move pseudonymization into the shared `analyze()` choke point every AI
+call already funnels through, rather than leaving each caller responsible for remembering
+to scrub — the same "enforced in six places is enforced in none" reasoning this codebase
+already applies to the chat-scope gate. Then correct the privacy notice's wording to match
+whatever is actually true afterward.
