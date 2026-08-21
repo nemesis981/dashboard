@@ -1808,7 +1808,51 @@ def _update_agent_device(payload, remote_ip=None):
     device_name = payload.get("device_name", device_id)
     device_type = payload.get("device_type", "")
     conn_type   = payload.get("connection_type", "")
-    ts          = payload.get("timestamp") or datetime.now().isoformat(timespec="seconds")
+    # ── agent_last_seen is the SERVER'S RECEIPT TIME, never the agent's clock ──
+    #
+    # This used to be `payload.get("timestamp")` -- the agent's own
+    # `datetime.now().isoformat()`, i.e. NAIVE time in the AGENT's timezone.
+    # Every reader compares it against the SERVER's naive `datetime.now()`:
+    #   dashboard._agent_checkin_state      (the check-in label + revoke advice)
+    #   dashboard._agent_status_from_seen   (online/offline badge + scan gating)
+    #   this file's `extended_absence`      (auto-queues a catch-up scan)
+    # Both operands were naive, so Python subtracted them happily -- no
+    # TypeError, no warning, just an answer wrong by the offset difference.
+    #
+    # Measured live 2026-08-20: gateway on Etc/UTC, agents on America/Chicago.
+    # A node that had beaten 0 seconds earlier computed an age of 18000s against
+    # a 1800s staleness threshold -- 10x over -- so every healthy node rendered
+    # as "no check-in since ...", whose note ends "If you think it may be lost or
+    # stolen, revoke it." West-of-server agents were indistinguishable from dead
+    # ones; east-of-server agents tripped the "in the future" branch instead.
+    #
+    # The timezone mix was the symptom; sourcing this column from the agent was
+    # the design error. "When did the server last hear from this device" is a
+    # fact the SERVER knows authoritatively, and stamping it here -- at the
+    # moment the heartbeat is being processed -- puts it in the same frame as
+    # every reader's `datetime.now()` by construction.
+    #
+    # It also takes the agent's clock out of the trust path: unlike `signed_at`,
+    # this value is NOT skew-checked (dashboard.py:4691-4693 says so), so a
+    # wrong, drifting, or falsified agent clock could previously claim any
+    # freshness it liked. It cannot now.
+    #
+    # NOTE the deliberate asymmetry with `signed_at`, which is aware-UTC: this
+    # stays NAIVE-LOCAL because that is the frame all three readers already use,
+    # so they need no change and cannot be left half-converted. The residual
+    # weakness is the server's own DST transition (a bounded ~1h misread twice a
+    # year), against the permanent multi-hour error this replaces. Moving the
+    # whole column to aware-UTC is a strictly better end state and needs all
+    # three readers converted in the same commit -- do not convert one alone.
+    #
+    # Legacy agent-frame values already in the table are NOT reinterpreted --
+    # they cannot be, the offset they were written in is unrecoverable. Each is
+    # superseded by a correct value on that device's next heartbeat.
+    #
+    # ⚠ `_create_enrollment` stamps this SAME column and already uses the
+    # server's clock (its own `now`, hw_monitor.py:3790). That agreement is what
+    # makes the column single-framed -- if either writer moves, move both.
+    ts          = datetime.now().isoformat(timespec="seconds")
     ah          = payload.get("agent_health", {})
     suri_run    = 1 if ah.get("suricata_running") else 0
     suri_prof   = ah.get("suricata_profile") or ""
@@ -3787,6 +3831,13 @@ def _create_enrollment(payload, remote_ip):
     import uuid as _uuid
     import time as _time
     device_id = _uuid.uuid4().hex
+    # Server clock, and it must STAY the server clock: this `now` is what seeds
+    # `agent_last_seen` for a freshly-enrolled device, and `_update_agent_device`
+    # stamps that same column from the server's clock on every heartbeat
+    # thereafter (see the long note at its `ts =`). One column, one frame, two
+    # writers that have to agree -- if either moves, move both. Sourcing this
+    # from anything the AGENT sent would re-open the timezone split that made
+    # healthy nodes read as silent for hours (fixed 2026-08-20).
     now = datetime.now().isoformat(timespec="seconds")
 
     # ── installer token: atomic single-use claim → auto-approve (skip pending) ──
