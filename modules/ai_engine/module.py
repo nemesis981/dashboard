@@ -2766,10 +2766,82 @@ def _analyze_inner(
         return {"ok": False, "reason": "anthropic package not installed — run pip install anthropic"}
 
     client = anthropic.Anthropic(api_key=key)
-    messages = [{"role": "user", "content": prompt}]
+
+    # ── PSEUDONYMIZATION, ENFORCED HERE AND NOWHERE ELSE ────────────────────
+    #
+    # Every billed call in the product funnels through this function, so this is
+    # the only place the guarantee can actually be made. It used to live in ONE
+    # caller (dashboard's alert path) while three others -- anomaly, community
+    # queue and malware Layer C -- called straight past it: anomaly was sending
+    # real device names and real LAN IPs to the vendor on every automatic
+    # incident analysis. That is the same argument `_chat_system_prompt` already
+    # makes about scope: "a property enforced in six places is enforced in none."
+    #
+    # ⚠ SCOPE OF THE GUARANTEE, STATED HONESTLY: `nemesis_pseudonymize` replaces
+    # ADDRESSES -- IPv4/IPv6 and MACs. It does NOT replace hostnames or device
+    # names, because those are not address-shaped and it has no way to recognise
+    # them. Anomaly's prompt still carries real device names (`_build_ai_prompt`
+    # in that module). This change closes the address leak for every present and
+    # future caller; the NAME leak is a separate, still-open item and must not be
+    # described as covered.
+    #
+    # ONE MAPPING ACROSS BOTH FIELDS. `pseudonymize()` assigns tokens from "A"
+    # per call with no way to seed it, so scrubbing `prompt` and `system` in two
+    # passes would mint two different host-A's and `resolve()` would map one of
+    # them back to the wrong address. They are therefore scrubbed as a single
+    # string and split apart again.
+    #
+    # FAIL CLOSED. A scrubber that raises must BLOCK the call, never fall
+    # through to sending the raw text: a silent pass-through is precisely the
+    # "failed read presented as a legal answer" shape this repo keeps finding,
+    # and here the cost of it is customer data on the wire.
+    #
+    # The CACHE is deliberately untouched by any of this. Scrubbing happens on
+    # the way to the wire and is reversed on the way back, so `ai_cache` stores
+    # exactly what it stored before, and a cache hit -- which never reaches the
+    # network -- needs no scrubbing at all.
+    _SEP = "\n\x00--nemesis-system-boundary--\x00\n"
+    try:
+        # `nemesis_pseudonymize` lives in alert_manager/, which is NOT on this
+        # module's import path — the one other place in this file that needs an
+        # alert_manager import inserts the path locally too (see the
+        # pricing-drift notifier). Resolved from __file__ rather than hardcoded
+        # so it survives a relocation: module.py -> ai_engine -> modules -> root.
+        #
+        # ⚠ This is load-bearing for AVAILABILITY, not just tidiness. The block
+        # below fails CLOSED, so if this import cannot resolve, every AI call in
+        # the product returns "pseudonymization failed" — a total outage of the
+        # feature, wearing the costume of a safety measure. Measured during
+        # development: without this insert the import raises ImportError on
+        # every call. `test_pseudonymize_chokepoint.py` asserts the import
+        # resolves from a bare interpreter for exactly this reason.
+        import sys as _sys
+        _amgr = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "alert_manager")
+        if _amgr not in _sys.path:
+            _sys.path.insert(0, _amgr)
+        import nemesis_pseudonymize as _pseudo
+        if _SEP in prompt or (system_prompt and _SEP in system_prompt):
+            raise ValueError("input contains the internal boundary sentinel")
+        if system_prompt:
+            _joined, _addr_map = _pseudo.pseudonymize(system_prompt + _SEP + prompt)
+            _wire_system, _, _wire_prompt = _joined.partition(_SEP)
+            if not _wire_prompt and prompt:
+                raise ValueError("boundary sentinel did not survive pseudonymization")
+        else:
+            _wire_prompt, _addr_map = _pseudo.pseudonymize(prompt)
+            _wire_system = None
+    except Exception as exc:                                    # noqa: BLE001
+        log.exception("ai_engine: pseudonymization failed — call BLOCKED")
+        return {"ok": False,
+                "reason": "pseudonymization failed, so the request was not sent "
+                          "(%s)" % exc}
+
+    messages = [{"role": "user", "content": _wire_prompt}]
     kwargs: dict = dict(model=target_model, max_tokens=max_tokens, messages=messages)
-    if system_prompt:
-        kwargs["system"] = system_prompt
+    if _wire_system:
+        kwargs["system"] = _wire_system
 
     # Reasoning effort. Omitted entirely unless a caller asked for one -- an
     # absent output_config lets the API pick (currently "high"), which is what
@@ -2824,6 +2896,19 @@ def _analyze_inner(
                 raise RuntimeError(
                     "response carried no text block (blocks: %s)"
                     % ", ".join(getattr(b, "type", "?") for b in msg.content))
+
+            # Reverse the pseudonymization before ANYTHING else sees the reply —
+            # callers, the cache and the returned dict all get real addresses,
+            # so this whole mechanism is invisible above this function. An
+            # UNKNOWN token is deliberately left standing by resolve(): if the
+            # model referred to a host that was never in its input, the operator
+            # should see that it did.
+            #
+            # Note the caller that already scrubs (dashboard's alert path) still
+            # composes correctly: its text arrives here already tokenized, so
+            # this pass finds no addresses, `_addr_map` is empty, and resolve()
+            # is a no-op. Its own resolve() then does the real work as before.
+            text = _pseudo.resolve(text, _addr_map)
 
             tokens_in  = getattr(msg.usage, "input_tokens",  0)
             tokens_out = getattr(msg.usage, "output_tokens", 0)
