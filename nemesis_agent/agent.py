@@ -309,27 +309,81 @@ def _load_platform_module():
     log.info("Loaded platform module for %s", _platform_name)
 
 
+#: The three answers `_detect_connection_type` can give. UNKNOWN is a real answer,
+#: not an error code: "this device could not be placed" is different information
+#: from "this device is away from home", and the difference decides whether a
+#: future steering mechanism may act (see `is_confirmed_remote`).
+CONN_LOCAL = "local"
+CONN_REMOTE = "vpn_remote"
+CONN_UNKNOWN = "unknown"
+
+
+def _connection_type_for_wire(conn_type):
+    """Collapse UNKNOWN to the conservative answer for the HEARTBEAT ONLY.
+
+    The wire value stays two-valued deliberately, and this is not timidity about
+    changing a protocol. The server keys a real behaviour off the exact string:
+    `hw_monitor` fires a `return_from_remote` scan on
+    `prev_conn_type == "vpn_remote" and conn_type == "local"`. An agent that began
+    sending "unknown" would write that into `agent_devices.connection_type`, and a
+    device that went remote -> unknown -> home would silently stop earning its
+    return-home scan, because the previous value no longer matches. A security
+    scan that quietly stops happening is exactly the class of failure this codebase
+    keeps finding, so the wire keeps the old two-valued contract until the server
+    is taught the third value as its own separate change.
+
+    Local decisions -- steering, cadence, the status view -- use the THREE-valued
+    answer. Only the heartbeat is collapsed, and only here.
+    """
+    return CONN_REMOTE if conn_type == CONN_UNKNOWN else conn_type
+
+
+def is_confirmed_remote(conn_type):
+    """True only for an AFFIRMATIVE remote answer -- never for UNKNOWN.
+
+    The predicate any future traffic-steering code must use, rather than
+    `conn_type != CONN_LOCAL`. The difference matters the moment this classification
+    stops being descriptive and starts being load-bearing: `!= local` would steer a
+    device whose detection merely FAILED, sending the traffic of a machine sitting
+    on the home LAN out to the tailnet and back for no benefit -- and the mistake
+    would be invisible, because "not local" is a legal-looking answer.
+    """
+    return conn_type == CONN_REMOTE
+
+
 def _detect_connection_type(conf):
-    """Compare local IPs against nemesis_subnet to determine local vs vpn_remote.
+    """Where is this device: CONN_LOCAL, CONN_REMOTE, or CONN_UNKNOWN.
 
     BOTH address families are considered. `nemesis_subnet` may name a v4 or a v6
     network; ipaddress's containment test returns False rather than raising when
     the address family and the network family differ, so collecting both is safe
     whichever family the subnet turns out to be.
 
-    THE FALLBACK IS SHARED, AND THAT IS DELIBERATE. Three distinct paths return
-    "vpn_remote": no subnet configured, a detection failure, and a genuine
-    not-on-the-subnet result. A caller therefore cannot tell a failure from a real
-    remote answer. That is accepted rather than accidental -- vpn_remote is the
-    more restrictive classification, so failing to it fails safe. The failure path
-    logs at WARNING (not debug) so the two ARE distinguishable in the journal even
-    though they are not in the return value. Giving failure its own sentinel is
-    deliberately left as a separate change: it ripples into all three callers.
+    THE THREE OUTCOMES ARE NOW DISTINCT, which they were not before 2026-08-20:
+      * CONN_LOCAL   -- an address of ours is inside the configured subnet.
+      * CONN_REMOTE  -- a subnet IS configured, the sweep completed, nothing matched.
+                        An affirmative "away from home".
+      * CONN_UNKNOWN -- we could not tell: no subnet is configured, or the sweep
+                        raised. NOT a location; an admission.
+
+    Previously all three collapsed to "vpn_remote", justified as failing safe --
+    and as a purely descriptive field it genuinely was safe, since every consumer
+    only ever asked "is this local?". The tunnel-back design (2026-08-20) makes
+    this classification decide whether to steer a device's traffic, and at that
+    point a failure that reads as a confident "remote" stops being conservative and
+    starts being wrong. The old docstring said the split was owed and would ripple
+    into its callers; this is that change.
+
+    Callers must not write `!= CONN_LOCAL`. Ask for what you actually need:
+    `is_confirmed_remote()` for an affirmative remote, and choose the conservative
+    branch for UNKNOWN explicitly, where a reader can see you chose it.
     """
     try:
         subnet_str = conf.get("nemesis_subnet") or ""
         if not subnet_str:
-            return "vpn_remote"   # no local subnet configured -> treat as remote
+            # Not "remote". We were never given the one fact needed to answer.
+            log.debug("no nemesis_subnet configured -> connection type unknown")
+            return CONN_UNKNOWN
         subnet = ipaddress.ip_network(subnet_str, strict=False)
         for iface_addrs in psutil.net_if_addrs().values():
             for addr in iface_addrs:
@@ -349,10 +403,15 @@ def _detect_connection_type(conf):
                     log.debug("skipping unparseable local address %r", raw)
                     continue
                 if ip in subnet:
-                    return "local"
+                    return CONN_LOCAL
     except Exception as e:
-        log.warning("connection type detection failed, treating as remote: %s", e)
-    return "vpn_remote"
+        # Still WARNING, not debug -- but the return value now carries the same
+        # fact the log line does, so a caller no longer has to read the journal to
+        # find out whether the answer it was given was a measurement.
+        log.warning("connection type detection failed: %s", e)
+        return CONN_UNKNOWN
+    # Subnet configured, sweep completed, nothing matched: an affirmative remote.
+    return CONN_REMOTE
 
 
 def _detect_link_type(conf):
@@ -461,7 +520,9 @@ def _collect_payload(conf):
         "device_id":       device_id,
         "device_name":     device_name,
         "device_type":     device_type,
-        "connection_type": conn_type,
+        # Collapsed to the two-valued wire contract; see _connection_type_for_wire
+        # for why the server must not start seeing "unknown" without being taught it.
+        "connection_type": _connection_type_for_wire(conn_type),
         "link_type":       link_type,
         "lan_macs":        lan_macs,
         # Tier 2 challenge response (dedicated field — the task-result channel
@@ -726,9 +787,13 @@ def _observation_for_beat(conn_type: str) -> dict:
     global _beat_count
     _beat_count += 1
 
-    if conn_type == "local":
+    if conn_type == CONN_LOCAL:
         due, every = True, 1
     else:
+        # CONN_REMOTE and CONN_UNKNOWN share this branch on purpose. The cadence
+        # exists to keep 22 MB/day off someone's mobile data; a device we cannot
+        # place might be on exactly that connection, so it gets the thrifty cadence
+        # rather than the assumption that it is free to talk.
         every = max(1, _remote_observe_n)
         # First beat of a process observes (1 % N != 0 only for N>1, so use the
         # count directly): a roaming device that just came up should report once
@@ -744,7 +809,9 @@ def _observation_for_beat(conn_type: str) -> dict:
         "observed_at": datetime.now().isoformat(timespec="seconds"),
         # Declared so staleness is checkable server-side rather than assumed.
         "cadence": {
-            "connection_type": conn_type,
+            # Server-facing, so the two-valued wire contract applies here too --
+            # not just to the top-level connection_type field.
+            "connection_type": _connection_type_for_wire(conn_type),
             "every_n_beats":   every,
         },
     }
@@ -921,9 +988,16 @@ def _get_last_scan_result():
 
 
 def _expected_suricata_profile(conn_type, conf):
+    """Which ruleset this device should be running.
+
+    UNKNOWN takes the ROAMING profile, deliberately and visibly: roaming is the
+    broader ruleset, so a device we cannot place is inspected more, not less. That
+    was already the behaviour via a bare `else`, but as an accident of the fallback
+    rather than a decision -- written out here so it survives the next edit.
+    """
     profile_pref = conf.get("suricata_profile", "auto")
     if profile_pref == "auto":
-        return "office" if conn_type == "local" else "roaming"
+        return "office" if conn_type == CONN_LOCAL else "roaming"
     return profile_pref
 
 

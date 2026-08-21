@@ -48,7 +48,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 sys.path.insert(0, HERE)
 
-EXPECTED_CHECKS = 14
+# 14 -> 19 with the 2026-08-20 sentinel split: two rewritten (no-subnet and
+# detection-failure now assert UNKNOWN rather than vpn_remote) plus four new ones
+# covering the affirmative-remote case and the preserved conservative outcomes.
+EXPECTED_CHECKS = 19
 
 _results = []
 
@@ -165,12 +168,37 @@ def main():
     check("a scope-suffixed link-local is parsed, not skipped",
           detect("fe80::/10", {"eth0": [v6("fe80::1%eth0")]}), "local")
 
-    # ── the shared fallback is deliberate, and visible where it matters ──────
-    print("\nthe shared vpn_remote fallback is documented and logged")
-    check("no subnet configured yields remote",
-          detect(None, {"eth0": [v4("198.51.100.22")]}), "vpn_remote")
-    check("a detection failure yields remote (fails restrictive)",
-          detect(LAN4, {}, raises=True), "vpn_remote")
+    # ── the sentinel split (2026-08-20) ─────────────────────────────────────
+    # These two checks previously asserted the OPPOSITE: that "no subnet" and "a
+    # detection failure" both yielded "vpn_remote". That collapse was correct while
+    # this field was purely descriptive -- every consumer only ever asked "is this
+    # local?", and failing to the restrictive answer was genuinely safe. The
+    # tunnel-back design makes this classification decide whether to STEER a
+    # device's traffic, and a failure that reads as a confident "remote" would then
+    # send a machine sitting on the home LAN out through the tunnel and back, with
+    # nothing to indicate anything had gone wrong. The old docstring recorded the
+    # split as owed; this is it.
+    print("\ncannot-tell is its own answer, distinct from an affirmative remote")
+    check("no subnet configured -> UNKNOWN (we were never given the fact)",
+          detect(None, {"eth0": [v4("198.51.100.22")]}), agent.CONN_UNKNOWN)
+    check("a detection failure -> UNKNOWN, not a location",
+          detect(LAN4, {}, raises=True), agent.CONN_UNKNOWN)
+    check("subnet configured + sweep completed + no match -> affirmative remote",
+          detect(LAN4, {"eth0": [v4("203.0.113.9")]}), agent.CONN_REMOTE)
+
+    # The safety property the two replaced checks were really protecting: nothing
+    # that could not be measured is ever treated as an affirmative remote, and the
+    # OUTWARD behaviour is unchanged, so the server sees exactly what it saw before.
+    print("\n...but the conservative outcome is preserved, now visibly")
+    check("UNKNOWN is not a confirmed remote",
+          agent.is_confirmed_remote(agent.CONN_UNKNOWN), False)
+    check("UNKNOWN still leaves the wire two-valued (server compat)",
+          agent._connection_type_for_wire(detect(LAN4, {}, raises=True)), "vpn_remote")
+    check("no-subnet still leaves the wire two-valued",
+          agent._connection_type_for_wire(
+              detect(None, {"eth0": [v4("203.0.113.9")]})), "vpn_remote")
+    check("UNKNOWN still takes the broader roaming ruleset",
+          agent._expected_suricata_profile(agent.CONN_UNKNOWN, {}), "roaming")
 
     cap = _Capture()
     agent.log.addHandler(cap)
