@@ -23,6 +23,33 @@ sys.path.insert(0, HERE)
 import secret_prompt
 from secret_prompt import DialogNotViewable, NoPromptAvailable
 
+def _tk_really_importable():
+    """Whether Tk can ACTUALLY be used on this machine, decided independently of
+    the function under test.
+
+    The checks below used to assert `_tk_available() is False` outright, because
+    the build box had no python3-tk. That made the environment a silent premise:
+    the moment Tk was installed (2026-08-20, to verify the agent settings window)
+    both tests failed, reporting a defect in code that had not changed. A control
+    whose answer depends on an unstated property of the machine is not a control.
+
+    So the assertion becomes AGREEMENT: `_tk_available()` must match reality,
+    whatever reality is here. That still catches the failure the original check
+    cared about -- a `_tk_available()` stuck on one answer -- and it catches it on
+    a machine WITH Tk too, which the original could not.
+    """
+    try:
+        import tkinter                                        # noqa: PLC0415,F401
+    except Exception:                                         # noqa: BLE001
+        return False
+    try:
+        root = tkinter.Tk()
+    except Exception:                                         # noqa: BLE001
+        return False                    # importable but no usable display
+    root.destroy()
+    return True
+
+
 _results = []
 
 
@@ -144,9 +171,9 @@ def main():
     check("parented path uses _build_form", "_build_form" in parented, True)
     check("standalone path uses _build_form", "_build_form" in standalone, True)
 
-    print("\nthe policy half is still importable with no display")
-    check("_tk_available correctly reports no Tk here",
-          secret_prompt._tk_available(), False)
+    print("\nthe policy half is still importable either way")
+    check("_tk_available agrees with whether Tk really works here",
+          secret_prompt._tk_available(), _tk_really_importable())
     check("validate_secret still works headless",
           secret_prompt.validate_secret(secret_prompt.SECRET_PASSWORD, "abcdefghij")[0],
           True)

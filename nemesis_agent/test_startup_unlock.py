@@ -25,6 +25,33 @@ sys.path.insert(0, HERE)
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+def _tk_really_importable():
+    """Whether Tk can ACTUALLY be used on this machine, decided independently of
+    the function under test.
+
+    The checks below used to assert `_tk_available() is False` outright, because
+    the build box had no python3-tk. That made the environment a silent premise:
+    the moment Tk was installed (2026-08-20, to verify the agent settings window)
+    both tests failed, reporting a defect in code that had not changed. A control
+    whose answer depends on an unstated property of the machine is not a control.
+
+    So the assertion becomes AGREEMENT: `_tk_available()` must match reality,
+    whatever reality is here. That still catches the failure the original check
+    cared about -- a `_tk_available()` stuck on one answer -- and it catches it on
+    a machine WITH Tk too, which the original could not.
+    """
+    try:
+        import tkinter                                        # noqa: PLC0415,F401
+    except Exception:                                         # noqa: BLE001
+        return False
+    try:
+        root = tkinter.Tk()
+    except Exception:                                         # noqa: BLE001
+        return False                    # importable but no usable display
+    root.destroy()
+    return True
+
+
 _results = []
 
 
@@ -183,9 +210,9 @@ def main():
               agent._key_protection_tier(), "unknown")
 
         # ── console fallback selection (testable here: no tkinter) ────────
-        print("\nprompt selection on a machine with no Tk")
-        check("CONTROL Tk is correctly detected as unavailable",
-              secret_prompt._tk_available(), False)
+        print("\nprompt selection follows what Tk can actually do here")
+        check("CONTROL Tk availability is detected correctly, either way",
+              secret_prompt._tk_available(), _tk_really_importable())
         check("CONTROL no TTY raises NoPromptAvailable, not a silent None",
               raises(lambda: secret_prompt.prompt_secret_console(
                   kind="password", mode=secret_prompt.UNLOCK)),

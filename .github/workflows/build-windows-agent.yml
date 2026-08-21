@@ -26,7 +26,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install build dependencies
-        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer pythonnet pydivert
+        # pystray/pillow/six are the tray exe's deps. `six` is listed even though
+        # pystray declares it: it appears in no import of ours, so a future trim of
+        # this line has to delete it deliberately rather than not notice it.
+        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer pythonnet pydivert pystray pillow six
 
       - name: Fetch ClamAV binaries (best-effort, no definitions)
         continue-on-error: true   # a download hiccup must NOT fail the exe build
@@ -79,6 +82,25 @@ jobs:
       - name: Build NemesisAgent-Setup.exe
         run: python nemesis_agent/build_installer.py
 
+      - name: Prove the frozen tray works (hidden imports resolve)
+        shell: pwsh
+        run: |
+          # The ONLY place the tray's hidden imports can actually be proven. pystray
+          # picks its backend at import time and PyInstaller cannot see that choice,
+          # so a missing `pystray._win32` or `six` produces an exe that dies on
+          # startup -- and a --windowed exe dies silently, with no console and no
+          # window, looking exactly like a tray that was never launched. The build
+          # box is the only machine that has the frozen artifact AND a Windows
+          # backend, so the check belongs here rather than in a test suite.
+          $exe = "nemesis_agent/dist/NemesisTray.exe"
+          $p = Start-Process -FilePath $exe -ArgumentList "--self-test" -Wait -PassThru
+          $log = "$env:APPDATA/Nemesis/nemesis_tray.log"
+          if (Test-Path $log) { Write-Host "--- tray self-test log ---"; Get-Content $log }
+          if ($p.ExitCode -ne 0) {
+            throw "NemesisTray.exe --self-test failed (exit $($p.ExitCode)) - the frozen bundle is missing a tray dependency"
+          }
+          Write-Host "Frozen tray self-test PASSED"
+
       - name: Bundle installer + docs (zip)
         shell: pwsh
         run: |
@@ -100,6 +122,7 @@ jobs:
           path: |
             nemesis_agent/dist/NemesisAgent-Setup.exe
             nemesis_agent/dist/NemesisAgent.exe
+            nemesis_agent/dist/NemesisTray.exe
             nemesis_agent/dist/NemesisAgent-*-Windows.zip
           if-no-files-found: error
 
@@ -110,4 +133,5 @@ jobs:
           files: |
             nemesis_agent/dist/NemesisAgent-Setup.exe
             nemesis_agent/dist/NemesisAgent.exe
+            nemesis_agent/dist/NemesisTray.exe
             nemesis_agent/dist/NemesisAgent-*-Windows.zip

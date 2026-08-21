@@ -3,3 +3,11 @@ psutil
 watchdog
 plyer
 pythonnet; sys_platform == "win32"
+# Tray shell (agent_tray.py). pystray pulls in Pillow and six itself, but both
+# are listed explicitly: the tray DRAWS its own icon with Pillow rather than
+# shipping .png files, and `six` is a hard runtime dependency that appears in no
+# import statement of ours -- pystray's own `from six.moves import queue`. An
+# implicit dependency is one nobody thinks to install.
+pystray
+pillow
+six

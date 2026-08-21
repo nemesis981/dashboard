@@ -54,6 +54,7 @@ broken, not that the work is done.
 """
 import ast
 import http.server
+import ipaddress
 import json
 import os
 import socket
@@ -61,6 +62,9 @@ import sys
 import threading
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -74,7 +78,12 @@ AGENT = os.path.join(HERE, "agent.py")
 # prints "N/N passed". Declaring the count separately is what turns a silently
 # skipped check into a visible failure (standing practice: a verification driver
 # reports `ran=` alongside `failed=`).
-EXPECTED_CHECKS = 17
+# 17 -> 21 (2026-08-20): the command-listener bind moved from literals to
+# config.COMMAND_HOST/COMMAND_PORT, so the two literal-matching checks became four
+# -- the agent must reference those names, and those names must resolve to a
+# loopback address and port 5002 -- plus two controls proving the loopback test
+# can actually fail.
+EXPECTED_CHECKS = 21
 
 _results = []
 
@@ -252,6 +261,19 @@ def section_premise():
         srv.server_close()
 
 
+def _bind_operand(node):
+    """Render a bind argument as source text: a literal's value, or `a.b` for an
+    attribute reference. Returned as a STRING either way so a config reference is
+    inspectable instead of collapsing to None, which is what made the old literal-
+    only reader silently report `Name(id='config')` when the code stopped using
+    literals."""
+    if isinstance(node, ast.Constant):
+        return node.value
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        return "%s.%s" % (node.value.id, node.attr)
+    return ast.dump(node)
+
+
 def section_agent_binding():
     """The binding above is what the agent actually does -- AST, not grep."""
     print("\nthe agent binds its command listener to loopback only")
@@ -266,13 +288,42 @@ def section_agent_binding():
                 arg = node.args[0]
                 if isinstance(arg, ast.Tuple) and len(arg.elts) == 2:
                     a, p = arg.elts
-                    binds.append((getattr(a, "value", None), getattr(p, "value", None)))
+                    binds.append((_bind_operand(a), _bind_operand(p)))
     check("exactly one command listener is bound", len(binds), 1)
     if len(binds) == 1:
-        check("it binds the loopback address", binds[0][0], "127.0.0.1")
-        check("it binds port 5002", binds[0][1], 5002)
+        host_src, port_src = binds[0]
+        # The bind moved from literals to config.COMMAND_HOST/COMMAND_PORT
+        # (2026-08-20) so the settings GUI could not disagree with the agent about
+        # where the listener is. That made a literal-matching AST check unable to
+        # SEE the address -- and a check that cannot see the thing it guards is the
+        # broken-instrument shape this codebase keeps finding, so it is replaced
+        # rather than relaxed. Two halves, together stronger than the old one:
+        # the agent must bind exactly those two names, AND those names must resolve
+        # to a loopback address and the expected port.
+        check("it binds config.COMMAND_HOST, not an address of its own",
+              host_src, "config.COMMAND_HOST")
+        check("it binds config.COMMAND_PORT, not a port of its own",
+              port_src, "config.COMMAND_PORT")
+        # is_loopback rather than == "127.0.0.1": it accepts ::1 correctly and, far
+        # more importantly, REJECTS 0.0.0.0 -- which a plain string comparison would
+        # also reject, but which an "is it a string we recognise" check might not.
+        try:
+            resolved_loopback = ipaddress.ip_address(config.COMMAND_HOST).is_loopback
+        except ValueError:
+            resolved_loopback = False
+        check("...and COMMAND_HOST really is a loopback address",
+              resolved_loopback, True)
+        check("...and COMMAND_PORT really is 5002", config.COMMAND_PORT, 5002)
+        # CONTROLS. The loopback assertion above is only evidence if it can say
+        # "no" -- an is_loopback that returned True for everything would pass the
+        # check above while guarding nothing at all.
+        check("CONTROL the loopback test REJECTS a wildcard bind",
+              ipaddress.ip_address("0.0.0.0").is_loopback, False)
+        check("CONTROL the loopback test ACCEPTS v6 loopback",
+              ipaddress.ip_address("::1").is_loopback, True)
     else:
-        check("it binds the loopback address", "no single bind found", "127.0.0.1")
+        check("it binds config.COMMAND_HOST, not an address of its own",
+              "no single bind found", "config.COMMAND_HOST")
         check("it binds port 5002", "no single bind found", 5002)
 
 

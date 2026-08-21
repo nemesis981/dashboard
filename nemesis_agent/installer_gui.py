@@ -28,6 +28,7 @@ INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
 
 AGENT_VERSION = os.environ.get("NEMESIS_AGENT_VERSION", "1.0.8")
 UNINSTALLER   = "NemesisUninstall.exe"
+TRAY_EXE      = "NemesisTray.exe"   # tray + settings window; optional, agent runs without it
 # Add/Remove Programs (Settings -> Apps) registry key — HKCU (per-user %APPDATA% install).
 ARP_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\NemesisFirewallAgent"
 
@@ -857,6 +858,15 @@ class InstallerApp:
         unins_src = os.path.join(src, UNINSTALLER)
         if os.path.isfile(unins_src):
             shutil.copy2(unins_src, os.path.join(INSTALL_DIR, UNINSTALLER))
+        # The tray + settings window. Same skip-if-absent shape as the uninstaller
+        # above, and for the same reason: a build made before this exe existed (or
+        # one where pystray was unavailable) must still produce a working install.
+        # OPTIONAL BY DESIGN -- the agent does not import it, does not launch it,
+        # and protects the machine exactly the same if it is missing. Nothing here
+        # registers it to auto-start; that is a separate, deliberate change.
+        tray_src = os.path.join(src, TRAY_EXE)
+        if os.path.isfile(tray_src):
+            shutil.copy2(tray_src, os.path.join(INSTALL_DIR, TRAY_EXE))
         cfg = configparser.ConfigParser()
         cfg.add_section("nemesis")
         cfg.set("nemesis", "nemesis_ip", self.server)
@@ -879,11 +889,17 @@ class InstallerApp:
             cfg.set("nemesis", "l2_enforce_enabled", "true")
         with open(os.path.join(INSTALL_DIR, "nemesis_agent.conf"), "w", encoding="utf-8") as f:
             cfg.write(f)
-        self._ilog("file-copy: agent=%s clamav=%s lhm=%s uninstaller=%s conf(server=%s)" % (
-            os.path.isfile(os.path.join(INSTALL_DIR, "NemesisAgent.exe")),
-            os.path.isdir(os.path.join(INSTALL_DIR, "clamav")),
-            os.path.isdir(os.path.join(INSTALL_DIR, "lhm")),
-            os.path.isfile(os.path.join(INSTALL_DIR, UNINSTALLER)), self.server))
+        # Logged as the RESULT of an os.path.isfile on the destination, not as
+        # "we ran copy2 without an exception" -- the install log has to record what
+        # actually landed on disk.
+        self._ilog("file-copy: agent=%s clamav=%s lhm=%s uninstaller=%s tray=%s "
+                   "conf(server=%s)" % (
+                       os.path.isfile(os.path.join(INSTALL_DIR, "NemesisAgent.exe")),
+                       os.path.isdir(os.path.join(INSTALL_DIR, "clamav")),
+                       os.path.isdir(os.path.join(INSTALL_DIR, "lhm")),
+                       os.path.isfile(os.path.join(INSTALL_DIR, UNINSTALLER)),
+                       os.path.isfile(os.path.join(INSTALL_DIR, TRAY_EXE)),
+                       self.server))
 
     def _enroll(self):
         """Generate the keypair, run the pre-enrollment scan, and send the token-bearing

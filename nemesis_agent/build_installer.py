@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Nemesis Windows installer — TWO-EXE model.
+"""Build the Nemesis Windows installer — multi-exe model.
 
 RUNS ON WINDOWS ONLY (PyInstaller does not cross-compile). Invoked by
 .github/workflows/build-windows-agent.yml on windows-latest, or on a Windows host.
@@ -10,8 +10,12 @@ Produces two frozen executables — ZERO external dependencies on the user's mac
   * NemesisAgent.exe        the persistent agent (Python + all deps frozen).
                             Extracted to %APPDATA%\\Nemesis and run by the logon
                             scheduled task at every login, forever.
+  * NemesisTray.exe         the tray icon AND the settings window (one exe, two
+                            personalities -- bare = tray, --settings = window).
+                            Optional: the agent runs perfectly well without it.
   * NemesisAgent-Setup.exe  the one-shot guided installer (bundles NemesisAgent.exe
-                            + the agent source for in-process enrollment).
+                            + NemesisTray.exe + the agent source for in-process
+                            enrollment).
 
 Generic build (CI default): no token baked in — the GUI collects server+token.
 Pre-baked build (optional): --server/--token/--device-name bakes a one-device config.
@@ -51,6 +55,57 @@ AGENT_HIDDEN = [
     # genuinely cannot open a window (headless Linux).
     "secret_prompt", "tkinter",
 ] + KEYPROTECT_HIDDEN
+
+
+# ── Tray + settings-window exe ───────────────────────────────────────────────
+# pystray resolves its backend AT IMPORT TIME, inside a function
+# (pystray/__init__.py `backend()` does `from . import _win32 as backend`), and
+# assigns `Icon = backend().Icon` at module scope. A bundle missing the backend
+# module therefore does not degrade to a trayless app -- it dies on `import
+# pystray`, before anything can report why. Named explicitly per platform rather
+# than --collect-all, which would also drag in the GTK/Xorg backends and their
+# `gi`/`Xlib` imports and bury a real missing-module error in warnings about
+# backends this build will never use.
+#
+# `six` is the trap worth writing down. pystray's `_base` AND `_win32` both do
+# `from six.moves import queue` -- a lazily-registered alias module, not a real
+# package -- so `six` is a hard runtime dependency of the tray that appears
+# nowhere in our own source and nowhere in an obvious import. `queue` is listed
+# alongside it so the module six.moves actually resolves TO is in the bundle
+# whether or not PyInstaller's six hook fires.
+TRAY_HIDDEN = [
+    "pystray", "pystray._base", "pystray._util",
+    "six", "queue",
+    "PIL", "PIL.Image", "PIL.ImageDraw",
+    # The tray re-invokes itself with --settings, so the whole window ships in
+    # the same exe. These are imported inside a function, which PyInstaller
+    # usually follows -- "usually" is not a property to ship a release on.
+    "agent_gui", "agent_gui_core", "config", "tkinter",
+]
+
+TRAY_BACKEND_HIDDEN = {
+    "win32":  ["pystray._win32", "pystray._util.win32"],
+    "darwin": ["pystray._darwin"],
+    "linux":  ["pystray._appindicator", "pystray._gtk", "pystray._xorg",
+               "pystray._util.gtk", "Xlib", "Xlib.display"],
+}
+
+
+def _tray_hidden():
+    """Hidden imports for THIS build host's tray backend.
+
+    Keyed off the build platform, because PyInstaller does not cross-compile --
+    the exe produced here only ever runs on the OS that built it, so bundling the
+    other platforms' backends would ship modules that can never be imported and
+    whose own dependencies (`gi`, `Xlib`) are not installed anyway.
+    """
+    if sys.platform == "win32":
+        key = "win32"
+    elif sys.platform == "darwin":
+        key = "darwin"
+    else:
+        key = "linux"
+    return TRAY_HIDDEN + TRAY_BACKEND_HIDDEN[key]
 
 
 def _bake_config(server, token, device_name):
@@ -133,6 +188,17 @@ def main(argv=None):
     if sys.platform == "win32" and not os.path.exists(uninstall_exe):
         raise SystemExit("NemesisUninstall.exe was not produced")
 
+    # 1c) Tray + settings-window exe. ONE artifact with two personalities:
+    #     bare it runs the tray, `--settings` opens the settings window (which the
+    #     tray menu launches by re-invoking this same exe). A second executable
+    #     for the window would be a second thing to build, sign, ship and keep in
+    #     step, for a window that is only ever opened from this one.
+    _pyinstaller("agent_tray.py", "NemesisTray", windowed=True,
+                 hidden=_tray_hidden())
+    tray_exe = os.path.join(DIST, "NemesisTray.exe")
+    if sys.platform == "win32" and not os.path.exists(tray_exe):
+        raise SystemExit("NemesisTray.exe was not produced")
+
     # 2) Setup exe — bundles the agent exe + agent source (for in-process enrollment).
     setup_datas = []
     if os.path.exists(agent_exe):
@@ -142,6 +208,11 @@ def main(argv=None):
     # "keyprotect" ships as DATA, not just a hidden import: installer_gui does
     # in-process enrollment by importing the extracted enrollment.py at runtime,
     # and that module imports keyprotect at module level.
+    # NOTE: agent_gui/agent_gui_core/agent_tray are deliberately NOT listed here.
+    # This list is extracted to _MEIPASS for the installer's own in-process use, and
+    # nothing in the installer imports the window or the tray -- their code ships
+    # frozen inside NemesisTray.exe. Adding the sources too would put a second,
+    # unused copy on every machine with nothing keeping it in step with the frozen one.
     for sub in ("config.py", "enrollment.py", "secret_prompt.py", "keyprotect",
                 "modules", "platforms", "clamav", "lhm"):
         p = os.path.join(HERE, sub)
@@ -152,6 +223,11 @@ def main(argv=None):
     uninstall_exe = os.path.join(DIST, UNINSTALLER)
     if os.path.exists(uninstall_exe):
         setup_datas.append(f"{uninstall_exe}{SEP}.")
+    # Ship the tray in the pack the same skip-if-absent way, so a build that
+    # predates it (or one where pystray is unavailable) still produces a working
+    # installer instead of failing on a component the agent does not need to run.
+    if os.path.exists(tray_exe):
+        setup_datas.append(f"{tray_exe}{SEP}.")
     if args.token:
         setup_datas.append(f"{_bake_config(args.server, args.token, args.device_name)}{SEP}.")
     _pyinstaller("installer_gui.py", "NemesisAgent-Setup", windowed=True,
@@ -159,8 +235,9 @@ def main(argv=None):
                  hidden=["requests", "psutil", "cryptography"] + KEYPROTECT_HIDDEN,
                  uac=True)   # Phase 2: request UAC elevation (needs admin for schtasks/Defender)
 
-    print("Built:", os.path.join(DIST, "NemesisAgent.exe"),
-          "+", os.path.join(DIST, "NemesisAgent-Setup.exe"))
+    print("Built:", ", ".join(
+        os.path.join(DIST, n) for n in
+        ("NemesisAgent.exe", "NemesisTray.exe", "NemesisAgent-Setup.exe")))
     return 0
 
 

@@ -95,8 +95,14 @@ _scan_on_reconnect_done = False
 
 # Heartbeat cadence. poll_interval is a live conf key (re-read each cycle); default 300s.
 # FLOOR clamps a mis-set/tiny value so it can never hammer the server.
-POLL_INTERVAL_DEFAULT = 300
-POLL_INTERVAL_FLOOR = 15
+#
+# DEFINED IN config.py, re-exported here. The settings GUI validates typed input
+# against the same two numbers, and a duplicate literal here would drift from the
+# GUI's copy the first time either is tuned. Kept as module globals (rather than
+# referenced as config.X at each use) so the ~10 existing call sites are unchanged
+# and test_early_beat.py's `agent.POLL_INTERVAL_FLOOR = ...` monkeypatch still works.
+POLL_INTERVAL_DEFAULT = config.POLL_INTERVAL_DEFAULT
+POLL_INTERVAL_FLOOR = config.POLL_INTERVAL_FLOOR
 
 # Startup ramp: the first few inter-beat gaps are short so a fresh start/reconnect gets
 # quick data (and seeds the future tuning baseline), then it settles to poll_interval.
@@ -135,6 +141,20 @@ _wake = threading.Event()
 _last_beat_at = 0.0
 _early_beat_reasons = []
 _early_beat_lock = threading.Lock()
+
+# ── Heartbeat outcome, for the local status surface ──────────────────────────
+# WALL-CLOCK (time.time()), unlike `_last_beat_at` above, which is monotonic.
+# These are shown to a person as "last check-in 3 minutes ago", and a monotonic
+# value has no meaning outside this process.
+#
+# `None` means NEVER, and that distinction is load-bearing: a fresh agent that has
+# not yet reached the appliance must read as "no check-in yet", never as a
+# check-in that happened at the epoch. A zero default here would be a legal-looking
+# answer to a question that was never actually answered.
+_last_post_ok_at = None       # last 200 from /hw_data
+_last_post_fail_at = None     # last attempt that did not return 200
+_last_post_error = None       # short reason for that failure; None once one succeeds
+_next_beat_due_at = None      # wall-clock estimate of the next beat; None until scheduled
 
 # Memory budget/ladder state, held across poll cycles. The long-lived poll
 # process IS the persistence (the agent has no DB); it re-arms to a fresh state
@@ -295,6 +315,23 @@ def _effective_interval(beat_index, poll_interval, hint):
     if hint is None:
         return base
     return max(POLL_INTERVAL_FLOOR, min(base, hint))
+
+
+def udp_filtering_suppressed(conf):
+    """True when DMZ mode is on: this device is deliberately exposed and NO
+    UDP/QUIC filtering may be applied to it.
+
+    THE ONE source of truth for the DMZ kill switch. Every UDP-family enforcement
+    path -- L1 DNS enforcement today, the roaming QUIC block when it is built --
+    calls this rather than re-reading `dmz_mode` itself, so the scope of what DMZ
+    disables is defined in exactly one place and cannot drift between callers.
+
+    Scoped to UDP/QUIC ON PURPOSE (see config.DEFAULTS): it does not report L2 TCP
+    reputation blocking or Suricata as suppressed, because those keep running in
+    DMZ mode and telling the user otherwise would be a false reassurance in the
+    wrong direction.
+    """
+    return str(conf.get("dmz_mode", "false")).strip().lower() == "true"
 
 
 def _load_platform_module():
@@ -523,6 +560,12 @@ def _collect_payload(conf):
         # Collapsed to the two-valued wire contract; see _connection_type_for_wire
         # for why the server must not start seeing "unknown" without being taught it.
         "connection_type": _connection_type_for_wire(conn_type),
+        # DMZ mode, reported UP so the dashboard can show which devices are
+        # deliberately exposed. Reporting-only today; the appliance cannot yet SET
+        # it (no downward policy-push channel -- tunnel-back design §7). Top-level,
+        # like connection_type, because "is this device exposed" is a first-order
+        # fleet fact, not a detail buried in the security sub-report.
+        "dmz_mode":        udp_filtering_suppressed(conf),
         "link_type":       link_type,
         "lan_macs":        lan_macs,
         # Tier 2 challenge response (dedicated field — the task-result channel
@@ -1278,6 +1321,7 @@ def _rotate_server_anchor(envelope, device_id):
 
 
 def _post_payload(conf, payload):
+    global _last_post_ok_at, _last_post_fail_at, _last_post_error
     url = f"http://{conf['nemesis_ip']}:{conf['nemesis_port']}/hw_data"
     try:
         # Serialise ONCE and post the exact bytes we signed. Letting requests
@@ -1295,15 +1339,27 @@ def _post_payload(conf, payload):
         if r.status_code == 200:
             log.info("Posted payload to %s (device=%s conn=%s)",
                      url, payload.get("device_id"), payload.get("connection_type"))
+            _last_post_ok_at, _last_post_error = time.time(), None
             _handle_response_tasks(r, payload.get("device_id", ""))
         else:
             log.warning("Nemesis returned %d: %s", r.status_code, r.text[:200])
+            # The STATUS CODE, not a generic "failed". 401 (rejected signature) and
+            # 503 (appliance busy) need different things from the person reading
+            # this in the GUI, and collapsing them cost most of a day on 2026-08-20
+            # when a 401 skew rejection read as a generic connectivity problem.
+            _last_post_fail_at = time.time()
+            _last_post_error = "the appliance rejected this check-in (HTTP %d)" % r.status_code
             agent_errors.restore(payload.get("agent_errors"))
     except requests.exceptions.ConnectionError:
         log.warning("Cannot reach Nemesis at %s (will retry)", url)
+        _last_post_fail_at = time.time()
+        _last_post_error = "cannot reach the appliance at %s:%s" % (
+            conf.get("nemesis_ip", "?"), conf.get("nemesis_port", "?"))
         agent_errors.restore(payload.get("agent_errors"))
     except Exception as e:
         log.error("POST failed: %s", e)
+        _last_post_fail_at = time.time()
+        _last_post_error = str(e)[:160]
         agent_errors.restore(payload.get("agent_errors"))
 
 
@@ -1357,6 +1413,11 @@ def _poll_loop():
         # one -- which is exactly what would happen if it were left set.
         _poll_hint = None
         beat += 1
+        # Recorded for the status surface only -- an ESTIMATE, and named as one in
+        # the payload. An event-triggered check-in or a shutdown can beat sooner,
+        # so nothing may treat this as a schedule.
+        global _next_beat_due_at
+        _next_beat_due_at = time.time() + interval
         _interruptible_sleep(interval)
 
 
@@ -1409,6 +1470,98 @@ def _interruptible_sleep(seconds):
 
 # ── Command listener on localhost:5002 ───────────────────────────────────────
 
+#: Conf keys the local status surface may report, and NOTHING else.
+#:
+#: An ALLOWLIST rather than "everything except a denylist", deliberately. The
+#: command listener on 127.0.0.1:5002 is UNAUTHENTICATED -- any local process can
+#: ask for status. With a denylist, the day someone adds a credential, token, or
+#: key path to config.DEFAULTS it is published to every local process instantly,
+#: and nothing about editing DEFAULTS would prompt them to come and look here.
+#: Adding a key to THIS tuple is a deliberate decision to publish it; adding one
+#: to DEFAULTS must never be. Currently excluded on purpose: enrollment_token,
+#: private_key_path, public_key_path, nemesis_subnet, dns_enforce_target.
+_STATUS_CONF_KEYS = (
+    "device_id", "device_name", "nemesis_ip", "nemesis_port",
+    "poll_interval", "enrollment_status", "last_scan_at",
+    "scan_on_reconnect", "reputation_cache_enabled",
+    "suricata_enabled", "suricata_profile",
+    "dns_enforce_enabled", "l2_enforce_enabled",
+    "dmz_mode", "dmz_locked_by_appliance",
+)
+
+#: What the agent can actually DO on request right now. The GUI enables its
+#: buttons from this rather than hardcoding its own list, so an action that is
+#: not built yet cannot be presented as available, and one that ships later
+#: lights up without a matching GUI release. `ram_recovery` is False because the
+#: endpoint memory ladder is FULLY SHADOW by design (mem_agent.py) -- it observes
+#: and reports, and executes nothing on a user's machine. Flipping this to True
+#: is a product decision, not a wiring detail.
+_CAPABILITIES = {
+    "scan": True,
+    "checkin": True,
+    "restart": True,
+    "ram_recovery": False,
+}
+
+
+def _status_snapshot():
+    """Read-only local status for the settings GUI / tray. Never raises.
+
+    Reports what the agent is ACTUALLY USING (its live in-memory `_conf`, re-read
+    at the top of every beat), which is deliberately not the same thing as what is
+    currently on disk. The GUI diffs the two to show a saved-but-not-yet-applied
+    setting as pending, instead of claiming a change took effect the moment it was
+    written. Same discipline as everywhere else here: report the measurement, not
+    the intention.
+
+    Every field that can be unknown is None, never a stand-in value. A caller must
+    be able to tell "no check-in has happened" from "a check-in happened long ago".
+    """
+    conf = _conf if isinstance(_conf, dict) else {}
+
+    # `attest` is imported LOCALLY throughout this file, never at module scope, so
+    # referencing it directly here would raise NameError -- and inside a dict
+    # literal that would take the WHOLE snapshot down, turning "never raises" into
+    # a comment that is simply false. py_compile does not catch this shape; only
+    # actually calling the function does.
+    try:
+        import attest as _attest                              # noqa: PLC0415
+        agent_version = _attest.AGENT_VERSION
+    except Exception:                                         # noqa: BLE001
+        agent_version = None                                  # unknown, not a guess
+
+    snap = {
+        "ok": True,
+        "agent_version": agent_version,
+        "platform": _platform_name,
+        "pid": __import__("os").getpid(),
+        "now": time.time(),                       # the AGENT's clock, so the GUI's
+        "started_at": _agent_start_time,          # "ago" arithmetic uses one clock
+        "running": _running,
+        "capabilities": dict(_CAPABILITIES),
+        "conf": {k: conf.get(k, "") for k in _STATUS_CONF_KEYS},
+        "last_checkin_ok_at": _last_post_ok_at,
+        "last_checkin_failed_at": _last_post_fail_at,
+        "last_checkin_error": _last_post_error,
+        "next_checkin_due_at_estimate": _next_beat_due_at,
+        "scan_on_reconnect_done": _scan_on_reconnect_done,
+    }
+
+    # Derived values are best-effort and fail to None -- an explicit "could not
+    # determine", which the GUI renders as "unknown". Falling back to a plausible
+    # number here would be the exact failure this codebase keeps finding: an
+    # instrument that can only produce one answer, reported as a measurement.
+    try:
+        snap["effective_poll_interval"] = _resolve_poll_interval(conf)
+    except Exception:                              # noqa: BLE001
+        snap["effective_poll_interval"] = None
+    try:
+        snap["connection_type"] = _detect_connection_type(conf)
+    except Exception:                              # noqa: BLE001
+        snap["connection_type"] = None
+    return snap
+
+
 class _CommandHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -1430,6 +1583,24 @@ class _CommandHandler(BaseHTTPRequestHandler):
             return {"ok": True,
                     "device_id":   _conf.get("device_id"),
                     "device_name": _conf.get("device_name", socket.gethostname())}
+
+        if action == "status":
+            # READ-ONLY. Changes nothing, and reports only _STATUS_CONF_KEYS.
+            return _status_snapshot()
+
+        if action == "checkin":
+            # Ask the poll loop to beat sooner. NOT a new exposure: this listener
+            # already accepts `scan` and `restart` unauthenticated, and the request
+            # is rate-limited by the SAME POLL_INTERVAL_FLOOR that bounds a
+            # server-supplied hint -- so a local process spamming it cannot turn
+            # into a heartbeat storm against the appliance.
+            #
+            # `due_now` is the honest answer to "did this happen": False means the
+            # request was RECORDED and will be honoured when the floor expires, not
+            # that it was dropped. The GUI says so rather than claiming success.
+            due_now = request_early_beat(body.get("reason", "local_request"))
+            return {"ok": True, "due_now": due_now,
+                    "floor_seconds": POLL_INTERVAL_FLOOR}
 
         if action == "scan":
             scan_id = scanner.trigger_scan(body.get("path", "/"),
@@ -1655,8 +1826,10 @@ def _update_suricata_rules(rules_url, expected_sha256=None, expected_size=None,
 
 def _start_command_listener():
     def _serve():
-        server = HTTPServer(("127.0.0.1", 5002), _CommandHandler)
-        log.info("Command listener on localhost:5002")
+        server = HTTPServer((config.COMMAND_HOST, config.COMMAND_PORT),
+                            _CommandHandler)
+        log.info("Command listener on %s:%d", config.COMMAND_HOST,
+                 config.COMMAND_PORT)
         server.serve_forever()
     t = threading.Thread(target=_serve, daemon=True, name="cmd-listener")
     t.start()
@@ -1750,11 +1923,18 @@ def main():
     # enabled (dns_enforce_enabled=true + dns_enforce_target set) — otherwise a no-op.
     # FAIL-OPEN: any failure restores the original DNS. NOT yet pointed at the tunnel
     # Pi-hole (ADR 0005 blocker). Restored on shutdown by _shutdown().
-    try:
-        import dns_enforce
-        dns_enforce.enforce_if_configured(_conf)
-    except Exception:
-        log.exception("dns enforce (L1) init failed — continuing")
+    if udp_filtering_suppressed(_conf):
+        # DMZ mode: the device is deliberately exposed. Do not touch its DNS. This
+        # is the existing UDP-family filter; the roaming QUIC block, when built,
+        # MUST consult the same udp_filtering_suppressed() predicate here.
+        log.warning("DMZ mode ON — UDP/QUIC filtering (incl. L1 DNS) is DISABLED "
+                    "for this device; it is exposed by explicit configuration")
+    else:
+        try:
+            import dns_enforce
+            dns_enforce.enforce_if_configured(_conf)
+        except Exception:
+            log.exception("dns enforce (L1) init failed — continuing")
 
     # Feature 6 (observation-only): build + measure the local IP-reputation cache
     # once at startup. Best-effort — NEVER enforces, blocks, or touches traffic, and

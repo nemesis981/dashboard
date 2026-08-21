@@ -221,8 +221,12 @@ class UninstallerApp:
 
     def _remove_components(self):
         import subprocess
-        # stop processes
-        for proc in ("NemesisAgent", "LibreHardwareMonitor"):
+        # stop processes. NemesisTray is in this list because the install dir is
+        # removed with `rmdir /s /q` below: a running tray holds its own exe open,
+        # the delete fails, and the uninstall reports success over a directory that
+        # is still there. The settings window is the SAME exe re-invoked with
+        # --settings, so one taskkill by image name closes both.
+        for proc in ("NemesisAgent", "NemesisTray", "LibreHardwareMonitor"):
             try:
                 subprocess.run(["taskkill", "/F", "/IM", proc + ".exe"],
                                check=False, capture_output=True, timeout=20)
