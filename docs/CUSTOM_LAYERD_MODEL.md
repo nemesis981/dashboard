@@ -24,9 +24,40 @@ first-class project**. A misfiring classifier is worse than none. So:
   A mismatch is refused, never scored — a model is only valid for the features it was
   trained on.
 
+## The training + calibration harness (built: `ml_train.py` + `ml_model.py`)
+
+The model-sourcing path is built and dependency-free:
+
+- **`ml_train.py`** (build-time, numpy) turns a labeled corpus into an artifact:
+  `python3 ml_train.py --malicious DIR --benign DIR --out model.json --target-fpr 0.01`.
+  It extracts features with the **same `ml_features.extract`** the endpoint uses (parity —
+  a model is never trained on features that differ from what it scores), trains a
+  standardized logistic regression, and **calibrates the malicious threshold on a held-out
+  split to keep the false-positive rate at/under the target**, recording achieved metrics in
+  the artifact. It refuses a single-class corpus (you cannot calibrate an FP rate without
+  both classes) and SKIPS non-PE files (never trains on faked features).
+- **`ml_model.py`** loads the artifact and scores with the **standard library only** — no
+  numpy/sklearn on the endpoint. `ml_model.load(path)` is the loader to pass to
+  `ml_classifier.load_model(path, loader=ml_model.load)`; any malformed/oversized/wrong-version
+  artifact returns `None` (Layer D stays in the safe no-verdict state). `model_compile_check`
+  is the rule_updater gate — a model that does not load + satisfy the interface never replaces
+  a good one on an endpoint.
+
+Proven end-to-end (2026-08-21) on a real-PE corpus: extract → train → calibrate (FP budget
+held) → save → load → `ml_classifier` scores a real high-entropy PE malicious and a real
+low-entropy PE benign, and the pure-Python scorer matches the numpy trainer to 1e-9.
+
+**What is still deferred is the CORPUS, not the code:** a production model needs a real,
+representative EMBER-style dataset and a deliberate false-positive budget. That curation is
+the data-science project this harness serves — the harness itself is done.
+
+The artifact is a transparent standardized logistic regression (a per-feature scaler + weight
+vector + bias + thresholds). A richer model (tree ensemble) can ship the same way by giving
+`ml_model.load()` another `kind` + scorer; the `ml_classifier` contract does not change.
+
 ## How it plugs in (the interface contract)
 
-Implement `ml_classifier.Model`:
+Implement `ml_classifier.Model` (or use `ml_model.LogisticModel` from a trained artifact):
 ```python
 class MyModel(ml_classifier.Model):
     feature_version = ml_features.FEATURE_VERSION
