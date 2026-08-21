@@ -33,6 +33,27 @@ log = logging.getLogger("nemesis.ai_engine")
 _RATE_HOUR_DEFAULT = 10
 _RATE_DAY_DEFAULT  = 50
 
+#: How far past a call-count ceiling the engine keeps answering on a CHEAPER
+#: model before it refuses outright. 2 means: up to the ceiling, full quality;
+#: from the ceiling to twice it, degraded; beyond that, refuse.
+#:
+#: WHY DEGRADE AT ALL. Hitting the ceiling used to stop interpretation dead, and
+#: a rate limit is likeliest to bind on the busiest day — exactly when the
+#: findings most need explaining. A cheaper answer beats no answer, provided the
+#: drop is VISIBLE (every degraded result carries `degraded: True` and the model
+#: it actually used).
+#:
+#: WHY IT IS STILL BOUNDED. "Never stop, just get cheaper" is not a ceiling at
+#: all; spend would then be limited only by inbound traffic. Set this to 1 to
+#: disable degradation entirely and restore hard-stop-at-ceiling behaviour.
+_RATE_DEGRADE_MULTIPLIER_DEFAULT = 2
+
+#: The model a degraded call falls back to. Cheapest in `_MODEL_RATES`
+#: ($1/$5 per MTok vs Sonnet's $3/$15). Deliberately NOT in
+#: `_EFFORT_CAPABLE_MODELS`, which the call path already handles by omitting
+#: `output_config` rather than failing the request.
+_DEGRADED_MODEL = "claude-haiku-4-5"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DB
@@ -1338,9 +1359,46 @@ def _spend_cap_usd() -> float | None:
 
 
 def _check_rate_limit(conn) -> tuple:
-    """Return (is_limited: bool, reason: str)."""
+    """Return (is_limited: bool, reason: str, kind: str).
+
+    `kind` is the whole point of this function's shape, so read it before
+    changing anything here:
+
+      ""        not limited.
+      "degrade" the CALL-COUNT ceiling is reached but the hard ceiling is not.
+                The caller should still answer, on a cheaper model. Interpretation
+                continues; quality drops, visibly.
+      "hard"    refuse. Either the call count is past the hard ceiling, or a
+                MONEY limit was hit.
+
+    WHY THROUGHPUT AND MONEY DEGRADE DIFFERENTLY. `rate_per_hour`/`rate_per_day`
+    bound how CHATTY the engine is; `spend_cap_monthly_usd` bounds what it may
+    COST. Falling back to a cheaper model is a real answer to the first and no
+    answer at all to the second — a cap the engine can route around is not a cap.
+    So money limits are never degradable, and that asymmetry is deliberate.
+
+    THE DEGRADED BAND IS BOUNDED. Degradation is allowed between the ceiling and
+    `ceiling * rate_degrade_multiplier`, then it becomes "hard". Without that
+    upper bound "degrade instead of stopping" would remove the ceiling
+    altogether and spend would be limited only by traffic — the opposite of what
+    a rate limit is for. Setting the multiplier to 1 disables degradation and
+    restores the previous hard-stop-at-ceiling behaviour exactly.
+
+    ⚠ THREE-TUPLE, and callers unpack it positionally. All three call sites
+    (`get_status`, `_analyze_inner`, and anomaly_detection's
+    `_is_currently_rate_limited`) were updated together. `limited` stays True for
+    BOTH "degrade" and "hard" so any caller that only looks at the flag keeps its
+    conservative reading.
+    """
     rate_h = int(_get_setting("rate_per_hour", str(_RATE_HOUR_DEFAULT)))
     rate_d = int(_get_setting("rate_per_day",  str(_RATE_DAY_DEFAULT)))
+    try:
+        mult = float(_get_setting("rate_degrade_multiplier",
+                                  str(_RATE_DEGRADE_MULTIPLIER_DEFAULT)))
+    except (TypeError, ValueError):
+        mult = _RATE_DEGRADE_MULTIPLIER_DEFAULT
+    if mult < 1:
+        mult = 1.0
     now = time.time()
 
     h_start = float(_get_rate_state(conn, "hour_window_start", "0"))
@@ -1354,7 +1412,8 @@ def _check_rate_limit(conn) -> tuple:
         else:
             mins_left = max(1, int((3600 - (now - h_start)) / 60) + 1)
             reset_str = f"resets in ~{mins_left}m"
-        return True, f"{h_count}/{rate_h} per hour ({reset_str})"
+        _kind = "hard" if h_count >= rate_h * mult else "degrade"
+        return True, f"{h_count}/{rate_h} per hour ({reset_str})", _kind
 
     d_start = float(_get_rate_state(conn, "day_window_start", "0"))
     d_count = int(_get_rate_state(conn, "day_count", "0"))
@@ -1367,7 +1426,8 @@ def _check_rate_limit(conn) -> tuple:
         else:
             hrs_left = max(1, int((86400 - (now - d_start)) / 3600) + 1)
             reset_str = f"resets in ~{hrs_left}h"
-        return True, f"{d_count}/{rate_d} per day ({reset_str})"
+        _kind = "hard" if d_count >= rate_d * mult else "degrade"
+        return True, f"{d_count}/{rate_d} per day ({reset_str})", _kind
 
     # Dollar cap. Checked last so the cheaper call-count checks short-circuit
     # first, and so its reason is the one surfaced when it is the binding limit.
@@ -1388,13 +1448,13 @@ def _check_rate_limit(conn) -> tuple:
             # set, this branch never runs, so a broken read cannot block a user
             # who never asked for the protection.
             return True, ("monthly spend cannot be read, and a spend cap is set "
-                          "— refusing rather than risk exceeding it")
+                          "— refusing rather than risk exceeding it"), "hard"
         usd = spend.get("usd") or 0.0
         if usd >= cap:
             return True, (f"monthly spend cap reached: ${usd:.2f} of ${cap:.2f} "
-                          f"for {spend.get('month')}")
+                          f"for {spend.get('month')}"), "hard"
 
-    return False, ""
+    return False, "", ""
 
 
 def _increment_rate(conn) -> None:
@@ -1465,9 +1525,18 @@ def get_status() -> dict:
                 "key_valid": False, "detail": "ANTHROPIC_API_KEY not configured"}
     try:
         conn = _conn()
-        limited, reason = _check_rate_limit(conn)
+        limited, reason, kind = _check_rate_limit(conn)
         conn.close()
-        detail = f"Rate limited: {reason}" if limited else "Ready"
+        # "Degraded" is a THIRD state and is reported as one. Calling it plain
+        # "Rate limited" would tell the operator interpretation had stopped when
+        # it is still running, just cheaper — and the badge is the one place they
+        # look to find that out.
+        if limited and kind == "degrade":
+            detail = f"Degraded (cheaper model): {reason}"
+        elif limited:
+            detail = f"Rate limited: {reason}"
+        else:
+            detail = "Ready"
         return {"state": "active", "enabled": True, "has_key": True,
                 "key_valid": True, "detail": detail}
     except Exception as exc:
@@ -2721,6 +2790,9 @@ def _analyze_inner(
     # answer from one model would be served for a request that explicitly asked
     # for another -- silently, and looking exactly like a normal cache hit.
     target_model = model or _ACTIVE_MODEL
+    # Kept un-namespaced so a later degrade can re-derive the key for the model
+    # it actually ends up using, instead of appending a second @suffix.
+    orig_cache_key = cache_key
     if cache_key and target_model != _ACTIVE_MODEL:
         cache_key = f"{cache_key}@{target_model}"
     key = _api_key()
@@ -2749,12 +2821,35 @@ def _analyze_inner(
             log.exception("ai_engine: cache lookup failed for %s", cache_key)
 
     # Rate limit check (skipped when force=True)
+    #
+    # DEGRADE RATHER THAN STOP. A call-count ceiling now downgrades the model
+    # instead of refusing (see `_check_rate_limit` for why money limits do not
+    # get the same treatment). The rate limit is likeliest to bind on the
+    # busiest day, which is exactly when the findings most need explaining.
+    #
+    # The swap is recorded, not hidden: the returned dict carries
+    # `degraded: True` and the model actually used, and `get_status()` reports a
+    # distinct "Degraded" state. A cheaper answer presented as a normal one
+    # would be the same defect this repo keeps finding — a lesser result wearing
+    # a full result's costume.
+    degraded = False
     if not force:
         try:
             conn = _conn()
-            limited, reason = _check_rate_limit(conn)
+            limited, reason, kind = _check_rate_limit(conn)
             conn.close()
-            if limited:
+            if limited and kind == "degrade" and target_model != _DEGRADED_MODEL:
+                degraded = True
+                target_model = _DEGRADED_MODEL
+                # Re-namespace the cache WRITE so a cheap answer is never stored
+                # under the full-quality key and served later as if it were one.
+                # The earlier cache LOOKUP used the original key on purpose: a
+                # full-quality cached answer is strictly better and should win.
+                if orig_cache_key:
+                    cache_key = f"{orig_cache_key}@{target_model}"
+                log.warning("ai_engine: rate ceiling reached (%s) — degrading to "
+                            "%s rather than refusing", reason, target_model)
+            elif limited:
                 return {"ok": False, "reason": f"Rate limit: {reason}"}
         except Exception:
             log.exception("ai_engine: rate limit check failed")
@@ -2980,9 +3075,14 @@ def _analyze_inner(
     # is needed because input and output are priced ~5x apart, so a per-call cost
     # derived from the sum alone cannot be right except by coincidence. The chat
     # surface shows the user what each question actually cost, which needs both.
+    # `degraded` and `model_used` travel with every result so a caller (or a
+    # reader of a stored verdict) can tell a full-quality answer from a
+    # rate-degraded one. Without them the downgrade would be silent, which is
+    # the failure this feature exists to avoid rather than introduce.
     return {"ok": True, "text": text, "from_cache": False,
             "tokens_used": (tokens_in or 0) + (tokens_out or 0),
-            "tokens_in": tokens_in or 0, "tokens_out": tokens_out or 0}
+            "tokens_in": tokens_in or 0, "tokens_out": tokens_out or 0,
+            "degraded": degraded, "model_used": target_model}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

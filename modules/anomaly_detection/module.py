@@ -1272,7 +1272,19 @@ def _is_currently_rate_limited() -> tuple:
         # closing() (not _db()) — this borrows ai_engine's connection factory, so it
         # must not go through anomaly_detection's namespace-scoped _conn().
         with closing(_ai_conn()) as conn:
-            limited, reason = _check_rate_limit(conn)
+            # THREE-tuple since 2026-08-21: (limited, reason, kind), where kind
+            # is "" | "degrade" | "hard". Unpacked explicitly rather than with a
+            # slice so a future arity change fails loudly here instead of being
+            # swallowed by the except below and silently reported as "not
+            # limited" — which is the dangerous direction for this particular
+            # answer.
+            limited, reason, kind = _check_rate_limit(conn)
+        # A degraded engine is still answering, so this proxy reports NOT limited
+        # for that case: its callers use this to decide whether to skip work
+        # entirely, and skipping when a cheaper answer is available would throw
+        # away the whole point of degradation.
+        if kind == "degrade":
+            return False, ""
         return limited, reason
     except Exception:
         return False, ""
