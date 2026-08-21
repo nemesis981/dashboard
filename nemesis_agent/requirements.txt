@@ -1,5 +1,12 @@
 requests
 psutil
+# enrollment.py and keyprotect/ import this at module level -- without it
+# enrollment raises ModuleNotFoundError and the agent will not start. Missing
+# from this file until 2026-08-20; the gap stayed hidden because Ubuntu ships
+# python3-cryptography system-wide, so installs against the system interpreter
+# picked it up by accident. A clean venv (which this installer now builds) does
+# not. See REQUIREMENTS.md.
+cryptography
 watchdog
 plyer
 pythonnet; sys_platform == "win32"
