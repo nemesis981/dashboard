@@ -24,6 +24,7 @@ import psutil
 import requests
 
 import config
+import engine_inventory
 import keyprotect
 from modules import hardware, security, scanner
 
@@ -474,6 +475,124 @@ def _detect_lan_macs(conf):
     return []
 
 
+# Behavioral monitor instance (Malware Layer B). None until started; started only
+# when behavioral_enabled AND the kernel monitor is present AND consent allows.
+# Drained into the heartbeat each beat.
+_behavioral_monitor = None
+_behavioral_thread = None
+
+
+def _start_behavioral_monitor(conf):
+    """Start the behavioral monitor + its Falco-tail thread, IFF enabled + present +
+    consented. No-op otherwise. Best-effort; a failure here never blocks startup."""
+    global _behavioral_monitor, _behavioral_thread
+    if str(conf.get("behavioral_enabled", "false")).strip().lower() != "true":
+        return
+    try:
+        import shutil as _sh
+        import consent as _consent
+        import behavioral_agent
+    except Exception as exc:                                 # noqa: BLE001
+        log.warning("behavioral: modules unavailable, not starting: %s", exc)
+        return
+    if not _sh.which("falco"):
+        log.warning("behavioral_enabled but falco not installed -- inventory will "
+                    "report the coverage gap; not tailing")
+        return
+    if not _consent.collection_allowed():
+        log.info("behavioral: monitoring enabled but consent not granted -- not tailing")
+        return
+    try:
+        window = float(conf.get("behavioral_window_s", "60"))
+        cap = int(conf.get("behavioral_max_per_window", "100"))
+        floor = conf.get("behavioral_severity_floor", "low")
+        _behavioral_monitor = behavioral_agent.BehavioralMonitor(
+            conf.get("device_id", "unknown"), window_s=window, max_per_window=cap,
+            severity_floor=floor)
+        out_path = conf.get("behavioral_falco_output", "/var/log/falco/events.json")
+        _behavioral_thread = threading.Thread(
+            target=_behavioral_tail, args=(out_path,), daemon=True,
+            name="behavioral-tail")
+        _behavioral_thread.start()
+        log.info("behavioral monitor started (tailing %s)", out_path)
+    except Exception as exc:                                 # noqa: BLE001
+        log.warning("behavioral: failed to start: %s", exc)
+
+
+def _behavioral_tail(path):
+    """Tail the kernel monitor's JSON-per-line output; feed each line to the monitor.
+
+    Robust to the file being absent, rotated, or truncated -- it retries and
+    re-opens. The agent only READS this file (the monitor daemon owns it as root).
+    Consent is re-read per line, so a mid-session revoke stops ingestion at once."""
+    import json as _json
+    import consent as _consent
+    pos = 0
+    while _running:
+        try:
+            import os as _os
+            if not _os.path.exists(path):
+                _wake.wait(5.0)
+                continue
+            size = _os.path.getsize(path)
+            if size < pos:
+                pos = 0                     # rotated/truncated -> start over
+            with open(path, "r") as fh:
+                fh.seek(pos)
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if not _consent.collection_allowed():
+                        continue           # revoked mid-session -> stop ingesting
+                    try:
+                        alert = _json.loads(line)
+                    except Exception:                        # noqa: BLE001
+                        continue
+                    if _behavioral_monitor is not None:
+                        _behavioral_monitor.ingest_falco(
+                            alert, _consent.consent_version())
+                pos = fh.tell()
+        except Exception as exc:                             # noqa: BLE001
+            log.debug("behavioral tail hiccup: %s", exc)
+        _wake.wait(2.0)
+
+
+def _drain_behavioral():
+    """Behavioral events for this heartbeat, or [] when the monitor is not running."""
+    if _behavioral_monitor is None:
+        return []
+    try:
+        return _behavioral_monitor.drain()
+    except Exception as exc:                                 # noqa: BLE001
+        log.warning("behavioral drain failed: %s", exc)
+        return []
+
+
+def _engine_inventory():
+    """Endpoint engine inventory for the heartbeat. Best-effort; never raises.
+
+    yara_rules_dir points at the agent's own bundled YARA rules if present (today
+    agents carry none, so this is None -> yara reports ABSENT, correctly). The
+    behavioral status reader is wired in at M2; until then behavioral reports ABSENT.
+    """
+    try:
+        import os as _os                                     # noqa: PLC0415
+        rules_dir = _os.path.join(_HERE, "yara_rules")
+        rules_dir = rules_dir if _os.path.isdir(rules_dir) else None
+        reader = None
+        try:
+            import behavioral_agent
+            reader = behavioral_agent.status_reader
+        except Exception:                                    # noqa: BLE001
+            reader = None      # behavioral module not present yet -> ABSENT
+        return engine_inventory.inventory(yara_rules_dir=rules_dir,
+                                          behavioral_status_reader=reader)
+    except Exception as exc:                                 # noqa: BLE001
+        log.warning("engine inventory failed: %s", exc)
+        return {"engines": {}, "summary": {}, "error": str(exc)[:120]}
+
+
 def _collect_payload(conf):
     device_id   = conf.get("device_id", "unknown")
     device_name = conf.get("device_name", socket.gethostname())
@@ -566,6 +685,15 @@ def _collect_payload(conf):
         # like connection_type, because "is this device exposed" is a first-order
         # fleet fact, not a detail buried in the security sub-report.
         "dmz_mode":        udp_filtering_suppressed(conf),
+        # Per-endpoint detection-engine inventory (ADR 0004 hinge (b)): versions +
+        # ruleset versions + EXPLICIT capability, so the server can surface uneven
+        # fleet coverage. Behavioral engine registers here at M2. A few fast
+        # subprocess probes; cheap against a poll interval in minutes.
+        "engine_inventory": _engine_inventory(),
+        # Behavioral-detection findings since the last beat (Malware Layer B). Empty
+        # unless the behavioral monitor is running. Already deduped + rate-capped
+        # agent-side; the server validates + records them as attested findings.
+        "behavioral_events": _drain_behavioral(),
         "link_type":       link_type,
         "lan_macs":        lan_macs,
         # Tier 2 challenge response (dedicated field — the task-result channel
@@ -1958,6 +2086,10 @@ def main():
             l2_windivert.start_background(_conf)
         except Exception:
             log.exception("L2 WinDivert init failed — continuing (fail-open)")
+
+    # Behavioral monitor (Malware Layer B). No-op unless enabled + falco present +
+    # consented; otherwise the engine inventory simply reports the coverage gap.
+    _start_behavioral_monitor(_conf)
 
     # Block in poll loop
     _poll_loop()

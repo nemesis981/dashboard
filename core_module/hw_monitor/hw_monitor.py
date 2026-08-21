@@ -507,7 +507,13 @@ def init_db():
                           # exactly which devices need a decision.
                           ("remote_enabled",      "INTEGER NOT NULL DEFAULT 0"),
                           ("remote_enabled_at",   "TEXT"),
-                          ("remote_enabled_by",   "TEXT")):   # actor seam
+                          ("remote_enabled_by",   "TEXT"),   # actor seam
+                          # Per-endpoint detection-engine inventory (ADR 0004 hinge (b)):
+                          # engines/versions/ruleset-versions/capability as reported on
+                          # the heartbeat, so uneven fleet coverage is visible. JSON blob
+                          # + when it was last reported (local ISO).
+                          ("engine_inventory_json", "TEXT"),
+                          ("engine_inventory_at",   "TEXT")):
             if col not in existing_ag:
                 c.execute(f"ALTER TABLE agent_devices ADD COLUMN {col} {decl}")
         conn.commit()
@@ -1953,6 +1959,39 @@ def _update_agent_device(payload, remote_ip=None):
                 # Non-fatal for the same reason attestation is: losing a whole
                 # heartbeat over an observation write would be the worse outcome.
                 log.warning("observation record failed for %s: %s", device_id, _oe)
+
+            # Detection-engine inventory (ADR 0004 hinge (b)). Stored as the current
+            # snapshot per beat, with the time it was reported so the dashboard can
+            # show stale/uneven coverage. Non-fatal: losing a whole heartbeat over
+            # this write is the worse outcome.
+            try:
+                eng = payload.get("engine_inventory")
+                if isinstance(eng, dict) and eng.get("engines"):
+                    conn.execute(
+                        "UPDATE agent_devices SET engine_inventory_json=?, "
+                        "engine_inventory_at=? WHERE device_id=?",
+                        (json.dumps(eng),
+                         datetime.now().isoformat(timespec="seconds"), device_id),
+                    )
+            except Exception as _ee:                      # noqa: BLE001
+                log.warning("engine inventory record failed for %s: %s", device_id, _ee)
+
+            # Behavioral-detection findings (Malware Layer B, behavioral half). The
+            # endpoint sends already-deduped/rate-capped events; validate each against
+            # the shared schema and record valid ones as malware_findings (attested
+            # endpoint claims). Non-fatal: a bad batch must not cost the heartbeat.
+            try:
+                bev = payload.get("behavioral_events")
+                if isinstance(bev, list) and bev:
+                    import behavioral_ingest
+                    _bi = behavioral_ingest.ingest_behavioral(
+                        conn, device_id, payload.get("device_name") or device_id,
+                        bev, datetime.now().isoformat(timespec="seconds"))
+                    if _bi["accepted"] or _bi["rejected"]:
+                        log.info("behavioral ingest %s: accepted=%d rejected=%d",
+                                 device_id, _bi["accepted"], _bi["rejected"])
+            except Exception as _be:                      # noqa: BLE001
+                log.warning("behavioral ingest failed for %s: %s", device_id, _be)
 
             conn.commit()
         finally:

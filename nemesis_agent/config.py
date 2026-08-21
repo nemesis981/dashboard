@@ -54,6 +54,20 @@ DEFAULTS = {
     "scan_on_reconnect": "true",
     "last_scan_at": "",
     "reputation_cache_enabled": "true",   # Feature 6: observation-only IP-rep cache (never enforces)
+    # ── Behavioral monitoring (Malware Layer B, behavioral half) — DEFAULT OFF ──
+    # Consumes a privileged kernel monitor's output (Falco/Sysmon, a SEPARATE root
+    # daemon — see docs/CUSTOM_FALCO.md) and reports normalized, de-noised
+    # behavioral findings on the heartbeat. Default OFF: it needs the privileged
+    # daemon installed AND consent. Inert until both hold.
+    "behavioral_enabled": "false",
+    # Where the kernel monitor writes its JSON events for the agent to tail. Falco:
+    # configure `json_output: true` + `file_output` to this path. The agent only
+    # READS it (the daemon runs as root; the agent does not).
+    "behavioral_falco_output": "/var/log/falco/events.json",
+    # Per-window noise controls (the design problem: process events flood).
+    "behavioral_window_s": "60",
+    "behavioral_max_per_window": "100",
+    "behavioral_severity_floor": "low",   # low|medium|high
     "dns_enforce_enabled": "false",       # L1: default OFF (plumbing; not pointed at tunnel Pi-hole yet — ADR 0005)
     "dns_enforce_target": "",             # L1: DNS server(s) to set when enabled; blank = no-op
     "l2_enforce_enabled": "false",        # L2: default OFF (WinDivert reputation blocking on TCP handshake-initiation, bidirectional: outbound SYN + SYN-ACK)
