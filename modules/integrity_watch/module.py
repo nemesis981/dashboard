@@ -44,12 +44,58 @@ codebase keeps finding in its own verification code.
 import datetime
 import html
 import logging
+import os
+import sys
+import threading
 
 from modules import NemesisModule, get_data_manager
+
+# Bounded evaluation cadence. Bare import off alert_manager/, the idiom every
+# service here uses — the dashboard unit's PYTHONPATH does not include the repo
+# root, so `from alert_manager import bounded` would work only by accident of
+# where dashboard.py lives.
+sys.path.insert(0, os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "alert_manager"))
+import bounded as _bounded                                        # noqa: E402
 
 log = logging.getLogger(__name__)
 
 MODULE = "integrity_watch"
+
+#: How soon after start the first evaluation runs. Deliberately short: the whole
+#: reason this module was found dormant is that nothing ever invoked it, and a
+#: loop whose first output is 24 hours away is indistinguishable from one that
+#: does not work — for a full day, every restart.
+FIRST_RUN_DELAY_SECONDS = 60
+
+#: Core settings key for the evaluation cadence. Stored in the CORE settings
+#: table rather than a new `integrity_settings` one: ADR 0001 is read-any /
+#: write-own, and this module only ever READS it. Adding a whole table (plus its
+#: canonical DDL and migration) for a single integer that has no UI yet would be
+#: more schema than the value justifies.
+_EVAL_INTERVAL_KEY = "integrity_eval_interval_hours"
+
+
+def _get_eval_interval_hours():
+    """The configured cadence, or the spec default when it cannot be read.
+
+    Returns the RAW stored value — `_bounded.resolve` does the bounding, so there
+    is exactly one place that decides what an out-of-range value means. Returning
+    an already-defaulted value here would hide a bad setting from resolve()'s
+    warning, which is the only thing that would tell an operator their write was
+    overruled.
+    """
+    try:
+        import database as _db                                    # noqa: PLC0415
+        raw = _db.get_setting(_EVAL_INTERVAL_KEY, None)
+    except Exception:                                             # noqa: BLE001
+        log.debug("integrity_watch: could not read %s; using default",
+                  _EVAL_INTERVAL_KEY, exc_info=True)
+        return _bounded.INTEGRITY_EVAL_INTERVAL_HOURS.default
+    if raw is None:
+        return _bounded.INTEGRITY_EVAL_INTERVAL_HOURS.default
+    return raw
 
 # Below this many completed scans, a per-device find-rate is noise, not a signal.
 MIN_SCANS_FOR_SIGNAL = 10
@@ -245,10 +291,76 @@ class Module(NemesisModule):
     def __init__(self, manifest: dict):
         super().__init__(manifest)
 
+    #: Set once in start(); the loop exits promptly when it is set.
+    _stop = None
+    _thread = None
+
+    def _interval_seconds(self) -> float:
+        """Evaluation cadence, bounded at both ends by `bounded.py`.
+
+        Read fresh each cycle (the scheduler-aware seam used by the canary and the
+        connectivity watcher) so a change takes effect without a restart.
+        """
+        return _bounded.resolve(
+            _get_eval_interval_hours(),
+            _bounded.INTEGRITY_EVAL_INTERVAL_HOURS) * 3600.0
+
+    def _loop(self) -> None:
+        """Periodically run the cross-checks.
+
+        WHY THIS EXISTS AT ALL. Until 2026-08-22 `evaluate()` had NO production
+        caller anywhere in the repo — the module had been enabled for 18 days and
+        `integrity_observations` held zero rows. Every other piece of it worked;
+        nothing ever invoked it. A detector that is enabled, reports "running",
+        renders a card, and never measures anything is worse than one that is
+        honestly off, because the card reads as coverage.
+
+        Never raises out of the thread: a failed evaluation must not take the
+        module down, and it must not silently stop the loop either — the next
+        cycle still runs.
+        """
+        # First run soon after start, then on the bounded interval.
+        if self._stop.wait(FIRST_RUN_DELAY_SECONDS):
+            return
+        while not self._stop.is_set():
+            try:
+                obs = evaluate(persist=True)
+                flags = sum(1 for o in obs if o["verdict"] == "flag")
+                undet = sum(1 for o in obs if o["verdict"] == "undetermined")
+                if not obs:
+                    # An empty fleet is "nothing to measure", NOT "all clear".
+                    # Logged distinctly so a box with no agents does not read the
+                    # same as a box whose agents are all healthy.
+                    log.info("integrity_watch: no devices to evaluate "
+                             "(nothing measured, not a clean bill)")
+                else:
+                    log.info("integrity_watch: evaluated %d observations "
+                             "(%d flagged, %d not measurable)",
+                             len(obs), flags, undet)
+            except Exception:                            # noqa: BLE001
+                log.exception("integrity_watch: evaluation cycle failed")
+            if self._stop.wait(self._interval_seconds()):
+                return
+
     def start(self) -> None:
-        log.info("integrity_watch: enabled (observe-only)")
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._loop, name="integrity-watch-eval", daemon=True)
+        self._thread.start()
+        log.info("integrity_watch: enabled (observe-only), evaluating every %.1fh",
+                 self._interval_seconds() / 3600.0)
 
     def stop(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        if self._thread is not None and self._thread.is_alive():
+            # Bounded join: the loop wakes on the event, so this returns quickly.
+            # Not waiting at all would let a restart run two loops concurrently.
+            self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                log.warning("integrity_watch: evaluation thread did not stop "
+                            "within 5s; it is a daemon and will not block exit")
+        self._thread = None
         log.info("integrity_watch: disabled")
 
     def status(self) -> dict:
