@@ -167,8 +167,12 @@ class AgentWindow(tk.Tk):
         self.book = ttk.Notebook(outer)
         self.book.pack(side="top", fill="both", expand=True)
         self.book.add(self._build_status_tab(self.book), text="  Status  ")
+        self.book.add(self._build_findings_tab(self.book), text="  Findings  ")
         self.book.add(self._build_settings_tab(self.book), text="  Settings  ")
         self.book.add(self._build_protection_tab(self.book), text="  Protection  ")
+        # fetch findings when the user opens that tab (and once now, so it is warm)
+        self.book.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.findings_in_flight = False
 
     # ── Status tab ───────────────────────────────────────────────────────────
 
@@ -237,6 +241,95 @@ class AgentWindow(tk.Tk):
                                        wraplength=580, justify="left")
         self.action_result.pack(anchor="w", pady=(10, 0))
         return tab
+
+    # ── Findings tab ─────────────────────────────────────────────────────────
+    #
+    # What was detected on THIS device. These findings also go to the Nemesis
+    # appliance, but a roaming user looking at their own machine could not see them
+    # anywhere until now. Read-only: this shows what the agent reported, it does not
+    # act. Rendering is wrapped so a display bug reports E-AGENT-090 (the standing
+    # lesson: a findings view that silently fails to render is worse than none).
+
+    def _build_findings_tab(self, parent):
+        tab = ttk.Frame(parent, padding=16)
+        ttk.Label(tab, text="Findings on this device", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(tab, text="Suspicious behaviour Nemesis detected on this machine. "
+                           "These are also reported to your Nemesis appliance.",
+                  style="Sub.TLabel", wraplength=580, justify="left").pack(
+            anchor="w", pady=(0, 8))
+
+        top = ttk.Frame(tab); top.pack(fill="x")
+        self.findings_summary = ttk.Label(top, text="Loading…", style="Sub.TLabel")
+        self.findings_summary.pack(side="left")
+        ttk.Button(top, text="Refresh", command=self._request_findings).pack(side="right")
+
+        ttk.Separator(tab).pack(fill="x", pady=10)
+        # a scrolling list of finding rows
+        self.findings_list = ttk.Frame(tab)
+        self.findings_list.pack(fill="both", expand=True)
+        return tab
+
+    def _on_tab_changed(self, _event=None):
+        try:
+            if self.book.tab(self.book.select(), "text").strip() == "Findings":
+                self._request_findings()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    def _request_findings(self):
+        if self.findings_in_flight:
+            return
+        self.findings_in_flight = True
+        self.findings_summary.configure(text="Loading…", style="Sub.TLabel")
+        self.worker.submit("findings", core.request_findings)
+
+    def _render_findings(self, ok, result):
+        # Clear the current rows first, always.
+        for child in list(self.findings_list.winfo_children()):
+            child.destroy()
+        if not ok:
+            self.findings_summary.configure(
+                text="Couldn't reach the agent to load findings.", style="Err.TLabel")
+            return
+        try:
+            if not result.get("behavioral_enabled"):
+                self.findings_summary.configure(
+                    text="Behavioural monitoring is off on this device — no findings "
+                         "are being collected.", style="Sub.TLabel")
+                return
+            items = result.get("findings") or []
+            if not items:
+                self.findings_summary.configure(
+                    text="No findings — nothing suspicious has been detected on this "
+                         "device.", style="Sub.TLabel")
+                return
+            self.findings_summary.configure(
+                text="%d recent finding(s):" % len(items), style="Sub.TLabel")
+            _sev_style = {"high": "Err.TLabel", "medium": "Val.TLabel",
+                          "low": "Sub.TLabel"}
+            for f in items:
+                row = ttk.Frame(self.findings_list)
+                row.pack(fill="x", pady=2)
+                sev = (f.get("severity") or "low").lower()
+                what = "%s — %s" % ((f.get("behavior") or "?").replace("_", " "),
+                                    f.get("rule") or "?")
+                ttk.Label(row, text=("● " + sev.upper()),
+                          style=_sev_style.get(sev, "Sub.TLabel")).pack(side="left")
+                proc = f.get("proc_name") or "?"
+                cnt = f.get("count", 1)
+                meta = "  %s   (process: %s%s)" % (
+                    what, proc, ("  ×%d" % cnt) if cnt and cnt > 1 else "")
+                ttk.Label(row, text=meta, style="Val.TLabel",
+                          wraplength=520, justify="left").pack(side="left")
+        except Exception as exc:                             # noqa: BLE001
+            # A render bug must be VISIBLE and RECORDED, not swallowed.
+            self.findings_summary.configure(
+                text="Couldn't display findings (this has been reported).",
+                style="Err.TLabel")
+            try:
+                core.report_gui_error("E-AGENT-090", "findings render: %s" % exc)
+            except Exception:                                # noqa: BLE001
+                pass
 
     # ── Settings tab ─────────────────────────────────────────────────────────
 
@@ -425,6 +518,11 @@ class AgentWindow(tk.Tk):
                 self.status, self.status_error = None, result
             self._render()
             self.after(REFRESH_MS, self._request_status)
+            return
+
+        if name == "findings":
+            self.findings_in_flight = False
+            self._render_findings(ok, result)
             return
 
         if name in ("scan", "checkin", "restart"):

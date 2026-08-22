@@ -96,6 +96,22 @@ def request_scan(path="/", timeout=8.0):
     return call_agent("scan", {"path": path}, timeout=timeout)
 
 
+def request_findings(timeout=4.0):
+    """The local device's own recent behavioral findings (read-only)."""
+    return call_agent("findings", timeout=timeout)
+
+
+def report_gui_error(code, context="", timeout=2.0):
+    """Report a GUI-side render failure into the agent's error ledger. Best-effort:
+    if the agent is unreachable there is nothing to report to, so swallow it (the
+    user already sees the render problem in the tab itself)."""
+    try:
+        return call_agent("report_error", {"code": code, "context": str(context)[:200]},
+                          timeout=timeout)
+    except AgentUnreachable:
+        return None
+
+
 def request_restart(timeout=4.0):
     return call_agent("restart", timeout=timeout)
 

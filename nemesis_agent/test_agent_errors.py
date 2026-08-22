@@ -153,6 +153,10 @@ def main():
     for f in ("agent.py", "l2_windivert.py", "dns_enforce.py", "attest.py",
               "enrollment.py", "tasks.py", "platforms/windows.py",
               "platforms/linux.py", "platforms/mac.py",
+              # agent_gui.py reports its OWN render failures over the control channel
+              # (report_gui_error), which the daemon turns into a record() -- so the
+              # GUI reporting site counts as wiring a code just as record() does.
+              "agent_gui.py",
               # privileged-IPC subsystem (step 3b): the SYSTEM service and the
               # session-side client record their own auth/start failures.
               "privservice.py", "privclient.py"):
@@ -160,7 +164,7 @@ def main():
             src += io.open(os.path.join(HERE, f), encoding="utf-8").read()
         except OSError:
             pass
-    wired = set(re.findall(r'record\("(E-AGENT-\d{3})"', src))
+    wired = set(re.findall(r'(?:record|report_gui_error)\("(E-AGENT-\d{3})"', src))
     catalog = set(ae.E_AGENT_CODES)
     check("no phantom codes (declared but never recorded)", sorted(catalog - wired), [])
     check("no undeclared codes (recorded but not in catalog)", sorted(wired - catalog), [])

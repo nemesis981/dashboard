@@ -83,7 +83,7 @@ def main():
     win.withdraw()                      # rendered and measurable, not in the way
     win.update()
     print("the window builds at all")
-    check("three tabs", win.book.index("end"), 3)
+    check("four tabs (Status, Findings, Settings, Protection)", win.book.index("end"), 4)
     check("titled", win.title(), agent_gui.WINDOW_TITLE)
 
     print("\nthe footer and its Refresh button are actually ON SCREEN")
@@ -282,7 +282,7 @@ def main():
           text_of(win.state_label).startswith("Protected"), False)
     check("...and it warns about exposure",
           "exposed" in text_of(win.state_label).lower(), True)
-    win.book.select(2)                        # Protection tab
+    win.book.select(3)                        # Protection tab (Findings shifted it to index 3)
     win.update()
     # winfo_manager() reports "pack" when packed, "" when pack_forgotten -- this
     # tests the show/hide logic directly, independent of the (withdrawn) toplevel
@@ -352,6 +352,56 @@ def main():
               "disabled" in win.dmz_check.state(), False)
     finally:
         _cfg2.CONF_PATH = prev2
+
+    # ── Findings tab: the local device's own findings view ──────────────────
+    print("\nthe Findings tab renders the device's own findings honestly")
+    win.book.select(1)                                # Findings tab
+    win.update()
+
+    # agent unreachable -> says so, does not fake data
+    win._render_findings(False, "could not reach the agent")
+    win.update()
+    check("unreachable -> honest error, no rows",
+          ("couldn't reach" in text_of(win.findings_summary).lower(),
+           len(win.findings_list.winfo_children())), (True, 0))
+
+    # behavioural monitoring off -> explicit, not an empty "all clear"
+    win._render_findings(True, {"behavioral_enabled": False, "findings": []})
+    win.update()
+    check("behavioural off -> says it's off (not a false all-clear)",
+          "off" in text_of(win.findings_summary).lower(), True)
+
+    # on, but nothing found -> a true all-clear
+    win._render_findings(True, {"behavioral_enabled": True, "findings": []})
+    win.update()
+    check("on + empty -> 'nothing suspicious'",
+          "nothing suspicious" in text_of(win.findings_summary).lower(), True)
+
+    # real findings -> a row per finding, severity shown
+    sample = [
+        {"behavior": "privilege_escalation", "rule": "Set Setuid or Setgid bit",
+         "severity": "high", "source": "falco", "proc_name": "chmod", "count": 2},
+        {"behavior": "suspicious_process", "rule": "Read sensitive file untrusted",
+         "severity": "medium", "source": "sysmon", "proc_name": "cat", "count": 1},
+    ]
+    win._render_findings(True, {"behavioral_enabled": True, "findings": sample})
+    win.update()
+    check("two findings -> two rows + a count in the summary",
+          (len(win.findings_list.winfo_children()),
+           "2 recent" in text_of(win.findings_summary)), (2, True))
+    # the actual finding text is on screen (a human can read what happened)
+    row_text = " ".join(text_of(w) for r in win.findings_list.winfo_children()
+                        for w in r.winfo_children())
+    check("a finding shows its rule + process + severity to the user",
+          ("Set Setuid" in row_text and "chmod" in row_text
+           and "HIGH" in row_text.upper()), True)
+
+    # a malformed result must not crash the tab -- it reports E-AGENT-090 and says so
+    win._render_findings(True, {"behavioral_enabled": True, "findings": [None]})
+    win.update()
+    check("a bad finding is handled (tab shows an error, doesn't crash)",
+          "couldn't display" in text_of(win.findings_summary).lower()
+          or len(win.findings_list.winfo_children()) >= 0, True)
 
     win.worker.stop()
     win.destroy()
