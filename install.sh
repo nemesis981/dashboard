@@ -894,6 +894,32 @@ install_clamav() {
     pip3 install --break-system-packages pefile \
         || warn "pefile pip install failed — PE heuristics will be disabled."
     ok "Malware detection Python dependencies installed"
+
+    # ── ISO builder — REQUIRED by the detonation sandbox ────────────────────
+    #
+    # `sandbox.py::_build_iso` puts the suspicious sample on a READ-ONLY ISO and
+    # attaches that to the throwaway VM. The read-only ISO is not a convenience:
+    # it is the one-way door. A shared folder would let the guest write back to
+    # the host, which is exactly what a detonation sandbox must never allow. So
+    # with no ISO builder present, detonation does not degrade — it REFUSES, and
+    # the whole tier is unavailable.
+    #
+    # This went undeclared until 2026-08-21. The M3 live proof passed because
+    # that session happened to have a copy on PATH from a scratchpad directory;
+    # on any fresh install the first real detonation would have failed with
+    # "no ISO builder (genisoimage/mkisofs/xorrisofs) available". Same shape as
+    # the undeclared `cryptography` dependency found in the agent the same week:
+    # a hard requirement that nothing installed and nothing declared.
+    info "Installing an ISO builder for the detonation sandbox..."
+    apt-get install -y genisoimage \
+        || apt-get install -y xorriso \
+        || warn "no ISO builder installed — the detonation sandbox will REFUSE to run"
+    if command -v genisoimage >/dev/null 2>&1 || command -v mkisofs >/dev/null 2>&1 \
+       || command -v xorrisofs >/dev/null 2>&1; then
+        ok "ISO builder present (detonation sandbox can stage samples)"
+    else
+        warn "ISO builder MISSING — detonation will refuse until one is installed"
+    fi
 }
 
 ###############################################################################
