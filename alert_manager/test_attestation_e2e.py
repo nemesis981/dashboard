@@ -240,5 +240,68 @@ def main():
         shutil.rmtree(tree, ignore_errors=True)
 
 
+def test_tier2_challenge_cadence():
+    """hw_monitor.ensure_challenge_queued: enqueues a Tier 2 challenge on the first
+    beat and DEDUPS against one already in flight — the observe-only twin of the
+    ensure_manifest_queued dedup covered in main(). Assert-based and skip-if-absent
+    (not routed through main()'s strict check-count guard) because it depends on the
+    PRIVATE attestation-tier2 module: a strict fixed count cannot accommodate a test
+    that legitimately skips when the private module is not deployed."""
+    import os, sys, sqlite3
+    PRIV = os.path.expanduser("~/work/nemesis-internal/attestation-tier2")
+    for p in (PRIV, "/opt/nemesis", "/opt/nemesis/alert_manager",
+              "/opt/nemesis/nemesis_agent", "/opt/nemesis/core_module/hw_monitor"):
+        if p not in sys.path:
+            sys.path.insert(0, p)
+    from alert_manager import attestation as att
+    if not att.tier2_available():
+        print("  SKIP tier2 challenge cadence (private module not on path) — NOT a pass")
+        return
+    import hw_monitor, database
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE agent_devices (device_id TEXT PRIMARY KEY,
+            attestation_state TEXT DEFAULT 'absent', tier2_state TEXT DEFAULT 'absent');
+        INSERT INTO agent_devices(device_id) VALUES ('dev1');
+        CREATE TABLE agent_attestation_challenges (device_id TEXT PRIMARY KEY,
+            nonce TEXT, code_digests TEXT, code_python TEXT, issued_at REAL, expires_at REAL);
+        CREATE TABLE scan_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT UNIQUE,
+            device_id TEXT, action TEXT, params_json TEXT, status TEXT DEFAULT 'pending',
+            created_at TEXT, dispatched_at TEXT, expires_at TEXT, dispatch_count INTEGER DEFAULT 0,
+            origin_queued_at TEXT, actor TEXT, result_ok INTEGER, result_detail TEXT, reported_at TEXT);
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        INSERT INTO settings VALUES ('attestation_interval_hours','24');
+    """)
+    # enqueue_task closes the connection it is handed; hand it a no-close proxy so a
+    # second call is not a PASS produced by a closed DB rather than by dedup logic
+    # (the exact trap the manifest test documents at 2026-08-04).
+    class _NoClose:
+        def __init__(self, c): self._c = c
+        def __getattr__(self, n): return getattr(self._c, n)
+        def close(self): pass
+    _real_db = getattr(hw_monitor, "_db_connect", None)
+    _real_get = database.get_setting
+    hw_monitor._db_connect = lambda *a, **k: _NoClose(conn)
+    database.get_setting = lambda k, d=None: dict(
+        conn.execute("SELECT key,value FROM settings").fetchall()).get(k, d)
+    try:
+        first = hw_monitor.ensure_challenge_queued(conn, "dev1")
+        assert first, "unchallenged device must get a challenge queued"
+        n1 = conn.execute("SELECT COUNT(*) FROM scan_tasks "
+                          "WHERE action='attest_challenge'").fetchone()[0]
+        assert n1 == 1, "exactly one challenge task after first beat, got %d" % n1
+        again = hw_monitor.ensure_challenge_queued(conn, "dev1")
+        assert again is None, "second beat must NOT duplicate an in-flight challenge"
+        n2 = conn.execute("SELECT COUNT(*) FROM scan_tasks "
+                          "WHERE action='attest_challenge'").fetchone()[0]
+        assert n2 == 1, "still one challenge task after second beat, got %d" % n2
+        print("  PASS  tier2 challenge cadence (first beat queues, second beat dedups)")
+    finally:
+        if _real_db is not None:
+            hw_monitor._db_connect = _real_db
+        database.get_setting = _real_get
+
+
 if __name__ == "__main__":
+    test_tier2_challenge_cadence()
     sys.exit(main())

@@ -148,9 +148,30 @@ def main():
 
 def test_tier2_challenge_round_trip():
     """Full Tier 2 issue->respond->ingest against the REAL functions + real crypto,
-    incl. the default now=None path (a missing import would crash here) and a
-    tampering control. Requires the private module on path; skips clearly if absent."""
-    import os, sys, sqlite3, tempfile
+    incl. the default now=None path (a missing import would crash here), the
+    observe-only guarantee, and a tampering control. Requires the private module on
+    path; skips clearly if absent.
+
+    TWO THINGS THIS TEST GETS RIGHT THAT AN EARLIER VERSION DID NOT (fixed 2026-08-21
+    when Tier 2 was actually exercised with the private module present):
+
+      1. `modules.scanner` MUST resolve to the AGENT's copy
+         (`nemesis_agent/modules/scanner.py`), not the dashboard's `modules/`
+         package. In one co-located test process both are importable and `modules`
+         binds to whichever loaded first — on a real endpoint the server's `modules/`
+         does not exist, so the agent always sees its own. We reproduce the endpoint
+         reality by clearing any cached `modules*` and importing with AGENT first.
+
+      2. A fully-loaded agent must report **attested** — not merely "some valid
+         state". `respond_to_challenge` measures LIVE `__code__`, so a covered
+         callable whose module is not imported reads `absent` (unresolved), and the
+         old `state in (absent,attested,failed)` assertion passed on that absent
+         without ever proving the honest path reaches attested. We now import EVERY
+         covered module and assert attested; if some covered module genuinely cannot
+         load (a forward-declared detector entry point not yet shipped), the honest
+         state must be **absent** (unresolved) — never a false attested or failed.
+    """
+    import os, sys, sqlite3
     AGENT="/opt/nemesis/nemesis_agent"; PRIV=os.path.expanduser("~/work/nemesis-internal/attestation-tier2")
     for pth in (PRIV, "/opt/nemesis", AGENT):
         if pth not in sys.path: sys.path.insert(0, pth)
@@ -160,29 +181,61 @@ def test_tier2_challenge_round_trip():
         return
     _cwd=os.getcwd(); os.chdir(AGENT)
     try:
-        import tier2_agent, tasks, enrollment, attest
-        from modules import scanner
+        # Endpoint reality: `modules` is the AGENT's package. Drop any cached bind
+        # (the dashboard's modules/ may have loaded first) and re-import AGENT-first.
+        for _m in [m for m in sys.modules if m=="modules" or m.startswith("modules.")]:
+            del sys.modules[_m]
+        import importlib; importlib.invalidate_caches()
+        if AGENT in sys.path: sys.path.insert(0, sys.path.pop(sys.path.index(AGENT)))
+        import tier2_agent, tasks
+        # Simulate a fully-loaded agent: import every module named in the covered
+        # set so its LIVE __code__ exists. Track whether all resolved — the honest
+        # verdict is attested iff all did, absent (never failed) otherwise.
+        covered=list(att.TIER2_COVERED)
+        loaded_all=True
+        for _p in covered:
+            _mod=_p.split(":",1)[0]
+            try: __import__(_mod)
+            except Exception as _e:  # forward-declared / not-yet-shipped covered path
+                loaded_all=False
+                print("    (covered module %s not loadable: %s)" % (_mod, _e))
+        assert sys.modules["modules"].__file__.startswith(AGENT), \
+            "modules must resolve to the agent's copy, got %s" % sys.modules["modules"].__file__
+
         c=sqlite3.connect(":memory:")
         c.execute("CREATE TABLE agent_devices (device_id TEXT PRIMARY KEY, attestation_state TEXT, tier2_state TEXT, tier2_detail TEXT, tier2_at TEXT)")
         c.execute("INSERT INTO agent_devices VALUES ('d','attested','absent',NULL,NULL)")
         c.execute("CREATE TABLE agent_attestation_challenges (device_id TEXT PRIMARY KEY, nonce TEXT, code_digests TEXT, code_python TEXT, issued_at REAL, expires_at REAL)")
-        ch=att.build_and_store_challenge(c,"d",agent_root=AGENT)   # default now=None
+
+        # ISSUE (default now=None path) -> RESPOND over live code -> INGEST
+        ch=att.build_and_store_challenge(c,"d",agent_root=AGENT)
         assert ch and ch["nonce"], "issue failed"
+        assert set(ch["covered"])==set(covered), "issued covered set must match TIER2_COVERED"
         resp=tier2_agent.respond_to_challenge(ch["nonce"], ch["covered"])
         att.ingest_challenge_response(c,"d",resp)
         row=c.execute("SELECT attestation_state,tier2_state FROM agent_devices WHERE device_id='d'").fetchone()
-        assert row[0]=="attested", "attestation_state must be untouched (observe-only)"
-        assert row[1] in ("absent","attested","failed"), "tier2_state recorded"
+        # OBSERVE-ONLY: Tier 2 must never touch Tier 1's attestation_state.
+        assert row[0]=="attested", "attestation_state must be untouched (observe-only), got %r" % (row[0],)
+        if loaded_all:
+            assert row[1]=="attested", "fully-loaded agent must attest, got %r" % (row[1],)
+        else:
+            assert row[1]=="absent", "partially-loaded agent must be absent (unresolved), got %r" % (row[1],)
         assert c.execute("SELECT 1 FROM agent_attestation_challenges WHERE device_id='d'").fetchone() is None, "challenge cleared"
-        # tamper control
+
+        # TAMPER control: replace a RESOLVED covered callable's code (tasks:verify_task
+        # is loaded) so its live digest differs from the manifest -> must be FAILED,
+        # and must still leave attestation_state untouched.
         att.build_and_store_challenge(c,"d",agent_root=AGENT)
         n2=c.execute("SELECT nonce FROM agent_attestation_challenges WHERE device_id='d'").fetchone()[0]
         _o=tasks.verify_task; tasks.verify_task=lambda *a,**k:{"ok":True}
         try:
             att.ingest_challenge_response(c,"d",tier2_agent.respond_to_challenge(n2,list(att.TIER2_COVERED)))
         finally: tasks.verify_task=_o
-        assert c.execute("SELECT tier2_state FROM agent_devices WHERE device_id='d'").fetchone()[0]=="failed", "tamper must be FAILED"
-        print("  PASS  tier2 challenge round trip (issue->respond->ingest, tamper->failed)")
+        trow=c.execute("SELECT attestation_state,tier2_state FROM agent_devices WHERE device_id='d'").fetchone()
+        assert trow[1]=="failed", "tamper must be FAILED, got %r" % (trow[1],)
+        assert trow[0]=="attested", "tamper must not touch attestation_state (observe-only)"
+        print("  PASS  tier2 challenge round trip (issue->respond->ingest -> %s, tamper->failed, observe-only)"
+              % ("attested" if loaded_all else "absent"))
     finally:
         os.chdir(_cwd)
 

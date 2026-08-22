@@ -54,13 +54,29 @@ _KNOWN_STATES = (ATTESTED, FAILED, ABSENT)
 ACTION = "attest_manifest"
 
 
-# ── Tier 2 (challenge-response) integration — GUARDED, OBSERVE-ONLY, DORMANT ──
+# ── Tier 2 (challenge-response) integration — GUARDED, OBSERVE-ONLY, LIVE ──
 # The mechanism lives in the PRIVATE attestation-tier2 module (Rule 10 carve-out),
 # deployed separately alongside the server. If it is not importable, Tier 2 is
-# simply OFF and Tier 1 is completely unaffected. Nothing here fires until BOTH
-# the private module is deployed AND the manifest/challenge issuance transport
-# exists (issuance is absent today — build_manifest_envelope has no caller — so
-# these hooks are dormant by construction, not just by flag).
+# simply OFF (tier2_available() is False) and Tier 1 is completely unaffected.
+#
+# When the private module IS deployed the challenge/response path is LIVE, not
+# dormant: hw_monitor's heartbeat handler calls ensure_challenge_queued() on a
+# cadence, delivery builds the challenge via build_and_store_challenge(), the
+# agent answers over its LIVE __code__, and ingest_challenge_response() verifies
+# and records the result. OBSERVE-ONLY is the load-bearing property (decision A2):
+# every Tier 2 verdict lands in the SEPARATE tier2_state column and NEVER touches
+# attestation_state, so Tier 2 cannot gate Tier 1 health until its false-positive
+# rate is measured. The whole path is proven end-to-end by
+# test_attestation.py::test_tier2_challenge_round_trip (attested + tamper->failed,
+# with attestation_state asserted untouched).
+#
+# ⚠ ONE hook here is genuinely unused: build_manifest_envelope()'s Tier 2
+# augmentation. Production manifest DELIVERY builds the manifest via build_task
+# (hw_monitor, action=="attest_manifest"), not build_manifest_envelope — and the
+# challenge flow computes its expected code_digests server-side at issue time
+# (build_and_store_challenge), so it does not depend on the agent caching an
+# augmented manifest at all. build_manifest_envelope stays as a forward hook for
+# an eventual agent-cached-manifest path; it is not on the live challenge path.
 try:
     import tier2_server as _tier2            # noqa: PLC0415  (private, deployed apart)
 except Exception:                            # ImportError or any load failure
@@ -306,8 +322,9 @@ def verify_and_record_tier2(conn, device_id: str, manifest: dict, nonce_hex: str
     """OBSERVE-ONLY: verify a Tier 2 challenge response and record its state in the
     SEPARATE `tier2_state` column — NEVER `attestation_state`, so Tier 2 cannot
     affect Tier 1 health gating (decision A2, observe-first). Returns the stored
-    state, or None if Tier 2 is unavailable. Dormant until issuance delivers a
-    (manifest, nonce, response) triple; nothing calls this yet.
+    state, or None if Tier 2 is unavailable. Called on the live challenge path by
+    ingest_challenge_response(), which the heartbeat handler drives once the
+    private module is deployed.
     """
     if not tier2_available():
         return None
