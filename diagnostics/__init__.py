@@ -19,6 +19,11 @@ from . import (
     anomaly_state,
     vpn_status,
     log_tails,
+    schema_drift,
+    clock_and_timestamp_sanity,
+    agent_enrollment_integrity,
+    dependency_preflight,
+    config_drift,
 )
 from .redact import redact, redact_result
 
@@ -35,6 +40,11 @@ CHECKS = [
     anomaly_state,
     vpn_status,
     log_tails,
+    schema_drift,
+    clock_and_timestamp_sanity,
+    agent_enrollment_integrity,
+    dependency_preflight,
+    config_drift,
 ]
 
 _CHECK_MAP = {m.META["id"]: m for m in CHECKS}
