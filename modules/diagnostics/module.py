@@ -22,10 +22,33 @@ no card (provides_dashboard_card=false until Pass 2), no routes.
 """
 
 import html
+import ipaddress
+import os
+import re
+import sys
 import time
 import logging
+from datetime import datetime
 
 from flask import jsonify, request
+
+#: Repo root, used to keep raw probe logs (which carry real addresses) outside it.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Bounded monitoring cadences. Bare import off the alert_manager directory, which
+# is how every service in this repo reaches that package: the dashboard unit's
+# PYTHONPATH is `/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_monitor`
+# and does NOT include the repo root, so `from alert_manager import cadence` works
+# only by accident of where dashboard.py happens to live. Module scope, not
+# lazy: this module is becoming `required`, and a settings validator that fails
+# open on an ImportError would silently restore the unbounded-interval hole.
+sys.path.insert(0, os.path.join(_REPO_ROOT, "alert_manager"))
+import bounded as _bounded
+
+#: Conservative hostname shape — labels of alphanumerics and hyphens, no leading
+#: or trailing hyphen, dot-separated.
+_HOSTNAME_RE = re.compile(
+    r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$")
 
 from modules import NemesisModule, get_data_manager
 
@@ -257,17 +280,137 @@ def _api_status():
         return jsonify({"error": "internal error"}), 500
 
 
+def _validate_setting(key: str, value) -> tuple:
+    """Per-key value validation. Returns (ok, error).
+
+    This endpoint previously performed NO value validation of any kind — the
+    allowlist said which KEYS could be written and nothing said what VALUES were
+    acceptable, so `POST {"watcher_interval_seconds": 999999999}` was accepted
+    and parked the connectivity watcher for 31.69 years while the module still
+    reported as enabled. Mirrors `modules/malware_detection/module.py`'s
+    `_validate_setting`, deliberately: two settings endpoints on the same
+    appliance with different validation postures is itself the defect signature
+    the route-security practice names.
+    """
+    s = str(value).strip()
+
+    # Bounded monitoring cadences come from the shared registry, so a new cadence
+    # key cannot be added here and silently inherit "anything goes".
+    if key in _bounded.SPECS:
+        return _bounded.validate(s, _bounded.SPECS[key])
+
+    if key in ("watcher_enabled", "watcher_verbose"):
+        return (s in ("0", "1")), "must be '0' or '1'"
+
+    if key == "watcher_verbose_until":
+        # Empty is legitimate — it means "no auto-revert scheduled" — so this is
+        # one of the few places an empty string is a real value rather than a
+        # failed read.
+        if not s:
+            return True, ""
+        try:
+            datetime.fromisoformat(s)
+            return True, ""
+        except ValueError:
+            return False, "must be an ISO-8601 timestamp or empty"
+
+    if key == "watcher_log_dir":
+        # Absolute, for the same reason the malware module requires it: the
+        # watcher service and the dashboard have different working directories,
+        # so a relative path would name two different places.
+        if not s.startswith("/"):
+            return False, "must be an absolute path"
+        if s.startswith(_REPO_ROOT):
+            # Rule 8 / the module docstring: raw probe detail carries real IPs
+            # and must land OUTSIDE the repo. A path inside it would put real
+            # addresses one `git add` away from a public push.
+            return False, "must be outside the repository (raw probe logs " \
+                          "contain real addresses)"
+        return True, ""
+
+    if key == "watcher_samples_max":
+        try:
+            n = int(s)
+        except ValueError:
+            return False, "must be a whole number"
+        # The FLOOR is the meaningful bound. This caps retained sample rows; set
+        # it to 0 or 1 and every cycle purges the history immediately, so the
+        # watcher keeps running while retaining nothing to observe — a coverage
+        # disable by retention rather than by cadence. 60 keeps at least an hour
+        # at the default 60s interval. The ceiling is disk hygiene, not safety.
+        if n < 60 or n > 1000000:
+            return False, "must be between 60 and 1000000 samples (below 60 " \
+                          "the history is purged faster than an outage lasts)"
+        return True, ""
+
+    if key == "watcher_log_retain_days":
+        try:
+            n = int(s)
+        except ValueError:
+            return False, "must be a whole number"
+        if n < 1 or n > 3650:
+            return False, "must be between 1 and 3650 days"
+        return True, ""
+
+    if key == "watcher_log_max_mb":
+        try:
+            n = int(s)
+        except ValueError:
+            return False, "must be a whole number"
+        if n < 1 or n > 10240:
+            return False, "must be between 1 and 10240 MB"
+        return True, ""
+
+    if key == "watcher_egress_ip":
+        # A raw-egress probe target, used deliberately WITHOUT DNS — so it must
+        # be a literal address. A hostname here would silently convert the
+        # DNS-independent probe into a DNS-dependent one, and the check would
+        # then fail for the one reason it was designed to rule out.
+        try:
+            ipaddress.ip_address(s)
+            return True, ""
+        except ValueError:
+            return False, "must be a literal IP address (this probe runs " \
+                          "without DNS by design)"
+
+    if key == "watcher_api_host":
+        if not s or len(s) > 253:
+            return False, "must be a non-empty hostname"
+        if not _HOSTNAME_RE.match(s):
+            return False, "must be a valid hostname"
+        return True, ""
+
+    # No branch matched. REFUSE rather than accept: the malware module's
+    # equivalent ends with `return True, ""`, which is exactly how
+    # canary_poll_seconds reached production unvalidated. A key in
+    # DEFAULT_SETTINGS with no validation rule here is an unfinished addition,
+    # and failing closed makes that visible immediately instead of at the point
+    # someone writes a value that breaks something.
+    return False, "no validation rule defined for this setting"
+
+
 def _api_settings():
     """GET/POST /api/diagnostics/settings."""
     if request.method == "POST":
         data = request.get_json(silent=True) or {}
         allowed = set(DEFAULT_SETTINGS.keys())
-        updated = {}
+        updated, rejected = {}, {}
         for k, v in data.items():
-            if k in allowed:
-                _set_setting(k, v)
-                updated[k] = str(v)
-        return jsonify({"ok": True, "updated": updated})
+            if k not in allowed:
+                rejected[k] = "unknown setting"
+                continue
+            ok, err = _validate_setting(k, v)
+            if not ok:
+                rejected[k] = err
+                continue
+            _set_setting(k, v)
+            updated[k] = str(v)
+        # Report rejections explicitly. Silently dropping an invalid write would
+        # leave the operator believing a value took effect when it did not —
+        # which for a cadence setting means believing coverage is configured one
+        # way while it runs another.
+        return jsonify({"ok": not rejected, "updated": updated,
+                        "rejected": rejected}), (200 if not rejected else 400)
     return jsonify({"settings": {k: _get_setting(k) for k in DEFAULT_SETTINGS}})
 
 

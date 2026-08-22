@@ -26,6 +26,7 @@ import time
 
 _HERE   = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
+import bounded as _bounded
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 DEFAULT_INTERVAL_SECONDS = 60
 #: Throttle handle, set in main() once diagnostics-watcher registers throttle-aware.
@@ -81,12 +82,18 @@ def _add_flat_log_handler() -> None:
 
 
 def _interval_seconds() -> int:
-    """Cadence read fresh from settings each loop (scheduler-aware seam)."""
-    try:
-        return max(5, int(diag._get_setting("watcher_interval_seconds",
-                                            str(DEFAULT_INTERVAL_SECONDS))))
-    except (TypeError, ValueError):
-        return DEFAULT_INTERVAL_SECONDS
+    """Cadence read fresh from settings each loop (scheduler-aware seam).
+
+    Bounded at BOTH ends by `_bounded.WATCHER_INTERVAL_SECONDS`. This used to be
+    `max(5, int(...))` — a floor with no ceiling — and it was reachable through a
+    settings endpoint that validated nothing at all, so one authenticated POST
+    could park the connectivity watcher for 31.69 years with the module still
+    reporting as enabled. A watcher whose interval can exceed the outages it
+    exists to observe is not continuous. See `alert_manager/bounded.py`.
+    """
+    return _bounded.resolve(
+        diag._get_setting("watcher_interval_seconds", str(DEFAULT_INTERVAL_SECONDS)),
+        _bounded.WATCHER_INTERVAL_SECONDS)
 
 
 def _gates_open() -> bool:
@@ -146,17 +153,23 @@ def _notify(result: dict) -> None:
 
 
 def _probe_sleep(seconds):
-    """The probe loop's wait, cooperatively throttled. The interval is already read
-    fresh each loop (the scheduler-aware seam); this lets the memory ladder lengthen
-    it further under RAM pressure. Falls back to the plain interruptible sleep when
-    unregistered."""
-    if _throttle is not None:
-        _throttle.throttled_sleep(seconds, is_running=lambda: _running)
-    else:
-        slept = 0
-        while _running and slept < seconds:
-            time.sleep(1)
-            slept += 1
+    """The probe loop's wait. Plain and interruptible — NOT throttled.
+
+    This deliberately no longer routes through the cooperative throttle. The
+    interval arriving here is already bounded 5..900s by
+    `_bounded.WATCHER_INTERVAL_SECONDS`, and that ceiling exists because beyond it
+    an outage can fall entirely between two samples. Multiplying it by the
+    throttle's MAX_FACTOR of 8 produced a 7,200s (2-hour) gap that the ceiling's
+    own rationale says must not exist.
+
+    `_throttle` is retained as a permanently-None module global rather than
+    deleted, so that any code still reaching for it gets a clean AttributeError-free
+    no-op instead of a NameError, and so the grep for it lands on this explanation.
+    """
+    slept = 0
+    while _running and slept < seconds:
+        time.sleep(1)
+        slept += 1
 
 
 def main() -> None:
@@ -169,20 +182,39 @@ def main() -> None:
     except Exception:
         log.exception("diagnostics-service: _init_db failed at startup")
 
-    # Cooperative throttle seam (ADR 0006). Best-effort; throttle.py fails OPEN.
+    # UNTHROTTLED BY DESIGN (2026-08-22) — this component deliberately does NOT
+    # register as throttle-aware.
+    #
+    # It used to. The registration was correct under the old reading (the probe
+    # loop has a real interval, so lengthening it is a gentle throttle) and became
+    # wrong once the interval gained a CEILING justified against what the detector
+    # is for: `watcher_interval_seconds` is bounded 5..900s because "beyond this an
+    # outage can fall entirely between two samples". The throttle multiplies the
+    # sleep by up to throttle.MAX_FACTOR (8.0), which turned that 900s ceiling into
+    # 7,200s — two hours — while the module still reported as enabled and healthy.
+    # A ceiling another subsystem may stretch is not a ceiling.
+    #
+    # The exclusion is asserted rather than merely omitted: a future edit that
+    # re-adds registration fails loudly here instead of silently restoring the
+    # gap. `mem_appliance.assert_throttle_registerable` is the guard, and
+    # `THROTTLE_UNTHROTTLED_COMPONENTS` is where the decision lives. The memory
+    # ladder keeps its other rungs (alert, abort, restart) for this service.
     global _throttle
+    _throttle = None
     try:
-        import throttle                                  # noqa: PLC0415
-        import data_manager                              # noqa: PLC0415
-        import database as _db_throttle                  # noqa: PLC0415
-        _db_throttle.init_throttle_tables()
-        _throttle = throttle.register_throttle_aware(
-            "diagnostics-watcher", data_manager.DataManager(DB_PATH))
-        log.info("throttle: diagnostics-watcher registered as throttle-aware")
+        import mem_appliance                             # noqa: PLC0415
+        mem_appliance.assert_throttle_registerable("diagnostics-watcher")
+        # Reaching here means the exclusion was removed from mem_appliance without
+        # this block being revisited. Refuse to register anyway and say so.
+        log.error("throttle: diagnostics-watcher is expected to be UNTHROTTLED by "
+                  "design but mem_appliance no longer excludes it -- NOT "
+                  "registering. Reconcile THROTTLE_UNTHROTTLED_COMPONENTS.")
+    except ValueError:
+        log.info("throttle: diagnostics-watcher is UNTHROTTLED by design "
+                 "(required detector; bounded cadence must not be stretched)")
     except Exception as exc:                             # noqa: BLE001
-        _throttle = None
-        log.error("throttle: could not register diagnostics-watcher (%s) -- probe "
-                  "runs at normal cadence, un-throttleable, until resolved", exc)
+        log.warning("throttle: could not confirm the UNTHROTTLED exclusion (%s) -- "
+                    "not registering, which is the safe direction", exc)
 
     _add_flat_log_handler()
     # journald-visible (stdout) AND flat log (the FileHandler just added).
