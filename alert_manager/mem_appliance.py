@@ -220,20 +220,39 @@ RUNG_AVAILABILITY = {
                       "abort": "no discrete operation; requests are the work",
                       "restart": "operator decision: alert-only"}},
 
-    # These four expose a real interval today (audited): lengthening it is a
+    # These three expose a real interval today (audited): lengthening it is a
     # genuine, gentle throttle.
     "hw-monitor":          {"available": _ALL, "why_absent": {}},
     "watchdog":            {"available": _ALL, "why_absent": {}},
     "alert-watcher":       {"available": _ALL, "why_absent": {}},
-    "diagnostics-watcher": {"available": _ALL, "why_absent": {}},
 
-    # Sweeps with sleeps but no named interval knob yet. THROTTLE is marked
-    # absent HONESTLY until a knob exists — claiming it before then would be a
-    # rung that does nothing.
+    # REQUIRED DETECTORS — structurally exempt from THROTTLE (2026-08-22). Both
+    # DO have a real, bounded interval knob; that is precisely why they are
+    # excluded. Their ceilings are justified against what the detector is for
+    # (alert_manager/cadence.py), and a throttle multiplier would carry the
+    # interval past its own ceiling. See THROTTLE_UNTHROTTLED_COMPONENTS.
+    #
+    # NOTE the change of reason for malware-canary: it previously read "loop has
+    # no interval knob yet", i.e. UNAVAILABLE-and-should-be-wired. It has had one
+    # all along (`canary_poll_seconds`), now bounded 5..300s — so acting on the
+    # old note would have wired throttle into a required detector and re-opened
+    # the exact hole this exclusion closes.
+    "diagnostics-watcher": {"available": frozenset({"alert", "abort", "restart"}),
+                            "why_absent": {"throttle":
+                                "required detector: stretching its bounded poll "
+                                "interval past the ceiling that justifies it is a "
+                                "coverage disable"}},
+    "malware-canary":      {"available": frozenset({"alert", "abort", "restart"}),
+                            "why_absent": {"throttle":
+                                "required detector: the poll interval IS the "
+                                "ransomware detection latency"}},
+
+    # Sweep with sleeps but no named interval knob yet. THROTTLE is marked absent
+    # HONESTLY until a knob exists — claiming it before then would be a rung that
+    # does nothing. Distinct from the two above: this one is not-yet-wired
+    # (UNAVAILABLE), not excluded by design.
     "device-scanner": {"available": frozenset({"alert", "abort", "restart"}),
                        "why_absent": {"throttle": "sweep has no interval knob yet"}},
-    "malware-canary": {"available": frozenset({"alert", "abort", "restart"}),
-                       "why_absent": {"throttle": "loop has no interval knob yet"}},
 
     # Exempt anyway; recorded for completeness so the table is not silently
     # partial.
@@ -281,18 +300,90 @@ THROTTLE_UNAVAILABLE  = "unavailable"    # SHOULD be wired but isn't yet (no int
 #: wired. Components here MUST NEVER call throttle.register_throttle_aware() — the
 #: exclusion is a decision, not an oversight, and UNTHROTTLED makes that visible
 #: rather than leaving them merely absent from the registry (which reads as a bug).
-THROTTLE_UNTHROTTLED_COMPONENTS = frozenset({"clamav-daemon", "suricata", "dashboard"})
+THROTTLE_UNTHROTTLED_COMPONENTS = frozenset({
+    "clamav-daemon", "suricata", "dashboard",
+    # ── Added 2026-08-22, for a DIFFERENT reason than the three above ──────────
+    # The three originals are exempt because there is no interval of ours to slow,
+    # or because slowing them is harmful in itself. These two are exempt because
+    # they are REQUIRED DETECTORS, and a detector's poll interval is bounded by a
+    # ceiling that is justified against what the detector is for
+    # (alert_manager/cadence.py). The throttle multiplies that interval by up to
+    # MAX_FACTOR, which would carry it past its own ceiling: measured, the
+    # diagnostics watcher's justified 900s ceiling became 7,200s (2 hours) — well
+    # past the point its own rationale says an outage can fall entirely between
+    # two samples.
+    #
+    # A ceiling that another subsystem may stretch is not a ceiling. That is the
+    # same coverage-disable-through-a-side-door the interval bounds were added to
+    # close, arriving through cooperation rather than through a setting.
+    #
+    # The memory ladder keeps every other rung for these components (alert, abort,
+    # restart) and keeps THROTTLE for non-detection work. Only the detector's
+    # cadence is off limits.
+    "diagnostics-watcher",
+    "malware-canary",
+})
 
 
 def throttle_status(component):
     """Three-way throttle standing for `component`. The report layer uses this so
-    UNTHROTTLED (excluded by design) never reads as UNAVAILABLE (not wired yet)."""
+    UNTHROTTLED (excluded by design) never reads as UNAVAILABLE (not wired yet).
+
+    UNTHROTTLED is checked FIRST, deliberately. It is a structural decision about
+    whether a component may EVER be throttled; RUNG_AVAILABILITY describes what a
+    component is mechanically capable of. If the two ever disagree the decision
+    must win, or a stale `available` entry would quietly re-open an exclusion that
+    was made on purpose. `_selftest_throttle_exclusions` makes such a disagreement
+    impossible to ship, but the ordering here means it would still fail safe.
+    """
+    if component in THROTTLE_UNTHROTTLED_COMPONENTS:
+        return THROTTLE_UNTHROTTLED
     entry = RUNG_AVAILABILITY.get(component)
     if entry and "throttle" in entry["available"]:
         return THROTTLE_THROTTLEABLE
-    if component in THROTTLE_UNTHROTTLED_COMPONENTS:
-        return THROTTLE_UNTHROTTLED
     return THROTTLE_UNAVAILABLE
+
+
+def _selftest_throttle_exclusions() -> None:
+    """An UNTHROTTLED component must not also advertise THROTTLE as available.
+
+    Runs at import, in the production path. The two structures are edited by hand
+    in different places, and a component left advertising `throttle` while being
+    structurally exempt is exactly the kind of half-applied change that reads as
+    working -- `throttle_status()` would still say UNTHROTTLED thanks to the
+    ordering above, while `RUNG_AVAILABILITY` told the ladder it was fair game.
+    """
+    for comp in THROTTLE_UNTHROTTLED_COMPONENTS:
+        entry = RUNG_AVAILABILITY.get(comp)
+        if entry and "throttle" in entry["available"]:
+            raise AssertionError(
+                "throttle exclusion self-test: %r is in "
+                "THROTTLE_UNTHROTTLED_COMPONENTS but RUNG_AVAILABILITY still "
+                "lists 'throttle' as available -- one of the two edits was "
+                "missed, and the ladder would treat it as throttleable" % comp)
+        if entry is not None and "throttle" not in entry.get("why_absent", {}):
+            raise AssertionError(
+                "throttle exclusion self-test: %r is UNTHROTTLED by design but "
+                "records no why_absent['throttle'] reason -- an exclusion whose "
+                "reason is not stated will not survive its first inconvenience"
+                % comp)
+    # CONTROL: prove this test can distinguish. A component that is genuinely
+    # throttleable must NOT be in the exclusion set, or the check above would be
+    # vacuously true for an empty/degenerate set.
+    throttleable = [c for c, e in RUNG_AVAILABILITY.items()
+                    if "throttle" in e["available"]]
+    if not throttleable:
+        raise AssertionError(
+            "throttle exclusion self-test: NO component is throttleable, so this "
+            "check proves nothing -- the throttle subsystem has no subjects left")
+    for c in throttleable:
+        if c in THROTTLE_UNTHROTTLED_COMPONENTS:
+            raise AssertionError(
+                "throttle exclusion self-test: %r is both throttleable and "
+                "structurally exempt" % c)
+
+
+_selftest_throttle_exclusions()
 
 
 def throttle_status_map():

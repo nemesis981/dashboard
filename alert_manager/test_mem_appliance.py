@@ -278,12 +278,29 @@ def test_throttle_status_three_way():
     # structural exclusions -> UNTHROTTLED
     for c in ("clamav-daemon", "suricata", "dashboard"):
         check("%s is UNTHROTTLED (by design)" % c, ma.throttle_status(c), ma.THROTTLE_UNTHROTTLED)
-    # not-wired-yet -> UNAVAILABLE (the generic case), NOT unthrottled
-    for c in ("device-scanner", "malware-canary"):
+    # REQUIRED DETECTORS -> UNTHROTTLED (2026-08-22). Both previously read
+    # differently and were changed deliberately, so the expectations here move
+    # with them rather than being loosened:
+    #   * malware-canary was UNAVAILABLE ("loop has no interval knob yet"). It has
+    #     had one all along -- `canary_poll_seconds`, now bounded 5..300s -- so the
+    #     old note would have led someone to WIRE throttle into a required
+    #     detector.
+    #   * diagnostics-watcher was THROTTLEABLE and genuinely registered. The
+    #     throttle multiplied its bounded 900s interval by up to MAX_FACTOR=8,
+    #     giving a 7,200s gap -- past the ceiling whose own rationale is that an
+    #     outage must not fall entirely between two samples.
+    # A ceiling another subsystem may stretch is not a ceiling.
+    for c in ("diagnostics-watcher", "malware-canary"):
+        check("%s is UNTHROTTLED (required detector, bounded cadence)" % c,
+              ma.throttle_status(c), ma.THROTTLE_UNTHROTTLED)
+    # not-wired-yet -> UNAVAILABLE (the generic case), NOT unthrottled. Kept as a
+    # CONTROL: it proves UNAVAILABLE still exists and did not collapse into
+    # UNTHROTTLED when the two entries above moved.
+    for c in ("device-scanner",):
         check("%s is UNAVAILABLE (pending a knob), not unthrottled" % c,
               ma.throttle_status(c), ma.THROTTLE_UNAVAILABLE)
     # real interval -> THROTTLEABLE
-    for c in ("hw-monitor", "watchdog", "alert-watcher", "diagnostics-watcher"):
+    for c in ("hw-monitor", "watchdog", "alert-watcher"):
         check("%s is THROTTLEABLE" % c, ma.throttle_status(c), ma.THROTTLE_THROTTLEABLE)
     # the three statuses are genuinely different strings
     check("the three statuses are distinct",
