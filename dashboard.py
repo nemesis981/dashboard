@@ -18,6 +18,7 @@ import shutil
 import socket
 import ipaddress
 import uuid as _uuid_mod
+import collections
 from datetime import datetime, timedelta, timezone
 
 # Root logger configuration. UNRELATED to the Data Manager work below — this
@@ -115,6 +116,8 @@ import bcrypt
 import psutil
 from flask_login import (LoginManager, UserMixin, login_user, logout_user,
                          login_required, current_user)
+
+import roles as _roles
 from core import entitlements, passphrase
 
 init_alerts_db()
@@ -1373,6 +1376,401 @@ def _enforce_setup_and_auth():
         except Exception:
             # A failure to evaluate the policy must not take the dashboard down.
             auth_log.exception("auth: password-expiry check failed")
+
+
+
+# ── Authorization gate (RBAC) ─────────────────────────────────────────────────
+# Registered AFTER _enforce_setup_and_auth so authentication is settled first:
+# this hook answers "may THIS user do this?", which is only a meaningful question
+# once we know who they are.
+#
+# WHY A before_request HOOK AND NOT ONLY A DECORATOR
+#   A decorator can only cover views defined in this file. 45 of the 143 live
+#   endpoints are registered by modules_loader from each module's get_routes(),
+#   and cannot be decorated from here. A decorator-only design would leave every
+#   module route ungated while looking complete. This hook sees every request, so
+#   coverage is a property of the mechanism rather than of remembering.
+#
+# WHY THIS DOES NOT SWALLOW EXCEPTIONS, UNLIKE ITS NEIGHBOURS
+#   The idle-lock and password-expiry checks above deliberately catch everything,
+#   because a bug in a CONFINEMENT policy must not lock the operator out. The
+#   opposite is true here: a bug in an AUTHORIZATION policy must not let someone
+#   through. Swallowing an exception here would fail open, which is the whole
+#   failure class this file keeps guarding against. It is a deliberate divergence
+#   from the sibling checks, not an oversight — flagged explicitly because "two
+#   routes doing the same conceptual job with different gates" is itself a
+#   finding shape, and this one has a reason.
+
+def _forbidden_page(need, have):
+    """The human-facing 403. Plain concatenation, single-quoted JS-free HTML.
+
+    Deliberately NOT a redirect to the login page: the user IS logged in, and
+    bouncing them to a sign-in form they can already pass would read as a broken
+    dashboard rather than as a permissions boundary. It says what happened, what
+    would be needed, and who can change it.
+    """
+    need_label = html.escape(_roles.role_label(need))
+    have_label = html.escape(_roles.role_label(have)) if have != "unknown" else "unrecognised"
+    return (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<title>Not permitted &mdash; Nemesis</title>'
+        '<link rel="stylesheet" href="/static/style.css">'
+        '<script src="/static/tier.js" defer></script></head>'
+        '<body style="background:#0d0d1e;color:#eee;font-family:system-ui,sans-serif">'
+        '<div style="max-width:620px;margin:14vh auto;padding:26px;'
+        'background:#12122a;border:1px solid #333;border-radius:10px">'
+        '<h1 style="margin:0 0 12px;font-size:1.3em">&#128274; Not permitted</h1>'
+        '<p class="tier-text" style="line-height:1.6"'
+        ' data-beginner="This part of Nemesis is reserved for accounts with more '
+        'access than yours. Nothing has gone wrong &mdash; you just are not set up '
+        'to use it. Ask whoever set up this system if you need it."'
+        ' data-intermediate="This action requires the ' + need_label + ' role. '
+        'Your account is ' + have_label + '. Ask an administrator if you need access."'
+        ' data-pro="403 &mdash; role ' + have_label + ' &lt; required ' + need_label + '. '
+        'Enforced server-side at the before_request gate.">'
+        'This action requires the ' + need_label + ' role. Your account is '
+        + have_label + '.</p>'
+        '<p style="margin-top:18px"><a href="/" style="color:#00d4ff">'
+        '&larr; Back to the dashboard</a></p>'
+        '</div>'
+        '<script>if(window.applyTierText){window.applyTierText();}</script>'
+        '</body></html>'
+    )
+
+
+def _errors_record_rbac(code, context):
+    """Record an RBAC error occurrence. Never raises into the request path.
+
+    Deferred registration, same reason as every other recorder in this codebase:
+    registering at import would couple the auth gate to the error tables existing,
+    and a failure there would take the whole dashboard down.
+    """
+    global _rbac_recorder
+    try:
+        if _rbac_recorder is None:
+            import nemesis_errors
+            from modules import get_data_manager
+            _rbac_recorder = nemesis_errors.make_recorder(
+                "core", lambda: get_data_manager().connect("core"),
+                _RBAC_ERR_CODES, logger=auth_log)
+        return _rbac_recorder(code, context=context)
+    except Exception:
+        return None
+
+
+# Prefix `E-RBAC-` claimed 2026-08-22; verified free against the range-claim
+# tables in docs/audits/error-code-classification-batch{1,2,3}-2026-08-08.md.
+_RBAC_ERR_CODES = {
+    "E-RBAC-001": ("a user account carries a role string the access-control layer "
+                   "cannot parse, so every non-self-service request from it is "
+                   "refused", "HIGH", "unparseable-role"),
+    "E-RBAC-002": ("a route was reached that has no role assignment; it fell back "
+                   "to admin-only, which is safe but means the registry has "
+                   "drifted from the routes", "MEDIUM", "unclassified-route"),
+    "E-RBAC-003": ("an account change was refused because it would have left the "
+                   "system with no administrator", "LOW", "last-admin-protection"),
+}
+_rbac_recorder = None
+
+
+_ROLE_DENIALS = collections.Counter()
+
+
+def _current_role():
+    """The active user's role, normalised. Raises RoleError if unusable."""
+    return _roles.normalise_role(getattr(current_user, "role", None))
+
+
+def _role_denied(ep, need, have):
+    """Refuse. JSON for API callers, a real page for humans."""
+    _ROLE_DENIALS[ep] += 1
+    auth_log.warning("authz: %s denied %s %s (needs %s, has %s)",
+                     getattr(current_user, "username", "?"), request.method,
+                     ep, need, have)
+    wants_json = (request.path.startswith("/api/")
+                  or "application/json" in (request.headers.get("Accept") or ""))
+    if wants_json:
+        return jsonify({
+            "ok": False,
+            "error": "Your account does not have permission to do this.",
+            "required_role": need,
+            "your_role": have,
+        }), 403
+    return _forbidden_page(need, have), 403
+
+
+@app.before_request
+def _enforce_role():
+    ep = request.endpoint
+    if ep is None:
+        return                      # unknown path — let Flask 404 it
+    if ep in _roles.UNAUTHENTICATED or ep.startswith("static"):
+        return                      # no session, so no role to check
+    if ep in _roles.SELF_SERVICE:
+        return                      # own password / logout / session touch:
+                                    # role-independent BY DESIGN. Gating these
+                                    # would lock a viewonly user out of their own
+                                    # account, which is worse security, not better.
+    if not current_user.is_authenticated:
+        return                      # the auth gate above already handled this
+
+    try:
+        have = _current_role()
+    except _roles.RoleError:
+        # A stored role we cannot parse. Refuse everything outside self-service
+        # rather than guessing — the users table defaults `role` to 'admin', so
+        # any fallback here would promote a corrupt row to superuser.
+        _errors_record_rbac("E-RBAC-001",
+                            {"user": getattr(current_user, "username", "?"),
+                             "role": repr(getattr(current_user, "role", None))})
+        auth_log.error("authz: user %s has an unusable role %r — refusing",
+                       getattr(current_user, "username", "?"),
+                       getattr(current_user, "role", None))
+        return _role_denied(ep, _roles.ROLE_ADMIN, "unknown")
+
+    if ep not in _roles.ROUTE_MINIMUMS:
+        # Fail closed, and SAY SO. An unclassified endpoint resolves to admin,
+        # which is safe, but silence would let the registry drift out of step
+        # with the routes forever. Recorded so drift is visible rather than
+        # merely survivable.
+        _errors_record_rbac("E-RBAC-002", {"endpoint": ep, "method": request.method})
+
+    need = _roles.required_role(ep, request.method)
+    if not _roles.at_least(have, need):
+        return _role_denied(ep, need, have)
+
+
+
+# ── User management (admin only) ──────────────────────────────────────────────
+# Every route here is admin-gated by the registry in roles.py, enforced at the
+# before_request gate. The @_roles.require_role decorators below are declarations
+# next to the code, and they write into that same table — they are not a second,
+# independent mechanism that could drift from it.
+
+def _admin_count(exclude_id=None):
+    """How many ACTIVE admins exist. `exclude_id` models a pending change.
+
+    Counts is_active=1 only: a deactivated admin cannot log in, so leaving one
+    behind is the same as leaving none. Treating them as sufficient would be a
+    lockout dressed up as a safety check.
+    """
+    conn = _users_conn()
+    try:
+        rows = conn.execute("SELECT id, role FROM users WHERE is_active=1").fetchall()
+    finally:
+        conn.close()
+    n = 0
+    for r in rows:
+        if exclude_id is not None and r["id"] == exclude_id:
+            continue
+        try:
+            if _roles.normalise_role(r["role"]) == _roles.ROLE_ADMIN:
+                n += 1
+        except _roles.RoleError:
+            # An unparseable role is NOT counted as an admin. Counting it would
+            # let a corrupt row stand in for the last real administrator and
+            # allow the last usable one to be removed.
+            continue
+    return n
+
+
+def _would_orphan(user_id, new_role=None, new_active=None):
+    """True if this change would leave the system with no usable administrator.
+
+    The invariant every account mutation is checked against. Without it, an admin
+    can demote, deactivate or delete themselves and lock everyone out of settings,
+    modules and user management permanently — recoverable only by editing the DB
+    by hand.
+    """
+    row = _load_user_row("id", user_id)
+    if row is None:
+        return False
+    try:
+        was_admin = _roles.normalise_role(row["role"]) == _roles.ROLE_ADMIN
+    except _roles.RoleError:
+        was_admin = False
+    if not (was_admin and bool(row["is_active"])):
+        return False                      # they were not a usable admin anyway
+    still_admin = was_admin if new_role is None else (
+        _roles.normalise_role(new_role) == _roles.ROLE_ADMIN)
+    still_active = bool(row["is_active"]) if new_active is None else bool(new_active)
+    if still_admin and still_active:
+        return False                      # nothing about their adminness changed
+    return _admin_count(exclude_id=user_id) == 0
+
+
+def _orphan_refusal(what):
+    _errors_record_rbac("E-RBAC-003", {"fn": what})
+    return jsonify({
+        "ok": False,
+        "error": ("This would leave the system with no administrator. Give "
+                  "another active account the Administrator role first."),
+    }), 409
+
+
+def _user_json(row):
+    try:
+        role = _roles.normalise_role(row["role"])
+        role_ok = True
+    except _roles.RoleError:
+        role, role_ok = str(row["role"]), False
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "display_name": row["display_name"],
+        "role": role,
+        "role_recognised": role_ok,
+        "role_label": _roles.role_label(role) if role_ok else "Unrecognised",
+        "is_active": bool(row["is_active"]),
+        "created_at": row["created_at"],
+        "last_login": row["last_login"],
+        "is_self": bool(current_user.is_authenticated and row["id"] == current_user.id),
+    }
+
+
+@app.route("/settings/users")
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def users_page():
+    return render_template("users.html")
+
+
+@app.route("/api/users/roles")
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def api_users_roles():
+    """The role catalogue, served rather than hardcoded in the page.
+
+    Same reasoning as the TLS port allowlist and the lookup rrtype set: the UI
+    must not be able to offer a role the backend will refuse, and the list of
+    roles must have exactly one definition.
+    """
+    return jsonify({"ok": True, "roles": [
+        {"value": r, "label": _roles.role_label(r),
+         "description": _roles.role_description(r)}
+        for r in reversed(_roles.ROLES)
+    ], "default": _roles.DEFAULT_ROLE})
+
+
+@app.route("/api/users")
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def api_users_list():
+    conn = _users_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY username").fetchall()
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "users": [_user_json(r) for r in rows],
+                    "admin_count": _admin_count()})
+
+
+@app.route("/api/users/create", methods=["POST"])
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def api_users_create():
+    data = request.get_json(silent=True) or {}
+    username = str(data.get("username", "")).strip().lower()
+    display = str(data.get("display_name", "")).strip() or username
+    password = str(data.get("password", "") or "")
+    if not _USERNAME_RE.match(username):
+        return jsonify({"ok": False, "error": "Username must be 3-20 characters, "
+                        "lowercase letters, numbers or underscore."}), 400
+    if _load_user_row("username", username) is not None:
+        return jsonify({"ok": False, "error": "That username is already taken."}), 409
+    # The SAME validator the setup wizard and password-change flow use
+    # (`core.passphrase.validate`). Writing a second, weaker check here would let
+    # an admin create an account whose password the product's own policy would
+    # have refused -- the "two routes doing the same job with different gates"
+    # shape, applied to credentials.
+    ok, why = passphrase.validate(password)
+    if not ok:
+        return jsonify({"ok": False, "error": why}), 400
+    try:
+        role = _roles.normalise_role(data.get("role") or _roles.DEFAULT_ROLE)
+    except _roles.RoleError:
+        return jsonify({"ok": False, "error": "Unknown role."}), 400
+    uid = _create_user(username, display, password, role)
+    auth_log.info("authz: %s created user %s with role %s",
+                  current_user.username, username, role)
+    return jsonify({"ok": True, "id": uid})
+
+
+@app.route("/api/users/<int:uid>/update", methods=["POST"])
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def api_users_update(uid):
+    """Change display name, role, active flag, or password. One route, one gate."""
+    row = _load_user_row("id", uid)
+    if row is None:
+        return jsonify({"ok": False, "error": "No such user."}), 404
+    data = request.get_json(silent=True) or {}
+
+    new_role = data.get("role")
+    if new_role is not None:
+        try:
+            new_role = _roles.normalise_role(new_role)
+        except _roles.RoleError:
+            return jsonify({"ok": False, "error": "Unknown role."}), 400
+    new_active = data.get("is_active")
+    if new_active is not None:
+        new_active = 1 if bool(new_active) else 0
+
+    if _would_orphan(uid, new_role, new_active):
+        return _orphan_refusal("api_users_update")
+
+    sets, args = [], []
+    if data.get("display_name") is not None:
+        sets.append("display_name=?"); args.append(str(data["display_name"]).strip())
+    if new_role is not None:
+        sets.append("role=?"); args.append(new_role)
+    if new_active is not None:
+        sets.append("is_active=?"); args.append(new_active)
+    if data.get("password"):
+        ok, why = passphrase.validate(str(data["password"]))
+        if not ok:
+            return jsonify({"ok": False, "error": why}), 400
+        sets.append("password_hash=?"); args.append(_hash_password(str(data["password"])))
+        sets.append("password_changed_at=?")
+        args.append(datetime.now().isoformat(timespec="seconds"))
+    if not sets:
+        return jsonify({"ok": False, "error": "Nothing to change."}), 400
+
+    conn = _users_conn()
+    try:
+        conn.execute("UPDATE users SET %s WHERE id=?" % ", ".join(sets), args + [uid])
+        conn.commit()
+    finally:
+        conn.close()
+    auth_log.info("authz: %s updated user %s (%s)",
+                  current_user.username, row["username"], ", ".join(sets))
+    return jsonify({"ok": True})
+
+
+@app.route("/api/users/<int:uid>/delete", methods=["POST"])
+@login_required
+@_roles.require_role(_roles.ROLE_ADMIN)
+def api_users_delete(uid):
+    row = _load_user_row("id", uid)
+    if row is None:
+        return jsonify({"ok": False, "error": "No such user."}), 404
+    if current_user.is_authenticated and uid == current_user.id:
+        # Distinct from the orphan check, and needed even when other admins
+        # exist: deleting the account you are signed in as leaves a live session
+        # attached to a row that no longer exists.
+        return jsonify({"ok": False, "error":
+                        "You cannot delete the account you are signed in as."}), 409
+    if _would_orphan(uid, new_active=0):
+        return _orphan_refusal("api_users_delete")
+    conn = _users_conn()
+    try:
+        conn.execute("DELETE FROM users WHERE id=?", (uid,))
+        conn.commit()
+    finally:
+        conn.close()
+    auth_log.info("authz: %s deleted user %s", current_user.username, row["username"])
+    return jsonify({"ok": True})
 
 
 # ── Auth routes ───────────────────────────────────────────────────────────────
@@ -3729,8 +4127,26 @@ def _header_status_data() -> dict:
 
 @app.route("/api/header/status")
 def api_header_status():
-    """Global health verdict for the header light (auth-guarded; no exemption)."""
-    return jsonify(_header_status_data())
+    """Global health verdict for the header light (auth-guarded; no exemption).
+
+    Also carries the caller's ROLE, so the interface can stop offering controls
+    the server would refuse. This is presentation only — every one of those
+    controls is enforced independently at the before_request gate, and hiding a
+    button has never been a security measure. It exists so a viewonly user sees a
+    coherent product rather than a wall of buttons that all return 403.
+    """
+    data = _header_status_data()
+    try:
+        role = _current_role()
+        data["role"] = role
+        data["role_label"] = _roles.role_label(role)
+    except Exception:                                          # noqa: BLE001
+        # An unusable role must not break the header. The gate has already
+        # refused this session everything but self-service; the UI just needs a
+        # value it can render.
+        data["role"] = "unknown"
+        data["role_label"] = "Unrecognised"
+    return jsonify(data)
 
 
 # ── Agent enrollment approval (owner action; auth-guarded dashboard routes) ────
@@ -7556,6 +7972,7 @@ def settings_page():
 <head>
     <title>Nemesis — Settings</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <style>
@@ -7998,6 +8415,23 @@ def settings_page():
                style="display:inline-block;margin-top:10px;background:#00d4ff22;color:#00d4ff;
                       border:1px solid #00d4ff;border-radius:7px;padding:7px 14px;
                       font-size:0.9em;text-decoration:none">Manage licence &amp; backup codes &rarr;</a>
+        </div>
+
+        <!-- User accounts. data-min-role hides this for non-admins; the route
+             itself is admin-gated at the before_request gate, so the attribute
+             is tidiness, not the control. -->
+        <div class="settings-card" data-min-role="admin">
+            <h2>&#128100; User accounts</h2>
+            <p>
+                <span class="tier-text"
+                    data-beginner="Give each person who uses Nemesis their own sign-in, and choose how much each one is allowed to do."
+                    data-intermediate="Accounts and roles. Roles are enforced on the server for every request, including the API."
+                    data-pro="RBAC: admin / user / viewonly, enforced at a before_request gate over all endpoints.">Give each person their own sign-in and decide what they can do.</span>
+            </p>
+            <a href="/settings/users"
+               style="display:inline-block;margin-top:10px;background:#00d4ff22;color:#00d4ff;
+                      border:1px solid #00d4ff;border-radius:7px;padding:7px 14px;
+                      font-size:0.9em;text-decoration:none">Manage user accounts &rarr;</a>
         </div>
     </div>
 
@@ -9504,6 +9938,7 @@ def diagnostics_page():
 <head>
     <title>Nemesis — Diagnostics</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <script src="/static/throttle-status.js"></script>
@@ -10036,6 +10471,7 @@ def firewall_db():
 <head>
     <title>Nemesis - Alert Database</title>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <style>
@@ -11869,6 +12305,7 @@ def scan_page():
          script loaded ahead of it could capture the unwrapped original. -->
     <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <style>
@@ -12556,6 +12993,7 @@ def hardware_all_page():
     <!-- Must precede any other script: it wraps window.fetch. -->
     <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <style>
@@ -13569,6 +14007,7 @@ def dashboard():
     </style>
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <script src="/static/tier.js"></script>
+    <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <script src="/static/ram-recovery.js"></script>

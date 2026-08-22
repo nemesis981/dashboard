@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>User accounts — Nemesis Firewall</title>
+  <script src="/static/tier.js" defer></script>
+  <script src="/static/role.js" defer></script>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; padding:26px; }
+    a { color:#00d4ff; }
+    h1 { color:#00d4ff; margin:0 0 4px; font-size:1.4em; }
+    .sub { color:#aaa; margin:0 0 20px; font-size:0.9em; line-height:1.5; max-width:70ch; }
+    .card { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:20px 22px; margin-bottom:18px; }
+    table { width:100%; border-collapse:collapse; font-size:0.9em; }
+    th { text-align:left; color:#8ab; font-weight:600; padding:8px 10px;
+         border-bottom:1px solid #2a2a4a; font-size:0.84em; }
+    td { padding:9px 10px; border-bottom:1px solid #1e1e38; vertical-align:middle; }
+    tr:last-child td { border-bottom:none; }
+    .pill { display:inline-block; padding:2px 9px; border-radius:11px; font-size:0.78em;
+            border:1px solid; }
+    .pill-admin    { color:#ff9d5c; border-color:#ff9d5c55; background:#ff9d5c14; }
+    .pill-user     { color:#00d4ff; border-color:#00d4ff55; background:#00d4ff14; }
+    .pill-viewonly { color:#9aa;    border-color:#9aa5;     background:#9aa1; }
+    .pill-bad      { color:#ff4444; border-color:#ff444488; background:#ff444418; }
+    .muted { color:#778; font-size:0.85em; }
+    label { display:block; margin:12px 0 4px; font-size:0.84em; color:#ccd; }
+    input[type=text], input[type=password], select {
+      width:100%; box-sizing:border-box; background:#0d0d1e; border:1px solid #334;
+      color:#eee; padding:8px 10px; border-radius:7px; font-size:0.92em; }
+    input:focus, select:focus { outline:none; border-color:#00d4ff; }
+    button { background:#00d4ff; color:#0d0d1e; border:none; padding:8px 18px;
+             border-radius:7px; font-weight:700; cursor:pointer; font-size:0.9em; }
+    button.ghost { background:transparent; color:#00d4ff; border:1px solid #00d4ff66;
+                   font-weight:500; padding:5px 12px; font-size:0.84em; }
+    button.danger { background:transparent; color:#ff6b6b; border:1px solid #ff6b6b66;
+                    font-weight:500; padding:5px 12px; font-size:0.84em; }
+    button:disabled { opacity:0.4; cursor:not-allowed; }
+    .row { display:flex; gap:14px; flex-wrap:wrap; }
+    .row > div { flex:1; min-width:180px; }
+    .msg { margin-top:12px; font-size:0.88em; min-height:1.2em; }
+    .msg.err { color:#ff6b6b; }
+    .msg.ok  { color:#00ff88; }
+    .rolehelp { color:#889; font-size:0.8em; margin-top:5px; line-height:1.45; }
+  </style>
+</head>
+<body>
+  <p><a href="/settings">&larr; Back to settings</a></p>
+  <h1>&#128100; User accounts</h1>
+  <p class="sub tier-text"
+     data-beginner="Each person who uses Nemesis gets their own account. The role you give them decides how much they can do &mdash; from just looking, up to full control. Everyone should have their own account rather than sharing one, so you can tell who did what."
+     data-intermediate="Accounts and roles. A role is enforced on the server for every request, so it applies to the API as well as the pages &mdash; not just what the interface shows."
+     data-pro="RBAC. Minimums are declared in alert_manager/roles.py and enforced at a before_request gate covering all endpoints, including module-registered routes.">
+    Accounts and roles. A role is enforced on the server for every request.
+  </p>
+
+  <div class="card">
+    <table id="userTable">
+      <thead>
+        <tr><th>Username</th><th>Name</th><th>Role</th><th>Status</th>
+            <th>Last sign-in</th><th></th></tr>
+      </thead>
+      <tbody id="userRows">
+        <tr><td colspan="6" class="muted">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+    <div id="listMsg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin:0 0 4px;font-size:1.05em;color:#00d4ff">Add an account</h2>
+    <div class="row">
+      <div>
+        <label for="nuUser">Username</label>
+        <input type="text" id="nuUser" maxlength="20" autocomplete="off"
+               placeholder="lowercase, 3-20 characters">
+      </div>
+      <div>
+        <label for="nuName">Display name</label>
+        <input type="text" id="nuName" maxlength="60" autocomplete="off"
+               placeholder="shown in the interface">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label for="nuPass">Password</label>
+        <input type="password" id="nuPass" autocomplete="new-password">
+      </div>
+      <div>
+        <label for="nuRole">Role</label>
+        <select id="nuRole"></select>
+        <div class="rolehelp" id="nuRoleHelp"></div>
+      </div>
+    </div>
+    <p style="margin-top:16px"><button id="nuBtn" onclick="createUser()">Create account</button></p>
+    <div id="newMsg" class="msg"></div>
+  </div>
+
+<script>
+var ROLES = [];
+
+function esc(s) { return (s === null || s === undefined) ? '' : String(s); }
+
+function setMsg(id, text, kind) {
+  var el = document.getElementById(id);
+  el.textContent = text || '';
+  el.className = 'msg' + (kind ? ' ' + kind : '');
+}
+
+function pillFor(u) {
+  var span = document.createElement('span');
+  if (!u.role_recognised) {
+    span.className = 'pill pill-bad';
+    span.textContent = 'Unrecognised: ' + esc(u.role);
+    span.title = 'This account cannot be used until an administrator sets a valid role.';
+    return span;
+  }
+  span.className = 'pill pill-' + esc(u.role);
+  span.textContent = esc(u.role_label);
+  return span;
+}
+
+function loadRoles() {
+  return fetch('/api/users/roles').then(function (r) { return r.json(); })
+    .then(function (d) {
+      if (!d.ok) { return; }
+      ROLES = d.roles;
+      var sel = document.getElementById('nuRole');
+      sel.innerHTML = '';
+      ROLES.forEach(function (r) {
+        var o = document.createElement('option');
+        o.value = r.value;
+        o.textContent = r.label;
+        if (r.value === d.default) { o.selected = true; }
+        sel.appendChild(o);
+      });
+      sel.onchange = showRoleHelp;
+      showRoleHelp();
+    });
+}
+
+function showRoleHelp() {
+  var v = document.getElementById('nuRole').value;
+  var hit = ROLES.filter(function (r) { return r.value === v; })[0];
+  document.getElementById('nuRoleHelp').textContent = hit ? hit.description : '';
+}
+
+function loadUsers() {
+  fetch('/api/users').then(function (r) { return r.json(); }).then(function (d) {
+    var body = document.getElementById('userRows');
+    body.innerHTML = '';
+    if (!d.ok) { setMsg('listMsg', d.error || 'Could not load accounts.', 'err'); return; }
+    d.users.forEach(function (u) {
+      var tr = document.createElement('tr');
+
+      var tdU = document.createElement('td');
+      tdU.textContent = esc(u.username);
+      if (u.is_self) {
+        var you = document.createElement('span');
+        you.className = 'muted'; you.textContent = '  (you)';
+        tdU.appendChild(you);
+      }
+      tr.appendChild(tdU);
+
+      var tdN = document.createElement('td');
+      tdN.textContent = esc(u.display_name);
+      tr.appendChild(tdN);
+
+      var tdR = document.createElement('td');
+      var sel = document.createElement('select');
+      sel.style.width = 'auto';
+      ROLES.forEach(function (r) {
+        var o = document.createElement('option');
+        o.value = r.value; o.textContent = r.label;
+        if (u.role_recognised && r.value === u.role) { o.selected = true; }
+        sel.appendChild(o);
+      });
+      if (!u.role_recognised) {
+        var warn = document.createElement('option');
+        warn.value = ''; warn.textContent = 'Unrecognised'; warn.selected = true;
+        sel.insertBefore(warn, sel.firstChild);
+      }
+      sel.onchange = function () {
+        if (!sel.value) { return; }
+        updateUser(u.id, {role: sel.value});
+      };
+      tdR.appendChild(sel);
+      tdR.appendChild(document.createTextNode(' '));
+      tdR.appendChild(pillFor(u));
+      tr.appendChild(tdR);
+
+      var tdS = document.createElement('td');
+      var btn = document.createElement('button');
+      btn.className = 'ghost';
+      btn.textContent = u.is_active ? 'Active' : 'Disabled';
+      btn.onclick = function () { updateUser(u.id, {is_active: !u.is_active}); };
+      tdS.appendChild(btn);
+      tr.appendChild(tdS);
+
+      var tdL = document.createElement('td');
+      tdL.className = 'muted';
+      tdL.textContent = u.last_login ? esc(u.last_login).replace('T', ' ') : 'never';
+      tr.appendChild(tdL);
+
+      var tdX = document.createElement('td');
+      if (!u.is_self) {
+        var del = document.createElement('button');
+        del.className = 'danger';
+        del.textContent = 'Remove';
+        del.onclick = function () { deleteUser(u.id, u.username, del); };
+        tdX.appendChild(del);
+      }
+      tr.appendChild(tdX);
+
+      body.appendChild(tr);
+    });
+    setMsg('listMsg', d.admin_count === 1
+      ? 'One administrator account. The system will refuse any change that would leave none.'
+      : d.admin_count + ' administrator accounts.', '');
+  }).catch(function (e) {
+    setMsg('listMsg', 'Could not load accounts: ' + e, 'err');
+  });
+}
+
+function updateUser(id, patch) {
+  setMsg('listMsg', 'Saving...', '');
+  fetch('/api/users/' + id + '/update', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(patch)
+  }).then(function (r) {
+    return r.json().then(function (d) { return {ok: r.ok, body: d}; });
+  }).then(function (res) {
+    if (!res.ok || !res.body.ok) {
+      setMsg('listMsg', res.body.error || 'Could not save.', 'err');
+      loadUsers();
+      return;
+    }
+    loadUsers();
+  }).catch(function (e) { setMsg('listMsg', 'Could not save: ' + e, 'err'); });
+}
+
+// Two-step, NOT confirm(). A browser modal blocks the page and is exactly the
+// dialog pattern the rest of this product avoids; it also cannot explain the
+// consequence in the reader's own tier.
+function deleteUser(id, username, btn) {
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.textContent = 'Really remove ' + username + '?';
+    setTimeout(function () {
+      if (btn.dataset.armed === '1') {
+        btn.dataset.armed = '0'; btn.textContent = 'Remove';
+      }
+    }, 4000);
+    return;
+  }
+  btn.dataset.armed = '0';
+  btn.disabled = true;
+  fetch('/api/users/' + id + '/delete', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}'
+  }).then(function (r) {
+    return r.json().then(function (d) { return {ok: r.ok, body: d}; });
+  }).then(function (res) {
+    if (!res.ok || !res.body.ok) {
+      setMsg('listMsg', res.body.error || 'Could not remove.', 'err');
+    }
+    loadUsers();
+  }).catch(function (e) {
+    setMsg('listMsg', 'Could not remove: ' + e, 'err');
+    loadUsers();
+  });
+}
+
+function createUser() {
+  var btn = document.getElementById('nuBtn');
+  btn.disabled = true;
+  setMsg('newMsg', 'Creating...', '');
+  fetch('/api/users/create', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      username: document.getElementById('nuUser').value,
+      display_name: document.getElementById('nuName').value,
+      password: document.getElementById('nuPass').value,
+      role: document.getElementById('nuRole').value
+    })
+  }).then(function (r) {
+    return r.json().then(function (d) { return {ok: r.ok, body: d}; });
+  }).then(function (res) {
+    btn.disabled = false;
+    if (!res.ok || !res.body.ok) {
+      setMsg('newMsg', res.body.error || 'Could not create the account.', 'err');
+      return;
+    }
+    setMsg('newMsg', 'Account created.', 'ok');
+    document.getElementById('nuUser').value = '';
+    document.getElementById('nuName').value = '';
+    document.getElementById('nuPass').value = '';
+    loadUsers();
+  }).catch(function (e) {
+    btn.disabled = false;
+    setMsg('newMsg', 'Could not create the account: ' + e, 'err');
+  });
+}
+
+loadRoles().then(loadUsers);
+</script>
+</body>
+</html>
