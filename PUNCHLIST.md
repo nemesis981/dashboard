@@ -3855,3 +3855,16 @@ call already funnels through, rather than leaving each caller responsible for re
 to scrub — the same "enforced in six places is enforced in none" reasoning this codebase
 already applies to the chat-scope gate. Then correct the privacy notice's wording to match
 whatever is actually true afterward.
+
+### [MEDIUM — private writeup] Six GET routes perform actions; convert to POST (found 2026-08-22, RBAC audit)
+Filed as its own scoped pass, deliberately separate from the RBAC foundation build
+(batch 4, landed `c84dcce`..`a0d971c` 2026-08-23) — role gating reduces the blast radius
+(an attacker now needs an admin's browser rather than any logged-in user's) but does not
+remove the underlying CSRF-shaped hazard for these six routes. Kept private per Rule 10
+(a live, unfixed route-level finding is a described-but-unresolved-edge-case shape) — full
+detail including the specific route names and each one's actual behavior:
+`~/work/nemesis-internal/audits/route-security-audit-rbac-2026-08-22.md`.
+
+**Candidate fix:** convert each of the six to POST. Each has its own existing callers, so
+this is a behavior change to already-shipped routes — one variable at a time, own commit
+per route or a single reviewed batch, not folded into any other pass.
