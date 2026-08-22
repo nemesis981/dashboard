@@ -1018,7 +1018,13 @@ def init_users_table():
                 username        TEXT NOT NULL UNIQUE,      -- login ID, stable, lowercase
                 display_name    TEXT NOT NULL,             -- shown in UI, can change
                 password_hash   TEXT NOT NULL,             -- bcrypt
-                role            TEXT NOT NULL DEFAULT 'admin',  -- 'admin'|'user' (commercial seam)
+                -- 'admin' | 'user' | 'viewonly'. Parsed by alert_manager/roles.py,
+                -- which RAISES on anything else rather than defaulting -- the
+                -- DEFAULT below is 'admin' only so a pre-RBAC single-user install
+                -- keeps working, and a silent fallback would turn any corrupt
+                -- value into a superuser. New accounts created through the user
+                -- management UI get roles.DEFAULT_ROLE ('user'), not this default.
+                role            TEXT NOT NULL DEFAULT 'admin',
                 is_active       INTEGER NOT NULL DEFAULT 1,
                 created_at      TEXT NOT NULL,
                 last_login      TEXT,
