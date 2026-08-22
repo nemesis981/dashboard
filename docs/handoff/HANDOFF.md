@@ -117,8 +117,52 @@ direct production data/config change.
 
 ## 9. Elevated grants
 
-Not checked today (Morning Status practice runs at session start, not carried into a
-closeout re-check). Re-check at next session start.
+**Baseline established 2026-08-22 — diff against this going forward.** No prior itemized
+list existed in this file to compare against; the 2026-08-20 worklog only recorded a
+shape-level finding ("no broad NOPASSWD"), not an itemized list. This is that itemized list,
+captured live via `sudo -n -l` / `getent group` / `id <user>` during the 2026-08-22 Morning
+Status pass and folded in as an explicit follow-up.
+
+- **sudo NOPASSWD — scoped, install/service-management shaped, not broad.** The
+  `(ALL : ALL) ALL` line is the standard admin-group entry (password required, NOT
+  NOPASSWD) — expected for the operator's sudo-group account, not itself a standing grant to
+  track.
+  Below that, `sudo -n -l` lists narrow, command-specific NOPASSWD entries only, all
+  matching the installer's own footprint:
+  - `ufw`
+  - `systemctl start/stop/restart` for the six core services (`dashboard`,
+    `diagnostics-watcher`, `alert-watcher`, `vpn-dns-guard`, `malware-canary`, `watchdog`,
+    `device-scanner`) plus `nemesis-fwd` (restart only); `daemon-reload`; `reset-failed
+    dashboard`
+  - `tee` + `chmod 0644` for each of those services' systemd unit files, and for
+    `/etc/polkit-1/rules.d/10-nemesis-watchdog.rules`
+  - `groupadd --system nemesis-db`; `useradd --system --no-create-home --shell
+    /usr/sbin/nologin --gid nemesis-db` for the six `nemesis-*` service accounts
+    (`nemesis-diag`, `nemesis-hwmon`, `nemesis-alertw`, `nemesis-vpndns`, `nemesis-canary`,
+    `nemesis-watchdog`)
+  - the one-time `/opt` migration set: `mkdir -p /var/lib/nemesis`; `mv` for
+    `/home/<user>/dashboard` → `/opt/nemesis` and `alerts.db`(+`-wal`/`-shm`) →
+    `/var/lib/nemesis`; matching `chown <user>` / `chgrp nemesis-db` / `chmod 0770`|`0660` on
+    those paths; `chmod 0755 /opt/nemesis`
+  - `tee` + `reload`/`restart` for `/etc/suricata/rules/local.rules`
+  - **Reason still needed:** this is install.sh's own sudoers footprint for provisioning and
+    managing the Nemesis services/accounts without a password prompt on every install/update
+    step — narrow, command-scoped, no wildcard/shell-out entries observed. No revocation
+    action indicated; this stays listed as "still needed" per Rule 7's framing, not flagged
+    for revoke.
+- **Group memberships** (`id <user>`): `nemesis-db`, `nemesis-fw`, `pihole` — the three
+  groups this file's Morning Status section names as meaningful-access groups. `nemesis-fw`
+  group membership: the operator account, `nemesis-alertw`, `nemesis-dash`. Also present but
+  outside this rule's named set: `adm`, `cdrom`, `sudo`, `dip`, `plugdev`, `users`,
+  `lpadmin`, `piavpn`, `nemesis` — standard desktop/admin groups plus VPN-client and a bare
+  `nemesis` group, none flagged as needing tracking here. No unexpected group membership
+  observed.
+- **Polkit rules** (`ls /etc/polkit-1/rules.d/`): **not checked** — `Permission denied` for
+  this session's user (needs root to read on this box, per this file's own standing note).
+  Carrying forward as explicitly unverified, not silently skipped.
+
+Re-verify each item above at next session start per Rule 7 — this list is the new
+comparison baseline, not a permanent record assumed still accurate.
 
 ## 10. Cross-references
 
