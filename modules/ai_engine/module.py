@@ -17,6 +17,7 @@ import os
 import re
 import json
 import time
+import uuid
 import logging
 import threading
 import urllib.request
@@ -77,14 +78,29 @@ def _init_db() -> None:
             expires_at    REAL NOT NULL
         );
 
+        -- PER-CALL rows, not an hourly rollup. The old shape bucketed on
+        -- UNIQUE(date, hour) with no model/cost/surface/actor, so spend could not
+        -- be attributed to a FEATURE and had to be re-derived by pricing every
+        -- token at the ACTIVE model's rate. That was already wrong once chat
+        -- could select opus and the rate-degrade path could select haiku: three
+        -- models, one assumed price. A spend CAP enforced against that figure is
+        -- a cap against a fiction, which is why this had to change before the cap
+        -- could be trusted.
+        --
+        -- The UNIQUE(date, hour) constraint is what forced a rebuild rather than
+        -- a column add: it structurally permits only one row per hour.
         CREATE TABLE IF NOT EXISTS ai_usage (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             date       TEXT    NOT NULL,
             hour       INTEGER NOT NULL,
+            ts         TEXT,
             call_count INTEGER NOT NULL DEFAULT 0,
             tokens_in  INTEGER NOT NULL DEFAULT 0,
             tokens_out INTEGER NOT NULL DEFAULT 0,
-            UNIQUE(date, hour)
+            model      TEXT,
+            cost_usd   REAL,
+            surface    TEXT,
+            actor      TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_aiu_date ON ai_usage(date);
 
@@ -174,8 +190,91 @@ def _init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_act_anchor ON ai_chat_turns(surface_key, row_id);
     """)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_authority_override (
+            action_class TEXT PRIMARY KEY,
+            level        INTEGER NOT NULL,
+            granted_by   TEXT NOT NULL,
+            granted_at   TEXT NOT NULL,
+            reason       TEXT
+        )
+    """)
+    # Requirement 1: one row per DECISION POINT, not per API call. Includes the
+    # decisions where nothing happened -- an absent row would be a default value
+    # that reads as "nothing to report", and the single most useful question
+    # during a trial week is "did it look at this and pass, or never see it?"
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_decision_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            trace_id         TEXT NOT NULL,
+            ts               TEXT NOT NULL,
+            stage            TEXT NOT NULL,
+            surface          TEXT NOT NULL,
+            subject_key      TEXT NOT NULL,
+            decision         TEXT NOT NULL,
+            reason_code      TEXT NOT NULL,
+            reason_detail    TEXT,
+            action_class     TEXT,
+            level_needed     INTEGER,
+            level_granted    INTEGER,
+            authority_source TEXT,
+            authority_by     TEXT,
+            model            TEXT,
+            tokens_in        INTEGER,
+            tokens_out       INTEGER,
+            cost_usd         REAL,
+            latency_ms       INTEGER,
+            proposal_id      INTEGER,
+            ticket_number    TEXT,
+            actor            TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_adl_trace "
+                 "ON ai_decision_log(trace_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_adl_ts ON ai_decision_log(ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_adl_subject "
+                 "ON ai_decision_log(surface, subject_key)")
     conn.commit()
+    # Runs AFTER the CREATEs so a fresh install already has the new shape and the
+    # migration is a no-op; an existing install gets rebuilt exactly once.
+    _migrate_ai_usage(conn)
     conn.close()
+
+
+def _migrate_ai_usage(conn) -> None:
+    """Rebuild a pre-2026-08-21 `ai_usage` into the per-call shape. Idempotent.
+
+    SQLite cannot drop a UNIQUE constraint in place, so the table is rebuilt.
+    History is PRESERVED rather than discarded: each old hourly bucket becomes one
+    row marked `surface='legacy_rollup'` with model/cost NULL, so it is obvious
+    which rows predate attribution. Dropping the history instead would silently
+    reset every spend window to zero -- the one thing a cap must never do by
+    accident.
+    """
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ai_usage)")}
+    if not cols or {"model", "cost_usd", "surface", "actor"} <= cols:
+        return                      # fresh install, or already migrated
+    log.warning("ai_engine: migrating ai_usage to per-call attribution")
+    conn.executescript("""
+        CREATE TABLE ai_usage_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL, hour INTEGER NOT NULL, ts TEXT,
+            call_count INTEGER NOT NULL DEFAULT 0,
+            tokens_in INTEGER NOT NULL DEFAULT 0,
+            tokens_out INTEGER NOT NULL DEFAULT 0,
+            model TEXT, cost_usd REAL, surface TEXT, actor TEXT
+        );
+        INSERT INTO ai_usage_new
+            (date, hour, ts, call_count, tokens_in, tokens_out, surface)
+        SELECT date, hour, NULL, call_count, tokens_in, tokens_out, 'legacy_rollup'
+        FROM ai_usage;
+        DROP TABLE ai_usage;
+        ALTER TABLE ai_usage_new RENAME TO ai_usage;
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_date ON ai_usage(date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_usage_surface ON ai_usage(surface)")
+    conn.commit()
 
 
 # Initialise at import time so any module can import and call before Module.start().
@@ -217,7 +316,59 @@ ACTION_CLASS_CEILINGS = {
     "ip_block_permanent":      L2_ACT_REVERSIBLE,
     "ip_action_internal":      L1_RECOMMEND,
     "malware_file_quarantine": L1_RECOMMEND,
+    # Setting an alert's DISPOSITION (e.g. auto-ignoring a low-risk alert) is an
+    # action, and it was the one the engine had been taking with no authority
+    # check at all: `/api/analyze/<rule_id>` wrote `alerts.action='ignore'`
+    # directly, while chat about that same alert was pinned to "you may not even
+    # recommend". Two surfaces, one object, opposite permission models -- the
+    # incoherence this class exists to close.
+    #
+    # Ceiling L2 (reversible), not higher: a disposition can be changed back, so
+    # it never warrants disruptive authority. At L0 the alert simply stays
+    # `pending` and a human decides; at L1 the engine may PROPOSE a disposition
+    # (recorded in ai_proposals for approval); only at L2 may it set one itself.
+    "alert_disposition":       L2_ACT_REVERSIBLE,
 }
+
+
+#: WHY A CEILING IS WHERE IT IS -- and therefore whether a human may raise it.
+#:
+#: `ACTION_CLASS_CEILINGS` mixes two genuinely different things, and the comment
+#: above already says so for malware_file_quarantine ("a missing-capability
+#: ceiling, not a threshold choice"). Until now that distinction lived only in
+#: prose, which was fine while nothing could override a ceiling. The master-
+#: password override makes it load-bearing:
+#:
+#:   THRESHOLD  -- a judgment about how much authority is appropriate. Someone
+#:                 in charge may decide to trust the engine earlier than its
+#:                 track record warrants. That is their call to make.
+#:   CAPABILITY -- the code cannot do the thing safely. No password creates a
+#:                 file-restore path. Raising this would not grant authority, it
+#:                 would grant a lie: the action still cannot be taken back.
+#:
+#: Only THRESHOLD ceilings are overridable. This is the same principle as the
+#: undo-handler gate in `execute_proposal` -- authentication establishes WHO you
+#: are, never what the code is capable of.
+CEILING_KIND = {
+    "ip_quarantine_external":  "threshold",
+    "ip_block_permanent":      "threshold",
+    "ip_action_internal":      "threshold",
+    # Pinned by a MISSING RESTORE PATH, not by caution -- see the comment on
+    # ACTION_CLASS_CEILINGS. Becomes "threshold" the day a restore function and
+    # an undo handler exist, and not one moment before.
+    "malware_file_quarantine": "capability",
+    "alert_disposition":       "threshold",
+}
+
+
+def ceiling_kind(action_class: str) -> str:
+    """'threshold' | 'capability'. Unknown classes are treated as CAPABILITY.
+
+    Defaulting to the RESTRICTIVE answer on purpose: a class someone forgot to
+    classify must not silently become overridable. A missing entry is a gap in
+    our knowledge, and a gap in knowledge is not permission.
+    """
+    return CEILING_KIND.get(action_class, "capability")
 
 
 class UnknownActionClass(Exception):
@@ -334,9 +485,29 @@ def effective_ceiling(action_class: str) -> dict:
             f"cannot read authority state for {action_class!r}: {exc}"
         ) from exc
 
-    level = _combine_ceiling(earned, hard, clamp)
+    # A manual override raises `earned` and, for THRESHOLD classes only, the hard
+    # ceiling too. It never touches `clamp` (the user's own standing rule -- you
+    # edit the rule, you do not out-authenticate yourself) and never touches the
+    # spend cap, which is enforced separately and deliberately stays absolute:
+    # a flood limit a password can lift is not a flood limit.
+    override = _authority_override(action_class)
+    ov_level = override["level"] if override else None
+    effective_hard = hard
+    if ov_level is not None:
+        earned = max(earned, ov_level)
+        if ceiling_kind(action_class) == "threshold":
+            effective_hard = max(hard, ov_level)
+
+    level = _combine_ceiling(earned, effective_hard, clamp)
 
     reasons = []
+    if ov_level is not None:
+        reasons.append("manual_override")
+        if ceiling_kind(action_class) == "capability" and ov_level > hard:
+            # The override was accepted but CANNOT lift this class. Say so, or
+            # the UI shows a raised toggle and the engine quietly does nothing.
+            reasons.append("capability_ceiling_not_overridable")
+    hard = effective_hard
     if level == clamp and clamp < min(earned, hard):
         reasons.append("standing_rule")
     if level == hard and hard < min(earned, clamp):
@@ -347,12 +518,20 @@ def effective_ceiling(action_class: str) -> dict:
         reasons.append("unconstrained" if level == L4_GOVERN else "tied")
 
     return {
-        "level":        level,
-        "earned":       earned,
-        "hard_ceiling": hard,
-        "rule_clamp":   clamp,
-        "rule_types":   rule_types,
-        "reasons":      reasons,
+        "level":            level,
+        "earned":           earned,
+        "hard_ceiling":     hard,
+        "rule_clamp":       clamp,
+        "rule_types":       rule_types,
+        "reasons":          reasons,
+        # PROVENANCE. Requirement-1 logging needs to distinguish "the ladder
+        # promoted this" from "someone typed the master password at 2am"; a
+        # level with no origin recorded cannot be audited after the fact.
+        "authority_source": "override" if ov_level is not None else "earned",
+        "override_by":      (override or {}).get("granted_by"),
+        "override_at":      (override or {}).get("granted_at"),
+        "ceiling_kind":     ceiling_kind(action_class),
+        "undo_available":   undo_handler_for(action_class) is not None,
     }
 
 
@@ -1306,56 +1485,187 @@ def check_pricing_drift(fetch=None) -> dict:
             "checked_at": now, "models_checked": len(parsed)}
 
 
+#: Default rolling window for the spend ceiling, in days. 30 preserves the old
+#: month-ish behaviour for anyone who never changes it; a trial can set 7.
+_SPEND_WINDOW_DAYS_DEFAULT = 30
+
+
 def get_spend_this_month() -> dict:
-    """Actual spend for the current calendar month, in dollars.
+    """Calendar-month spend. Kept for existing callers; now RECORDED-cost based.
 
-    Computed from the RECORDED tokens (`ai_usage.tokens_in`/`tokens_out`, stamped
-    from `msg.usage` on every real call) priced at the active model's rates —
-    not from a per-call assumption. The old 350-in/150-out guess understated
-    real spend by ~13x, so a cap enforced against it would have been a cap
-    against a fiction.
-
-    Cache hits cost nothing and correctly contribute nothing: `analyze()` skips
-    `_increment_usage` on a cache hit, so those tokens were never recorded.
-
-    Returns `{"ok": True, "usd": float, "month": "YYYY-MM"}`, or
-    `{"ok": False, "error": ...}` with NO figure. A caller must not read a
-    missing spend as zero — see `_check_rate_limit`, which fails closed on it.
+    Superseded by `get_spend(window_days)`, which is what the ceiling enforces --
+    a rolling window expresses "no more than $X per week" naturally, where a
+    calendar month cannot. This is retained because callers exist, but it no
+    longer re-prices every token at the active model's rate: that produced a
+    plausible wrong number once more than one model was in play.
     """
-    pricing = get_pricing()
     month = datetime.now().strftime("%Y-%m")
+    pricing = get_pricing()
     try:
         conn = _conn()
         row = conn.execute(
-            "SELECT COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0) "
-            "FROM ai_usage WHERE substr(date,1,7)=?", (month,)).fetchone()
+            "SELECT COALESCE(SUM(cost_usd),0), "
+            "       COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN tokens_in  ELSE 0 END),0), "
+            "       COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN tokens_out ELSE 0 END),0), "
+            "       SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END) "
+            "FROM ai_usage WHERE substr(COALESCE(ts, date),1,7)=?", (month,)).fetchone()
         conn.close()
-        usd = (int(row[0]) * pricing["input_per_mtok"] / 1_000_000
-               + int(row[1]) * pricing["output_per_mtok"] / 1_000_000)
-        return {"ok": True, "usd": round(usd, 6), "month": month,
-                "tokens": {"in": int(row[0]), "out": int(row[1])}}
-    except Exception as exc:
+        priced = float(row[0] or 0.0)
+        est = (int(row[1]) * pricing["input_per_mtok"] / 1_000_000
+               + int(row[2]) * pricing["output_per_mtok"] / 1_000_000)
+        return {"ok": True, "usd": round(priced + est, 6), "month": month,
+                "recorded_usd": round(priced, 6),
+                "estimated_usd": round(est, 6),
+                "unpriced_rows": int(row[3] or 0)}
+    except Exception as exc:                                 # noqa: BLE001
         log.exception("ai_engine: get_spend_this_month failed")
         return {"ok": False, "error": str(exc)[:200], "month": month}
 
 
-def _spend_cap_usd() -> float | None:
-    """Configured monthly cap in dollars, or None when unset/unusable.
+def get_spend_stop() -> dict:
+    """Is the engine currently STOPPED on the spend ceiling, and since when.
 
-    Unset and unparseable both mean "no cap": a garbage value must not be read
-    as a cap of 0, which would block every call and look like a bug in the
-    engine rather than a typo in a setting.
+    Exists so the halt is REPORTABLE rather than merely enforced. An engine that
+    silently stops answering is indistinguishable from a broken one; this is what
+    lets a badge, an API or a report say "stopped on 2026-08-21 at $10.03 of
+    $10.00" instead of leaving the operator to guess.
     """
-    raw = (_get_setting("spend_cap_monthly_usd", "") or "").strip()
-    if not raw:
-        return None
+    cap = _spend_cap_usd()
+    active = (_get_setting("spend_stop_active", "0") or "0") == "1"
+    # NO CEILING MEANS NOT STOPPED, whatever the stored flag says. The flag is a
+    # latch set at the moment of crossing, and removing the ceiling entirely used
+    # to leave it set forever -- the engine then reported "Stopped: spend ceiling
+    # of $0.00" while happily answering, which is both false and unfixable from
+    # the UI. Derived state wins over a stale latch.
+    if cap is None:
+        active = False
+    out = {"stopped": active, "cap_usd": cap,
+           "window_days": _spend_window_days()}
+    if active:
+        out["since"] = _get_setting("spend_stop_at", "") or None
+        try:
+            out["usd_at_stop"] = float(_get_setting("spend_stop_usd", "0") or 0)
+        except (TypeError, ValueError):
+            out["usd_at_stop"] = None
+    return out
+
+
+def clear_spend_stop(actor: str | None = None) -> None:
+    """Manually clear the stopped flag (e.g. after raising the ceiling).
+
+    The flag also clears itself on the next call once spend is back under the
+    ceiling; this is for an operator who wants the reported state corrected
+    immediately rather than at the next attempt.
+    """
+    _set_setting("spend_stop_active", "0")
+    log.warning("ai_engine: spend stop cleared by %s", actor or "unknown")
+
+
+def _spend_cap_usd() -> float | None:
+    """The configured spend ceiling in dollars, or None when unset/unusable.
+
+    TWO SETTINGS, ONE MEANING, resolved oldest-last:
+      `spend_cap_usd`          -- the ceiling (the setting users see)
+      `spend_cap_monthly_usd`  -- the previous name, still honoured so an existing
+                                  install does not silently lose its cap on upgrade
+
+    Unset AND unparseable both mean "no cap". A garbage value must never be read
+    as a cap of ZERO, which would block every call and read as a broken engine
+    rather than a typo in a setting.
+    """
+    for key in ("spend_cap_usd", "spend_cap_monthly_usd"):
+        raw = (_get_setting(key, "") or "").strip()
+        if not raw:
+            continue
+        try:
+            val = float(raw)
+        except (ValueError, TypeError):
+            log.warning("ai_engine: %s=%r is not a number - treating as no cap",
+                        key, raw)
+            return None
+        return val if val > 0 else None
+    return None
+
+
+def _spend_window_days() -> int:
+    """Rolling window the ceiling is measured over. Always >= 1."""
+    raw = (_get_setting("spend_cap_window_days",
+                        str(_SPEND_WINDOW_DAYS_DEFAULT)) or "").strip()
     try:
-        val = float(raw)
+        return max(1, int(float(raw)))
     except (ValueError, TypeError):
-        log.warning("ai_engine: spend_cap_monthly_usd=%r is not a number — "
-                    "treating as no cap", raw)
-        return None
-    return val if val > 0 else None
+        return _SPEND_WINDOW_DAYS_DEFAULT
+
+
+def get_spend(window_days: int | None = None) -> dict:
+    """Recorded spend over a ROLLING window, in dollars.
+
+    Sums the `cost_usd` RECORDED on each call -- the price of the model that was
+    actually billed. It no longer re-prices tokens at the active model's rate,
+    which was wrong the moment chat could pick opus and the degrade path could
+    pick haiku.
+
+    ROWS WITH NO RECORDED PRICE ARE COUNTED SEPARATELY AND SAID OUT LOUD.
+    Legacy rollup rows (pre-attribution) and any call whose model had no known
+    rate carry cost_usd NULL. Their tokens are still priced, at the active rate,
+    as the best available estimate -- but `unpriced_rows` reports how many, so a
+    figure resting on estimates is never mistaken for a figure resting on
+    receipts. Silently folding them in at an assumed price is exactly the fiction
+    this rewrite exists to remove.
+
+    Returns ok=False with NO figure on failure; a caller must not read a missing
+    spend as zero (see `_check_rate_limit`, which fails closed on it).
+    """
+    days = window_days or _spend_window_days()
+    since_date = (datetime.now() - timedelta(days=days)).isoformat()[:10]
+    pricing = get_pricing()
+    try:
+        conn = _conn()
+        # ts is NULL on migrated legacy rows, so the window is matched on `date`
+        # too -- otherwise upgrading would drop all history out of the window and
+        # reset the cap to zero, which is the dangerous direction.
+        row = conn.execute(
+            "SELECT COALESCE(SUM(cost_usd),0), "
+            "       COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN tokens_in  ELSE 0 END),0), "
+            "       COALESCE(SUM(CASE WHEN cost_usd IS NULL THEN tokens_out ELSE 0 END),0), "
+            "       SUM(CASE WHEN cost_usd IS NULL THEN 1 ELSE 0 END), "
+            "       COUNT(*) "
+            "FROM ai_usage WHERE COALESCE(ts, date) >= ?",
+            (since_date,)).fetchone()
+        conn.close()
+        priced = float(row[0] or 0.0)
+        est = (int(row[1]) * pricing["input_per_mtok"] / 1_000_000
+               + int(row[2]) * pricing["output_per_mtok"] / 1_000_000)
+        return {"ok": True, "usd": round(priced + est, 6),
+                "recorded_usd": round(priced, 6),
+                "estimated_usd": round(est, 6),
+                "unpriced_rows": int(row[3] or 0), "rows": int(row[4] or 0),
+                "window_days": days, "since": since_date}
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: get_spend failed")
+        return {"ok": False, "error": str(exc)[:200], "window_days": days}
+
+
+def get_spend_by_surface(window_days: int | None = None) -> list:
+    """[(surface, calls, usd)] over the window, dearest first.
+
+    The whole point of the attribution columns: "what is costing money" is a
+    question the product could not answer at all before.
+    """
+    days = window_days or _spend_window_days()
+    since_date = (datetime.now() - timedelta(days=days)).isoformat()[:10]
+    try:
+        conn = _conn()
+        rows = conn.execute(
+            "SELECT COALESCE(surface,'unattributed'), COUNT(*), "
+            "       COALESCE(SUM(cost_usd),0) "
+            "FROM ai_usage WHERE COALESCE(ts, date) >= ? "
+            "GROUP BY 1 ORDER BY 3 DESC", (since_date,)).fetchall()
+        conn.close()
+        return [(r[0], int(r[1]), round(float(r[2] or 0.0), 6)) for r in rows]
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: get_spend_by_surface failed")
+        return []
 
 
 def _check_rate_limit(conn) -> tuple:
@@ -1438,7 +1748,7 @@ def _check_rate_limit(conn) -> tuple:
     # means by "don't spend more than $X".
     cap = _spend_cap_usd()
     if cap is not None:
-        spend = get_spend_this_month()
+        spend = get_spend()
         if not spend.get("ok"):
             # FAIL CLOSED, but only because a cap was explicitly requested.
             # The point of a cap is protecting money: if we cannot tell whether
@@ -1451,8 +1761,31 @@ def _check_rate_limit(conn) -> tuple:
                           "— refusing rather than risk exceeding it"), "hard"
         usd = spend.get("usd") or 0.0
         if usd >= cap:
-            return True, (f"monthly spend cap reached: ${usd:.2f} of ${cap:.2f} "
-                          f"for {spend.get('month')}"), "hard"
+            # RECORD THE STOP so it is reportable, not just refused. A cap that
+            # halts the engine silently is indistinguishable from an engine that
+            # is broken -- the operator needs to be able to see WHY it went quiet,
+            # and when. Written once per crossing (the value only changes when the
+            # spend does), and cleared by `clear_spend_stop()` when the cap is
+            # raised or the window rolls past it.
+            try:
+                _set_setting("spend_stop_active", "1")
+                _set_setting("spend_stop_at", datetime.now().isoformat(timespec="seconds"))
+                _set_setting("spend_stop_usd", "%.6f" % usd)
+                _set_setting("spend_stop_cap", "%.6f" % cap)
+            except Exception:                                # noqa: BLE001
+                log.exception("ai_engine: could not record the spend-stop state")
+            return True, (f"spend cap reached: ${usd:.2f} of ${cap:.2f} "
+                          f"over the last {spend.get('window_days')}d"), "hard"
+        if (_get_setting("spend_stop_active", "0") or "0") == "1":
+            # Back under the ceiling (cap raised, or the rolling window moved on).
+            # Clearing it here means the reported state follows reality instead of
+            # latching on forever after one crossing.
+            try:
+                _set_setting("spend_stop_active", "0")
+                log.warning("ai_engine: spend ceiling no longer exceeded "
+                            "($%.2f of $%.2f) - resuming", usd, cap)
+            except Exception:                                # noqa: BLE001
+                pass
 
     return False, "", ""
 
@@ -1489,16 +1822,57 @@ def _increment_rate(conn) -> None:
             )
 
 
-def _increment_usage(conn, tokens_in: int, tokens_out: int) -> None:
+#: Maps a job_id/cache_key prefix onto the FEATURE that spent the money. Derived
+#: rather than demanded from callers so attribution works for every existing call
+#: site immediately; `analyze(surface=...)` overrides it when a caller knows better.
+_SURFACE_PREFIXES = (
+    ("chat:", "chat"),
+    ("alert_", "alert_verdict"),
+    ("malware_verdict_", "malware_verdict"),
+    ("cq:", "community_queue"),
+)
+
+
+def _derive_surface(job_id, cache_key):
+    """Best-effort feature name for a call, or 'unattributed'.
+
+    'unattributed' is deliberately a REAL value rather than NULL: a NULL would be
+    indistinguishable from a legacy row, and the whole point of this column is
+    being able to say which feature spent what. A growing 'unattributed' total is
+    a visible prompt to add a prefix here, not a silent gap.
+    """
+    for key in (job_id or "", cache_key or ""):
+        for prefix, name in _SURFACE_PREFIXES:
+            if key.startswith(prefix):
+                return name
+    return "unattributed"
+
+
+def _current_actor():
+    """Whoever the Data Manager says is acting, or None. Never raises."""
+    try:
+        from modules import get_data_manager
+        return get_data_manager().current_actor()
+    except Exception:                                        # noqa: BLE001
+        return None
+
+
+def _increment_usage(conn, tokens_in: int, tokens_out: int, model=None,
+                     cost_usd=None, surface=None, actor=None) -> None:
+    """Record ONE call. Per-row, not an hourly rollup -- see the schema comment.
+
+    `cost_usd` is RECORDED, not re-derived later, because the model that was
+    actually billed is knowable now and unknowable afterwards. A NULL here means
+    the price could not be determined (unknown model), which `_spend_since`
+    reports as a distinct, visible condition rather than treating as zero.
+    """
     now = datetime.now()
     conn.execute(
-        """INSERT INTO ai_usage(date, hour, call_count, tokens_in, tokens_out)
-           VALUES(?, ?, 1, ?, ?)
-           ON CONFLICT(date, hour) DO UPDATE SET
-               call_count = call_count + 1,
-               tokens_in  = tokens_in  + excluded.tokens_in,
-               tokens_out = tokens_out + excluded.tokens_out""",
-        (now.strftime("%Y-%m-%d"), now.hour, tokens_in, tokens_out)
+        """INSERT INTO ai_usage(date, hour, ts, call_count, tokens_in, tokens_out,
+                                model, cost_usd, surface, actor)
+           VALUES(?, ?, ?, 1, ?, ?, ?, ?, ?, ?)""",
+        (now.strftime("%Y-%m-%d"), now.hour, now.isoformat(timespec="seconds"),
+         tokens_in, tokens_out, model, cost_usd, surface, actor)
     )
 
 
@@ -1531,14 +1905,27 @@ def get_status() -> dict:
         # "Rate limited" would tell the operator interpretation had stopped when
         # it is still running, just cheaper — and the badge is the one place they
         # look to find that out.
-        if limited and kind == "degrade":
+        # SPEND-STOPPED is its own state, ahead of the generic rate wording.
+        # "Rate limited" implies "wait and it resumes"; a spend ceiling does not
+        # resume until the window rolls or the ceiling is raised, and telling the
+        # operator the wrong one sends them to the wrong fix.
+        stop = get_spend_stop()
+        if stop.get("stopped"):
+            detail = ("Stopped: spend ceiling of $%.2f reached over %sd"
+                      % (stop.get("cap_usd") or 0.0, stop.get("window_days")))
+            state = "spend_capped"
+        elif limited and kind == "degrade":
             detail = f"Degraded (cheaper model): {reason}"
+            state = "active"
         elif limited:
             detail = f"Rate limited: {reason}"
+            state = "active"
         else:
             detail = "Ready"
-        return {"state": "active", "enabled": True, "has_key": True,
-                "key_valid": True, "detail": detail}
+            state = "active"
+        return {"state": state, "enabled": True, "has_key": True,
+                "key_valid": True, "detail": detail,
+                "spend_stop": stop}
     except Exception as exc:
         return {"state": "active", "enabled": True, "has_key": True,
                 "key_valid": True, "detail": str(exc)}
@@ -1606,6 +1993,28 @@ _MODEL_RATES = {
 }
 
 
+#: Anthropic model IDs come in two forms: the rolling alias (`claude-haiku-4-5`)
+#: and the dated snapshot (`claude-haiku-4-5-20251001`). `_MODEL_RATES` is keyed
+#: by alias, and the lookup was exact-string — so a dated ID priced at NOTHING
+#: and the call's cost silently moved from the RECORDED bucket into the ESTIMATED
+#: one. That distinction is the entire basis of the spend ceiling: a cap enforced
+#: against a figure that has quietly become a guess is a cap against a fiction.
+#: Nothing passes a dated ID today; the degrade path is where one would plausibly
+#: get pinned later, and the failure would be invisible at the moment it started.
+_DATED_MODEL_RE = re.compile(r"^(.*?)-(\d{8})$")
+
+
+def _pricing_alias(model_id: str) -> str:
+    """Strip a trailing -YYYYMMDD snapshot suffix to get the rolling alias.
+
+    Returns the input unchanged when it is not a dated ID, so a genuinely unknown
+    model stays unknown and still reports `known: False` rather than being
+    coerced into some neighbouring model's price.
+    """
+    m = _DATED_MODEL_RE.match(model_id or "")
+    return m.group(1) if m else (model_id or "")
+
+
 def get_pricing(model: str | None = None) -> dict:
     """Per-MTok rates for `model`, plus the date they were last confirmed.
 
@@ -1636,7 +2045,7 @@ def get_pricing(model: str | None = None) -> dict:
        date, so a typo surfaces instead of being papered over.
     """
     target = model or _ACTIVE_MODEL
-    rates = _MODEL_RATES.get(target)
+    rates = _MODEL_RATES.get(target) or _MODEL_RATES.get(_pricing_alias(target))
 
     raw_in   = (os.environ.get("ANTHROPIC_INPUT_PRICE_PER_MTOK")  or "").strip()
     raw_out  = (os.environ.get("ANTHROPIC_OUTPUT_PRICE_PER_MTOK") or "").strip()
@@ -2744,6 +3153,7 @@ def analyze(
     job_id: str | None = None,
     model: str | None = None,
     effort: str | None = None,
+    surface: str | None = None,
 ) -> dict:
     """
     Single entry point for all Anthropic API calls.
@@ -2769,7 +3179,8 @@ def analyze(
 
     try:
         return _analyze_inner(prompt, system_prompt, max_tokens, cache_key,
-                              cache_hours, force, model, effort)
+                              cache_hours, force, model, effort,
+                              job_id=job_id, surface=surface)
     finally:
         if job_id:
             with _in_flight_lock:
@@ -2785,6 +3196,8 @@ def _analyze_inner(
     force: bool,
     model: str | None = None,
     effort: str | None = None,
+    job_id: str | None = None,
+    surface: str | None = None,
 ) -> dict:
     # A non-default model gets its own cache namespace. Without this a cached
     # answer from one model would be served for a request that explicitly asked
@@ -3063,7 +3476,14 @@ def _analyze_inner(
                 " VALUES(?,?,?,?)",
                 (cache_key, text, now, expires)
             )
-        _increment_usage(conn, tokens_in, tokens_out)
+        # Price it with the model ACTUALLY used (which may be the degraded one),
+        # attribute it to a feature, and stamp the acting user. All four are
+        # knowable here and unknowable afterwards.
+        _increment_usage(conn, tokens_in, tokens_out,
+                         model=target_model,
+                         cost_usd=_cost_of(tokens_in, tokens_out, target_model),
+                         surface=surface or _derive_surface(job_id, cache_key),
+                         actor=_current_actor())
         _increment_rate(conn)
         conn.commit()
         conn.close()
@@ -3086,6 +3506,719 @@ def _analyze_inner(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# The master password, the manual authority override, and loud demotion
+#
+# The toggle is settable at any time, but RAISING it past what the ladder has
+# earned requires a second credential -- distinct from the dashboard login --
+# held by whoever is actually in charge. The gate is authentication, not track
+# record.
+#
+# WHAT A PASSWORD CANNOT DO, no matter who holds it:
+#   * make an irreversible action reversible (`execute_proposal`'s undo gate)
+#   * lift a CAPABILITY ceiling (see CEILING_KIND)
+#   * lift the spend cap  -- a flood limit a password can raise is not a limit
+#   * override the user's OWN standing rule -- edit the rule instead
+# It authorizes RISK. It does not change what the code is able to do.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def new_trace_id() -> str:
+    """Minted at INGEST, before the pre-filter -- never at the first model call.
+
+    If it were minted at the model call, every item the pre-filter dropped would
+    be untraceable, and that is precisely the population most worth auditing.
+    """
+    return uuid.uuid4().hex[:12]
+
+
+def log_decision(trace_id, stage, surface, subject_key, decision, reason_code,
+                 reason_detail=None, action_class=None, level_needed=None,
+                 level_granted=None, authority_source=None, authority_by=None,
+                 model=None, tokens_in=None, tokens_out=None, cost_usd=None,
+                 latency_ms=None, proposal_id=None, ticket_number=None,
+                 actor=None) -> int | None:
+    """Append one decision-point row. Never raises -- logging must not be able to
+    break the thing it is observing -- but a failure to log is logged."""
+    try:
+        conn = _conn()
+        cur = conn.execute(
+            "INSERT INTO ai_decision_log(trace_id, ts, stage, surface, subject_key,"
+            " decision, reason_code, reason_detail, action_class, level_needed,"
+            " level_granted, authority_source, authority_by, model, tokens_in,"
+            " tokens_out, cost_usd, latency_ms, proposal_id, ticket_number, actor)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (trace_id, datetime.now().isoformat(timespec="seconds"), stage, surface,
+             str(subject_key), decision, reason_code, reason_detail, action_class,
+             level_needed, level_granted, authority_source, authority_by, model,
+             tokens_in, tokens_out, cost_usd, latency_ms, proposal_id,
+             ticket_number, actor or _current_actor()))
+        conn.commit()
+        rid = cur.lastrowid
+        conn.close()
+        return rid
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: decision-log write failed (%s/%s)", stage, decision)
+        return None
+
+
+def decision_trail(trace_id: str) -> list:
+    """Every decision point for one subject, in order -- the reconstruction."""
+    try:
+        conn = _conn()
+        rows = conn.execute("SELECT * FROM ai_decision_log WHERE trace_id=? "
+                            "ORDER BY id", (trace_id,)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: decision_trail failed")
+        return []
+
+
+def refusal_ticket_text(action_class: str, subject: str, proposed: str) -> str:
+    """What the ticket says when the engine WANTED to act and was refused.
+
+    Requirement 2b: a refusal must be self-documenting. Silently doing nothing is
+    indistinguishable from having nothing to say, and that ambiguity is exactly
+    what turns a safety gate into a bug report.
+    """
+    lines = ["Nemesis AI identified an action it judged appropriate and did NOT "
+             "take it.", "",
+             "Subject:         %s" % subject,
+             "Proposed action: %s" % proposed,
+             "Action class:    %s" % action_class, ""]
+    if undo_handler_for(action_class) is None:
+        lines += [
+            "WHY IT DID NOT ACT: insufficient reversal support to act on this yet.",
+            "",
+            "No undo handler is registered for '%s', so Nemesis cannot take this "
+            "action back if it turns out to be wrong. It therefore refuses to "
+            "take it automatically at any authority level -- including levels "
+            "granted with the master password. Authority can authorize risk; it "
+            "cannot make an action reversible." % action_class,
+            "",
+            "This is a product limitation, not a misconfiguration. It resolves "
+            "when a reversal path for this action class is implemented.",
+        ]
+    else:
+        lines += ["WHY IT DID NOT ACT: current authority level is below what this "
+                  "action requires. Raise it in AI settings, or approve this "
+                  "action directly."]
+    lines += ["", "Review and act on this manually if appropriate."]
+    return "\n".join(lines)
+
+
+_MASTER_PW_KEY        = "master_password_hash"
+_MASTER_PW_FAILS_KEY  = "master_password_fails"
+_MASTER_PW_LOCK_KEY   = "master_password_locked_until"
+#: Attempts before lockout, and how long. Without this the override endpoint is
+#: an unrate-limited oracle against a single credential -- the dashboard login
+#: already has tiered lockout for exactly this reason.
+_MASTER_PW_MAX_FAILS  = 5
+_MASTER_PW_LOCKOUT_S  = 900
+
+
+def master_password_is_set() -> bool:
+    return bool((_get_setting(_MASTER_PW_KEY, "") or "").strip())
+
+
+def set_master_password(new_pw: str, current_pw: str | None = None) -> dict:
+    """Set or rotate the master password. Only ever stores a bcrypt hash.
+
+    Rotation requires the CURRENT password: otherwise anyone with a dashboard
+    session could silently replace the second credential and defeat the whole
+    point of it being second.
+    """
+    if not new_pw or len(new_pw) < 12:
+        return {"ok": False, "error": "master password must be at least 12 characters"}
+    if master_password_is_set():
+        ok, err = _verify_master_password(current_pw or "")
+        if not ok:
+            return {"ok": False, "error": "current master password required: %s" % err}
+    try:
+        import bcrypt
+        _set_setting(_MASTER_PW_KEY,
+                     bcrypt.hashpw(new_pw.encode(), bcrypt.gensalt()).decode())
+        _set_setting(_MASTER_PW_FAILS_KEY, "0")
+        _set_setting(_MASTER_PW_LOCK_KEY, "")
+        log.warning("ai_engine: master password %s",
+                    "rotated" if current_pw else "set for the first time")
+        return {"ok": True}
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: set_master_password failed")
+        return {"ok": False, "error": str(exc)[:200]}
+
+
+def _verify_master_password(pw: str) -> tuple:
+    """(ok, error). Rate-limited; never reveals whether a hash exists via timing.
+
+    A failed read of the stored hash returns an explicit failure, never a pass --
+    the one direction this check must never fail in.
+    """
+    stored = (_get_setting(_MASTER_PW_KEY, "") or "").strip()
+    if not stored:
+        return False, "no master password has been set"
+    locked = (_get_setting(_MASTER_PW_LOCK_KEY, "") or "").strip()
+    if locked:
+        try:
+            if time.time() < float(locked):
+                return False, ("locked out for %d more seconds after repeated "
+                               "failures" % int(float(locked) - time.time()))
+        except (TypeError, ValueError):
+            pass                      # unparseable lock => treat as not locked
+    try:
+        import bcrypt
+        if bcrypt.checkpw((pw or "").encode(), stored.encode()):
+            _set_setting(_MASTER_PW_FAILS_KEY, "0")
+            _set_setting(_MASTER_PW_LOCK_KEY, "")
+            return True, ""
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: master password check errored")
+        return False, "verification failed: %s" % str(exc)[:120]
+    try:
+        fails = int(_get_setting(_MASTER_PW_FAILS_KEY, "0") or 0) + 1
+    except (TypeError, ValueError):
+        fails = 1
+    _set_setting(_MASTER_PW_FAILS_KEY, str(fails))
+    if fails >= _MASTER_PW_MAX_FAILS:
+        _set_setting(_MASTER_PW_LOCK_KEY, str(time.time() + _MASTER_PW_LOCKOUT_S))
+        log.warning("ai_engine: master password locked out after %d failures", fails)
+        return False, "too many failures - locked out for %d minutes" % (
+            _MASTER_PW_LOCKOUT_S // 60)
+    return False, "incorrect master password (%d of %d attempts used)" % (
+        fails, _MASTER_PW_MAX_FAILS)
+
+
+def _authority_override(action_class: str) -> dict | None:
+    try:
+        conn = _conn()
+        row = conn.execute(
+            "SELECT action_class, level, granted_by, granted_at, reason "
+            "FROM ai_authority_override WHERE action_class=?",
+            (action_class,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:                                        # noqa: BLE001
+        # A failed read must NOT look like "no override" -- but it also must not
+        # invent one. Log loudly and report none, which is the SAFE direction
+        # (less authority, never more).
+        log.exception("ai_engine: override read failed for %s", action_class)
+        return None
+
+
+def raise_authority(action_class: str, level: int, master_pw: str,
+                    granted_by: str, reason: str = "") -> dict:
+    """Manually raise a class's authority, gated on the master password.
+
+    Refuses, with a reason the UI can show verbatim, when:
+      * the class is unknown
+      * the password is wrong / locked out
+      * the level is out of range
+      * the class has a CAPABILITY ceiling it would exceed
+    """
+    if action_class not in ACTION_CLASS_CEILINGS:
+        raise UnknownActionClass(action_class)
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "level must be an integer"}
+    if not L0_OBSERVE <= level <= L4_GOVERN:
+        return {"ok": False, "error": "level must be between %d and %d"
+                % (L0_OBSERVE, L4_GOVERN)}
+    ok, err = _verify_master_password(master_pw)
+    if not ok:
+        log.warning("ai_engine: REJECTED authority raise for %s by %s: %s",
+                    action_class, granted_by, err)
+        return {"ok": False, "error": err, "auth_failed": True}
+    hard = ACTION_CLASS_CEILINGS[action_class]
+    if ceiling_kind(action_class) == "capability" and level > hard:
+        return {"ok": False, "error":
+                ("%s is capped at L%d by a MISSING CAPABILITY, not by caution: "
+                 "the code has no way to reverse this action. No password can "
+                 "raise it until that capability exists." % (action_class, hard))}
+    try:
+        conn = _conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO ai_authority_override"
+            "(action_class, level, granted_by, granted_at, reason) VALUES(?,?,?,?,?)",
+            (action_class, level, granted_by,
+             datetime.now().isoformat(timespec="seconds"), reason or ""))
+        conn.commit()
+        conn.close()
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: could not record authority override")
+        return {"ok": False, "error": str(exc)[:200]}
+    log.warning("ai_engine: AUTHORITY RAISED %s -> L%d by %s (%s)",
+                action_class, level, granted_by, reason or "no reason given")
+    # Returned in the SAME response as the successful raise: the user must not be
+    # able to leave this interaction believing something is automated when it is
+    # not. Waiting for a refusal ticket is not good enough -- if the triggering
+    # condition never occurs, no ticket ever fires and they stay wrong.
+    readiness = automation_readiness([action_class], level=level)
+    return {"ok": True, "action_class": action_class, "level": level,
+            "warnings": authority_raise_warnings(action_class, level),
+            "readiness": readiness,
+            "inert": [r for r in readiness if not r["will_act"]]}
+
+
+def surface_action_classes(surface_key: str) -> tuple:
+    """Which action classes a surface can lead to, from its registered anchor.
+
+    Empty tuple for a surface that registered none (explanatory only) AND for an
+    unregistered surface -- callers that need to tell those apart should check
+    `registered_anchors()`; for readiness purposes both correctly yield "nothing
+    here will act", which is the honest answer either way.
+    """
+    a = _ANCHORS.get(surface_key)
+    return tuple(a["action_classes"]) if a else ()
+
+
+def automation_readiness(action_classes=None, surface_key=None, level=None) -> list:
+    """Which of these classes will ACTUALLY act automatically -- and which won't.
+
+    THE PROBLEM THIS EXISTS TO SOLVE. Raising a toggle can succeed completely and
+    still leave the class inert, because authority is only one of the conditions
+    for acting. A user who sees "override applied" and walks away believes
+    automation is live. Nothing contradicts them until the engine declines to act
+    on a real event -- which, if the triggering condition never occurs, may be
+    never. They can be wrong for the entire trial and never find out.
+
+    So this is computed and shown AT RAISE TIME, in the same interaction, rather
+    than discovered later from a refusal ticket.
+
+    Two independent reasons a class stays inert, and they fail very differently:
+
+      * CAPABILITY CEILING -- `raise_authority` already refuses these loudly at
+        the moment of the raise, so the user does get told.
+      * NO UNDO HANDLER    -- this one is SILENT. The raise succeeds cleanly,
+        the toggle reads ACT, and `execute_proposal` refuses every time. This is
+        the dangerous case and the reason this function is not optional.
+
+    Pure derivation over `effective_ceiling()` -- no new authority rules. If it
+    ever disagrees with what `execute_proposal` does, execute_proposal is right
+    and this is the bug.
+    """
+    if action_classes is None:
+        action_classes = surface_action_classes(surface_key) if surface_key else ()
+    out = []
+    for ac in action_classes:
+        try:
+            eff = effective_ceiling(ac)
+        except (UnknownActionClass, AuthorityUnavailable) as exc:
+            # An unreadable authority state is NOT "it will act". Report the
+            # failure; never let a failed read present as a capability.
+            out.append({"action_class": ac, "will_act": False,
+                        "reason": "unknown", "level": None,
+                        "detail": "could not determine authority: %s" % str(exc)[:120]})
+            continue
+        undo_ok = eff["undo_available"]
+        hard = ACTION_CLASS_CEILINGS[ac]
+        requested = eff["level"] if level is None else int(level)
+        # `level` is the authority being GRANTED, not a cap on current state.
+        # Clamping to the current level (the first cut of this) made a preview
+        # report the pre-raise world -- every class "below_acting_level" purely
+        # because the raise had not happened yet, which is useless in the one
+        # dialog that needs to predict the post-raise world.
+        if eff["ceiling_kind"] == "capability":
+            eff_level = min(requested, hard)
+        else:
+            eff_level = requested
+        # A standing rule the user set themselves still binds -- the override
+        # never lifts it (see raise_authority), so readiness must not pretend
+        # otherwise.
+        eff_level = min(eff_level, eff["rule_clamp"])
+        blocked_by_capability = (eff["ceiling_kind"] == "capability"
+                                 and requested > hard)
+        if blocked_by_capability:
+            out.append({"action_class": ac, "will_act": False,
+                        "reason": "capability_ceiling", "level": eff_level,
+                        "detail": "no restore path available - this action is "
+                                  "capped at L%d by a missing capability in the "
+                                  "product, and no password can lift it" % hard})
+        elif not undo_ok and eff_level >= L2_ACT_REVERSIBLE:
+            out.append({"action_class": ac, "will_act": False,
+                        "reason": "no_undo_handler", "level": eff_level,
+                        "detail": "no reversal is registered, so Nemesis will "
+                                  "refuse to do this automatically even at L%d - "
+                                  "it could not be taken back if wrong" % eff_level})
+        elif eff_level < L2_ACT_REVERSIBLE:
+            out.append({"action_class": ac, "will_act": False,
+                        "reason": "below_acting_level", "level": eff_level,
+                        "detail": "at L%d Nemesis may %s but not act" %
+                                  (eff_level, "propose" if eff_level == L1_RECOMMEND
+                                   else "only observe")})
+        else:
+            out.append({"action_class": ac, "will_act": True,
+                        "reason": "ready", "level": eff_level,
+                        "detail": "will act automatically at L%d" % eff_level})
+    return out
+
+
+def inert_after_raise(surface_key=None, action_classes=None, level=None) -> list:
+    """Just the classes that will NOT act -- what the raise dialog must display."""
+    return [r for r in automation_readiness(action_classes=action_classes,
+                                            surface_key=surface_key, level=level)
+            if not r["will_act"]]
+
+
+def authority_raise_warnings(action_class: str, level: int) -> list:
+    """What the confirmation dialog MUST say before a raise is accepted.
+
+    Two different warnings, deliberately not merged: "earlier than its track
+    record warrants" is a risk you can take back, and "cannot be undone" is not.
+    Collapsing them into one scary paragraph teaches people to click through.
+    """
+    out = []
+    if level >= L2_ACT_REVERSIBLE and undo_handler_for(action_class) is None:
+        out.append("THIS ACTION CANNOT BE UNDONE IF IT IS WRONG. No reversal is "
+                   "registered for %s, so the engine will REFUSE to act on it "
+                   "even at this level -- and if a reversal is added later, "
+                   "actions taken under it still could not be taken back "
+                   "retroactively." % action_class)
+    if ceiling_kind(action_class) == "capability":
+        out.append("%s is limited by a missing capability in the product, not by "
+                   "caution. Raising this setting will not enable the action."
+                   % action_class)
+    try:
+        conn = _conn()
+        row = conn.execute("SELECT current_level FROM ai_authority WHERE action_class=?",
+                           (action_class,)).fetchone()
+        conn.close()
+        earned = int(row["current_level"]) if row else L0_OBSERVE
+    except Exception:                                        # noqa: BLE001
+        earned = None
+    if earned is not None and level > earned:
+        out.append("You are granting L%d to a class the system has only earned "
+                   "L%d for. You are choosing to trust it earlier than its "
+                   "track record warrants." % (level, earned))
+    return out
+
+
+def clear_authority_override(action_class: str, cleared_by: str,
+                             reason: str = "") -> dict:
+    """Remove a manual override. Requires no password -- LOWERING authority is
+    always allowed, by anyone. Only raising needs the second credential."""
+    try:
+        conn = _conn()
+        cur = conn.execute("DELETE FROM ai_authority_override WHERE action_class=?",
+                           (action_class,))
+        conn.commit()
+        n = cur.rowcount
+        conn.close()
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: could not clear override")
+        return {"ok": False, "error": str(exc)[:200]}
+    if n:
+        log.warning("ai_engine: authority override CLEARED for %s by %s (%s)",
+                    action_class, cleared_by, reason or "no reason given")
+    return {"ok": True, "cleared": bool(n)}
+
+
+def demote_action_class(action_class: str, reason: str, notifier=None) -> dict:
+    """The safety response: drop a class's earned level AND kill any override.
+
+    A standing manual override must NOT survive a demotion. The whole point of
+    demotion is that something went wrong; letting a password entered last week
+    outvote the safety system that just fired would make demotion decorative.
+
+    LOUD BY CONTRACT, not by convention: this returns `notified` and takes a
+    `notifier`, because telling the person in charge "the safety system just
+    overrode your standing setting" in a log line nobody reads is the same as
+    not telling them.
+    """
+    if action_class not in ACTION_CLASS_CEILINGS:
+        raise UnknownActionClass(action_class)
+    had_override = _authority_override(action_class)
+    try:
+        conn = _conn()
+        conn.execute(
+            "INSERT INTO ai_authority(action_class, current_level, hard_ceiling, "
+            " last_demoted_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(action_class) DO UPDATE SET current_level=?, "
+            " last_demoted_at=excluded.last_demoted_at",
+            (action_class, L0_OBSERVE, ACTION_CLASS_CEILINGS[action_class],
+             datetime.now().isoformat(timespec="seconds"), L0_OBSERVE))
+        conn.execute("DELETE FROM ai_authority_override WHERE action_class=?",
+                     (action_class,))
+        conn.commit()
+        conn.close()
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: demotion failed for %s", action_class)
+        return {"ok": False, "error": str(exc)[:200]}
+    msg = ("Nemesis SAFETY ACTION: automation for '%s' has been demoted to L0 "
+           "(observe only).\n\nReason: %s\n" % (action_class, reason))
+    if had_override:
+        msg += ("\nYOUR MANUAL OVERRIDE WAS CLEARED. It had been set to L%d by "
+                "%s on %s. The master password must be re-entered to restore it "
+                "-- deliberately, so that restoring authority after a failure is "
+                "a decision someone makes on purpose.\n"
+                % (had_override["level"], had_override.get("granted_by") or "unknown",
+                   had_override.get("granted_at") or "unknown"))
+    log.warning("ai_engine: DEMOTED %s to L0 (%s); override_cleared=%s",
+                action_class, reason, bool(had_override))
+    notified = False
+    if notifier:
+        try:
+            notifier("[Nemesis] Automation demoted: %s" % action_class, msg)
+            notified = True
+        except Exception:                                    # noqa: BLE001
+            # The demotion STOOD; only the shout failed. Never let a mail error
+            # roll back a safety action.
+            log.exception("ai_engine: demotion notice failed to send")
+    return {"ok": True, "action_class": action_class, "level": L0_OBSERVE,
+            "override_cleared": bool(had_override), "notified": notified,
+            "message": msg}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Proposals: the L1 approve/reject loop, and the UNDO that L2+ requires
+#
+# `ai_proposals` shipped as schema with NO reader and NO writer -- including the
+# `undone`/`undone_at`/`undone_by` columns, which described a capability nothing
+# implemented. That is the gap that made the whole authority ladder undeployable:
+# you cannot responsibly grant an engine permission to ACT until the action can be
+# taken back, and "we will add undo later" is how a system ships that can only go
+# one way.
+#
+# UNDO IS A REGISTRY, NOT A SWITCH. Reversing an action is domain knowledge --
+# un-blocking an IP, re-opening an alert, releasing a quarantined file are three
+# different operations owned by three different modules. This layer records intent
+# and ordering; the module that knows how to reverse its own action registers a
+# handler. A class with NO registered handler CANNOT BE EXECUTED at L2+, which is
+# enforced below rather than documented: an irreversible action is exactly the one
+# that must not be automated.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: action_class -> callable(proposal_row[, context]) -> (ok: bool, detail: str)
+#:
+#: A handler MAY require a credential passed through `context`, and that still
+#: counts as reversible. The asymmetry is deliberate and matches how the firewall
+#: is already built: the ENGINE acts unattended, but an UNDO is initiated by a
+#: human, so a credential legitimately exists at that moment. nemesis_fwd's
+#: PEER_POLICY makes the unattended peer STRUCTURALLY incapable of lifting a
+#: block (ops: block_ip/deny_ip/expire_quarantine only) while the credentialed
+#: dashboard peer holds `unblock_ip`. That is not an obstacle to L2 -- it IS the
+#: L2 contract: the engine may act, and a person can take it back.
+_UNDO_HANDLERS = {}
+
+
+def register_undo_handler(action_class: str, handler) -> None:
+    """Declare how to REVERSE one class of action.
+
+    Registering is what makes a class eligible for L2+ execution at all (see
+    `execute_proposal`). Modules register their own; nothing here guesses how to
+    undo someone else's action.
+    """
+    _UNDO_HANDLERS[action_class] = handler
+    log.info("ai_engine: undo handler registered for %s", action_class)
+
+
+def undo_handler_for(action_class: str):
+    return _UNDO_HANDLERS.get(action_class)
+
+
+def create_proposal(action_class: str, surface_key: str, row_id, proposed_action: str,
+                    reasoning: str, model_used: str | None = None) -> int | None:
+    """Record a proposed action awaiting human approval. Returns its id.
+
+    This is what the engine does at L1: it proposes, it does not act. Every row is
+    also a labelled datapoint for the promotion mechanism the ladder describes --
+    the human's approve/reject is the measurement.
+    """
+    if action_class not in ACTION_CLASS_CEILINGS:
+        raise UnknownActionClass(action_class)
+    try:
+        conn = _conn()
+        cur = conn.execute(
+            "INSERT INTO ai_proposals(action_class, surface_key, row_id, "
+            " proposed_action, reasoning, model_used, created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (action_class, surface_key, str(row_id), proposed_action,
+             reasoning or "", model_used or _ACTIVE_MODEL,
+             datetime.now().isoformat(timespec="seconds")))
+        conn.commit()
+        pid = cur.lastrowid
+        conn.close()
+        return pid
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: create_proposal failed")
+        return None
+
+
+def get_proposal(proposal_id: int) -> dict | None:
+    try:
+        conn = _conn()
+        conn.row_factory = __import__("sqlite3").Row
+        row = conn.execute("SELECT * FROM ai_proposals WHERE id=?",
+                           (proposal_id,)).fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: get_proposal failed")
+        return None
+
+
+def list_proposals(limit: int = 100, pending_only: bool = False) -> list:
+    """Proposals, newest first -- the approve/reject queue and its audit trail."""
+    try:
+        conn = _conn()
+        conn.row_factory = __import__("sqlite3").Row
+        sql = "SELECT * FROM ai_proposals"
+        if pending_only:
+            sql += " WHERE human_response IS NULL"
+        sql += " ORDER BY id DESC LIMIT ?"
+        rows = conn.execute(sql, (int(limit),)).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: list_proposals failed")
+        return []
+
+
+def respond_to_proposal(proposal_id: int, response: str, responded_by: str) -> dict:
+    """Record a human approve/reject. Does NOT execute -- that is a separate step.
+
+    Split deliberately: approving is a decision, executing is an effect, and
+    collapsing them would make "I approve this in principle" indistinguishable
+    from "do it now". The audit trail needs both moments.
+    """
+    if response not in ("approved", "rejected"):
+        return {"ok": False, "error": "response must be 'approved' or 'rejected'"}
+    p = get_proposal(proposal_id)
+    if not p:
+        return {"ok": False, "error": "no such proposal"}
+    if p["human_response"]:
+        # Not an error to re-read, but the FIRST decision stands. Silently
+        # overwriting it would erase the audit trail this table exists to be.
+        return {"ok": False, "error": "already %s by %s"
+                % (p["human_response"], p["responded_by"] or "unknown")}
+    try:
+        conn = _conn()
+        conn.execute("UPDATE ai_proposals SET human_response=?, responded_at=?, "
+                     "responded_by=? WHERE id=?",
+                     (response, datetime.now().isoformat(timespec="seconds"),
+                      responded_by, proposal_id))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "id": proposal_id, "response": response}
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: respond_to_proposal failed")
+        return {"ok": False, "error": str(exc)[:200]}
+
+
+def execute_proposal(proposal_id: int, executor, actor: str | None = None) -> dict:
+    """Carry out an APPROVED proposal via `executor(proposal) -> (ok, detail)`.
+
+    THREE REFUSALS, all deliberate:
+      * not approved            -> an unapproved action is not an action
+      * already executed        -> re-running is not idempotent in the real world
+      * NO UNDO HANDLER         -> see below
+
+    The undo requirement is the load-bearing one. An action whose class has no
+    registered reversal cannot be executed here at all, no matter how much
+    authority the ladder grants, because granting an engine the power to do
+    something it cannot take back is the failure mode the whole ladder exists to
+    prevent. It fails LOUD rather than executing-and-hoping.
+    """
+    p = get_proposal(proposal_id)
+    if not p:
+        return {"ok": False, "error": "no such proposal"}
+    if p["human_response"] != "approved":
+        return {"ok": False, "error": "proposal is not approved (%s)"
+                % (p["human_response"] or "no response yet")}
+    if p["executed"]:
+        return {"ok": False, "error": "already executed at %s" % p["executed_at"]}
+    if undo_handler_for(p["action_class"]) is None:
+        return {"ok": False, "error":
+                "refusing to execute %s: no undo handler registered for that "
+                "action class, so it could not be reversed" % p["action_class"]}
+    try:
+        ok, detail = executor(p)
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: executor raised for proposal %s", proposal_id)
+        return {"ok": False, "error": "executor raised: %s" % str(exc)[:200]}
+    if not ok:
+        return {"ok": False, "error": detail or "executor reported failure"}
+    try:
+        conn = _conn()
+        conn.execute("UPDATE ai_proposals SET executed=1, executed_at=? WHERE id=?",
+                     (datetime.now().isoformat(timespec="seconds"), proposal_id))
+        conn.commit()
+        conn.close()
+    except Exception:                                        # noqa: BLE001
+        # The effect HAPPENED but the record did not. Loud, because an executed
+        # action with no audit row is the state we can least afford to be quiet
+        # about -- it is also now un-undoable through this path.
+        log.exception("ai_engine: proposal %s EXECUTED but could not be recorded",
+                      proposal_id)
+        return {"ok": False, "error": "executed but the record failed to write - "
+                                      "manual reconciliation required"}
+    log.warning("ai_engine: proposal %s executed by %s (%s)",
+                proposal_id, actor or "unknown", p["action_class"])
+    return {"ok": True, "id": proposal_id, "detail": detail}
+
+
+def _call_handler(handler, proposal, context):
+    """Call a reversal handler, passing `context` only if it accepts one.
+
+    Signature-inspected rather than try/except TypeError: catching TypeError
+    would also swallow a genuine TypeError raised INSIDE the handler and
+    silently retry it with fewer arguments, turning a real bug into a confusing
+    second failure.
+    """
+    import inspect
+    try:
+        params = inspect.signature(handler).parameters
+        takes_ctx = len(params) >= 2
+    except (TypeError, ValueError):
+        takes_ctx = False
+    return handler(proposal, context) if takes_ctx else handler(proposal)
+
+
+def undo_proposal(proposal_id: int, undone_by: str, context: dict | None = None) -> dict:
+    """Reverse an executed proposal through its registered handler.
+
+    The reversal is attempted FIRST and the row is only marked undone if it
+    actually succeeded. Marking first would leave a row claiming an action was
+    reversed when it is still in force -- a lie in the one record an operator
+    would consult during an incident.
+    """
+    p = get_proposal(proposal_id)
+    if not p:
+        return {"ok": False, "error": "no such proposal"}
+    if not p["executed"]:
+        return {"ok": False, "error": "proposal was never executed"}
+    if p["undone"]:
+        return {"ok": False, "error": "already undone at %s by %s"
+                % (p["undone_at"], p["undone_by"] or "unknown")}
+    handler = undo_handler_for(p["action_class"])
+    if handler is None:
+        return {"ok": False, "error":
+                "no undo handler for %s - cannot reverse" % p["action_class"]}
+    try:
+        ok, detail = _call_handler(handler, p, context or {})
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: undo handler raised for proposal %s", proposal_id)
+        return {"ok": False, "error": "undo handler raised: %s" % str(exc)[:200]}
+    if not ok:
+        return {"ok": False, "error": detail or "undo reported failure",
+                "still_in_force": True}
+    try:
+        conn = _conn()
+        conn.execute("UPDATE ai_proposals SET undone=1, undone_at=?, undone_by=? "
+                     "WHERE id=?",
+                     (datetime.now().isoformat(timespec="seconds"), undone_by,
+                      proposal_id))
+        conn.commit()
+        conn.close()
+    except Exception:                                        # noqa: BLE001
+        log.exception("ai_engine: proposal %s REVERSED but could not be recorded",
+                      proposal_id)
+        return {"ok": False, "error": "reversed but the record failed to write - "
+                                      "manual reconciliation required"}
+    log.warning("ai_engine: proposal %s undone by %s", proposal_id, undone_by)
+    return {"ok": True, "id": proposal_id, "detail": detail}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Flask route handlers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3099,6 +4232,40 @@ def _route_usage():
     return jsonify(get_usage_stats())
 
 
+def _route_automation_readiness():
+    """GET /api/ai/automation_readiness?surface=alert&level=2
+
+    Lets the toggle UI show, BEFORE and AFTER a raise, exactly which action
+    classes will still not act. Read-only, so GET is correct here -- it changes
+    nothing (contrast the raise itself, which must be POST).
+    """
+    from flask import jsonify, request
+    surface = (request.args.get("surface") or "").strip() or None
+    raw = (request.args.get("level") or "").strip()
+    try:
+        level = int(raw) if raw else None
+    except ValueError:
+        return jsonify({"error": "level must be an integer"}), 400
+    classes = None
+    if not surface:
+        c = (request.args.get("action_classes") or "").strip()
+        classes = [x for x in c.split(",") if x] or None
+    if not surface and not classes:
+        return jsonify({"error": "surface or action_classes required"}), 400
+    try:
+        rows = automation_readiness(action_classes=classes, surface_key=surface,
+                                    level=level)
+    except UnknownActionClass as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({
+        "surface": surface,
+        "level": level,
+        "readiness": rows,
+        "inert": [r for r in rows if not r["will_act"]],
+        "all_inert": bool(rows) and all(not r["will_act"] for r in rows),
+    })
+
+
 def _route_settings():
     from flask import request, jsonify
     if request.method == "GET":
@@ -3109,6 +4276,15 @@ def _route_settings():
             # "" means no cap. Returned as the stored string rather than a float
             # so the UI can distinguish "unset" from "0" without guessing.
             "spend_cap_monthly_usd": _get_setting("spend_cap_monthly_usd", ""),
+            # The canonical ceiling + the window it is measured over. A rolling
+            # window is what lets a user express "no more than $10 this week";
+            # a calendar month cannot say that at all.
+            "spend_cap_usd": _get_setting("spend_cap_usd", ""),
+            "spend_cap_window_days": _spend_window_days(),
+            # The STOPPED state, so a UI can show why the engine went quiet
+            # rather than leaving the operator to infer it from silence.
+            "spend_stop": get_spend_stop(),
+            "spend": get_spend(),
         })
     data = request.get_json(silent=True) or {}
 
@@ -3123,6 +4299,43 @@ def _route_settings():
     #     means a typo accepted here would SILENTLY REMOVE the user's spending
     #     protection while the save looked successful. So garbage is refused at
     #     the point of entry, and an existing cap is left exactly as it was.
+    # Same validate-before-write discipline as below, for the same reason: a
+    # typo accepted here would silently remove the user's spending protection
+    # while the save looked successful.
+    new_cap_write = None
+    if "spend_cap_usd" in data:
+        raw = ("" if data["spend_cap_usd"] is None
+               else str(data["spend_cap_usd"]).strip())
+        if raw == "":
+            new_cap_write = ""
+        else:
+            try:
+                val = float(raw)
+            except (ValueError, TypeError):
+                return jsonify({"ok": False, "error":
+                                "Spend ceiling must be a number, or empty for no "
+                                "ceiling. Existing ceiling left unchanged."}), 400
+            if val <= 0:
+                return jsonify({"ok": False, "error":
+                                "Spend ceiling must be greater than 0, or empty "
+                                "for no ceiling. Existing ceiling left "
+                                "unchanged."}), 400
+            new_cap_write = f"{val:.2f}"
+
+    window_write = None
+    if "spend_cap_window_days" in data:
+        try:
+            wd = int(float(str(data["spend_cap_window_days"]).strip()))
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "error":
+                            "Spend window must be a whole number of days. "
+                            "Existing window left unchanged."}), 400
+        if wd < 1 or wd > 365:
+            return jsonify({"ok": False, "error":
+                            "Spend window must be between 1 and 365 days. "
+                            "Existing window left unchanged."}), 400
+        window_write = str(wd)
+
     cap_write = None
     if "spend_cap_monthly_usd" in data:
         raw = ("" if data["spend_cap_monthly_usd"] is None
@@ -3145,6 +4358,21 @@ def _route_settings():
     try:
         if cap_write is not None:
             _set_setting("spend_cap_monthly_usd", cap_write)
+        if new_cap_write is not None:
+            _set_setting("spend_cap_usd", new_cap_write)
+        if window_write is not None:
+            _set_setting("spend_cap_window_days", window_write)
+        # Raising the ceiling should un-stick a reported stop immediately rather
+        # than leaving a stale "stopped" badge until the next call happens to
+        # re-evaluate it.
+        if new_cap_write is not None or window_write is not None or cap_write is not None:
+            try:
+                sp = get_spend()
+                cap_now = _spend_cap_usd()
+                if sp.get("ok") and (cap_now is None or (sp.get("usd") or 0) < cap_now):
+                    clear_spend_stop(actor="settings")
+            except Exception:                                # noqa: BLE001
+                pass
         if "rate_per_hour" in data:
             _set_setting("rate_per_hour", str(max(0, int(data["rate_per_hour"]))))
         if "rate_per_day" in data:
@@ -3224,6 +4452,7 @@ class Module(NemesisModule):
             ("/api/ai/status",             _route_status,            {"methods": ["GET"]}),
             ("/api/ai/usage",              _route_usage,             {"methods": ["GET"]}),
             ("/api/ai/settings",           _route_settings,          {"methods": ["GET", "POST"]}),
+            ("/api/ai/automation_readiness", _route_automation_readiness, {"methods": ["GET"]}),
             ("/api/ai/upsell_dismiss",     _route_upsell_dismiss,    {"methods": ["POST"]}),
             ("/api/ai/upsell_restore",     _route_upsell_restore,    {"methods": ["POST"]}),
             ("/api/ai/incident",           _route_incident,          {"methods": ["GET"]}),
