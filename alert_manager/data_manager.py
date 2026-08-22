@@ -156,6 +156,18 @@ NAMESPACES = {
     # a deliberate act rather than something this entry quietly permits.
     "lookup":             {"tables": ()},
 
+    # Same empty-grant reasoning as `lookup` above: netprobe owns no tables. It
+    # READS the device inventory and the enrolled-agent list to decide whether a
+    # probe target is permitted, which ADR 0001's read-any rule already allows,
+    # and it persists nothing of its own beyond E-NETPROBE-* ledger rows (covered
+    # by the namespace-independent error-ledger exemption further down).
+    #
+    # Registered so `connect("netprobe")` resolves. Without it, `make_recorder`
+    # would swallow the unknown-namespace error and every probe error code would
+    # silently return None while the module looked instrumented -- the exact
+    # failure `lookup` hit above.
+    "netprobe":           {"tables": ()},
+
     # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
     # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the
     # dashboard can render a persistent degraded banner and so every transition
