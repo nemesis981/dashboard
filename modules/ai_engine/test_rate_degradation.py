@@ -108,7 +108,7 @@ class _Client:
 _fake = types.ModuleType("anthropic")
 _fake.Anthropic = _Client
 sys.modules["anthropic"] = _fake
-ai._increment_usage = lambda conn, tokens_in, tokens_out: None
+ai._increment_usage = lambda conn, tokens_in, tokens_out, **kw: None
 ai._record_call_success = lambda: None
 
 
@@ -206,8 +206,8 @@ def main():
     print("\n-- THE SAFETY PROPERTY: money ceilings are NEVER degradable --")
     set_counts(0, 0)                       # throughput deliberately clear
     ai._set_setting("spend_cap_monthly_usd", "5.00")
-    _orig_spend = ai.get_spend_this_month
-    ai.get_spend_this_month = lambda: {"ok": True, "usd": 9.99, "month": "2026-08"}
+    _orig_spend = ai.get_spend
+    ai.get_spend = lambda window_days=None: {"ok": True, "usd": 9.99, "window_days": 30}
     try:
         lim, reason, kind = limit()
         check("spend cap reports 'hard', never 'degrade'", kind == "hard",
@@ -218,12 +218,12 @@ def main():
               repr(r.get("reason")))
 
         print("\n-- and an UNREADABLE spend with a cap set still refuses --")
-        ai.get_spend_this_month = lambda: {"ok": False}
+        ai.get_spend = lambda window_days=None: {"ok": False, "window_days": 30}
         lim, reason, kind = limit()
         check("unreadable spend + cap set is 'hard'", kind == "hard", "kind=%r" % kind)
         check("NOT degraded", kind != "degrade")
     finally:
-        ai.get_spend_this_month = _orig_spend
+        ai.get_spend = _orig_spend
         ai._set_setting("spend_cap_monthly_usd", "")
 
     print("\n-- CONTROL: with the cap cleared, calls work again --")
