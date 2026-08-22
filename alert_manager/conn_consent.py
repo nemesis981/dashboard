@@ -219,6 +219,110 @@ def status(device_id, conn=None):
     }
 
 
+# ── Coverage state — so a device nobody is watching never looks fine ─────────
+#
+# `status()` above answers "is consent live" with a boolean, and a boolean folds
+# together states that mean very different things to whoever reads the dashboard:
+#
+#   * a device that never enrolled in Track C at all
+#   * a device whose user WITHDREW consent, and whose history was purged
+#   * a device consented at a superseded disclosure version, whose events the
+#     ingest gate now silently rejects — the module docstring already flags that
+#     this "looks like an agent that has stopped reporting"
+#
+# Rendered as one `consented: False`, all three read as "nothing here", which is
+# indistinguishable from a healthy device with nothing to report. That is the
+# two-state collapse `integrity_watch` refuses on principle: a check that cannot
+# run is not a check that passed.
+#
+# Interim measure pending the consent legal review (2026-08-22): whatever is
+# decided about lawful basis, a device whose connection telemetry is NOT being
+# collected must SAY so rather than simply be absent.
+
+COVERAGE_COVERED      = "covered"        # consent live at the current version
+COVERAGE_WITHDRAWN    = "withdrawn"      # consent revoked; history purged
+COVERAGE_NOT_ENROLLED = "not_enrolled"   # never consented; Track C never started
+COVERAGE_VERSION_STALE = "version_stale"  # consented, but at a superseded version
+COVERAGE_UNKNOWN      = "unknown"        # state could not be read
+
+#: Short user-facing label per state. Deliberately NONE of them is empty: an
+#: empty label renders as a blank cell, which is how "not covered" became
+#: indistinguishable from "fine" in the first place.
+COVERAGE_LABELS = {
+    COVERAGE_COVERED:       "connection telemetry: collected",
+    COVERAGE_WITHDRAWN:     "NOT COVERED — consent withdrawn",
+    COVERAGE_NOT_ENROLLED:  "NOT COVERED — no consent on record",
+    COVERAGE_VERSION_STALE: "NOT COVERED — consent predates the current disclosure",
+    COVERAGE_UNKNOWN:       "NOT COVERED — consent state unreadable",
+}
+
+
+def coverage_state(device_id, conn=None) -> str:
+    """Why this device's connection telemetry is or is not being collected.
+
+    Five-valued on purpose. Only COVERAGE_COVERED means data is flowing; every
+    other value is a distinct reason it is not, and each one is reported rather
+    than collapsed into a blank.
+
+    A failed read returns COVERAGE_UNKNOWN — never COVERAGE_COVERED. Guessing
+    "covered" on an unreadable state would put a reassuring label on a device
+    nobody is watching, which is the exact failure this function exists to
+    prevent.
+    """
+    try:
+        st = status(device_id, conn=conn)
+    except Exception:                                        # noqa: BLE001
+        return COVERAGE_UNKNOWN
+    if st.get("reason") == "no record":
+        return COVERAGE_NOT_ENROLLED
+    if st.get("revoked_at"):
+        return COVERAGE_WITHDRAWN
+    if not st.get("consented"):
+        # Defensive: consented False with no revoked_at is not a state `status()`
+        # produces today, but treating an unexplained not-consented as covered
+        # would be exactly the wrong direction.
+        return COVERAGE_NOT_ENROLLED
+    if not st.get("version_current"):
+        return COVERAGE_VERSION_STALE
+    return COVERAGE_COVERED
+
+
+def coverage_label(state) -> str:
+    """User-facing text. An unrecognised state is reported, never blanked."""
+    return COVERAGE_LABELS.get(
+        state, "NOT COVERED — unrecognised consent state (%s)" % (state,))
+
+
+def _selftest_coverage_states() -> None:
+    """Every state must be reachable, distinct, and never silently reassuring.
+
+    Runs at import, in the production path. Without it a mapping that returned
+    COVERAGE_COVERED for everything would satisfy any "covered devices show as
+    covered" test a suite could write.
+    """
+    if len(set(COVERAGE_LABELS.values())) != len(COVERAGE_LABELS):
+        raise AssertionError("coverage self-test: two states share a label")
+    for state, label in COVERAGE_LABELS.items():
+        if not label.strip():
+            raise AssertionError(
+                "coverage self-test: state %r has an empty label; a blank cell is "
+                "how 'not covered' became indistinguishable from 'fine'" % state)
+        if state != COVERAGE_COVERED and "NOT COVERED" not in label:
+            raise AssertionError(
+                "coverage self-test: non-covered state %r does not say so (%r)"
+                % (state, label))
+    if "NOT COVERED" in COVERAGE_LABELS[COVERAGE_COVERED]:
+        raise AssertionError(
+            "coverage self-test: the COVERED state claims not to be covered")
+    # An unrecognised state must still produce a not-covered label rather than "".
+    if "NOT COVERED" not in coverage_label("some_future_state"):
+        raise AssertionError(
+            "coverage self-test: an unrecognised state did not report as uncovered")
+
+
+_selftest_coverage_states()
+
+
 def ensure_codes(conn):
     """Register the E-CONSENT-* catalog. Idempotent; safe to call per request.
 

@@ -5100,6 +5100,26 @@ def _render_agent_devices_html() -> str:
         # determination the server cannot make. The Revoke control sits directly
         # below the note because "I can't tell whether this is stolen" is exactly
         # the situation revoke exists for.
+        # Connection-telemetry coverage. Shown for every enrolled device, not
+        # only uncovered ones: a badge that appears only on failure is absent in
+        # both the healthy case AND the case where the lookup itself broke.
+        # Interim measure pending the consent legal review (2026-08-22) — a
+        # device whose telemetry is not being collected must SAY so rather than
+        # simply show nothing, which reads identically to a quiet healthy device.
+        consent_badge = ""
+        try:
+            import conn_consent as _cc                        # noqa: PLC0415
+            _cov = _cc.coverage_state(r["device_id"])
+            _covered = (_cov == _cc.COVERAGE_COVERED)
+            _colour = "#4caf50" if _covered else "#ffcc00"
+            consent_badge = (
+                '<div style="color:%s;font-size:0.8em;margin:4px 0">%s</div>'
+                % (_colour, html.escape(_cc.coverage_label(_cov))))
+        except Exception:
+            # The lookup itself failed. Say that, rather than rendering nothing —
+            # an absent badge would be indistinguishable from a covered device.
+            consent_badge = ('<div style="color:#ffcc00;font-size:0.8em;margin:4px 0">'
+                             'NOT COVERED &mdash; consent state unreadable</div>')
         _ck_label, _ck_note = _agent_checkin_state(r["agent_last_seen"])
         checkin_label = html.escape(_ck_label)
         checkin_note = (
@@ -5115,6 +5135,7 @@ def _render_agent_devices_html() -> str:
             f'<span style="color:#888">{checkin_label}</span> &middot; '
             f'<span style="color:#888">{lhm}</span>{wifi_note}<br>'
             f'{checkin_note}'
+            f'{consent_badge}'
             f'{_agent_error_digest_html(agent_errs.get(r["device_id"], []))}'
             f'<button onclick="agentRevoke(\'{did}\')" style="background:#ff444422;color:#ff6666;'
             'border:1px solid #ff4444;border-radius:6px;padding:4px 12px;cursor:pointer;'
