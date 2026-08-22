@@ -240,7 +240,8 @@ Defined in `modules/ai_engine/module.py` (`L0_OBSERVE`–`L4_GOVERN`):
 **Authority is per action class, not global** (`ACTION_CLASS_CEILINGS`): e.g.
 `ip_quarantine_external` ceilings at L3, `ip_block_permanent` at L2, and both
 `ip_action_internal` and `malware_file_quarantine` are pinned at L1 — the AI may recommend
-quarantining a file, never do it.
+quarantining a file, never do it. Setting an alert's disposition (`alert_disposition`)
+ceilings at L2, because a disposition is reversible.
 
 **The effective level is `min()` of three terms** (`effective_ceiling()`): what has been
 *earned* (`ai_authority.current_level`), the *hard* code-level ceiling for that class, and
@@ -255,7 +256,18 @@ is explain-only everywhere, and today it gates only what the chat may *say* — 
 path consults it, because nothing executes. Wiring L1 (propose + approve/reject) is the
 next step; see the scoping note in the private mirror.
 
-⚠ **One known incoherence, not yet fixed:** the alert-verdict path
-(`/api/analyze/<rule_id>`) writes `alerts.action` without consulting `effective_ceiling()`
-at all, while chat on the same alert is fully gated. Reconcile before granting any real
-authority, or the permission model is false on its face.
+✅ **Reconciled 2026-08-21.** The alert-verdict path (`/api/analyze/<rule_id>`) used
+to write `alerts.action` without consulting `effective_ceiling()` at all, while chat on the
+same alert was fully gated — two surfaces, one object, opposite permission models. It now
+goes through the `alert_disposition` class:
+
+| effective level | what happens to the alert |
+|---|---|
+| L0 | stays `pending`; a human decides. The engine explains only. |
+| L1 | the engine PROPOSES a disposition (recorded in `ai_proposals` for approval) |
+| L2 | the engine may set the disposition itself (reversible, and undoable) |
+
+Because nothing writes `ai_authority` yet, every install resolves to L0 today — so the
+practical effect of the fix is that the engine STOPPED auto-ignoring low-risk alerts until
+authority is actually granted. That is the correct direction: the permission model is now
+true rather than decorative.
