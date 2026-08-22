@@ -152,7 +152,10 @@ def main():
     src = ""
     for f in ("agent.py", "l2_windivert.py", "dns_enforce.py", "attest.py",
               "enrollment.py", "tasks.py", "platforms/windows.py",
-              "platforms/linux.py", "platforms/mac.py"):
+              "platforms/linux.py", "platforms/mac.py",
+              # privileged-IPC subsystem (step 3b): the SYSTEM service and the
+              # session-side client record their own auth/start failures.
+              "privservice.py", "privclient.py"):
         try:
             src += io.open(os.path.join(HERE, f), encoding="utf-8").read()
         except OSError:
