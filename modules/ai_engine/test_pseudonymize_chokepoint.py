@@ -106,7 +106,7 @@ sys.modules["anthropic"] = _fake
 # swallows it and carries on — the suite would still pass, for the wrong reason,
 # while logging a TypeError on every call. Matched deliberately.
 ai._check_rate_limit = lambda conn: (False, None)
-ai._increment_usage = lambda conn, tokens_in, tokens_out: None
+ai._increment_usage = lambda conn, tokens_in, tokens_out, **kw: None
 ai._record_call_success = lambda: None
 
 
