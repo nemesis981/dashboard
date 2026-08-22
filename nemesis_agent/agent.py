@@ -669,6 +669,11 @@ def _collect_payload(conf):
         # interval measured in minutes, and a cache would need invalidating on
         # exactly the event this exists to detect.
         "attestation": _attestation_state(),
+        # Memory-inspection capability (memory-injection detection, step 3a). Honest
+        # three-state + 'disabled'; the server can see which devices can (and are set
+        # to) do memory inspection, and uneven coverage stays visible rather than
+        # silent. 'disabled' by default — an off device never probes foreign memory.
+        "memscan_capability": _memscan_capability(),
     }
 
     return {
@@ -1136,6 +1141,50 @@ def _attestation_state():
     except Exception as exc:                                 # noqa: BLE001
         log.warning("attestation self-check failed: %s", exc)
         return {"state": "absent", "detail": "self-check error: %s" % exc}
+
+
+_memscan_cache = None
+
+
+def _memscan_capability():
+    """Memory-inspection capability for the heartbeat — honest, fail-closed.
+
+    Reports whether this agent can read another process's memory (the acquisition
+    the step-4 memory-injection detector needs). Same honest-reporting discipline
+    as `_key_protection_tier`: a state that cannot be established is never a false
+    'available'.
+
+    OFF means truly inert: when memscan_enabled is false (the default) this does
+    NOT run the functional probe, so a device with the feature off never reads any
+    foreign process's memory — it reports 'disabled' and stops. Only an ENABLED
+    device probes.
+
+    The privilege cannot change without a service restart (systemd sets caps at
+    exec), so a DEFINITIVE result (available/unavailable) is cached; an
+    'undetermined' result is retried on the next beat rather than frozen. When
+    enabled but not available, records E-AGENT-100 — fail-closed and visible, not
+    silently degraded.
+    """
+    global _memscan_cache
+    enabled = str(_conf.get("memscan_enabled", "false")).lower() == "true"
+    if not enabled:
+        return {"state": "disabled", "enabled": False}
+    if _memscan_cache is None or _memscan_cache.get("state") == "undetermined":
+        try:
+            import memcap                                     # noqa: PLC0415
+            _memscan_cache = memcap.probe()
+        except Exception as e:                                # noqa: BLE001
+            log.warning("memscan capability probe failed: %s", e)
+            _memscan_cache = {"state": "undetermined",
+                              "detail": "probe error: %s" % e, "method": "error"}
+        if _memscan_cache.get("state") != "available":
+            agent_errors.record("E-AGENT-100",
+                "memscan enabled but capability %s: %s"
+                % (_memscan_cache.get("state"),
+                   str(_memscan_cache.get("detail", ""))[:120]))
+    out = dict(_memscan_cache)
+    out["enabled"] = True
+    return out
 
 
 def _key_protection_tier():

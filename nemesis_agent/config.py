@@ -60,6 +60,15 @@ DEFAULTS = {
     # behavioral findings on the heartbeat. Default OFF: it needs the privileged
     # daemon installed AND consent. Inert until both hold.
     "behavioral_enabled": "false",
+    # ── Memory-inspection capability (memory-injection detection, step 4) — DEFAULT OFF ──
+    # When true, the agent probes (and later, at step 4, USES) the privilege to read
+    # another process's memory. On Linux that privilege is CAP_SYS_PTRACE, granted to
+    # the service by an opt-in systemd drop-in (see deploy_memscan_linux.sh) — a
+    # security-posture decision the operator makes per fleet, never pulled in silently.
+    # Default OFF: while off, the agent does not read any foreign process's memory at
+    # all (memcap reports "disabled" without probing). The Windows path (SeDebugPrivilege
+    # in a SYSTEM service) is step 3b/3c.
+    "memscan_enabled": "false",
     # Where the kernel monitor writes its JSON events for the agent to tail. Falco:
     # configure `json_output: true` + `file_output` to this path. The agent only
     # READS it (the daemon runs as root; the agent does not).
