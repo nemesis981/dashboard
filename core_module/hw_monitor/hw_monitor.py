@@ -2863,6 +2863,27 @@ def _requeue_expired_tasks(device_id, now=None):
 TASK_POLL_HINT_SECONDS = 30
 
 
+def _steering_gate_armed():
+    """Is the appliance's Tier 2 inspection gate ARMED and actively inspecting?
+
+    The downward half of the roaming-steering lease (tunnel-back design §5.2): a
+    roaming agent may only hold steering while the appliance is actually inspecting,
+    so the agent needs this pushed down every beat. Sourced from
+    tier2_gate_state.read_state()['inspecting'], which is ALREADY forced False when
+    the gate posture is stale -- the exact false-reassurance guard this needs, so a
+    gate that has stopped publishing does not keep authorising steering.
+
+    FAIL-SAFE: any error (DB fault, module absent, gate never published) returns
+    False. Authorising steering off a read that did not succeed is precisely the
+    wrong direction, so an unreadable gate reads as 'not armed'.
+    """
+    try:
+        import tier2_gate_state
+        return bool(tier2_gate_state.read_state().get("inspecting"))
+    except Exception:
+        return False
+
+
 def _next_poll_hint(device_id, dispatched):
     """Seconds to ask this device to come back in, or None for normal cadence.
 
@@ -4352,12 +4373,18 @@ def _start_windows_agent_listener():
                     _obs_n = database.get_remote_observe_every_n()
                 except Exception:
                     _obs_n = None      # explicit "no usable value"; agent keeps its default
+                # Roaming steering gate posture (tunnel-back §5.2). Always present,
+                # same convention as the other hints. FAIL-SAFE False so a gate
+                # read that fails never authorises a roaming device to steer. The
+                # agent renews its steering lease only while this is True AND it is
+                # reachable AND approved -- three independent facts, this being one.
                 _resp = {"ok": True,
                          "server_time": datetime.now().isoformat(timespec="seconds"),
                          "tasks": _tasks,
                          "results_ack": _acked,
                          "next_poll_hint": _next_poll_hint(device_id, bool(_tasks)),
-                         "observe_every_n": _obs_n}
+                         "observe_every_n": _obs_n,
+                         "steering_gate_armed": _steering_gate_armed()}
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
