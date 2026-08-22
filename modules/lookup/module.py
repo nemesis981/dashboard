@@ -47,13 +47,42 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(_HERE))
 # dashboard unit's PYTHONPATH does not include the repo root.
 sys.path.insert(0, os.path.join(_REPO_ROOT, "alert_manager"))
 
-from . import lookup_core as core                                  # noqa: E402
-from . import tls_core                                             # noqa: E402
+
+
 
 import logging                                                     # noqa: E402
 log = logging.getLogger("nemesis.lookup")
 
 MODULE = "lookup"
+
+def _sibling(mod_name):
+    """Import a sibling file beside this one, WITHOUT a relative import.
+
+    `modules_loader._load_module` loads module.py via
+    `spec_from_file_location("nemesis_module_<name>", ...)` — a top-level module
+    with NO parent package — so `from . import x` raises
+    "attempted relative import with no known parent package" and the module
+    never loads at all.
+
+    Found 2026-08-22 by loading through the REAL loader. It was invisible to
+    every earlier check because a direct `spec_from_file_location` import of
+    this file (which is how the card render was first verified) DOES give the
+    module a resolvable location, so the relative form worked in the test and
+    only ever failed in production.
+    """
+    import importlib.util                                       # noqa: PLC0415
+    path = os.path.join(_HERE, mod_name + ".py")
+    spec = importlib.util.spec_from_file_location(
+        "nemesis_%s_%s" % (MODULE, mod_name), path)
+    if spec is None or spec.loader is None:
+        raise ImportError("cannot load %s from %s" % (mod_name, path))
+    sib = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sib)
+    return sib
+
+core = _sibling("lookup_core")
+tls_core = _sibling("tls_core")
+
 
 # ── Structured error codes ───────────────────────────────────────────────────
 # Prefix `E-LOOKUP-` claimed 2026-08-23; verified free against the range-claim
