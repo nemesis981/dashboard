@@ -38,6 +38,7 @@ EVENTS_DIR="/var/log/falco"
 EVENTS_FILE="${NEMESIS_FALCO_OUTPUT:-${EVENTS_DIR}/events.json}"
 MIN_KMAJ=5; MIN_KMIN=8          # modern eBPF (CO-RE) needs kernel >= 5.8
 DO_UNINSTALL=0
+EXTRA_RULES=0                     # opt-in: broader (noisier) incubating+sandbox rule feeds
 LOCAL_DEB=""
 AGENT_USER="${NEMESIS_AGENT_USER:-}"
 
@@ -49,6 +50,7 @@ fail()  { echo "    [FAIL] $1" >&2; exit 1; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --uninstall)    DO_UNINSTALL=1; shift ;;
+        --extra-rules)  EXTRA_RULES=1; shift ;;
         --local-deb)    LOCAL_DEB="${2:-}"; shift 2 ;;
         --user)         AGENT_USER="${2:-}"; shift 2 ;;
         --events-file)  EVENTS_FILE="${2:-}"; EVENTS_DIR="$(dirname "$EVENTS_FILE")"; shift 2 ;;
@@ -76,7 +78,7 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
     U="$(falco_unit)"
     systemctl stop "$U" 2>/dev/null || true
     systemctl disable "$U" 2>/dev/null || true
-    rm -f /etc/falco/config.d/zzz-nemesis-behavioral.yaml 2>/dev/null || true
+    rm -f /etc/falco/config.d/zzz-nemesis-behavioral.yaml /etc/falco/config.d/zzz-nemesis-rules.yaml 2>/dev/null || true
     systemctl daemon-reload 2>/dev/null || true
     # flip the agent back to behavioral-off so it stops tailing a dead file
     if [ -f "$AGENT_CONF" ]; then
@@ -160,6 +162,29 @@ else
 fi
 command -v falco >/dev/null 2>&1 || fail "falco not on PATH after install"
 ok "falco present: $(falco --version 2>&1 | head -1)"
+
+# Optional: broader rule coverage. The slimmed DEFAULT ruleset only arms a few
+# techniques (verified live 2026-08-21: a credential-read fires, but persistence /
+# setuid / ptrace / network-tool launches do NOT). The incubating + sandbox feeds
+# arm them. Broader = noisier, so this is opt-in for endpoints; the detonation base
+# builder passes --extra-rules because a detonation sandbox WANTS to observe
+# everything. falcoctl verifies each artifact's digest on install.
+if [ "$EXTRA_RULES" -eq 1 ] && command -v falcoctl >/dev/null 2>&1; then
+    step "Installing broader Falco rule feeds (incubating + sandbox)"
+    falcoctl artifact install falco-incubating-rules >/dev/null 2>&1 \
+        && ok "falco-incubating-rules installed" || warn "incubating-rules install failed"
+    falcoctl artifact install falco-sandbox-rules >/dev/null 2>&1 \
+        && ok "falco-sandbox-rules installed" || warn "sandbox-rules install failed"
+    cat > /etc/falco/config.d/zzz-nemesis-rules.yaml <<'YAML'
+# managed by deploy_behavioral_linux.sh --extra-rules
+rules_files:
+  - /etc/falco/falco_rules.yaml
+  - /etc/falco/falco-incubating_rules.yaml
+  - /etc/falco/falco-sandbox_rules.yaml
+  - /etc/falco/rules.d
+YAML
+    ok "wired incubating+sandbox rules into the load list"
+fi
 
 # ── configure JSON file output + modern-bpf engine ──────────────────────────
 step "Configuring Falco (JSON -> $EVENTS_FILE, modern eBPF engine)"
