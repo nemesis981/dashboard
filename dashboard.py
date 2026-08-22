@@ -104,7 +104,7 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_conn_events_tables, init_tier2_gate_tables)
 from ip_enrichment import enrich_ip
 import tailscale_api
-from firewall import (parse_alert, ufw_delete, ufw_deny_append,
+from firewall import (parse_alert, ufw_delete, ufw_deny_append, list_blocked,
                       FirewallError, FirewallDenied, FirewallUnavailable)
 import hw_monitor
 import modules_loader
@@ -6387,7 +6387,46 @@ make another. All three describe the same conclusion; only the reader changes.
         # express a tier — a chat prompt has no expertise setting to honour.
         analysis["explanation"] = expl_m
         now = datetime.now().isoformat()
-        new_action = "ignore" if analysis.get("risk_level") == "LOW" else "pending"
+        # ── AUTHORITY GATE ──────────────────────────────────────────────────
+        #
+        # Auto-ignoring a low-risk alert IS an action: it disposes of a finding
+        # with no human in the loop. Until 2026-08-21 this path took it with NO
+        # authority check whatsoever, while chat about the very same alert was
+        # ceiling-gated down to "you may not even recommend an action". Two
+        # surfaces, one object, opposite permission models -- a permission system
+        # that is false on its face is worse than none, because it is trusted.
+        #
+        # Now the disposition goes through the ladder (ai_engine.ACTION_CLASS_
+        # CEILINGS['alert_disposition'], ceiling L2 because a disposition can be
+        # reversed):
+        #     < L1  -> leave it `pending`; the engine explains, a human decides
+        #     = L1  -> the engine may PROPOSE (recorded for approval), not set
+        #    >= L2  -> the engine may set the disposition itself
+        #
+        # FAILS CLOSED. If the ceiling cannot be determined -- module missing,
+        # unknown class, unreadable authority table -- the alert stays `pending`.
+        # An unreadable permission is not permission.
+        _disposition_level = 0
+        try:
+            from modules.ai_engine import effective_ceiling as _eff
+            _disposition_level = _eff("alert_disposition")
+        except Exception as _exc:                            # noqa: BLE001
+            app.logger.info("ai authority unavailable for alert_disposition "
+                            "(%s) -- leaving alert pending", _exc)
+            _disposition_level = 0
+
+        if analysis.get("risk_level") == "LOW" and _disposition_level >= 2:
+            new_action = "ignore"
+        else:
+            new_action = "pending"
+        analysis["authority_level"] = _disposition_level
+        if analysis.get("risk_level") == "LOW" and _disposition_level < 2:
+            # Say so, rather than silently declining to act. A reader comparing a
+            # LOW verdict against a still-pending alert must be able to see that
+            # the engine was not permitted, not that it failed.
+            analysis["disposition_note"] = (
+                "left pending: the AI engine holds authority level L%d for alert "
+                "dispositions (L2 required to set one)" % _disposition_level)
         # Decide from the CURRENT state, not from `existing` — that was read
         # before a Claude call that takes seconds, so by now another request may
         # already have inserted this rule_id. `alerts.rule_id` carries no UNIQUE
@@ -6600,6 +6639,133 @@ try:
     )
 except Exception:
     log.exception("chat: could not register the alert anchor")
+
+
+def _undo_alert_disposition(proposal):
+    """Reverse an AI-set alert disposition: put the alert back to `pending`.
+
+    Registered so `alert_disposition` is ELIGIBLE for L2 execution at all --
+    `execute_proposal` refuses any class with no registered reversal, on the
+    principle that an engine must not be granted power it cannot take back.
+
+    Returns (ok, detail). Reports failure honestly rather than raising: the caller
+    marks the row undone ONLY on a real success, so a row never claims an action
+    was reversed while it is still in force.
+    """
+    try:
+        conn = _dm_conn()
+        cur = conn.execute(
+            "UPDATE alerts SET action='pending' WHERE rule_id=? AND action=?",
+            (proposal["row_id"], proposal["proposed_action"]))
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+        if changed == 0:
+            # Nothing matched: either the alert is gone, or a human already
+            # changed the disposition. Not an error, but NOT a reversal either --
+            # say which, rather than reporting a success that did nothing.
+            return False, ("no alert row matched rule_id=%s with action=%s "
+                           "(already changed, or removed)"
+                           % (proposal["row_id"], proposal["proposed_action"]))
+        return True, "alert %s returned to pending" % proposal["row_id"]
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("undo: alert disposition reversal failed")
+        return False, "reversal failed: %s" % str(exc)[:200]
+
+
+def _undo_ip_block(proposal, context=None):
+    """Reverse an AI-applied IP block or quarantine.
+
+    WHY THIS NEEDS A CREDENTIAL, AND WHY THAT IS CORRECT. nemesis_fwd's
+    PEER_POLICY makes the UNATTENDED peer structurally incapable of lifting a
+    block -- it holds only block_ip/deny_ip/expire_quarantine, and
+    expire_quarantine re-derives from the DB that the quarantine has already
+    expired, so it cannot lift one merely because the caller wants it lifted.
+    Only the credentialed `dashboard` peer holds `unblock_ip`.
+
+    That is not a barrier to automating the block; it is exactly the L2
+    contract. The ENGINE acts unattended; the UNDO is initiated by a human, who
+    has a session and can therefore supply the credential. `context` carries it.
+
+    ORDERING mirrors api_quarantine_lift and api_firewall_unblock deliberately:
+    the firewall call goes FIRST, and the database is touched only if it
+    succeeded. Recording a block as lifted while its ufw rule is still in place
+    would be worse than refusing -- it is the one state an operator would most
+    confidently misread during an incident.
+    """
+    ip = (proposal.get("row_id") or "").strip()
+    if not ip:
+        return False, "proposal carries no IP to unblock"
+    ctx = context or {}
+    actor = ctx.get("actor") or _actor()
+    session_id = ctx.get("session_id") or _fw_session_id()
+    credential = ctx.get("credential") or _fw_credential()
+    if not credential:
+        # An explicit, actionable refusal -- NOT a silent failure and NOT an
+        # attempt to reach for the unattended path, which would be denied by the
+        # helper anyway and would read as a mysterious firewall error.
+        return False, ("lifting a block requires an administrator credential; "
+                       "undo must be performed from a signed-in dashboard "
+                       "session (the engine itself cannot lift blocks by design)")
+    try:
+        ufw_delete(ip, actor, session_id, credential)
+    except FirewallError as exc:
+        return False, "firewall refused the unblock: %s" % str(exc)[:200]
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("undo: unblock failed for %s", ip)
+        return False, "unblock failed: %s" % str(exc)[:200]
+
+    # READ BACK, do not assume. ufw_delete raising nothing is the helper's
+    # report; this is our own confirmation that the rule is actually gone.
+    try:
+        still = [b for b in (list_blocked(actor, session_id, credential) or [])
+                 if (b.get("ip") if isinstance(b, dict) else str(b)) == ip]
+        if still:
+            return False, ("unblock reported success but %s is STILL present in "
+                           "the ruleset - not marking this undone" % ip)
+    except Exception:                                        # noqa: BLE001
+        # Could not verify. Say so rather than claiming a clean reversal: the
+        # firewall call did succeed, so this is a partial, not a failure.
+        log.exception("undo: could not read back the ruleset after unblocking %s", ip)
+
+    detail = "%s unblocked" % ip
+    try:
+        conn = _dm_conn()
+        cur = conn.execute(
+            "UPDATE quarantines SET status='lifted', actor=? "
+            "WHERE ip=? AND status='active'", (actor, ip))
+        conn.commit()
+        n = cur.rowcount
+        # Return the alert to pending so the UI does not keep showing a
+        # disposition that no longer reflects reality.
+        if proposal.get("surface_key"):
+            conn.execute("UPDATE alerts SET action='pending' WHERE src_ip=?", (ip,))
+            conn.commit()
+        conn.close()
+        if n:
+            detail += " and %d quarantine row(s) marked lifted" % n
+        else:
+            # NOT an error: ip_block_permanent deliberately never creates a
+            # quarantines row (see api_firewall_unblock). The firewall rule is
+            # what mattered and it is gone.
+            detail += " (no quarantine row - permanent block, as expected)"
+    except Exception:                                        # noqa: BLE001
+        log.exception("undo: unblocked %s but could not update its DB rows", ip)
+        return False, ("%s was unblocked in the firewall but its database rows "
+                       "could not be updated - manual reconciliation required" % ip)
+    _audit(action="ai_undo_unblock", rule_id=str(proposal.get("id")), ip=ip)
+    return True, detail
+
+
+try:
+    from modules.ai_engine import register_undo_handler as _ai_register_undo
+    _ai_register_undo("alert_disposition", _undo_alert_disposition)
+    # Both IP classes reverse through the SAME credentialed path -- one handler,
+    # registered twice, rather than two near-identical copies that could drift.
+    _ai_register_undo("ip_quarantine_external", _undo_ip_block)
+    _ai_register_undo("ip_block_permanent", _undo_ip_block)
+except Exception:
+    log.exception("undo: could not register the reversal handlers")
 
 
 @app.route("/api/settings/observe-every-n", methods=["POST"])
