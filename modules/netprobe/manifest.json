@@ -1,0 +1,14 @@
+{
+  "name": "netprobe",
+  "display_name": "Device Reachability",
+  "version": "0.1.0",
+  "description": "Operator-driven reachability testing against devices this appliance already knows: ping to answer 'is it there and how well', traceroute to answer 'where does the path break'. ACTIVE, unlike the lookup tool — it emits packets — so the target space is constrained rather than the caller: a probe may only be aimed at a host already in the LAN inventory or already enrolled as an approved agent, never an arbitrary address. Deliberately a separate module from lookup so that module's read-only property stays literally true. Port scanning and packet capture are NOT included and are held pending an authorization layer.",
+  "category": "system",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false,
+  "apt_deps": ["iputils-ping", "mtr-tiny"],
+  "pip_deps": []
+}
