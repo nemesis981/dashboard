@@ -19,6 +19,21 @@ against real VirtualBox (2026-08-21):
 
 ---
 
+## Host prerequisites (the sandbox REFUSES without these)
+
+- **An ISO builder on the HOST** — `genisoimage`, `mkisofs` or `xorrisofs`.
+  `install.sh` installs one; a host provisioned before 2026-08-21 will not have
+  it. The sample reaches the guest **only** on a read-only ISO, so with no
+  builder present detonation does not degrade, it **refuses**:
+  `no ISO builder available (...)`. Check with
+  `python3 -c "import sandbox; print(sandbox.iso_builder())"`.
+  *Why it was missed:* the 2026-08-21 live proof passed because that session had
+  a copy on `PATH` from a scratchpad directory, so the gap never surfaced.
+- **VirtualBox + `VBoxManage`** on the host, and a base image whose guest has the
+  **full Guest Additions userland** (the guestcontrol channel).
+
+---
+
 ## The isolation-safe result channel (why guestcontrol, not the network)
 
 The sample must be executed and its observation retrieved **without** giving the guest a
