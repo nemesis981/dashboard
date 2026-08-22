@@ -43,11 +43,53 @@ def run() -> dict:
         conn.row_factory = sqlite3.Row
 
         # Module enabled?
+        #
+        # FIXED 2026-08-23. This read used to be:
+        #
+        #     SELECT value FROM anomaly_state WHERE key='enabled'
+        #     enabled = (en_row["value"] if en_row else "0") == "1"
+        #
+        # `anomaly_state` has NEVER held an `enabled` key -- it holds
+        # `baseline_built`, `eve_inode` and `eve_offset`, and the module's only
+        # writer never creates one. So the row was always absent, the failed read
+        # always defaulted to "0", and this check reported "Anomaly detection
+        # module is disabled" UNCONDITIONALLY -- including on this box, where the
+        # module is enabled and running. An operator asking "is anomaly detection
+        # on?" was told no while it was on.
+        #
+        # Two defects, one line: the wrong source of truth, and a failed read
+        # resolving to a value that means something. Enablement lives in the core
+        # `modules_enabled` table (read-any under ADR 0001), which is what
+        # `modules/diagnostics/module.py::_module_enabled` already uses.
+        #
+        # The absent-row case is now its own third state rather than being folded
+        # into "disabled": a module that has never been recorded either way is not
+        # the same as one deliberately switched off, and reporting them alike is
+        # what made this bug invisible for as long as it lasted.
         en_row = conn.execute(
-            "SELECT value FROM anomaly_state WHERE key='enabled'"
+            "SELECT enabled FROM modules_enabled WHERE module_name='anomaly_detection'"
         ).fetchone()
-        enabled = (en_row["value"] if en_row else "0") == "1"
-        sections.append(f"Module enabled: {'yes' if enabled else 'no'}")
+        if en_row is None:
+            enabled, enabled_label = None, "unknown (no row in modules_enabled)"
+        else:
+            enabled = bool(en_row["enabled"])
+            enabled_label = "yes" if enabled else "no"
+        sections.append(f"Module enabled: {enabled_label}")
+
+        if enabled is None:
+            # Not measurable. Deliberately NOT reported as disabled -- see above.
+            conn.close()
+            return {
+                "id": META["id"],
+                "name": META["name"],
+                "icon": META["icon"],
+                "status": "warn",
+                "summary": "Cannot determine whether anomaly detection is enabled",
+                "output": sections[0] + (
+                    "\n\nNo row for 'anomaly_detection' exists in modules_enabled, "
+                    "so this check cannot tell whether the module is on. That is "
+                    "not the same as it being off, and is not reported as such."),
+            }
 
         if not enabled:
             conn.close()
