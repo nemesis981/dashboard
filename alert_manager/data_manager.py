@@ -137,6 +137,25 @@ NAMESPACES = {
     # static-analysis output, so it needs no WARN grace period.
     "integrity_watch":    {"tables": ("integrity_observations",)},
 
+    # An EMPTY table grant, and that is the whole point. The lookup tool owns no
+    # tables: it shells out to dig/whois, returns the answer to the operator, and
+    # persists nothing of its own. It is registered here ONLY so that
+    # `connect("lookup")` resolves — the error-ledger exemption further down is
+    # namespace-INDEPENDENT and is what actually permits its E-LOOKUP-* rows.
+    #
+    # Registered because the alternative failed silently in exactly the way this
+    # file already warns about. Without an entry, `connect()` raised "unknown
+    # module namespace", `make_recorder` swallowed it, and every recorded error
+    # code returned None while the module looked fully instrumented — the same
+    # shape as the pre-2026-08-08 single-namespace bug noted below, reached by a
+    # different route. Verified after adding this: the first E-LOOKUP-001 lands a
+    # real row.
+    #
+    # This grants NOTHING beyond name resolution. An empty tuple means every
+    # `check_write` for a module-owned table is refused, so widening it later is
+    # a deliberate act rather than something this entry quietly permits.
+    "lookup":             {"tables": ()},
+
     # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
     # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the
     # dashboard can render a persistent degraded banner and so every transition
