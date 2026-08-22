@@ -702,13 +702,18 @@ TIER 1 Rule 5 and Window Roles above (Window 2 is the sole git-writer).
   `anomaly_incidents`) — the **Data Manager v0 seed** — are now formalized as the real
   `next_sequence`/`increment_counter`/`upsert` methods on `DataManager`, not scattered inline
   SQL. Label new atomic operations as calls to those methods, with a pointer to ADR 0006.
-- **Actor mechanism is live but currently unwired** — flagged here because it's easy to miss
+- **Actor mechanism has been wired since 2026-08-04** — flagged here because it's easy to miss
   and ADR 0006 doesn't call it out. The Data Manager stamps `current_actor()` on every logged
   write automatically (atomic-helper AND raw passthrough writes alike — proven in
-  `test_data_manager.py`), so once a caller sets an actor it needs no per-write plumbing. But
-  **no caller sets it yet** — nothing in the codebase calls `set_actor()` — so every write's
-  logged actor is `NULL` in practice today. Wiring real identity context into `set_actor()` at
-  the request/session boundary is separate, unstarted work.
+  `test_data_manager.py`). `dashboard.py:_set_dm_actor` (`@app.before_request`, ~line 1291)
+  sets `set_actor("user:<username>")` on both `DataManager` instances (`_dm()` and
+  `modules.get_data_manager()` — both, deliberately, since the actor is per-instance
+  thread-local state) for the duration of each authenticated request, with a matching
+  `_clear_dm_actor` teardown. Unauthenticated requests explicitly set `None` rather than
+  leaving a stale value. **This entry was itself found stale 2026-08-22** (Window 3's RBAC
+  batch handoff caught it, having repeated the same stale claim once before checking) — a
+  reminder that even a flag like this one needs periodic re-verification against the code,
+  not just against the last time someone wrote it down.
 
 ### Vendor-specific integrations
 **VENDOR-SPECIFIC INTEGRATIONS: whenever a vendor-specific probe, plugin, or integration is
