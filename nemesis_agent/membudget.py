@@ -113,7 +113,7 @@ def resolve_budget_mb(spec, total_ram_mb):
     return round(mb, 2), None
 
 
-def validate_budgets(budgets, total_ram_mb,
+def validate_budgets(budgets, total_ram_mb, reservations=None,
                      max_commit_fraction=DEFAULT_MAX_COMMIT_FRACTION):
     """Check a budget SET is coherent before it is ever used to judge anything.
 
@@ -122,6 +122,26 @@ def validate_budgets(budgets, total_ram_mb,
     has. Such a set can never be satisfied, so it would generate breaches that
     no amount of fixing the software could clear — and the natural response to
     an unfixable alert is to stop believing alerts.
+
+    ────────────────────────────────────────────────────────────────────────
+    RESERVATIONS — TRANSIENT HEADROOM, NOT A STEADY BUDGET
+    ────────────────────────────────────────────────────────────────────────
+    `reservations` (same {pct,min_mb,max_mb} spec shape) are RAM that must be
+    kept FREE for a transient consumer that spikes and then releases — the
+    memory-injection detector reading a target process's working set (no disk
+    fallback: process memory cannot be scanned from disk), a tmpfs scratch
+    bound, a RAM-backed detonation VM. They are deliberately NOT budgets:
+    nothing evaluates them against a running process (there is no steady
+    process to judge), and they must never be recovery-throttled (there is
+    nothing to throttle — the RAM is reserved precisely so it is available
+    when the spike comes).
+
+    But they draw from the SAME pool as the steady budgets, so coherence has
+    to account for both AT ONCE: steady commitments + transient reservations
+    must together fit under the ceiling, or the reservation is a lie — the RAM
+    it promises has already been budgeted to a service. Validating the two
+    separately would pass each while their sum overcommits, which is exactly
+    the invisible authoring error this function exists to catch.
     """
     problems = []
     resolved = {}
@@ -132,19 +152,38 @@ def validate_budgets(budgets, total_ram_mb,
         else:
             resolved[name] = mb
 
-    committed = round(sum(resolved.values()), 2) if resolved else 0.0
+    reserved = {}
+    for name, spec in (reservations or {}).items():
+        mb, reason = resolve_budget_mb(spec, total_ram_mb)
+        if mb is None:
+            problems.append("reservation %s: %s" % (name, reason))
+        else:
+            reserved[name] = mb
+
+    budgets_committed = round(sum(resolved.values()), 2) if resolved else 0.0
+    reserved_committed = round(sum(reserved.values()), 2) if reserved else 0.0
+    committed = round(budgets_committed + reserved_committed, 2)
     ceiling = None
     if total_ram_mb is not None:
         ceiling = round(total_ram_mb * max_commit_fraction, 2)
         if committed > ceiling:
+            # Name the reservation contribution explicitly: an overcommit that is
+            # only over once the transient headroom is counted is a different fix
+            # (shrink the reservation, or re-baseline) than a steady-budget
+            # overcommit, and a reader must be able to tell which they are looking at.
+            res_note = (" (incl. %.0f MB reserved headroom)" % reserved_committed
+                        if reserved_committed else "")
             problems.append(
-                "budget set commits %.0f MB of %.0f MB total (%.0f%%), over the "
+                "budget set commits %.0f MB of %.0f MB total (%.0f%%)%s, over the "
                 "%.0f%% ceiling — unsatisfiable, would breach permanently"
                 % (committed, total_ram_mb, 100.0 * committed / total_ram_mb,
-                   100.0 * max_commit_fraction))
+                   res_note, 100.0 * max_commit_fraction))
 
     return {"ok": not problems, "problems": problems,
-            "resolved_mb": resolved, "committed_mb": committed,
+            "resolved_mb": resolved, "reserved_mb": reserved,
+            "committed_mb": committed,
+            "budgets_committed_mb": budgets_committed,
+            "reserved_committed_mb": reserved_committed,
             "ceiling_mb": ceiling, "total_ram_mb": total_ram_mb}
 
 
@@ -296,6 +335,27 @@ def self_test():
     v = validate_budgets({"a": {"pct": 60.0}, "b": {"pct": 60.0}}, total)
     if v["ok"]:
         findings.append("a 120%-committed budget set validated as ok")
+
+    # 6. a transient RESERVATION must be counted against the ceiling: a budget
+    #    set that fits ALONE but overcommits ONCE the reservation is added must
+    #    be refused — else the headroom the reservation promises is a lie.
+    fits_alone = validate_budgets({"a": {"pct": 50.0}}, total)          # 50% ok
+    if not fits_alone["ok"]:
+        findings.append("a 50%% budget set was wrongly refused on its own")
+    with_res = validate_budgets({"a": {"pct": 50.0}}, total,
+                                reservations={"scan": {"pct": 40.0}})   # 90% > 80%
+    if with_res["ok"]:
+        findings.append("50%% budget + 40%% reservation (90%%) validated as ok — "
+                        "the reservation was not counted against the ceiling")
+    # 7. CONTROL: a reservation that genuinely fits must still pass, so #6 is
+    #    proving accounting and not a validator that refuses every reservation.
+    ok_res = validate_budgets({"a": {"pct": 50.0}}, total,
+                              reservations={"scan": {"pct": 10.0}})     # 60% ok
+    if not ok_res["ok"]:
+        findings.append("50%% budget + 10%% reservation (60%%) was wrongly refused")
+    if ok_res.get("reserved_committed_mb") != round(total * 0.10, 2):
+        findings.append("reserved headroom not reported: %r"
+                        % ok_res.get("reserved_committed_mb"))
 
     return {"ok": not findings, "findings": findings}
 

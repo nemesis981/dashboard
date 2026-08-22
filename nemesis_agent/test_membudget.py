@@ -179,6 +179,49 @@ def test_sane_budget_set_validates():
     check("ok", v["ok"], True)
     check("no problems", v["problems"], [])
     check("committed total", v["committed_mb"], 1228.8)
+    # backward-compat: with no reservations, committed == budgets committed
+    check("budgets_committed mirrors committed", v["budgets_committed_mb"], 1228.8)
+    check("nothing reserved", v["reserved_committed_mb"], 0.0)
+
+
+def test_reservations_count_against_the_ceiling():
+    """A transient reservation draws from the same pool as steady budgets, so a set
+    that fits ALONE but overcommits ONCE the reservation is added must be refused —
+    otherwise the reserved headroom is a lie."""
+    print("\n[reserved headroom is counted against the commit ceiling]")
+    fits = mb.validate_budgets({"svc": {"pct": 50.0}}, 8192.0)     # 50% alone
+    check("50% budget fits on its own", fits["ok"], True)
+    over = mb.validate_budgets({"svc": {"pct": 50.0}}, 8192.0,
+                               reservations={"scan": {"pct": 40.0}})  # 90% > 80%
+    check("50% budget + 40% reservation (90%) is refused", over["ok"], False)
+    check("the overcommit names the reserved headroom",
+          any("reserved headroom" in p for p in over["problems"]), True)
+    check("reserved total is reported", over["reserved_committed_mb"],
+          round(8192.0 * 0.40, 2))
+
+
+def test_a_reservation_that_fits_is_accepted():
+    """CONTROL for the above: a reservation that genuinely fits must still pass, so
+    the refusal is about accounting and not a validator that rejects all reservations."""
+    print("\n[CONTROL: a reservation that fits validates cleanly]")
+    v = mb.validate_budgets({"svc": {"pct": 50.0}}, 8192.0,
+                            reservations={"scan": {"pct": 10.0}})   # 60% ok
+    check("60% total validates", v["ok"], True)
+    check("committed splits budgets + reserved",
+          v["committed_mb"], round(v["budgets_committed_mb"] + v["reserved_committed_mb"], 2))
+    check("reserved resolved via the same clamps",
+          v["reserved_mb"], {"scan": round(8192.0 * 0.10, 2)})
+
+
+def test_unresolvable_reservation_is_a_problem():
+    """An unresolvable reservation must surface as a NAMED problem, never be
+    silently dropped — a dropped reservation is unaccounted headroom."""
+    print("\n[an unresolvable reservation is a named problem, not silently dropped]")
+    v = mb.validate_budgets({"svc": {"pct": 10.0}}, 8192.0,
+                            reservations={"scan": {"pct": -1.0}})  # bad pct
+    check("not ok", v["ok"], False)
+    check("problem names the reservation",
+          any(p.startswith("reservation scan:") for p in v["problems"]), True)
 
 
 # ── structural guarantees ────────────────────────────────────────────────────
@@ -225,6 +268,9 @@ if __name__ == "__main__":
     test_budgeted_but_absent_is_surfaced()
     test_overcommitted_budget_set_is_refused()
     test_sane_budget_set_validates()
+    test_reservations_count_against_the_ceiling()
+    test_a_reservation_that_fits_is_accepted()
+    test_unresolvable_reservation_is_a_problem()
     test_model_is_pure_and_platform_neutral()
     test_self_test_passes()
 

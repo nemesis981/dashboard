@@ -32,7 +32,8 @@ import throttle
 log = logging.getLogger("nemesis.mem_appliance")
 
 __all__ = [
-    "APPLIANCE_BUDGETS", "RECOVERY_EXEMPT", "PROVISIONAL_BASELINE_GB",
+    "APPLIANCE_BUDGETS", "APPLIANCE_RESERVATIONS", "RECOVERY_EXEMPT",
+    "PROVISIONAL_BASELINE_GB",
     "classify_process", "unit_for_pid", "sample_and_evaluate",
     "RUNG_AVAILABILITY", "availability_map", "why_rung_absent",
     "load_memory_modules", "self_test",
@@ -97,6 +98,42 @@ APPLIANCE_BUDGETS = {
 #     induce memory pressure could then make the appliance stand its own AV
 #     down — the recovery mechanism becomes the attack.
 RECOVERY_EXEMPT = frozenset({"clamav-daemon"})
+
+
+# ── transient RESERVATIONS (headroom kept free, NOT steady budgets) ───────────
+#
+# These are RAM the appliance must keep FREE for a consumer that spikes and then
+# releases — they are validated TOGETHER with APPLIANCE_BUDGETS against the one
+# commit ceiling (membudget.validate_budgets(..., reservations=...)) so a steady
+# service can never be budgeted the very RAM a transient consumer is promised.
+# They are deliberately NOT in APPLIANCE_BUDGETS: nothing samples them against a
+# running process, and they must never be recovery-throttled — the RAM is
+# reserved precisely so it is there when the spike comes.
+#
+# Percentages WITH CLAMPS, same as the budget table: the cost of one memory read
+# tracks the detector's chunk buffer, not the size of the box, so it is closer to
+# fixed-cost than proportional — hence the max_mb clamp so a 32 GB workstation
+# does not reserve gigabytes it will never use.
+APPLIANCE_RESERVATIONS = {
+    # Consumer (i) of the shared budget model: the memory-injection detector's
+    # transient working set. Reading a target process's memory has a working-set
+    # cost with NO disk fallback (process memory cannot be scanned from disk), so
+    # the RAM to hold one bounded read window must be guaranteed, not hoped for.
+    # PROVISIONAL — the detector is not built yet (step 4). The number is a
+    # conservative placeholder for a bounded, chunked read (a whole target is
+    # streamed in windows, never mapped at once); it is expected to converge from
+    # real measurement once the detector exists, the same discipline as the 8 GB
+    # baseline and every budget entry's `basis`.
+    "memory-injection-scan": {
+        "pct": 3.0, "min_mb": 128.0, "max_mb": 384.0,
+        "basis": "PROVISIONAL: bounded chunked read window for the memory-"
+                 "injection detector (step 4, not yet built); no disk fallback",
+    },
+    # Consumers (ii) tmpfs scratch bounds and (iii) a future RAM-backed detonation
+    # VM share this table when they are scoped — they are the same shape (headroom
+    # kept free, accounted against the ceiling), and are intentionally NOT added
+    # here yet because neither is in scope for this step.
+}
 
 #: cgroup line -> systemd unit. Matches both cgroup v2 ("0::/system.slice/x.service")
 #: and v1 ("N:name=systemd:/system.slice/x.service").
@@ -415,17 +452,29 @@ def self_test(proc_root="/proc"):
         return {"ok": False, "findings": ["cannot load generic modules: %r" % exc]}
 
     # 1. the budget table must be internally coherent on the provisional baseline
+    #    — WITH the transient reservations counted, since steady budgets and
+    #    reserved headroom draw from the same pool and must fit together.
     v = membudget.validate_budgets(APPLIANCE_BUDGETS,
-                                   PROVISIONAL_BASELINE_GB * 1024.0)
+                                   PROVISIONAL_BASELINE_GB * 1024.0,
+                                   reservations=APPLIANCE_RESERVATIONS)
     if not v["ok"]:
-        findings.append("budget table incoherent at %d GB: %s"
+        findings.append("budget+reservation set incoherent at %d GB: %s"
                         % (PROVISIONAL_BASELINE_GB, "; ".join(v["problems"])))
-    # 2. ...and on the sizes it is most likely to be re-based to
-    for gb in (4, 16):
-        v2 = membudget.validate_budgets(APPLIANCE_BUDGETS, gb * 1024.0)
+    # 2. ...and on the sizes it is most likely to be re-based to (4 GB is the
+    #    tightest: floors dominate and the reservation still has to fit).
+    for gb in (4, 16, 32):
+        v2 = membudget.validate_budgets(APPLIANCE_BUDGETS, gb * 1024.0,
+                                        reservations=APPLIANCE_RESERVATIONS)
         if not v2["ok"]:
-            findings.append("budget table incoherent at %d GB: %s"
+            findings.append("budget+reservation set incoherent at %d GB: %s"
                             % (gb, "; ".join(v2["problems"])))
+    # 2b. the detector reservation must carry a basis and must NOT have leaked
+    #     into the steady budget table (where it would be judged/throttled).
+    if not APPLIANCE_RESERVATIONS.get("memory-injection-scan", {}).get("basis"):
+        findings.append("memory-injection-scan reservation has no basis")
+    if "memory-injection-scan" in APPLIANCE_BUDGETS:
+        findings.append("a transient reservation leaked into APPLIANCE_BUDGETS — "
+                        "it would be evaluated against a process and recovery-throttled")
     # 3. the classifier must actually resolve a unit for THIS process when it is
     #    under systemd, and must never invent one when it is not.
     u = unit_for_pid(os.getpid(), proc_root=proc_root)

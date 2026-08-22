@@ -133,6 +133,39 @@ def test_every_budget_records_its_basis():
     check("all entries carry a basis", missing, [])
 
 
+def test_detector_reservation_present_and_not_a_budget():
+    """The memory-injection detector's transient working-set consumer is a
+    RESERVATION (headroom kept free), not a steady budget: it must be in
+    APPLIANCE_RESERVATIONS with a basis, and must NOT leak into APPLIANCE_BUDGETS
+    where it would be judged against a process and recovery-throttled."""
+    print("\n[the detector working-set consumer is a reservation, not a budget]")
+    res = ma.APPLIANCE_RESERVATIONS.get("memory-injection-scan")
+    check("detector reservation present", bool(res), True)
+    check("reservation carries a basis", bool(res and res.get("basis")), True)
+    check("reservation has a max_mb clamp (cost is near-fixed, not proportional)",
+          bool(res and res.get("max_mb")), True)
+    check("did NOT leak into the steady budget table",
+          "memory-injection-scan" in ma.APPLIANCE_BUDGETS, False)
+    missing = [k for k, v in ma.APPLIANCE_RESERVATIONS.items() if not v.get("basis")]
+    check("every reservation entry carries a basis", missing, [])
+
+
+def test_budgets_and_reservations_are_coherent_together():
+    """Steady budgets + transient reservations must fit under the ceiling at every
+    plausible baseline — 4 GB is the tightest (floors dominate, reservation still
+    has to fit)."""
+    print("\n[budgets + reservations stay satisfiable together at 4 / 8 / 16 / 32 GB]")
+    _, membudget = ma.load_memory_modules()
+    for gb in (4, 8, 16, 32):
+        v = membudget.validate_budgets(ma.APPLIANCE_BUDGETS, gb * 1024.0,
+                                       reservations=ma.APPLIANCE_RESERVATIONS)
+        check("coherent at %d GB" % gb, v["ok"], True)
+        check("reserved headroom is actually counted at %d GB" % gb,
+              v["reserved_committed_mb"] > 0, True)
+        if not v["ok"]:
+            print("        %s" % "; ".join(v["problems"]))
+
+
 # ── the loading design claim ─────────────────────────────────────────────────
 
 def test_generic_modules_load_without_polluting_sys_path():
@@ -432,6 +465,8 @@ if __name__ == "__main__":
     test_fallback_is_marked_as_less_reliable()
     test_table_is_coherent_at_every_plausible_baseline()
     test_every_budget_records_its_basis()
+    test_detector_reservation_present_and_not_a_budget()
+    test_budgets_and_reservations_are_coherent_together()
     test_generic_modules_load_without_polluting_sys_path()
     test_availability_matches_the_audit()
     test_every_absent_rung_states_why()
