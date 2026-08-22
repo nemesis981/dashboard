@@ -65,6 +65,96 @@ _NOTE_DNS_FAIL = "dns resolution failed"
 _NOTE_EGRESS_FAIL = "raw egress blocked"
 _NOTE_IPV6_FAIL = "ipv6 keytest failed"
 _NOTE_IPV4_FAIL = "ipv4 keytest failed"
+#: IPv6 is not provisioned on this link at all, so its keytest failing is the
+#: expected result rather than a fault. Distinct from _NOTE_IPV6_FAIL: one says
+#: "a thing that should work does not", the other says "this link is IPv4-only".
+_NOTE_IPV6_ABSENT = "ipv6 not provisioned on this link"
+#: We could not determine whether IPv6 is provisioned. NOT the same as either of
+#: the two above — see `ipv6_expectation`.
+_NOTE_IPV6_UNKNOWN = "ipv6 provisioning undetermined"
+
+
+# ── Is IPv6 even expected here? ───────────────────────────────────────────────
+#
+# THE BUG THIS CLOSES (found 2026-08-22). `classify()` returned DEGRADED whenever
+# the IPv6 keytest failed, and `_notify` treats anything other than ALL_OK as a
+# failing observation. On an IPv4-only link — most home and small-office
+# connections — `curl -6` fails on EVERY cycle, forever. After FAILURE_DEBOUNCE
+# an episode opens at MEDIUM and never closes, and there was no setting anywhere
+# to suppress it. A monitor that reports a permanent fault for a condition that is
+# not a fault trains its operator to ignore it, which costs more coverage than the
+# check was ever worth.
+#
+# "IPv6 down" is only a fault where IPv6 is actually provisioned. So measure that
+# instead of assuming it.
+IPV6_EXPECTED     = "expected"          # a global address exists; a failure is real
+IPV6_NOT_PROVISIONED = "not_provisioned"  # IPv4-only link; failure is the norm
+IPV6_UNKNOWN      = "unknown"           # could not tell — never guess either way
+
+
+def ipv6_expectation(runner=None) -> str:
+    """Three-valued: is IPv6 provisioned on this host?
+
+    Presence of a GLOBAL-scope IPv6 address is the test. Link-local (`fe80::`)
+    addresses exist on virtually every interface whether or not the network
+    carries IPv6, so counting them would make every link look IPv6-capable and
+    reinstate the exact false positive this exists to remove — `scope global` is
+    what distinguishes provisioned from merely present.
+
+    Returns IPV6_UNKNOWN — never a boolean — when the probe itself fails. A failed
+    read must not resolve to either real answer: guessing "not provisioned" would
+    silently suppress a genuine IPv6 outage, and guessing "expected" would restore
+    the permanent false positive. Unknown is a third thing and is reported as one.
+    """
+    # Resolved at call time, not as a default argument: this function is defined
+    # above `_run` (it belongs with the note vocabulary it feeds), and a default
+    # of `_run` would be evaluated at def time and raise NameError at import.
+    runner = runner or _run
+    rc, out = runner(["ip", "-6", "-o", "addr", "show", "scope", "global"])
+    if rc == 127:
+        return IPV6_UNKNOWN                      # no `ip` binary — cannot tell
+    if rc != 0:
+        return IPV6_UNKNOWN                      # probe failed; not evidence of absence
+    # rc == 0 with empty output is a REAL measurement: the command succeeded and
+    # found no global IPv6 address. This is the one place empty means something,
+    # and it means it only because the return code proved the instrument ran.
+    return IPV6_EXPECTED if out.strip() else IPV6_NOT_PROVISIONED
+
+
+def _selftest_ipv6_expectation() -> None:
+    """Prove this can return all three answers before trusting any of them.
+
+    Runs at import, in the production path. Without it, a probe that always said
+    NOT_PROVISIONED would silently disable IPv6 fault reporting everywhere and
+    look exactly like a working one.
+    """
+    cases = [
+        (lambda cmd: (0, "eth0 inet6 2001:db8::1/64 scope global"), IPV6_EXPECTED,
+         "a global address means IPv6 is provisioned"),
+        (lambda cmd: (0, ""), IPV6_NOT_PROVISIONED,
+         "rc=0 with no output is a real 'IPv4-only' measurement"),
+        (lambda cmd: (1, "Cannot open netlink"), IPV6_UNKNOWN,
+         "a failed probe is not evidence of absence"),
+        (lambda cmd: (127, "<command not found>"), IPV6_UNKNOWN,
+         "a missing `ip` binary is not evidence of absence"),
+        (lambda cmd: (124, "<timeout>"), IPV6_UNKNOWN,
+         "a timeout is not evidence of absence"),
+    ]
+    for runner, expected, why in cases:
+        got = ipv6_expectation(runner=runner)
+        if got != expected:
+            raise AssertionError(
+                "ipv6_expectation self-test failed (%s): got %r, expected %r"
+                % (why, got, expected))
+    # A link-local-only host must NOT read as provisioned — the specific mistake
+    # that would silently re-open the false positive.
+    got = ipv6_expectation(lambda cmd: (0, ""))
+    if got != IPV6_NOT_PROVISIONED:
+        raise AssertionError("ipv6_expectation self-test: link-local-only host "
+                             "must read as not provisioned")
+
+
+_selftest_ipv6_expectation()
 
 
 # ── command runner (per-probe isolation: one failing probe never kills the run)─
@@ -295,37 +385,72 @@ def _probe(cfg: dict):
     raw.append(f"  [KEYTEST.ipv4] ok={v4_ok} {r4}")
     raw.append(f"  [KEYTEST.ipv6] ok={v6_ok} {r6}")
 
+    # Is IPv6 even provisioned here? Measured, not assumed — an IPv4-only link
+    # otherwise reports DEGRADED on every cycle forever (see ipv6_expectation).
+    v6_expect = ipv6_expectation()
+    raw.append(f"  [ipv6.expectation] {v6_expect}")
+
     latency_ms = round(a_secs * 1000, 1) if a_secs is not None else None
     flags = {"routing_ok": routing_ok, "dns_ok": dns_ok,
              "egress_ok": egress_ok, "api_ok": api_ok}
-    note = _note(flags, v4_ok, v6_ok)
-    return flags, latency_ms, note, raw, (v4_ok, v6_ok), vpn_connected
+    note = _note(flags, v4_ok, v6_ok, v6_expect)
+    return flags, latency_ms, note, raw, (v4_ok, v6_ok, v6_expect), vpn_connected
 
 
-def _note(flags, v4_ok, v6_ok) -> str:
+def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
     if not flags["routing_ok"]:
         return _NOTE_NO_ROUTE
     if not flags["dns_ok"]:
         return _NOTE_DNS_FAIL
     if not flags["egress_ok"]:
         return _NOTE_EGRESS_FAIL
-    if flags["api_ok"] and not v6_ok:
-        return _NOTE_IPV6_FAIL
+    # IPv4 is reported ahead of IPv6 now. On an IPv4-only link an IPv6 failure is
+    # expected and uninformative, so letting it win the note would bury a real
+    # IPv4 fault behind a permanent one — which is how the old ordering behaved
+    # on every IPv4-only box.
     if flags["api_ok"] and not v4_ok:
         return _NOTE_IPV4_FAIL
+    if flags["api_ok"] and not v6_ok:
+        if v6_expect == IPV6_NOT_PROVISIONED:
+            return _NOTE_IPV6_ABSENT      # not a fault; stated, not hidden
+        if v6_expect == IPV6_UNKNOWN:
+            return _NOTE_IPV6_UNKNOWN     # undetermined; stated, not guessed
+        return _NOTE_IPV6_FAIL            # provisioned and failing — a real fault
     return ""
 
 
-def classify(flags: dict, v4_ok: bool, v6_ok: bool) -> str:
-    """The is-it-me-or-them verdict (spec §6)."""
+def classify(flags: dict, v4_ok: bool, v6_ok: bool,
+             v6_expect: str = IPV6_EXPECTED) -> str:
+    """The is-it-me-or-them verdict (spec §6).
+
+    `v6_expect` decides whether a failed IPv6 keytest counts against the verdict
+    at all. Only a link that actually has IPv6 provisioned can have IPv6 "down";
+    on an IPv4-only link the failure is the expected result and must not produce
+    a DEGRADED verdict on every cycle forever (see `ipv6_expectation`).
+
+    Defaulting to IPV6_EXPECTED keeps the strict behaviour for any caller that
+    has not been updated — a caller that forgets to pass it gets the old, noisier
+    answer rather than a silently more permissive one.
+    """
     local_ok = flags["routing_ok"] and flags["dns_ok"] and flags["egress_ok"]
     if not local_ok:
         return "LOCAL_FAIL"          # it's us
-    if flags["api_ok"] and v4_ok and v6_ok:
+    if not flags["api_ok"]:
+        return "UPSTREAM_FAIL"       # local green, upstream dead — it's them
+    # api_ok from here on: the upstream is reachable by SOME address family.
+    if not v4_ok:
+        return "DEGRADED"            # IPv4 down is always a real degradation
+    if v6_ok:
         return "ALL_OK"
-    if flags["api_ok"]:
-        return "DEGRADED"            # reachable overall, one variant down
-    return "UPSTREAM_FAIL"           # local green, upstream dead — it's them
+    # IPv6 keytest failed. Whether that is a degradation depends on whether this
+    # link has IPv6 at all.
+    if v6_expect == IPV6_EXPECTED:
+        return "DEGRADED"
+    # NOT_PROVISIONED -> genuinely fine. UNKNOWN -> we could not establish that a
+    # fault exists, and reporting one we cannot substantiate is what produced the
+    # permanent-MEDIUM episode. The condition is carried in the NOTE either way,
+    # so it is visible rather than swallowed.
+    return "ALL_OK"
 
 
 # ── flat-file writer (raw; rotation + age prune; OUTSIDE the repo) ────────────
@@ -460,8 +585,8 @@ def run_once(actor: str = "watcher-service", verbose=None) -> dict:
         verbose = _verbose_now(cfg)
 
     ts = datetime.now()
-    flags, latency_ms, note, raw_lines, (v4_ok, v6_ok), vpn_connected = _probe(cfg)
-    verdict = classify(flags, v4_ok, v6_ok)
+    flags, latency_ms, note, raw_lines, (v4_ok, v6_ok, v6_expect), vpn_connected = _probe(cfg)
+    verdict = classify(flags, v4_ok, v6_ok, v6_expect)
 
     summary = (f"{ts.isoformat()} verdict={verdict} "
                f"routing={int(bool(flags['routing_ok']))} dns={int(bool(flags['dns_ok']))} "
