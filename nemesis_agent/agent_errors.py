@@ -120,6 +120,50 @@ E_AGENT_CODES = {
     "E-AGENT-062": ("Task result write failed",
                     "Persisting a task result failed; the result may not reach "
                     "the server on the next beat.", "low"),
+
+    # ── Memory-injection detection (100 block) ──
+    "E-AGENT-100": ("Memory-scan capability absent",
+                    "memscan is ENABLED for this device but the agent cannot read "
+                    "another process's memory (capability unavailable or "
+                    "undetermined). On Linux, grant CAP_SYS_PTRACE via "
+                    "deploy_memscan_linux.sh; until then the memory-injection "
+                    "detector cannot acquire target memory. Fail-closed, not "
+                    "silently degraded.", "medium"),
+
+    # ── Privileged IPC channel (Windows split, step 3b) ──
+    "E-AGENT-110": ("Priv-channel client auth refused",
+                    "The SYSTEM privileged service refused a pipe client whose SID "
+                    "did not match the enrolled agent user. Expected traffic if a "
+                    "local process probes the pipe; a burst may indicate a local "
+                    "process attempting to drive SYSTEM-level actions.", "medium"),
+    "E-AGENT-111": ("Priv-channel server not SYSTEM",
+                    "The session agent connected to the privileged pipe but the "
+                    "server process was NOT LocalSystem — a probable pipe-squatting "
+                    "attempt by a lower-privilege local process. The client refused "
+                    "to send anything and treats the channel as unavailable.", "high"),
+    "E-AGENT-112": ("Priv-service SCM start failed",
+                    "The SYSTEM privileged service could not start under the Service "
+                    "Control Manager (dispatch/registration/status reporting failed, "
+                    "or the pipe could not be created). The privileged channel is "
+                    "down; the session agent runs as today without it.", "medium"),
+
+    # -- Memory acquisition over the privileged channel (Windows, step 3c) --
+    "E-AGENT-113": ("Memory inspection privilege unavailable",
+                    "The privileged service could not obtain the privilege needed to "
+                    "read another process's memory (SeDebugPrivilege not held, or the "
+                    "adjust did not execute). Acquisition is unavailable; the service "
+                    "reports this rather than returning an empty result that would "
+                    "read like a clean scan.", "medium"),
+    "E-AGENT-114": ("Memory inspection target protected",
+                    "A requested target could not be opened because the operating "
+                    "system protects it (a protected-process target refuses access "
+                    "even to SYSTEM). This is a platform limitation, not a failure of "
+                    "the agent, and it is reported per target so the process is never "
+                    "counted as scanned.", "low"),
+    "E-AGENT-115": ("Memory inspection result truncated",
+                    "A target's region map exceeded the configured bounds and was "
+                    "truncated. The response says so explicitly; a truncated map must "
+                    "not be read as a complete picture of the process.", "low"),
 }
 
 _MAX_CONTEXT = 300               # hard cap on a context string (bounded input)
