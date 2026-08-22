@@ -1,0 +1,168 @@
+<Sysmon schemaversion="4.91">
+  <!--
+    Nemesis ENDPOINT Sysmon config — behavioral Layer B, Windows arm.
+
+    This is NOT the detonation config. A detonation VM has ONE attributable process
+    tree in a bounded window, so a permissive "log every process/file" config is
+    fine there. A real endpoint has thousands of legitimate processes at once; a
+    permissive config there floods the pipeline and detects nothing meaningfully.
+
+    So this config is HIGH-SIGNAL and INCLUDE-BASED: every section defaults to
+    logging NOTHING and opts in ONLY specific suspicious patterns. Volume stays low
+    by construction, and each rule is NAMED with a RuleName the agent's
+    behavioral_agent.SYSMON_RULE_MAP recognizes, so the security judgement lives in
+    ONE reviewable place (the agent's vocabulary), not scattered across this XML.
+
+    The four behaviors the agent reports — privilege_escalation, suspicious_process,
+    suspicious_network, bulk_file_modify — are each produced by the RuleNames below
+    (or, for a few event types, by the bare-EventID fallback in SYSMON_EVENTID_MAP).
+
+    schemaversion: 4.91, confirmed live against the v15.21 binary on 2026-08-21
+    (4.90 is rejected by this binary). The installer verifies the config
+    actually went live by reading Sysmon active config back, not just up.
+  -->
+  <HashAlgorithms>SHA256</HashAlgorithms>
+  <CheckRevocation>false</CheckRevocation>
+
+  <EventFiltering>
+
+    <!-- 1 ProcessCreate: opt IN only LOLBin / living-off-the-land patterns and
+         office-spawns-shell. NOT every process create (that is the flood). -->
+    <RuleGroup name="proc-create" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <Rule name="Suspicious Process Creation" groupRelation="or">
+          <!-- HIGH-signal only. Deliberately NOT '-ExecutionPolicy Bypass' or a
+               bare '-windowstyle hidden' — legit installers/software use those
+               constantly, and an endpoint config that flags them is noise, not
+               detection. The encode/download/dynamic-exec indicators below are the
+               ones that actually distinguish an attack. -->
+          <CommandLine condition="contains any">-enc ;-encodedcommand;-e jab;frombase64string;downloadstring;downloadfile;net.webclient;iex ;invoke-expression;-nop -w hidden;-noprofile -w hidden</CommandLine>
+          <Image condition="end with">\mshta.exe</Image>
+          <Image condition="end with">\wscript.exe</Image>
+          <Image condition="end with">\cscript.exe</Image>
+          <Image condition="end with">\regsvr32.exe</Image>
+          <Image condition="end with">\rundll32.exe</Image>
+          <Image condition="end with">\certutil.exe</Image>
+          <Image condition="end with">\bitsadmin.exe</Image>
+        </Rule>
+        <!-- office/browser spawning a shell is a classic macro/exploit chain -->
+        <Rule name="Suspicious Process Creation" groupRelation="and">
+          <ParentImage condition="contains any">\winword.exe;\excel.exe;\powerpnt.exe;\outlook.exe;\mspub.exe</ParentImage>
+          <Image condition="contains any">\cmd.exe;\powershell.exe;\pwsh.exe;\wscript.exe;\cscript.exe;\mshta.exe</Image>
+        </Rule>
+        <!-- shadow-copy / backup destruction: ransomware pre-encryption prep -->
+        <Rule name="Ransomware File Activity" groupRelation="or">
+          <CommandLine condition="contains any">vssadmin delete shadows;wmic shadowcopy delete;wbadmin delete;bcdedit /set {default} recoveryenabled no;bcdedit /set {default} bootstatuspolicy ignoreallfailures</CommandLine>
+        </Rule>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- 3 NetworkConnect: opt IN only interpreters/tools that should NOT normally
+         talk to the network. A browser making connections is not logged. -->
+    <RuleGroup name="net-connect" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Rule name="Suspicious Network Connection" groupRelation="or">
+          <Image condition="end with">\powershell.exe</Image>
+          <Image condition="end with">\pwsh.exe</Image>
+          <Image condition="end with">\cmd.exe</Image>
+          <Image condition="end with">\mshta.exe</Image>
+          <Image condition="end with">\rundll32.exe</Image>
+          <Image condition="end with">\regsvr32.exe</Image>
+          <Image condition="end with">\certutil.exe</Image>
+          <Image condition="end with">\bitsadmin.exe</Image>
+          <Image condition="end with">\wscript.exe</Image>
+          <Image condition="end with">\cscript.exe</Image>
+          <Image condition="end with">\ncat.exe</Image>
+          <Image condition="end with">\nc.exe</Image>
+        </Rule>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- 6 DriverLoad: opt IN unsigned drivers (rootkit/BYOVD). Bare EventID 6 ->
+         privilege_escalation in the agent's fallback map. -->
+    <RuleGroup name="driver-load" groupRelation="or">
+      <DriverLoad onmatch="include">
+        <Signed condition="is">false</Signed>
+      </DriverLoad>
+    </RuleGroup>
+
+    <!-- 8 CreateRemoteThread: rare and high-signal; log all. -->
+    <RuleGroup name="remote-thread" groupRelation="or">
+      <CreateRemoteThread onmatch="include">
+        <Rule name="Process Injection" groupRelation="or">
+          <TargetImage condition="is not">x</TargetImage>
+        </Rule>
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- 9 RawAccessRead: DELIBERATELY NOT LOGGED. The live 2026-08-21 endpoint run
+         showed it fires ~535x over a single boot (System, AV, indexing, backup all
+         do legitimate raw-volume reads) - by far the noisiest, lowest-signal event
+         of this set. Wipers/ransomware that use raw disk writes still trip the
+         FileDelete and vssadmin/ProcessCreate rules, so dropping 9 costs little
+         signal and removes the bulk of the endpoint channel volume. If a fleet
+         needs it, re-add scoped to specific non-system Images. -->
+
+    <!-- 10 ProcessAccess: opt IN ONLY high-access handle opens to LSASS — the
+         credential-dumping signal. This is why 10 is not a flood here. -->
+    <RuleGroup name="proc-access" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <Rule name="LSASS Access" groupRelation="and">
+          <TargetImage condition="end with">\lsass.exe</TargetImage>
+          <GrantedAccess condition="contains any">0x1010;0x1410;0x1438;0x143a;0x1fffff;0x1f1fff</GrantedAccess>
+        </Rule>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- 11 FileCreate: opt IN writes to autostart locations only. -->
+    <RuleGroup name="file-create" groupRelation="or">
+      <FileCreate onmatch="include">
+        <Rule name="Autostart Persistence" groupRelation="or">
+          <TargetFilename condition="contains">\Start Menu\Programs\Startup\</TargetFilename>
+          <TargetFilename condition="contains">\Microsoft\Windows\Start Menu\Programs\Startup\</TargetFilename>
+        </Rule>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- 13 RegistryEvent (value set): opt IN Run keys / service ImagePath — the
+         autostart persistence signal. -->
+    <RuleGroup name="reg-set" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <Rule name="Autostart Persistence" groupRelation="or">
+          <TargetObject condition="contains">\CurrentVersion\Run</TargetObject>
+          <TargetObject condition="contains">\CurrentVersion\RunOnce</TargetObject>
+          <TargetObject condition="end with">\ImagePath</TargetObject>
+          <TargetObject condition="contains">\CurrentVersion\Winlogon\Shell</TargetObject>
+        </Rule>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- 20 WmiEvent (consumer): WMI event consumers are rare and are persistence.
+         Bare EventID 20 -> suspicious_process (high) in the fallback map. -->
+    <RuleGroup name="wmi" groupRelation="or">
+      <WmiEvent onmatch="include">
+        <Type condition="is">ConsumerToFilter</Type>
+      </WmiEvent>
+    </RuleGroup>
+
+    <!-- 23/26 FileDelete: opt IN deletion of user documents in bulk-prone areas
+         (ransomware overwrites/deletes). Named so it maps to bulk_file_modify.
+         Kept narrow (specific doc extensions) so ordinary temp churn is not logged. -->
+    <RuleGroup name="file-delete" groupRelation="or">
+      <FileDelete onmatch="include">
+        <Rule name="Ransomware File Activity" groupRelation="or">
+          <TargetFilename condition="contains any">.docx;.xlsx;.pptx;.pdf;.jpg;.png;.zip;.locked;.encrypted;.crypt</TargetFilename>
+        </Rule>
+      </FileDelete>
+    </RuleGroup>
+
+    <!-- 25 ProcessTampering: image hollowing / herpaderping, high-signal; log all.
+         Bare EventID 25 -> suspicious_process (high) in the fallback map. -->
+    <RuleGroup name="proc-tamper" groupRelation="or">
+      <ProcessTampering onmatch="include">
+        <Type condition="is not">x</Type>
+      </ProcessTampering>
+    </RuleGroup>
+
+  </EventFiltering>
+</Sysmon>
