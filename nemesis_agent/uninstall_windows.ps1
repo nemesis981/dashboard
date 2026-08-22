@@ -1,6 +1,16 @@
 #Requires -RunAsAdministrator
+#
+# ENCODING: this file MUST stay pure ASCII (no em dashes, no box-drawing).
+# Windows PowerShell 5.1 reads a BOM-less .ps1 as the ANSI codepage, so a UTF-8 em
+# dash arrives as U+201D -- which PowerShell treats as a real string delimiter. One
+# of them inside a quoted string closes it early and the whole file fails to parse.
+# Every line of this banner carries its own '#': an un-prefixed block placed outside
+# the <# #> delimiters PARSES CLEANLY as bareword commands and only fails at RUNTIME.
+# test_ps1_encoding.py enforces both the encoding and this banner's commenting.
+#
+
 <#
-    Nemesis Agent — Windows uninstaller.
+    Nemesis Agent -- Windows uninstaller.
 
     Removes the Nemesis agent cleanly: scheduled tasks, running processes, the
     install directory, and our own Windows Defender exclusion. Best-effort tells
@@ -88,7 +98,7 @@ try {
 }
 
 # 5. Remove the install directory entirely (NemesisAgent.exe, clamav\, lhm\,
-#    keys\, nemesis_agent.conf, yara_rules\ — everything under %APPDATA%\Nemesis).
+#    keys\, nemesis_agent.conf, yara_rules\ -- everything under %APPDATA%\Nemesis).
 if (Test-Path $InstallDir) {
     Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $InstallDir) {

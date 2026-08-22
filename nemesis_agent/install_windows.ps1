@@ -1,4 +1,12 @@
-# Nemesis Agent — Windows Installer
+# Nemesis Agent -- Windows Installer
+#
+# ENCODING: this file MUST stay pure ASCII (no em dashes, no box-drawing).
+# Windows PowerShell 5.1 reads a BOM-less .ps1 as the ANSI codepage, so a UTF-8 em
+# dash arrives as U+201D -- which PowerShell treats as a real string delimiter. One
+# of them inside a quoted string closes it early and the whole file fails to parse.
+# Verified live 2026-08-22 (this file had 3 parse errors on Windows 11 until it was
+# made ASCII-only). test_ps1_encoding.py enforces this.
+#
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File install_windows.ps1
 
 #Requires -RunAsAdministrator
@@ -15,12 +23,12 @@ function Write-OK   { param($msg) Write-Host "    [OK] $msg" -ForegroundColor Gr
 function Write-Warn { param($msg) Write-Host "    [!!] $msg" -ForegroundColor Yellow }
 function Write-Fail { param($msg) Write-Host "    [FAIL] $msg" -ForegroundColor Red }
 
-# ── 1. Visual C++ Redistributable ────────────────────────────────────────────
+# -- 1. Visual C++ Redistributable --------------------------------------------
 Write-Step "Checking Visual C++ Redistributable 2015-2022..."
 $vcKey = "HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"
 $vcInstalled = (Test-Path $vcKey) -and ((Get-ItemProperty $vcKey -ErrorAction SilentlyContinue).Installed -eq 1)
 if (-not $vcInstalled) {
-    Write-Warn "Visual C++ Redistributable not found — downloading and installing..."
+    Write-Warn "Visual C++ Redistributable not found -- downloading and installing..."
     $vcUrl  = "https://aka.ms/vs/17/release/vc_redist.x64.exe"
     $vcFile = "$env:TEMP\vc_redist.x64.exe"
     Invoke-WebRequest -Uri $vcUrl -OutFile $vcFile -UseBasicParsing
@@ -30,7 +38,7 @@ if (-not $vcInstalled) {
     Write-OK "Visual C++ Redistributable already present"
 }
 
-# ── 2. Python ─────────────────────────────────────────────────────────────────
+# -- 2. Python -----------------------------------------------------------------
 Write-Step "Checking Python 3.8+..."
 $python = Get-Command python -ErrorAction SilentlyContinue
 if (-not $python) {
@@ -41,39 +49,39 @@ if (-not $python) {
     Read-Host "Press Enter when Python is installed"
     $python = Get-Command python -ErrorAction SilentlyContinue
     if (-not $python) {
-        Write-Fail "Python still not found — aborting"
+        Write-Fail "Python still not found -- aborting"
         exit 1
     }
 }
 $pyver = & python --version 2>&1
 Write-OK "Found: $pyver"
 
-# ── 3. Pip packages ──────────────────────────────────────────────────────────
+# -- 3. Pip packages ----------------------------------------------------------
 Write-Step "Installing Python packages..."
 & python -m pip install --upgrade pip --quiet
 & python -m pip install requests psutil watchdog plyer pywin32 cryptography --quiet
 if ($LASTEXITCODE -ne 0) {
-    Write-Fail "pip install failed — ensure Visual C++ Redistributable is installed first"
+    Write-Fail "pip install failed -- ensure Visual C++ Redistributable is installed first"
     exit 1
 }
 Write-OK "Python packages installed"
 
-# ── 3b. Tailscale (remote access for the road) ───────────────────────────────
+# -- 3b. Tailscale (remote access for the road) -------------------------------
 Write-Step "Checking Tailscale (remote access to your Nemesis box)..."
 $ts = Get-Command tailscale -ErrorAction SilentlyContinue
 if (-not $ts) {
     $resp = Read-Host "Tailscale not found. Install it now? (recommended for remote/road use) [y/N]"
     if ($resp -eq 'y' -or $resp -eq 'Y') {
         winget install Tailscale.Tailscale --silent --accept-package-agreements --accept-source-agreements
-        Write-OK "Tailscale installed — run 'tailscale up' and sign in to join your tailnet"
+        Write-OK "Tailscale installed -- run 'tailscale up' and sign in to join your tailnet"
     } else {
-        Write-Warn "Skipped Tailscale — the Nemesis box must be reachable on your LAN/VPN"
+        Write-Warn "Skipped Tailscale -- the Nemesis box must be reachable on your LAN/VPN"
     }
 } else {
     Write-OK "Tailscale already installed"
 }
 
-# ── 3c. LibreHardwareMonitor web server (temps/fans on port 8085) ─────────────
+# -- 3c. LibreHardwareMonitor web server (temps/fans on port 8085) -------------
 Write-Step "Starting LibreHardwareMonitor web server (port 8085)..."
 $lhmExe = "C:\Program Files\LibreHardwareMonitor\LibreHardwareMonitor.exe"
 if (Test-Path $lhmExe) {
@@ -85,7 +93,7 @@ if (Test-Path $lhmExe) {
     Write-Host "    Then enable Options -> Web Server (port 8085). The agent still runs without it (psutil only)."
 }
 
-# ── 4. Copy agent files ──────────────────────────────────────────────────────
+# -- 4. Copy agent files ------------------------------------------------------
 Write-Step "Installing agent to $InstallDir..."
 if (-not (Test-Path $InstallDir)) {
     New-Item -ItemType Directory -Path $InstallDir | Out-Null
@@ -94,7 +102,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Copy-Item -Path "$ScriptDir\*" -Destination $InstallDir -Recurse -Force
 Write-OK "Files copied to $InstallDir"
 
-# ── 5. Configure nemesis_agent.conf ─────────────────────────────────────────
+# -- 5. Configure nemesis_agent.conf -----------------------------------------
 Write-Step "Configuring agent..."
 $confPath = "$InstallDir\nemesis_agent.conf"
 if (-not (Test-Path $confPath)) {
@@ -132,7 +140,7 @@ if ($dn) {
 }
 Write-OK "Configuration saved"
 
-# ── 6. Windows Defender exclusion ────────────────────────────────────────────
+# -- 6. Windows Defender exclusion --------------------------------------------
 Write-Step "Adding Windows Defender exclusion for $InstallDir..."
 try {
     Add-MpPreference -ExclusionPath $InstallDir -ErrorAction Stop
@@ -141,7 +149,7 @@ try {
     Write-Warn "Could not add Defender exclusion (non-fatal): $_"
 }
 
-# ── 7. Task Scheduler ────────────────────────────────────────────────────────
+# -- 7. Task Scheduler --------------------------------------------------------
 Write-Step "Creating Task Scheduler task '$TaskName'..."
 $action  = New-ScheduledTaskAction -Execute "python" -Argument "$InstallDir\agent.py" -WorkingDirectory $InstallDir
 $trigger = New-ScheduledTaskTrigger -AtLogOn
@@ -157,7 +165,7 @@ try {
     Write-Warn "Task Scheduler failed (non-fatal): $_"
 }
 
-# ── 8. Start agent ────────────────────────────────────────────────────────────
+# -- 8. Start agent ------------------------------------------------------------
 Write-Step "Starting Nemesis Agent..."
 Start-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 2
@@ -168,7 +176,7 @@ Write-Host "  Install dir: $InstallDir" -ForegroundColor Green
 Write-Host "  Log file:    $InstallDir\nemesis_agent.log" -ForegroundColor Green
 Write-Host "  Config:      $InstallDir\nemesis_agent.conf" -ForegroundColor Green
 Write-Host "" -ForegroundColor Green
-Write-Host "  NEXT STEP — approve this device:" -ForegroundColor Yellow
+Write-Host "  NEXT STEP -- approve this device:" -ForegroundColor Yellow
 Write-Host "    The agent generated a keypair and requested enrollment." -ForegroundColor Yellow
 Write-Host "    Open your Nemesis dashboard -> Settings -> Devices and click" -ForegroundColor Yellow
 Write-Host "    Approve. The agent will start reporting once approved." -ForegroundColor Yellow
