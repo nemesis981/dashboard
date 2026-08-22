@@ -1,0 +1,14 @@
+{
+  "name": "lookup",
+  "display_name": "Domain & IP Lookup",
+  "version": "0.1.0",
+  "description": "Operator-driven investigation of a domain or IP address from the dashboard: DNS records via dig, registration and ownership via whois, and a plain-language reading of what the answer means. Answers the first question anyone asks about a flagged domain — what is this? — without leaving the product for a terminal. Read-only: it queries from the appliance and tasks no remote machine, so it sits on the safe side of the diagnostics access-control boundary. Results are tiered: beginner gets an interpretation and a next step, pro gets the raw dig/whois output.",
+  "category": "system",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": false,
+  "apt_deps": ["dnsutils", "whois"],
+  "pip_deps": []
+}
