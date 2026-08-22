@@ -1,183 +1,203 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-21, nightly closeout (Window 2)**. Overwritten each closeout
+> Last updated **2026-08-23, nightly closeout (Window 2)**. Overwritten each closeout
 > (latest state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
 >
-> Full detail behind every claim below: `docs/handoff/supplements/2026-08-21-001.md`
-> (curated) and `docs/handoff/worklog/2026-08-21-001.md` (raw log, kept live all session).
-> Also see `2026-08-20-002.md` / `2026-08-20-001.md` for the tail end of the prior day.
+> Full detail behind today's session: `docs/handoff/supplements/2026-08-23-001.md`
+> (curated) and `docs/handoff/worklog/2026-08-23-001.md` (raw log). This was an
+> exceptionally large session — 51 commits — so this file summarizes by theme rather
+> than re-narrating every commit; the supplement has the full list.
 
 ---
 
 ## 1. Push status — all clear, `origin/main` == local HEAD
 
-Nothing pending push in the public repo as of this writing. `git rev-parse HEAD` ==
-`git rev-parse origin/main` == `c7ac0cce837ac7daa709aa2bac28743330f9bccc`.
+`git rev-parse HEAD` == `git rev-parse origin/main` == `a0d971c4101299b34767f183c3451afdabd7804f`.
 
-Today's 8 commits (most recent first) — the zero-day M1-M4 cores + operational gaps 1-3,
-4 AI-mode fixes, and the AI-surfacing PUNCHLIST entries — see
-`docs/handoff/supplements/2026-08-21-001.md` for the full list with descriptions.
+## 2. What landed today (51 commits, `372b717`..`a0d971c`) — by theme
 
-## 2. FIRST THING NEXT SESSION — read Window 1's commit-ordering plan before touching anything
+1. **Roadmap audit refresh + Window 3's detector-coverage-corrections batch** (`5a04d0d`,
+   `6448f5b`, then `2618b02`→`7e6cb8b`): bounded settings, malware/diagnostics settings
+   validation, IPv6 fix, mem_appliance throttle exclusions, integrity_watch wiring.
+2. **Memory-injection Set 1** (`0509b67`→`52d3ab6`): Tier 2 attestation, RAM-budget
+   reservations, E-AGENT error codes, Linux memcap (opt-in), Windows privileged channel +
+   memory acquisition, `.ps1` encoding/banner fix (including a real regression caught and
+   fixed in the same pass).
+3. **Diagnostics-tools batch** (`f023bfd`→`062df42`): shared canary harness,
+   schema_drift, clock_and_timestamp_sanity, agent_enrollment_integrity,
+   dependency_preflight, config_drift, the `anomaly_state` enablement-detection bug fix
+   (was unconditionally reporting the module disabled), all five registered.
+4. **2026-08-21 AI-automation batch, held two days, landed** (`1225bd0`→`6f93588`):
+   master-password authority/spend-metering/undo path, the dashboard authority gate on
+   the alert-verdict path (closes a real permission-model incoherence), ARCHITECTURE.md's
+   L0-L4 ladder documentation, a malware sandbox guest-dump-error fix, the consent
+   five-valued coverage state.
+5. **Lookup + TLS investigation tools** (`00c3223`→`93b0e41`, then `542f56a` fixing a
+   real load-time defect in `31478f0`): domain/IP lookup (dig/whois), TLS certificate
+   inspection, folded into one module wrapper, plus the CUSTOM guide. **`542f56a`
+   matters**: `module.py` used a relative import that works when tested directly via
+   `spec_from_file_location` but fails under the real `modules_loader` mechanism — fixed
+   via an explicit `_sibling()` path-based loader. Verify any future module split via the
+   real loader, not a direct import (see §6).
+6. **Digest scheduling foundation** (`7a7d703`) + **F1 test-mock fixes**
+   (`a809835`, `5478f81`) for the spend-metering rename that broke
+   `test_rate_degradation.py` at HEAD.
+7. **Pre-filter ladder** (`8cf521d`): cost-control heuristic triage ahead of AI model
+   calls — a prerequisite for the AI trial being affordable at all.
+8. **Set 2 (malware/zero-day, Groups A-H) — the oldest outstanding debt, now fully
+   landed** (`71dda37`→`328e25e`): roaming traffic steering (L3 forwarder/lease/nft),
+   Windows detonation base image, **Windows behavioral monitoring (Sysmon)** — Windows
+   endpoints are no longer behaviorally blind — synthetic sample suite (harness public,
+   AV fixtures correctly gitignored), Layer-B Falco/Sysmon corrections (including a real
+   bug: Windows always reported its behavioral engine absent even when healthy), agent
+   GUI findings tab, the ISO-builder install.sh dependency, and the 4 outstanding
+   error-code-classification/roadmap audit docs.
+9. **Netprobe (ping/traceroute)** (`2249930`→`81ca877`): inventory-restricted reachability
+   probing — targets must be a known LAN device or enrolled agent, never arbitrary. Port
+   scan and packet capture remain deliberately unbuilt (§5).
+10. **RBAC foundation** (`c84dcce`→`a0d971c`): three roles (admin/user/viewonly) enforced
+    at a `before_request` gate covering all 149 live endpoints including module-registered
+    ones a decorator-only design would have missed. `role` existed and was enforced
+    nowhere before this. Independently re-verified (not just Window 3's own report): reran
+    `test_roles.py` directly, separately replicated the live app+module-loading setup and
+    re-ran `assert_registry_complete()` myself, manually sampled all 45 module endpoints
+    against the registry, and confirmed the six GET-that-act routes' elevated minimums
+    against the actual `dashboard.py` source.
 
-`~/work/nemesis-internal/handoff/2026-08-21-window1-handoff.md`, section "HELD FILES for
-Window 2", has an explicit, ready-to-execute plan (groups A through H) for the large
-held-work batch sitting uncommitted in the working tree right now. It resolves tonight's
-specific blocker (see §3) and gives dependency ordering across features from BOTH build
-windows. Read that section before staging anything — don't re-derive the grouping from
-`git status` alone.
+**Not deployed.** No auto-deploy in this repo — every commit above needs an
+operator-driven install/restart to take effect anywhere real.
 
-## 3. The blocked batch from tonight — now resolved, not yet executed
+## 3. Two items flagged for Window 3, first thing tomorrow morning
 
-Asked tonight to pull: merged `sysmon_collector.py` + tests, `sandbox.py` /
-`build_detonation_base_linux.sh` / `behavioral_agent.py`, new Windows detonation artifacts,
-`install.sh` + the ISO-dependency doc section. Everything checked out (Rule-8 clean, tests
-independently re-verified) **except one real cross-file coupling hazard**:
-`build_detonation_base_linux.sh` calls `deploy_behavioral_linux.sh --extra-rules`, but that
-flag only exists in the still-uncommitted `deploy_behavioral_linux.sh` — the currently-
-committed version (`c091ed5`) hard-exits on any unrecognized argument. Committing
-`build_detonation_base_linux.sh` alone would have broken the base-image build script.
-Nothing was staged; the operator asked for a nightly closeout instead of resolving it
-in-session.
+1. **Two overlapping lookup CUSTOM guides need reconciling into one.**
+   `docs/modules/lookup/CUSTOM_LOOKUP_BACKEND.md` shipped in today's batch (`93b0e41`).
+   Window 3 separately wrote `docs/CUSTOM_LOOKUP_RESOLVER.md` believing lookup had shipped
+   with no guide (checked commit `31478f0` in isolation and missed the follow-up two
+   commits later in the same batch). The two substantially overlap — contract,
+   skip-if-absent, example, Rule 8 — with the newer RESOLVER doc additionally covering TLS
+   backends and sinkhole detection. **Held out of tonight's closeout** (operator decision)
+   — `docs/CUSTOM_LOOKUP_RESOLVER.md` sits uncommitted in the working tree. Window 3:
+   reconcile into ONE accurate guide (likely merging RESOLVER's TLS/sinkhole content into
+   the shipped BACKEND doc, or replacing it outright) before either is committed again.
+2. **CLAUDE.md's ADR 0006 actor-mechanism note was stale and has been corrected
+   tonight** (see the "Actor mechanism" bullet under ADR 0006 in CLAUDE.md). It claimed
+   the mechanism was unwired; it's been wired since 2026-08-04
+   (`dashboard.py:_set_dm_actor`, verified independently before correcting). Window 3
+   flagged this after having repeated the same stale claim once itself before checking —
+   worth remembering that a CLAUDE.md flag needs the same periodic re-verification as any
+   other claim, not trust-by-inheritance.
 
-**Resolved while reading Window 1's handoff, not yet acted on**: their own commit-ordering
-plan groups `deploy_behavioral_linux.sh` + `build_detonation_base_linux.sh` together as one
-unit ("Layer B behavioral fixes") — confirming the flag and its caller are meant to land in
-the same commit. Next session should follow that grouping rather than re-litigating it.
+## 4. Open items, priority order
 
-## 4. What's live in production vs. what's only committed
+1. **Window 1's R1-R7 protection-schema audit work — held, no commit plan yet.**
+   Touches `modules/ai_engine/module.py`, `modules/anomaly_detection/manifest.json`,
+   `modules/malware_detection/manifest.json`, `modules_loader.py`, a new
+   `docs/architecture/0024-windows-endpoint-av-delegation.md`,
+   `modules/ai_engine/test_authority_promotion.py`, `scripts/error_code_registry.py` (+
+   its test), `test_required_detector_coverage.py`, plus 9 hunks inside `dashboard.py`
+   (a detector-coverage monitor/banner labeled "R6" and master-password-authority routes
+   labeled "R2" in Window 1's own numbering — coincidentally colliding with tonight's
+   RBAC batch's own R2/R3/R5 labels; they are unrelated features). **Do not touch until
+   Window 1 hands over a proper commit plan** — explicit operator instruction tonight.
+2. **R6's "active pipeline alert"** (the detector-coverage monitor referenced above,
+   building on a tested function + a dashboard banner) may or may not be assigned to
+   Window 2 — operator was confirming with Window 1 as of tonight. **Do not start
+   speculatively.**
+3. **Batch 3's digest-delivery remainder (H1-H3) — held tonight, scope was netprobe
+   only.** `alert_manager/database.py` carries an uncommitted `init_notify_tables()`
+   addition (H1) sitting alongside the R5 comment fix that WAS committed tonight (staged
+   by hunk, H1 left in the working tree). `alert_manager/notify.py`/`test_notify.py` and
+   `core_module/watchdog/watchdog.py` also carry H2/H3 content. See
+   `~/work/nemesis-internal/handoff/2026-08-22-window3-to-window2-batch-3.md` §3 for the
+   full spec (bundle/build/send/mark-sent, watchdog tick, 113 checks claimed).
+4. **Six GET-routes-that-act should become POST** — tracked in `PUNCHLIST.md` tonight
+   (new entry, kept deliberately light on specifics; full detail in the private route
+   audit). Role gating (landed tonight) reduces blast radius but doesn't remove the
+   underlying shape. Own pass, own commit(s).
+5. **Port scan and packet capture are deliberately NOT built.** Per the operator's
+   explicit instruction: building a gating layer purely to ship these two would decide
+   "full roles system vs. extending master-password" as a side effect. RBAC (tonight) is
+   that foundation, now confirmed independently — but building on top of it is still its
+   own deliberate pass per Window 3's own batch-4 handoff, not an automatic next step.
+6. **Set 4 (memory-injection step 4+)** — Window 1's ongoing work
+   (`linmem.py`/`memfeatures.py`/`meminject_scan.py`/the corpus-collection tools +
+   tests), plus the mixed files shared with earlier Set 2/Set 1 work (`agent.py`,
+   `agent_errors.py`, `config.py`, `privservice.py`, `test_inspect_pid.py`). Not part of
+   tonight's scope; still Window 1's in-progress work.
+7. `LICENSE` draft's real legal review — placeholders filled, review unstarted (carried
+   forward, unchanged for weeks).
 
-**Pushed today, NOT deployed** — no auto-deploy in this repo; everything below needs an
-operator-driven install/restart to take effect anywhere real: all 8 of today's commits
-(zero-day M1-M4 + 3 operational gaps, 4 AI-mode fixes). Nothing before today changed this
-picture.
+## 5. Do NOT touch — the working tree still holds two other windows' in-progress work
 
-## 5. Open items, priority order
+Everything under `nemesis_agent/keyprotect/`, `nemesis_agent/linmem.py`,
+`nemesis_agent/memfeatures.py`, `nemesis_agent/meminject_scan.py`, the
+`nemesis_agent/tools/*corpus*`/`measure_scan_cost.py` tools + their tests,
+`scripts/error_code_registry.py` (+test), `test_required_detector_coverage.py`,
+`docs/architecture/0024-*.md`, `modules/ai_engine/test_authority_promotion.py`, the
+`modules/*/manifest.json` and `modules_loader.py` modifications, and 9 specific hunks
+inside `dashboard.py` (identified precisely tonight — see §4.1) are **Window 1's**,
+per explicit operator instruction. `alert_manager/database.py` (H1 hunk),
+`alert_manager/notify.py`/`test_notify.py`, `core_module/watchdog/watchdog.py` are
+**Window 3's held batch-3 digest work** — do not sweep in. `docs/CUSTOM_LOOKUP_RESOLVER.md`
+is held pending the reconciliation in §3.1.
 
-1. **Execute Window 1's commit-ordering plan (groups A-H)** for the large held batch —
-   see §2. Spans steering/L3 forwarder, Windows detonation sandbox, Windows behavioral
-   (Sysmon), synthetic sample suite, Layer B behavioral fixes, agent GUI findings tab,
-   ai-engine work, and docs/audits. Four files (`agent.py`, `behavioral_agent.py`,
-   `config.py`, `agent_errors.py`) are flagged by Window 1 as genuinely mixed across
-   multiple features and will need `git add -p` hunk-splitting, not a blanket add — same
-   discipline already used tonight for `ai_engine/module.py`.
-2. **Two docs remain deliberately deferred** (operator's own call, not forgotten):
-   `CUSTOM_SYSMON.md` and the Windows section of `CUSTOM_DETONATION_SANDBOX.md` — come
-   later once Window 1's endpoint deploy script work clarifies what needs documenting.
-3. **A much larger volume of held work exists beyond the commit-ordering plan** — Window 1's
-   memory-injection detection arc (Tier 2 attestation, RAM-budget consumer, Linux
-   memory-inspection, Windows authenticated-IPC) and Window 3's AI-automation-mode Phase 1
-   (paused at a scoping gate), master-password-authority rebuild, and IP-reversal handlers.
-   None of this is in the commit-ordering plan above (it landed after that plan was
-   written, or is still mid-build) — read both windows' full 2026-08-21 handoffs before
-   assuming §2's plan is exhaustive.
-4. **The three 08-08 error-code-classification batches** — many days unclaimed, unchanged.
-5. **`docs/audits/roadmap-state-audit-2026-08-19.md`** — still uncommitted, unchanged.
-6. **`install.sh` still doesn't wire `malware-scan.service`** — open since 2026-08-18.
-7. **`LICENSE` draft's real legal review** — placeholders filled, review unstarted.
-8. **Private repo (`nemesis-internal`) has unpushed commits** — Window 1's handoff reports
-   4 unpushed (theirs + one Window 3 handoff) as of their closeout. Window 1 is the primary
-   git-writer there; Window 2 can push as backup if asked, but wasn't asked tonight — this
-   is a heads-up, not an action taken.
+## 6. Verified live tonight, not just claimed (Rule 3 discipline)
 
-## 6. Do NOT touch — the working tree is mid-build for BOTH other windows, snapshot only
+Every batch tonight carried independent verification, not just Window 3's own report:
+every test suite Window 3 claimed a count for was independently re-run and matched
+exactly; Rule 8 was independently re-scanned on every new/modified file, not trusted from
+the handoff; the `542f56a` lookup-load defect was reproduced myself via the real
+`modules_loader` mechanism before trusting the fix, and the fix re-verified the same way;
+RBAC's registry-completeness was independently re-run outside `test_roles.py`'s own
+harness, plus a manual sample of all 45 module-registered endpoints against the live
+`url_map`; the six GET-that-act routes were confirmed as genuinely bare `@app.route()` by
+reading `dashboard.py` source directly, not assumed from the handoff's description; every
+mixed-file hunk-split (dashboard.py x2 separate diffs today, database.py, agent_errors.py
+earlier this week) was done by reading every hunk individually and verifying the
+staged-only content compiles/passes in isolation before committing.
 
-`git status` at closeout showed a very large and still-growing set of modified/untracked
-files across both windows' work (steering/forwarder, Windows detonation, Sysmon behavioral,
-synthetic samples, memory-injection detection, AI automation-mode scoping, master-password
-authority, IP reversal). **Do not treat any specific file list in this document as
-exhaustive or current — re-run `git status` fresh next session.** The one reliable
-reference is Window 1's commit-ordering plan (§2), which names the held set as of their
-closeout and should be re-verified against a fresh `git status` before executing, since both
-windows may have kept working after writing it.
+**One real dependency surfaced and documented, not silently absorbed:** `roles.py`
+(`c84dcce`) references two endpoint names (`api_ai_authority`, `api_ai_authority_raise`)
+that only exist in Window 1's held work. This makes `assert_registry_complete()` report 2
+phantom entries and `test_roles.py` show 143/144 (not 144/144) until Window 1's routes
+land — confirmed to have zero live effect (the check is test/audit-only, never called from
+the request path). Documented in commit `91833d9`'s message; will self-resolve once
+Window 1's work lands.
 
-`modules/malware_detection/synthetic_samples/` specifically: confirmed by Window 1's
-handoff as Window 1's own work, with a deliberate operator decision that the AV-triggering
-fixtures (EICAR/YARA-signature/PE samples) are **private-mirror only** (gitignored in
-public) — only the harness `.py`/`.sh` files are meant for the public repo. Worth
-double-checking that `.gitignore` entry is actually in place before staging this directory.
+## 7. State snapshots
 
-## 7. Verified live today, not just claimed (Rule 3 discipline)
+None taken tonight — every state-changing action was a code commit, not a direct
+production data/config change.
 
-Every commit today carried independent verification by this window: every hunk of every
-multi-window-touched file read and categorized personally before deciding how to split it
-(not just trusting either build window's description of what changed where); claimed test
-pass counts independently re-run and confirmed to match exactly (24/24, 12/12, 19/19,
-30/30, 13/13, 16/16→23/23, 28/28, 14/14, 25/25, 22/22, 67/67, plus more); one real
-misattribution caught and corrected (`agent_errors.py` was not actually part of the zero-day
-batch despite being counted as one of the "4 modified files"); one real cross-file breakage
-caught and stopped before it was committed (§3, the `--extra-rules` coupling).
+## 8. Elevated grants
 
-## 8. State snapshots
+Not re-checked tonight (this was a code-batch closeout, not a Morning Status pass). The
+2026-08-22 baseline (scoped sudo NOPASSWD set, `nemesis-db`/`nemesis-fw`/`pihole` group
+membership, polkit unreadable this session) stands unchanged — full itemization in this
+file's git history (the version immediately prior to this one) and in the mirror at
+`~/work/nemesis-internal/handoff/HANDOFF.md`'s own history. Not re-copied into this
+revision deliberately, per Rule 7's own reasoning: a duplicated copy is a second source of
+truth that desyncs the moment one copy is updated and the other isn't. Re-verify fresh at
+next Morning Status.
 
-None taken today by this window — every state-changing action was a code commit, not a
-direct production data/config change.
+## 9. Cross-references
 
-## 9. Elevated grants
-
-**Baseline established 2026-08-22 — diff against this going forward.** No prior itemized
-list existed in this file to compare against; the 2026-08-20 worklog only recorded a
-shape-level finding ("no broad NOPASSWD"), not an itemized list. This is that itemized list,
-captured live via `sudo -n -l` / `getent group` / `id <user>` during the 2026-08-22 Morning
-Status pass and folded in as an explicit follow-up.
-
-- **sudo NOPASSWD — scoped, install/service-management shaped, not broad.** The
-  `(ALL : ALL) ALL` line is the standard admin-group entry (password required, NOT
-  NOPASSWD) — expected for the operator's sudo-group account, not itself a standing grant to
-  track.
-  Below that, `sudo -n -l` lists narrow, command-specific NOPASSWD entries only, all
-  matching the installer's own footprint:
-  - `ufw`
-  - `systemctl start/stop/restart` for the six core services (`dashboard`,
-    `diagnostics-watcher`, `alert-watcher`, `vpn-dns-guard`, `malware-canary`, `watchdog`,
-    `device-scanner`) plus `nemesis-fwd` (restart only); `daemon-reload`; `reset-failed
-    dashboard`
-  - `tee` + `chmod 0644` for each of those services' systemd unit files, and for
-    `/etc/polkit-1/rules.d/10-nemesis-watchdog.rules`
-  - `groupadd --system nemesis-db`; `useradd --system --no-create-home --shell
-    /usr/sbin/nologin --gid nemesis-db` for the six `nemesis-*` service accounts
-    (`nemesis-diag`, `nemesis-hwmon`, `nemesis-alertw`, `nemesis-vpndns`, `nemesis-canary`,
-    `nemesis-watchdog`)
-  - the one-time `/opt` migration set: `mkdir -p /var/lib/nemesis`; `mv` for
-    `/home/<user>/dashboard` → `/opt/nemesis` and `alerts.db`(+`-wal`/`-shm`) →
-    `/var/lib/nemesis`; matching `chown <user>` / `chgrp nemesis-db` / `chmod 0770`|`0660` on
-    those paths; `chmod 0755 /opt/nemesis`
-  - `tee` + `reload`/`restart` for `/etc/suricata/rules/local.rules`
-  - **Reason still needed:** this is install.sh's own sudoers footprint for provisioning and
-    managing the Nemesis services/accounts without a password prompt on every install/update
-    step — narrow, command-scoped, no wildcard/shell-out entries observed. No revocation
-    action indicated; this stays listed as "still needed" per Rule 7's framing, not flagged
-    for revoke.
-- **Group memberships** (`id <user>`): `nemesis-db`, `nemesis-fw`, `pihole` — the three
-  groups this file's Morning Status section names as meaningful-access groups. `nemesis-fw`
-  group membership: the operator account, `nemesis-alertw`, `nemesis-dash`. Also present but
-  outside this rule's named set: `adm`, `cdrom`, `sudo`, `dip`, `plugdev`, `users`,
-  `lpadmin`, `piavpn`, `nemesis` — standard desktop/admin groups plus VPN-client and a bare
-  `nemesis` group, none flagged as needing tracking here. No unexpected group membership
-  observed.
-- **Polkit rules** (`ls /etc/polkit-1/rules.d/`): **not checked** — `Permission denied` for
-  this session's user (needs root to read on this box, per this file's own standing note).
-  Carrying forward as explicitly unverified, not silently skipped.
-
-Re-verify each item above at next session start per Rule 7 — this list is the new
-comparison baseline, not a permanent record assumed still accurate.
-
-## 10. Cross-references
-
-- `docs/handoff/supplements/2026-08-21-001.md` — curated narrative, today.
-- `docs/handoff/worklog/2026-08-21-001.md` — chronological detail, kept live all session.
-- `docs/handoff/supplements/2026-08-20-002.md` / `worklog/2026-08-20-002.md` — the tail end
-  of yesterday (agent_last_seen fix, GUI/DMZ/sentinel/QUIC split, private-repo pushes).
-- `~/work/nemesis-internal/handoff/2026-08-21-window1-handoff.md` — the commit-ordering
-  plan (read this first next session), memory-injection detection arc, KEEP VMs, gotchas.
-- `~/work/nemesis-internal/handoff/2026-08-21-window3-handoff.md` — AI automation mode
-  status, Windows detonation Phase 3, master-password rebuild, IP reversal handlers.
-- `PUNCHLIST.md` — 4 new AI-surfacing entries filed today.
-- Prior day: `docs/handoff/supplements/2026-08-19-001.md`.
+- `docs/handoff/supplements/2026-08-23-001.md` — curated narrative, today (51 commits).
+- `docs/handoff/worklog/2026-08-23-001.md` — chronological detail.
+- `~/work/nemesis-internal/handoff/2026-08-22-window1-to-window2-set2-REDERIVED-commit-plan.md`
+  — Set 2's plan, now fully executed.
+- `~/work/nemesis-internal/handoff/2026-08-23-window3-to-window2-commit-batch.md`,
+  `2026-08-23-window3-to-window2-batch-2.md`, `2026-08-22-window3-to-window2-batch-3.md`,
+  `2026-08-22-window3-to-window2-batch-4-rbac.md` — today's four Window-3 handoffs, all
+  substantially executed (batch-3's H1-H3 remain outstanding, see §4.3).
+- `~/work/nemesis-internal/audits/route-security-audit-netprobe-2026-08-22.md`,
+  `route-security-audit-rbac-2026-08-22.md` — private route-level audits.
+- `PUNCHLIST.md` — new entry tonight (six GET-that-act routes).
+- Prior day: `docs/handoff/supplements/2026-08-21-001.md`.
 
 ## Topology (durable, unchanged from prior handoffs unless noted)
 
-No topology changes today. See `docs/handoff/supplements/2026-08-19-001.md` for the last
-full topology summary.
+No topology changes tonight. See `docs/handoff/supplements/2026-08-19-001.md` for the
+last full topology summary.
