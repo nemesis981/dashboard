@@ -86,6 +86,23 @@ CRITICAL = "CRITICAL"
 KEY_TIMEZONE   = "digest_timezone"
 KEY_OPEN_TIME  = "digest_open_time"
 KEY_CLOSE_TIME = "digest_close_time"
+KEY_NOTIFY_MODE = "notify_mode"
+
+#: DEFAULT IS `immediate`, DELIBERATELY -- it is the pre-digest behaviour.
+#:
+#: Defaulting to "digest" would flip every existing installation to batched mail
+#: on upgrade, which can delay a HIGH-severity alert by up to twelve hours for an
+#: operator who never opened the setting and never agreed to it. Defaulting to
+#: "immediate" makes this layer inert until someone opts in: the pipe is live and
+#: proven, but nothing changes underfoot. Same reasoning `route()` already
+#: applies to an unrecognised mode -- the noisy direction is the safe one.
+#:
+#: Defined HERE, with the other settings keys, rather than beside the dispatch
+#: helper that reads it: `validate_notify_mode` (far above that helper) needs it,
+#: and a constant defined below its first use resolves only by accident of call
+#: ordering. Same trap as a default argument naming a not-yet-defined value --
+#: it compiles, then raises at import.
+DEFAULT_NOTIFY_MODE = "immediate"
 
 #: Ratified defaults 2026-08-22: a sensible AM/PM split reading as
 #: start-of-day open / end-of-day close.
@@ -258,6 +275,92 @@ def validate_schedule(open_text, close_text, tz_name):
         if problem:
             errors[KEY_TIMEZONE] = problem
     return (not errors), errors
+
+
+# ── Delivery mode: the operator-facing vocabulary ────────────────────────────
+
+MODE_IMMEDIATE = "immediate"
+MODE_DIGEST = "digest"
+
+#: The modes an operator may CHOOSE. Deliberately narrower than what `route()`
+#: tolerates.
+#:
+#: `route()` also accepts "both", and treats it exactly as "immediate" -- the
+#: "send now AND also include it in the digest" half was never built, and
+#: `route()` structurally cannot express it because it returns one decision, not
+#: a set. Nothing in the tree ever sets it (verified 2026-08-23: it appears only
+#: in `route()` and its own canary). Offering it in a settings UI would therefore
+#: promise behaviour that does not exist, so it is NOT offered here. Implementing
+#: it properly means changing `route()`'s return type, which is its own decision.
+NOTIFY_MODES = (MODE_IMMEDIATE, MODE_DIGEST)
+
+_MODE_LABELS = {
+    MODE_IMMEDIATE: "Send every notification immediately",
+    MODE_DIGEST: "Bundle non-critical notifications into the twice-daily digest",
+}
+
+
+def mode_label(mode):
+    """Human-readable label for a mode, for the settings UI."""
+    return _MODE_LABELS.get((mode or "").strip().lower(), "")
+
+
+def validate_notify_mode(raw):
+    """Validate an operator-supplied delivery mode. Returns (ok, errors).
+
+    Refuses at the WRITE, like `validate_schedule`. A mode that reaches storage
+    unvalidated does not fail loudly -- `route()` falls back to sending
+    immediately and logs a warning, so the operator's chosen setting silently
+    does nothing and the only evidence is a log line nobody reads.
+    """
+    errors = {}
+    text = (raw or "").strip().lower()
+    if text not in NOTIFY_MODES:
+        errors[KEY_NOTIFY_MODE] = ("must be one of: %s"
+                                   % ", ".join(NOTIFY_MODES))
+    return (not errors), errors
+
+
+def validate_digest_settings(open_text, close_text, tz_name, mode):
+    """Validate ALL FOUR digest settings together. Returns (ok, errors_by_field).
+
+    One gate for the whole form, because the settings belong to one feature and
+    an operator fixing them one refusal at a time learns about each problem only
+    after fixing the last one.
+    """
+    ok_sched, errors = validate_schedule(open_text, close_text, tz_name)
+    _ok_mode, mode_errors = validate_notify_mode(mode)
+    errors = dict(errors)
+    errors.update(mode_errors)
+    return (not errors), errors
+
+
+def save_digest_settings(open_text, close_text, tz_name, mode,
+                         set_setting=None, actor=None):
+    """Validate, then write all four. Returns (ok, errors_by_field).
+
+    ALL-OR-NOTHING, deliberately: if any field is invalid, NOTHING is written.
+
+    A partial write is the failure worth designing against here. Accepting a
+    valid start time while rejecting an invalid end time leaves the stored
+    schedule in a state the operator never chose and the form no longer shows --
+    and a digest then fires at a time nobody picked. Refusing the whole form
+    keeps stored state equal to some state the operator actually asked for.
+
+    `set_setting` is injected so this is testable without a database.
+    """
+    ok, errors = validate_digest_settings(open_text, close_text, tz_name, mode)
+    if not ok:
+        return False, errors
+    writer = set_setting
+    if writer is None:
+        import database                                        # noqa: PLC0415
+        writer = database.set_setting
+    writer(KEY_OPEN_TIME, open_text, actor=actor)
+    writer(KEY_CLOSE_TIME, close_text, actor=actor)
+    writer(KEY_TIMEZONE, tz_name or "", actor=actor)
+    writer(KEY_NOTIFY_MODE, (mode or "").strip().lower(), actor=actor)
+    return True, {}
 
 
 def digest_schedule(get_setting):
@@ -746,3 +849,124 @@ def run_digest_tick(conn, get_setting, sender=None, recipient=None, now=None):
     results = [send_digest(conn, w, schedule, sender=sender,
                            recipient=recipient, now=now) for w in due]
     return {"ok": all(r.get("ok") for r in results), "due": due, "results": results}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THE CALLER-FACING ENTRY POINT
+#
+# Everything above is machinery. This is the ONE function the ~10 existing
+# `send_email` call sites should use, and the reason it exists is that they must
+# NOT each learn the machinery:
+#
+#   * `route()` needs a severity and a mode. A caller that forgets the mode gets
+#     the `route()` default, which is BUNDLE -- so a caller that half-adopts this
+#     layer silently starts deferring mail. One entry point means one place that
+#     reads the setting.
+#   * `enqueue()` needs a live sqlite3 connection. Two of the call sites are
+#     MODULES, and `modules_loader` statically refuses to load a module that
+#     imports sqlite3 or calls get_db (verified: it ast.walk()s module.py for
+#     exactly that). A module can therefore never legally hold the connection
+#     `enqueue` wants -- but it CAN call this, because the connection is acquired
+#     in here, in alert_manager, which the loader does not scan.
+#   * A notification path must never take down the thing that was notifying.
+#
+# So: callers pass what they know (severity, subject, body, family). They do not
+# pass, or need, a connection, a mode, or a schedule.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _default_get_setting(key, default=None):
+    """Read a setting without importing `database` at module import time."""
+    import database                                            # noqa: PLC0415
+    return database.get_setting(key, default)
+
+
+def notify(severity, subject, body="", family_key=None, surface=None,
+           actor=None, conn=None, sender=None, get_setting=None, now=None):
+    """Deliver one notification: immediately, or into the next digest.
+
+    THE ONE CALL SITES SHOULD USE. Returns an explicit result dict and NEVER
+    raises -- a failure to notify must not break detection, which is the thing
+    that actually matters.
+
+    `severity` MUST be a `nemesis_severity.CANONICAL` value. CRITICAL is always
+    sent immediately, before any setting is consulted (see `route`).
+
+    `family_key` groups repeats for bundling -- 28 CPU-temperature notices become
+    one "(x28)" line instead of 28 emails. Omit it and the event stands alone;
+    inventing a shared key for unrelated events silently merges them, so when in
+    doubt leave it out.
+
+    Returns::
+
+        {"ok": bool, "delivery": "send_now"|"bundle", "queued_id": int|None,
+         "error": str|None, "fell_back": bool}
+
+    `fell_back=True` means the event was routed to the digest but could not be
+    queued, so it was sent immediately instead. See below -- that direction is
+    deliberate.
+    """
+    mode = DEFAULT_NOTIFY_MODE
+    try:
+        getter = get_setting or _default_get_setting
+        mode = getter(KEY_NOTIFY_MODE, DEFAULT_NOTIFY_MODE) or DEFAULT_NOTIFY_MODE
+    except Exception:                                          # noqa: BLE001
+        # `mode` keeps its pre-initialised value; this is what stops an
+        # exception here from becoming a NameError below. (It is NOT what keeps
+        # delivery safe -- `route()` already fails safe on any unrecognised
+        # mode. Proven: mutating the pre-init to None changes nothing
+        # observable, which is why no test claims otherwise.)
+        log.exception("notify: could not read %s; using %r",
+                      KEY_NOTIFY_MODE, DEFAULT_NOTIFY_MODE)
+
+    # Pass `mode` EXPLICITLY. `route()`'s own default parameter is "digest", so
+    # calling route(severity) here would silently bundle every non-critical
+    # notification regardless of the setting. Pinned by a mutation.
+    decision = route(severity, mode)
+
+    if decision == BUNDLE:
+        owned = conn is None
+        try:
+            if owned:
+                import database                                # noqa: PLC0415
+                conn = sqlite3.connect(database.DB_PATH, timeout=5.0)
+            try:
+                qid = enqueue(conn, severity, subject, body=body,
+                              surface=surface, family_key=family_key,
+                              actor=actor, now=now)
+            finally:
+                if owned:
+                    conn.close()
+            return {"ok": True, "delivery": BUNDLE, "queued_id": qid,
+                    "error": None, "fell_back": False}
+        except Exception as exc:                               # noqa: BLE001
+            # FALL FORWARD TO AN IMMEDIATE SEND, never a silent drop.
+            #
+            # The queue is the only thing holding a bundled event; if the insert
+            # failed, the event exists nowhere else and returning "ok" would lose
+            # it permanently. Sending it now is the wrong SCHEDULE but the right
+            # EVENT -- and an operator noticing an unexpected email is a far
+            # better failure than an operator never learning something happened.
+            log.exception("notify: enqueue failed; sending immediately instead")
+            result = _send_now(subject, body, sender)
+            result["fell_back"] = True
+            return result
+
+    return _send_now(subject, body, sender)
+
+
+def _send_now(subject, body, sender=None):
+    """Immediate delivery. Never raises; reports what happened."""
+    if sender is None:
+        import email_utils                                     # noqa: PLC0415
+        sender = email_utils.send_email
+    try:
+        ok = bool(sender(subject, body))
+    except Exception as exc:                                   # noqa: BLE001
+        log.exception("notify: immediate send raised")
+        return {"ok": False, "delivery": SEND_NOW, "queued_id": None,
+                "error": "%s: %s" % (type(exc).__name__, exc), "fell_back": False}
+    if not ok:
+        log.error("notify: immediate send failed for %r", subject)
+    return {"ok": ok, "delivery": SEND_NOW, "queued_id": None,
+            "error": None if ok else "send_email returned False",
+            "fell_back": False}

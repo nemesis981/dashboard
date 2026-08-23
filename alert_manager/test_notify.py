@@ -354,6 +354,143 @@ check("route still sends CRITICAL immediately in every mode",
           for m in ("digest", "immediate", "both", "quiet", None, "")))
 
 
+print("\n-- notify(): the caller-facing entry point --")
+
+def _gs(mode):
+    """A get_setting that reports `mode`, and UTC so the schedule is fixed."""
+    def g(key, default=None):
+        if key == n.KEY_NOTIFY_MODE:
+            return mode
+        if key == n.KEY_TIMEZONE:
+            return "UTC"
+        return default
+    return g
+
+
+_c = _db()
+_sent = []
+_spy = lambda s, b, to=None: (_sent.append(s), True)[1]
+
+r = n.notify("LOW", "immediate subject", "body", conn=_c,
+                  sender=_spy, get_setting=_gs("immediate"), now=_at(9))
+check("immediate mode sends now", r["ok"] and r["delivery"] == n.SEND_NOW)
+check("...and queues nothing", not n.pending(_c))
+check("...and actually called the sender", len(_sent) == 1)
+
+r = n.notify("LOW", "bundled subject", "body", family_key="fam", conn=_c,
+                  sender=_spy, get_setting=_gs("digest"), now=_at(9))
+check("digest mode bundles", r["ok"] and r["delivery"] == n.BUNDLE)
+check("...returns the queued row id", isinstance(r["queued_id"], int))
+check("...and did NOT send", len(_sent) == 1)
+check("...and the event is really queued", len(n.pending(_c)) == 1)
+
+r = n.notify("CRITICAL", "critical subject", "body", conn=_c,
+                  sender=_spy, get_setting=_gs("digest"), now=_at(9))
+check("CRITICAL sends immediately even in digest mode",
+      r["delivery"] == n.SEND_NOW and len(_sent) == 2)
+check("...and was not queued", len(n.pending(_c)) == 1)
+
+print("\n-- notify(): the DEFAULT is 'immediate', so an upgrade changes nothing --")
+r = n.notify("HIGH", "no setting at all", "body", conn=_c, sender=_spy,
+                  get_setting=lambda k, d=None: d, now=_at(9))
+check("an ABSENT notify_mode setting sends immediately, never bundles",
+      r["delivery"] == n.SEND_NOW)
+check("CONTROL: the same call bundles when the setting says digest",
+      n.notify("HIGH", "x", "b", conn=_c, sender=_spy,
+                    get_setting=_gs("digest"), now=_at(9))["delivery"]
+      == n.BUNDLE)
+
+
+def _raising_setting(key, default=None):
+    raise RuntimeError("settings table unreadable")
+
+
+r = n.notify("HIGH", "unreadable setting", "body", conn=_c, sender=_spy,
+                  get_setting=_raising_setting, now=_at(9))
+check("an UNREADABLE setting falls back to immediate, not to route()'s BUNDLE",
+      r["delivery"] == n.SEND_NOW)
+
+print("\n-- notify(): a failed enqueue must NOT lose the event --")
+
+
+class _BrokenConn:
+    """A connection whose INSERT always fails."""
+    def execute(self, *a, **k):
+        raise _sq3.OperationalError("no such table: notify_queue")
+
+    def commit(self):
+        pass
+
+
+_before = len(_sent)
+r = n.notify("MEDIUM", "enqueue will fail", "body", conn=_BrokenConn(),
+                  sender=_spy, get_setting=_gs("digest"), now=_at(9))
+check("a failed enqueue FALLS FORWARD to an immediate send",
+      r["delivery"] == n.SEND_NOW and len(_sent) == _before + 1)
+check("...and says so, rather than reporting a clean bundle",
+      r["fell_back"] is True)
+check("...and still reports ok, because the event DID go out", r["ok"] is True)
+
+print("\n-- notify(): never raises into the caller --")
+
+
+def _boom(subject, body, to=None):
+    raise RuntimeError("SMTP exploded")
+
+
+r = n.notify("LOW", "raising sender", "body", conn=_c, sender=_boom,
+                  get_setting=_gs("immediate"), now=_at(9))
+check("a raising sender is contained", r["ok"] is False)
+check("...and the reason is reported, not swallowed", bool(r["error"]))
+
+print("\n-- notify_mode: validated at the write, like the schedule --")
+for good in ("immediate", "digest", "DIGEST", "  Immediate  "):
+    check("%r is accepted" % (good,), n.validate_notify_mode(good)[0])
+for bad in ("", None, "banana", "quiet", "off", "never"):
+    ok, errs = n.validate_notify_mode(bad)
+    check("%r is refused, not silently defaulted" % (bad,),
+          not ok and n.KEY_NOTIFY_MODE in errs)
+
+# "both" is accepted by route() but behaves EXACTLY as immediate -- the
+# "also include it in the digest" half was never built. Offering it would
+# promise behaviour that does not exist.
+ok, _ = n.validate_notify_mode("both")
+check("'both' is NOT offered as a choice, though route() tolerates it", not ok)
+check("CONTROL: route() really does still tolerate it",
+      n.route("LOW", "both") == n.SEND_NOW)
+
+print("\n-- all four digest settings validate as ONE form --")
+ok, errs = n.validate_digest_settings("08:00", "16:00", None, "digest")
+check("a wholly valid form passes", ok, errs)
+ok, errs = n.validate_digest_settings("banana", "16:00", None, "banana")
+check("a form with two bad fields fails", not ok)
+check("...and reports BOTH, not just the first",
+      n.KEY_OPEN_TIME in errs and n.KEY_NOTIFY_MODE in errs, errs)
+
+print("\n-- saving is ALL-OR-NOTHING (no partial schedule) --")
+writes = []
+_w = lambda k, v, actor=None: writes.append((k, v))
+
+ok, errs = n.save_digest_settings("08:00", "16:00", "UTC", "digest",
+                                  set_setting=_w)
+check("a valid save succeeds", ok, errs)
+check("...and writes all FOUR keys", len(writes) == 4, writes)
+check("...including the mode",
+      (n.KEY_NOTIFY_MODE, "digest") in writes, writes)
+
+writes.clear()
+ok, errs = n.save_digest_settings("08:00", "banana", "UTC", "digest",
+                                  set_setting=_w)
+check("an invalid END time refuses the save", not ok)
+check("...and writes NOTHING -- not even the valid start time",
+      writes == [], writes)
+
+writes.clear()
+ok, _ = n.save_digest_settings("08:00", "16:00", "UTC", "banana",
+                               set_setting=_w)
+check("an invalid MODE alone also refuses the whole form", not ok)
+check("...and still writes nothing", writes == [], writes)
+
 print("\n-- MUTATION: injected delivery defects must FAIL this suite --")
 # Unlike the diagnostics tools, notify.py has no import-time canary — its
 # correctness is asserted by this file. So a mutation is "caught" when the
@@ -412,6 +549,72 @@ def _probe(mod):
         mod.run_digest_tick(c2, gs2, sender=snd, now=_at(9, 30))
         if len(calls) != 1:
             return False
+
+        # ---- notify(), the caller-facing entry point --------------------
+        # The probe MUST exercise this or a mutation to it is uncatchable --
+        # the same trap the keyless-bundling comment above records.
+        def gs3(mode):
+            return lambda k, d=None: (mode if k == mod.KEY_NOTIFY_MODE
+                                      else ("UTC" if k == mod.KEY_TIMEZONE else d))
+
+        c3 = _db()
+        got = []
+        sp = lambda s, b, to=None: (got.append(s), True)[1]
+
+        # digest mode bundles and does NOT send
+        r = mod.notify("LOW", "n1", "", family_key="k", conn=c3, sender=sp,
+                       get_setting=gs3("digest"), now=_at(9))
+        if r["delivery"] != mod.BUNDLE or got or len(mod.pending(c3)) != 1:
+            return False
+        # immediate mode sends and does NOT bundle
+        r = mod.notify("LOW", "n2", "", conn=c3, sender=sp,
+                       get_setting=gs3("immediate"), now=_at(9))
+        if r["delivery"] != mod.SEND_NOW or len(got) != 1:
+            return False
+        # CRITICAL ignores the mode entirely
+        r = mod.notify("CRITICAL", "n3", "", conn=c3, sender=sp,
+                       get_setting=gs3("digest"), now=_at(9))
+        if r["delivery"] != mod.SEND_NOW or len(got) != 2:
+            return False
+        # an ABSENT setting must resolve to immediate, never to bundle
+        r = mod.notify("HIGH", "n4", "", conn=c3, sender=sp,
+                       get_setting=lambda k, d=None: d, now=_at(9))
+        if r["delivery"] != mod.SEND_NOW:
+            return False
+        # a failed enqueue must fall forward to a send, not vanish
+        class _Bad:
+            def execute(self, *a, **k):
+                raise _sq3.OperationalError("boom")
+
+            def commit(self):
+                pass
+
+        before = len(got)
+        r = mod.notify("MEDIUM", "n5", "", conn=_Bad(), sender=sp,
+                       get_setting=gs3("digest"), now=_at(9))
+        if r["delivery"] != mod.SEND_NOW or len(got) != before + 1:
+            return False
+
+        # ---- settings validation + the all-or-nothing write --------------
+        # Same rule as above: unexercised code cannot be mutation-tested.
+        w = []
+        rec = lambda k, v, actor=None: w.append((k, v))
+        ok, _e = mod.save_digest_settings("08:00", "16:00", "UTC", "digest",
+                                          set_setting=rec)
+        if not ok or len(w) != 4:
+            return False
+        w.clear()
+        # a bad END time must write NOTHING -- not even the valid start time
+        ok, _e = mod.save_digest_settings("08:00", "banana", "UTC", "digest",
+                                          set_setting=rec)
+        if ok or w:
+            return False
+        w.clear()
+        # a bad MODE alone must refuse the whole form too
+        ok, _e = mod.save_digest_settings("08:00", "16:00", "UTC", "banana",
+                                          set_setting=rec)
+        if ok or w:
+            return False
         return True
     except Exception:
         return False
@@ -464,6 +667,39 @@ MUTATIONS = [
      '"FROM notify_queue ORDER BY queued_at, id "'),
     ("the tick stops recording last-sent (digest resends every call)",
      "    _set_state(conn, _STATE_LAST_SENT % which, now.isoformat(timespec=\"seconds\"), now=now)",
+     "    pass"),
+    # ---- notify() entry-point mutations ---------------------------------
+    ("the DEFAULT flips to digest (silently defers mail on upgrade)",
+     'DEFAULT_NOTIFY_MODE = "immediate"',
+     'DEFAULT_NOTIFY_MODE = "digest"'),
+    # NOT a mutation of the `mode = DEFAULT_NOTIFY_MODE` pre-initialisation:
+    # setting it to None changes NOTHING observable, because route() already
+    # fails safe on an unrecognised mode and returns SEND_NOW. That pre-init
+    # prevents a NameError if the getter raises; it is not what keeps delivery
+    # correct. The REAL defect shape is dropping the argument, because route()'s
+    # own DEFAULT PARAMETER is "digest" -- so a caller that forgets it silently
+    # bundles everything.
+    ("the mode argument is dropped, so route()'s 'digest' default bundles all mail",
+     "    decision = route(severity, mode)",
+     "    decision = route(severity)"),
+    ("a failed enqueue reports success without sending (silent event loss)",
+     '            log.exception("notify: enqueue failed; sending immediately instead")\n'
+     "            result = _send_now(subject, body, sender)\n"
+     '            result["fell_back"] = True\n'
+     "            return result",
+     '            log.exception("notify: enqueue failed")\n'
+     '            return {"ok": True, "delivery": BUNDLE, "queued_id": None,\n'
+     '                    "error": None, "fell_back": False}'),
+    ("CRITICAL is routed through the mode instead of before it",
+     '    if (severity or "").strip().upper() == CRITICAL:\n        return SEND_NOW',
+     '    if False:\n        return SEND_NOW'),
+    ("a failed validation still writes -- leaving a PARTIAL schedule stored",
+     "    ok, errors = validate_digest_settings(open_text, close_text, tz_name, mode)\n"
+     "    if not ok:\n        return False, errors",
+     "    ok, errors = validate_digest_settings(open_text, close_text, tz_name, mode)\n"
+     "    if False:\n        return False, errors"),
+    ("the form drops mode errors, so an invalid mode saves silently",
+     "    errors.update(mode_errors)",
      "    pass"),
 ]
 
