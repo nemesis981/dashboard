@@ -1,0 +1,63 @@
+{
+  "capability": "push_and_run",
+  "quiz_version": "1",
+  "title": "Running a diagnostic on someone else's machine",
+  "intro": "Push-and-run sends a diagnostic to a device and runs it there. This is the only capability in Nemesis that acts on a machine other than the appliance, so it is worth five minutes before you hold it.",
+  "questions": [
+    {
+      "id": "whose_machine",
+      "prompt": "You push a diagnostic to a laptop belonging to a member of staff. Where does it run, and who can tell?",
+      "options": [
+        "On the Nemesis appliance; the laptop is only the subject of the report",
+        "On the laptop itself, and the person using it may notice it running",
+        "On the appliance first, then on the laptop only if the first pass finds something"
+      ],
+      "correct": 1,
+      "why": "It runs ON the laptop. That is the whole point of the capability and the whole reason it is gated: every other Nemesis tool observes from the appliance, and this one executes on hardware someone else is sitting in front of. Assume they can notice, and treat it as something you do to a colleague rather than to a row in a list."
+    },
+    {
+      "id": "consent_gate",
+      "prompt": "You have unlocked this capability and you are an approved admin. The target device refuses the task. What has gone wrong?",
+      "options": [
+        "Nothing — the device has its own consent setting and it is allowed to refuse",
+        "The unlock has not finished propagating; retry in a few minutes",
+        "The device has been compromised and should be quarantined"
+      ],
+      "correct": 0,
+      "why": "Nothing has gone wrong. Authorization and consent are two separate gates: the server authorises YOU, and the agent on the device separately consents to being tasked. A device configured not to accept server tasking will refuse a perfectly valid request, by design. Escalating a refusal as an incident is the mistake this question exists to prevent."
+    },
+    {
+      "id": "quiz_is_not_security",
+      "prompt": "What does passing this quiz actually prove?",
+      "options": [
+        "That you are authorised to run diagnostics on other machines",
+        "That you understand the capability — authorisation is a separate, independent check",
+        "That your account has been verified as belonging to you"
+      ],
+      "correct": 1,
+      "why": "It proves competence, not authorisation. The quiz stops an untrained person firing a dangerous task by accident; it would not inconvenience an attacker for a second. Every push-and-run still needs your role, this unlock, an approval signature from your phone, and the device's own consent. If you ever hear the training described as the thing keeping the capability safe, that is wrong and worth correcting."
+    },
+    {
+      "id": "output_contains",
+      "prompt": "A diagnostic comes back with a process list and open network connections from that laptop. How should you treat it?",
+      "options": [
+        "As routine telemetry — it is machine data, not personal data",
+        "As personal data about that individual, to be looked at for the incident and not circulated",
+        "As evidence to attach to a shared ticket so the whole team can review it"
+      ],
+      "correct": 1,
+      "why": "A process list and connection table say what someone was doing at their desk — what they had open, what they were browsing, when they were active. That is personal, whoever owns the hardware. Read it for the question you are answering, keep it out of general circulation, and do not paste it into anywhere it will outlive the incident."
+    },
+    {
+      "id": "no_undo",
+      "prompt": "You push a diagnostic to the wrong device. What is the recovery?",
+      "options": [
+        "Cancel it from the dashboard before the agent picks it up",
+        "There is no undo — it either ran or it did not, so check the target before approving",
+        "Revoke your own unlock, which retracts any task still in flight"
+      ],
+      "correct": 1,
+      "why": "There is no undo. By the time you have noticed, the task has either run on that machine or it has not, and neither revoking your unlock nor anything on the dashboard reaches back to un-run it. The approval prompt on your phone shows you the target device precisely so the check happens BEFORE it goes out — read that screen rather than tapping through it."
+    }
+  ]
+}
