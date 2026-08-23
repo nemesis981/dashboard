@@ -219,6 +219,10 @@ def test_digest_reads_are_budgeted():
                 got["exhausted"] = True
                 break
             got["total"] += len(data)
+        # Return a real verdict: under the tightened contract a classifier that returns
+        # nothing is `inert`, and this test is about the READ BUDGET, not about the
+        # inert path (which has its own test).
+        return {"suspicious": False, "notes": "budget probe"}
 
     r = _run(fake, {"pid": 1, "max_regions": 512}, classifier=greedy)
     check("the reader eventually refuses", got["exhausted"], True)
@@ -237,6 +241,59 @@ def test_classifier_absence_is_reported_not_disguised():
     check("classification absent", r.get("classification"), "absent")
     check("but the raw region facts are still returned", len(r["regions"]), 3)
     check("and the target is still legitimately scanned", r.get("scanned"), True)
+
+
+def test_a_classifier_that_returns_nothing_is_INERT_not_present():
+    """REGRESSION (found planning step 4). The hook used to be called for side effects
+    with its return value DISCARDED, then unconditionally labelled `present`. An inert
+    hook -- one that does nothing at all -- was therefore indistinguishable from a
+    working detector. Three outcomes now get three labels."""
+    print("\n[a classifier returning nothing is 'inert', never 'present']")
+    fake = _FakeWinmem(regions=_regions(3))
+
+    for retval, why in ((None, "returns None"), ({}, "returns an empty dict"),
+                        ("yes", "returns a non-dict")):
+        r = _run(fake, {"pid": 1, "max_regions": 512},
+                 classifier=lambda pid, regions, reader, v=retval: v)
+        check("a classifier that %s -> inert" % why, r.get("classification"), "inert")
+
+    r = _run(fake, {"pid": 1, "max_regions": 512},
+             classifier=lambda pid, regions, reader: {"suspicious": True})
+    check("CONTROL: a real verdict -> present", r.get("classification"), "present")
+    check("and the verdict reaches the response", r.get("suspicious"), True)
+
+
+def test_a_verdict_cannot_overwrite_acquisition_facts():
+    """The private detector may say what it thinks; it may not restate whether the
+    target was scanned. Those fields are what make a result trustworthy, and a hook
+    that could rewrite them could make an unscanned process look scanned."""
+    print("\n[a verdict cannot overwrite the acquisition layer's own facts]")
+    fake = _FakeWinmem(regions=_regions(2))
+    hostile = {"suspicious": True, "scanned": False, "state": "protected",
+               "regions": [], "pid": 9999, "score": 7}
+    r = _run(fake, {"pid": 1, "max_regions": 512},
+             classifier=lambda pid, regions, reader: hostile)
+    check("scanned is NOT overwritten", r.get("scanned"), True)
+    check("state is NOT overwritten", r.get("state"), winmem.READABLE)
+    check("regions are NOT overwritten", len(r.get("regions", [])), 2)
+    check("pid is NOT overwritten", r.get("pid"), 1)
+    check("but allowed keys DO land", (r.get("suspicious"), r.get("score")), (True, 7))
+    check("and the rejected keys are named, not silently dropped",
+          r.get("verdict_keys_ignored"), ["pid", "regions", "scanned", "state"])
+
+
+def test_merge_verdict_is_pure_and_total():
+    print("\n[merge_verdict: pure, never raises, reports whether it classified]")
+    for bad in (None, {}, [], 0, "x", 3.5):
+        resp = {"scanned": True}
+        check("merge_verdict(%r) -> False + inert" % (bad,),
+              (privservice.merge_verdict(resp, bad), resp["classification"]),
+              (False, "inert"))
+    resp = {"scanned": True}
+    check("a real dict -> True + present",
+          (privservice.merge_verdict(resp, {"findings": ["x"]}),
+           resp["classification"]), (True, "present"))
+    check("findings landed", resp.get("findings"), ["x"])
 
 
 def test_a_failing_classifier_does_not_fake_success():
@@ -270,6 +327,9 @@ if __name__ == "__main__":
     test_truncation_actually_fires_and_is_declared()
     test_digest_reads_are_budgeted()
     test_classifier_absence_is_reported_not_disguised()
+    test_a_classifier_that_returns_nothing_is_INERT_not_present()
+    test_a_verdict_cannot_overwrite_acquisition_facts()
+    test_merge_verdict_is_pure_and_total()
     test_a_failing_classifier_does_not_fake_success()
     test_load_classifier_is_skip_if_absent()
 

@@ -143,6 +143,13 @@ def make_inspector(classifier=None):
     RWX/private-executable heuristic is the detector's novelty and lives in the private
     module). Its ABSENCE is normal and is reported explicitly -- a response must never
     look classified when nothing classified it.
+
+    CONTRACT: `classifier(pid, regions, reader) -> dict | None`.
+      * a dict contributes VERDICT_KEYS to the response and sets classification=present
+      * None / {} / a non-dict means it did NOT classify -> classification=inert
+      * raising means it broke -> classification=error
+    Three outcomes, three labels. `regions` may be annotated in place (that is how a
+    per-region flag reaches the caller), but in-place mutation alone is NOT a verdict.
     """
     def _inspect(params):
         import winmem
@@ -178,8 +185,15 @@ def make_inspector(classifier=None):
             if classifier is not None:
                 try:
                     reader = _budgeted_reader(handle)
-                    classifier(pid, regions, reader)
-                    resp["classification"] = "present"
+                    verdict = classifier(pid, regions, reader)
+                    merged = merge_verdict(resp, verdict)
+                    if not merged:
+                        # A classifier that returns nothing has not classified. Saying
+                        # "present" here would let an inert hook look like a working
+                        # detector -- the exact shape of instrument this codebase keeps
+                        # finding broken.
+                        log.warning("priv-service: classifier returned no verdict for "
+                                    "pid %d - reporting inert, not present", pid)
                 except Exception as exc:                     # noqa: BLE001
                     log.warning("priv-service: classifier failed for pid %d: %s",
                                 pid, exc)
@@ -196,6 +210,42 @@ def make_inspector(classifier=None):
         return out
 
     return _inspect
+
+
+#: Keys a classifier verdict may contribute to the response. Anything else is dropped
+#: rather than merged: the private detector must not be able to overwrite the
+#: acquisition layer's own facts (`scanned`, `state`, `regions`, `pid`), which are what
+#: make a result trustworthy in the first place.
+VERDICT_KEYS = ("suspicious", "findings", "score", "detector_version", "notes")
+
+
+def merge_verdict(resp: dict, verdict) -> bool:
+    """Merge a classifier's returned verdict into `resp`. PURE. Returns whether the
+    classifier actually produced one.
+
+    WHY THIS EXISTS (defect in 3c's first cut, found while planning step 4): the hook
+    used to be called for its SIDE EFFECTS and its return value was discarded --
+    `classifier(pid, regions, reader)` followed unconditionally by
+    `classification = "present"`. The only way a verdict could reach the caller was if
+    the classifier mutated the region dicts in place, which was implicit, undocumented,
+    and indistinguishable from a hook that did nothing at all.
+
+    Now the contract is explicit: return a dict, or you did not classify.
+
+    The acquisition layer's own fields are NOT overwritable. A detector may say what it
+    thinks; it may not restate whether the target was scanned.
+    """
+    if not isinstance(verdict, dict) or not verdict:
+        resp["classification"] = "inert"
+        return False
+    for key in VERDICT_KEYS:
+        if key in verdict:
+            resp[key] = verdict[key]
+    rejected = sorted(set(verdict) - set(VERDICT_KEYS))
+    if rejected:
+        resp["verdict_keys_ignored"] = rejected
+    resp["classification"] = "present"
+    return True
 
 
 def _budgeted_reader(handle):
