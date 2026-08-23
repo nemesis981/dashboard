@@ -245,6 +245,11 @@ _ERR_CODES = {
     "E-DASH-001": ("device inventory read failed; empty list returned, which the "
                    "UI renders as 'no devices on the network'",
                    "HIGH", "db-read-empty-default"),
+    "E-DASH-003": ("a REQUIRED detector is enabled but not running healthy (coverage "
+                   "suppressed) -- an active protection gap, not a setting. Recorded by "
+                   "the in-process coverage monitor so it alerts even when nobody is "
+                   "looking at the settings page.",
+                   "HIGH", "required-detector-suppressed"),
     "E-DASH-002": ("VPN split-tunnel app list read failed; empty list returned as "
                    "a real result",
                    "LOW", "db-read-empty-default"),
@@ -269,6 +274,42 @@ def _errors_record(code, context):
 #: file that is usually unchanged, so the cost is nil; 60s bounds how long a
 #: tamper event sits in the journal without reaching the audit trail.
 DEGRADED_INGEST_INTERVAL = int(os.environ.get("NEMESIS_DEGRADED_INGEST_INTERVAL", "60"))
+
+
+DETECTOR_COVERAGE_INTERVAL = int(os.environ.get("NEMESIS_DETECTOR_COVERAGE_INTERVAL", "120"))
+
+
+def _check_detector_coverage(recorder) -> list:
+    """R6 active alert: record E-DASH-003 for every suppressed required detector. Returns
+    the suppression findings (empty = all covered). PURE except for the recorder call, so
+    it is testable with a fake recorder. Runs in the DASHBOARD process, which is the only
+    one with modules loaded (module_status needs the live instance) -- the watchdog is a
+    separate process and would false-alarm on everything, which is why this lives here."""
+    try:
+        findings = modules_loader.required_detector_coverage()
+    except Exception as exc:                                 # noqa: BLE001
+        # A monitor that cannot check is itself a coverage gap -- record, do not swallow.
+        recorder("E-DASH-003", {"error": "coverage check failed: %s" % exc})
+        return []
+    for f in findings:
+        recorder("E-DASH-003", {"module": f.get("module"), "state": f.get("state"),
+                                "reason": f.get("reason")})
+    return findings
+
+
+def _start_detector_coverage_monitor():
+    """Periodic in-process R6 alert loop. Mirrors the degraded-ingest daemon shape."""
+    def _loop():
+        while True:
+            try:
+                _check_detector_coverage(_errors_record)   # reuse the dashboard recorder
+            except Exception:
+                log.exception("detector-coverage monitor sweep failed; will retry")
+            time.sleep(DETECTOR_COVERAGE_INTERVAL)
+    threading.Thread(target=_loop, name="nemesis-detector-coverage",
+                     daemon=True).start()
+    log.info("required-detector coverage monitor started (every %ds)",
+             DETECTOR_COVERAGE_INTERVAL)
 
 
 def _start_degraded_ingest():
@@ -7242,6 +7283,64 @@ def api_set_observe_every_n():
     return jsonify({"ok": True, "value": database.get_remote_observe_every_n()})
 
 
+@app.route("/api/ai/authority")
+def api_ai_authority():
+    """Read-only view of the L0-L4 authority ladder per action class. GET, login-gated
+    (absent from _AUTH_EXEMPT). Shows earned level, effective ceiling, whether an override
+    is active, and whether the class would ACTUALLY act -- so the operator sees the real
+    state of the ladder, not a decorative toggle. Honest three-state: on any read failure
+    a class reports state 'unknown', never a false 'ready'."""
+    try:
+        from modules.ai_engine import (ACTION_CLASS_CEILINGS as _cls,
+                                        effective_ceiling as _eff)
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "ai_engine unavailable: %s" % e}), 503
+    out = {}
+    for ac in _cls:
+        try:
+            eff = _eff(ac)
+            out[ac] = {"effective_level": eff.get("level"),
+                       "hard_ceiling": _cls[ac],
+                       "state": "ok"}
+        except Exception as e:                               # noqa: BLE001
+            out[ac] = {"state": "unknown", "detail": str(e)[:120]}   # fail-closed
+    return jsonify({"success": True, "classes": out})
+
+
+@app.route("/api/ai/authority/raise", methods=["POST"])
+def api_ai_authority_raise():
+    """Master-password-gated manual authority raise. POST + login-gated (absent from
+    _AUTH_EXEMPT) + master password (checked inside raise_authority) -- two independent
+    gates. The master password authorizes RISK within capability, never capability itself
+    (raise_authority refuses capability ceilings) and never touches detector coverage (no
+    action class can disable a detector -- enforced by assert_no_action_class_disables_a_
+    detector). Every raise is logged with the actor. Fail-closed: bad input -> error, no
+    state change."""
+    try:
+        from modules.ai_engine import raise_authority as _raise
+    except Exception as e:                                   # noqa: BLE001
+        return jsonify({"error": "ai_engine unavailable: %s" % e}), 503
+    data = request.get_json(silent=True) or {}
+    action_class = data.get("action_class")
+    level = data.get("level")
+    master_pw = data.get("master_password") or ""
+    reason = str(data.get("reason", ""))[:200]
+    if not action_class or level is None:
+        return jsonify({"error": "action_class and level are required"}), 400
+    try:
+        res = _raise(action_class, level, master_pw, granted_by=_actor(), reason=reason)
+    except Exception as e:                                   # noqa: BLE001
+        # UnknownActionClass etc. -> explicit 400, never a silent partial raise.
+        return jsonify({"error": str(e)[:200]}), 400
+    if not res.get("ok"):
+        # auth failure vs. capability refusal both come back here with a reason.
+        code = 403 if res.get("auth_failed") else 400
+        return jsonify(res), code
+    log.warning("dashboard: authority raise %s->L%s by %s via /api/ai/authority/raise",
+                action_class, level, _actor())
+    return jsonify(res)
+
+
 @app.route("/api/ai/chat/state")
 def api_ai_chat_state():
     """Read-only: what the chat affordance should show for one anchored finding.
@@ -7435,6 +7534,41 @@ def _settings_incident_panel(inc: dict) -> str:
     return f"""<div style="font-size:0.85em">{status_line}{details}{last_checked}</div>"""
 
 
+# ── R2 (2026-08-22): the settings row must show REAL status, not the toggle flag ──
+# A module that is enabled but ERRORING (crashed, no key, data source absent, failed to
+# load) must never render green. This extends today's honest-three-state discipline to the
+# operator-facing surface. GREEN only for a clearly-healthy state; RED for a hard error;
+# AMBER for anything enabled-but-not-clearly-healthy (never defaulting to green when unsure);
+# GREY when actually disabled. All detail text is escaped -- it can be a raw exception string.
+_MODULE_HEALTHY_STATES = frozenset({"active", "running", "ok", "healthy", "enabled"})
+_MODULE_STATE_LABELS = {
+    "no_key": "No API key", "disabled": "Inactive", "unavailable": "Unavailable",
+    "unparsed": "Degraded", "stopped": "Enabled, not running",
+    "not_serving": "Not serving", "not_loaded": "Enabled, not running",
+}
+
+
+def _module_status_display(name, enabled):
+    """(color, html-safe label) for a module's settings row, from its REAL status()."""
+    if not enabled:
+        return "#666", "Disabled"
+    st = {}
+    try:
+        st = modules_loader.module_status(name) or {}
+    except Exception as e:                                    # noqa: BLE001
+        return "#ff5555", "Error: " + html.escape(str(e)[:80])
+    state = str(st.get("state", "")).lower()
+    detail = html.escape(str(st.get("detail", ""))[:80])
+    if state in _MODULE_HEALTHY_STATES:
+        return "#00ff88", "Active"
+    if state == "error":
+        return "#ff5555", "Error" + (": " + detail if detail else "")
+    label = _MODULE_STATE_LABELS.get(state, "Degraded")
+    if detail and state not in ("no_key",):
+        label += ": " + detail
+    return "#ffaa00", label
+
+
 @app.route("/settings")
 def settings_page():
     # Detect windows_agent mode for restart button
@@ -7523,8 +7657,8 @@ def settings_page():
         confirm_msg = html.escape(m.get("confirmation_message", ""), quote=True)
         is_required = m.get("required", False)
         toggle_checked = "checked" if enabled else ""
-        status_label = "Enabled" if enabled else "Disabled"
-        status_color = "#00ff88" if enabled else "#666"
+        # R2: real status(), not the toggle flag -- enabled-but-erroring is not green.
+        status_color, status_label = _module_status_display(name, enabled)
         if is_required:
             module_rows_html += f"""
         <div class="module-row" id="mod-row-{name}">
@@ -7949,6 +8083,27 @@ def settings_page():
     if not module_rows_html:
         module_rows_html = '<p style="color:#bbb;font-style:italic">No modules found in modules/ directory.</p>'
 
+    # R6: a required detector that is enabled-but-not-healthy is SUPPRESSED coverage --
+    # surface it loudly at the top of the module list, not buried in one row's colour.
+    try:
+        _suppressed = modules_loader.required_detector_coverage()
+    except Exception:                                        # noqa: BLE001
+        _suppressed = []
+    detector_alarm_html = ""
+    if _suppressed:
+        _items = "".join(
+            "<li><b>%s</b>: %s (%s)</li>" % (html.escape(f["module"]),
+                html.escape(f["reason"]), html.escape(f.get("state", "")))
+            for f in _suppressed)
+        detector_alarm_html = (
+            '<div style="background:#2a0a0a;border:1px solid #ff5555;border-radius:8px;'
+            'padding:10px 14px;margin:0 0 12px 0;color:#ff8888">'
+            '<b>&#9888; REQUIRED DETECTOR COVERAGE SUPPRESSED</b>'
+            '<div style="font-size:0.85em;color:#ffb0b0;margin-top:4px">A required '
+            'protection layer is enabled but not running healthy. This is not a setting '
+            'you can turn off; it means the detector is failing. Investigate:</div>'
+            '<ul style="margin:6px 0 0 0;font-size:0.85em">' + _items + '</ul></div>')
+
     # Users section — multi-user is a commercial-tier feature (entitlements gate).
     if entitlements.is_commercial():
         _add_user_html = (
@@ -8302,6 +8457,7 @@ def settings_page():
             Changes take effect immediately.
         </p>
         <div id="moduleList">
+        {detector_alarm_html}
         {module_rows_html}
         </div>
         <p id="moduleMsg" style="display:none;font-size:0.85em;margin-top:10px"></p>
@@ -8681,8 +8837,24 @@ def settings_page():
                         statusEl.textContent = 'Error: ' + d.error;
                         document.getElementById('mod-toggle-' + name).checked = !enabled;
                     }} else {{
-                        statusEl.style.color = enabled ? '#00ff88' : '#666';
-                        statusEl.textContent = enabled ? 'Enabled' : 'Disabled';
+                        // R2: reflect the module's REAL status from the response, not a
+                        // hardcoded green 'Enabled' -- a module that enabled but errors must
+                        // not paint green here any more than on a server render.
+                        if (!enabled) {{
+                            statusEl.style.color = '#666'; statusEl.textContent = 'Disabled';
+                        }} else {{
+                            var stt = (d.status && d.status.state ? String(d.status.state) : '').toLowerCase();
+                            var det = (d.status && d.status.detail) ? String(d.status.detail).slice(0,80) : '';
+                            var healthy = ['active','running','ok','healthy','enabled'];
+                            if (healthy.indexOf(stt) !== -1) {{
+                                statusEl.style.color = '#00ff88'; statusEl.textContent = 'Active';
+                            }} else if (stt === 'error') {{
+                                statusEl.style.color = '#ff5555'; statusEl.textContent = 'Error' + (det ? ': ' + det : '');
+                            }} else {{
+                                statusEl.style.color = '#ffaa00';
+                                statusEl.textContent = (stt ? 'Degraded' : 'Enabled') + (det ? ': ' + det : '');
+                            }}
+                        }}
                         // Show/hide module sub-settings when toggled
                         var subIds = {{anomaly_detection: 'ad-subsettings', tickets: 'tk-subsettings'}};
                         var subId = subIds[name];
@@ -15959,6 +16131,7 @@ if __name__ == "__main__":
     # Started here, not at import: this spawns a thread that writes the live
     # database, which a test import or py_compile has no business doing.
     _start_degraded_ingest()
+    _start_detector_coverage_monitor()
     # ── GAP 3 (2026-08-16): loopback, not 0.0.0.0 ─────────────────────────────
     #
     # This bound every interface, and the ONLY thing keeping :5000 off the
