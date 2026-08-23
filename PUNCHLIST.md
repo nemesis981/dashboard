@@ -21,9 +21,15 @@ rather than rewritten, on the reasoning that it will age out naturally through n
 parameter rotation, similar to how a leaked credential gets rotated rather than scrubbed from
 history.
 
-- [ ] **Minor follow-up, not blocking:** a handful of docs (worklogs/HANDOFF.md) reference the
-  pre-rewrite commit hashes by name — those mentions are now stale (describe a commit ID that
-  no longer exists on `main`). Cosmetic, not broken; fix opportunistically.
+- [ACCEPTED RESIDUAL — 2026-08-23] **Minor follow-up, not blocking:** a handful of docs
+  reference the pre-rewrite commit hashes by name — those mentions are now stale (describe a
+  commit ID that no longer exists on `main`). Cosmetic, not broken.
+  **Checked 2026-08-23 (V2.0 gap-scan)**: 23 stale hashes, all in `docs/handoff/worklog/` and
+  `docs/handoff/supplements/` (2026-07-02 through 2026-08-21) — none in `HANDOFF.md` itself
+  (the earlier "worklogs/HANDOFF.md" framing above overstated where they live). **Operator
+  decision: accept as residual, same reasoning as the item below** — Rule 9's append-only
+  discipline for worklog/supplements (durable historical record, never overwritten) outweighs
+  the cosmetic value of fixing a dead reference. Not fixing.
 
 - [ ] **NEW (found 2026-07-28 closeout): a commit made AFTER the 2026-07-26 rewrite reintroduces
   the same class of leak.** Commit `9ffac56`'s own message quotes the literal real install
