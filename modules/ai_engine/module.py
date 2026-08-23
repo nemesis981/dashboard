@@ -4000,6 +4000,124 @@ def demote_action_class(action_class: str, reason: str, notifier=None) -> dict:
 _UNDO_HANDLERS = {}
 
 
+
+# ── UPWARD promotion — graduated trust (the writer that was missing 2026-08-22) ──
+#: Consecutive HUMAN-approved proposals in a class (with no rejection since the last
+#: promotion) that earn one level of authority. Conservative and measurable; a rejection
+#: since the last promotion breaks the streak (fail-closed). Named so it is one edit to tune.
+PROMOTION_THRESHOLD = 5
+
+
+def _consecutive_approvals_since_promotion(conn, action_class):
+    """How many approvals a class has banked toward its next promotion.
+
+    Counts proposals RESPONDED-TO since the class's last promotion. Returns 0 the moment a
+    REJECTION appears in that window -- a single rejection resets the streak. Fail-closed:
+    any read trouble yields 0 (no promotion), never a guessed count.
+    """
+    try:
+        row = conn.execute("SELECT last_promoted_at FROM ai_authority WHERE action_class=?",
+                           (action_class,)).fetchone()
+        since = (row["last_promoted_at"] if row and row["last_promoted_at"] else "")
+        rows = conn.execute(
+            "SELECT human_response FROM ai_proposals "
+            "WHERE action_class=? AND human_response IS NOT NULL "
+            "  AND responded_at > ? ORDER BY responded_at ASC",
+            (action_class, since)).fetchall()
+    except Exception:                                        # noqa: BLE001
+        return 0
+    # Count approvals since the MOST RECENT rejection (and since last promotion). A
+    # rejection RESETS the streak to 0 at that point; approvals after it rebuild it.
+    # Returning 0 on the first rejection ever seen (an earlier cut) permanently froze
+    # promotion after a single rejection -- caught by the "does reach the ceiling"
+    # control 2026-08-22. Fail-closed is "a rejection breaks the current streak", not
+    # "a rejection is a lifetime ban".
+    n = 0
+    for r in rows:
+        if r["human_response"] == "rejected":
+            n = 0
+        elif r["human_response"] == "approved":
+            n += 1
+    return n
+
+
+def promote_action_class(action_class: str, reason: str = "") -> dict:
+    """Raise a class's EARNED level by one, capped at its hard ceiling. Never above.
+
+    The upward counterpart to demote_action_class. Mirrors these ratified constraints:
+      * authorizes RISK, not CAPABILITY -- promotion stops at the hard ceiling, and never
+        promotes a capability-ceilinged class past its cap (the code cannot reverse the
+        action, so no track record grants it).
+      * every change is logged + stamped (last_promoted_at) for audit.
+      * fail-closed: unknown class raises; a read/write error returns ok:False and does NOT
+        move the level.
+    Does NOT touch overrides or standing rules -- earned is its own term.
+    """
+    if action_class not in ACTION_CLASS_CEILINGS:
+        raise UnknownActionClass(action_class)
+    hard = ACTION_CLASS_CEILINGS[action_class]
+    try:
+        conn = _conn()
+        try:
+            row = conn.execute("SELECT current_level FROM ai_authority WHERE action_class=?",
+                               (action_class,)).fetchone()
+            earned = int(row["current_level"]) if row else L0_OBSERVE
+            if earned >= hard:
+                return {"ok": True, "promoted": False, "level": earned,
+                        "reason": "already at the hard ceiling L%d" % hard}
+            new_level = min(earned + 1, hard)
+            conn.execute(
+                "INSERT INTO ai_authority(action_class, current_level, hard_ceiling, "
+                " last_promoted_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(action_class) DO UPDATE SET current_level=?, "
+                " last_promoted_at=excluded.last_promoted_at",
+                # microsecond resolution: a seconds-resolution stamp + strict '>' loses
+                # every approval landing in the same second as the promotion, freezing the
+                # streak (caught 2026-08-22). Finer resolution makes ordering unambiguous;
+                # production promotions are minutes apart regardless.
+                (action_class, new_level, hard,
+                 datetime.now().isoformat(), new_level))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai_engine: promotion failed for %s", action_class)
+        return {"ok": False, "error": str(exc)[:200]}
+    log.warning("ai_engine: AUTHORITY PROMOTED %s L%d -> L%d (%s)",
+                action_class, earned, new_level, reason or "track record")
+    return {"ok": True, "promoted": True, "level": new_level, "from": earned}
+
+
+def _consider_promotion(action_class: str) -> dict | None:
+    """Called after an APPROVAL: promote if the class has banked the threshold. None if not."""
+    try:
+        conn = _conn()
+        try:
+            streak = _consecutive_approvals_since_promotion(conn, action_class)
+        finally:
+            conn.close()
+    except Exception:                                        # noqa: BLE001
+        return None
+    if streak >= PROMOTION_THRESHOLD:
+        return promote_action_class(
+            action_class, reason="%d consecutive approvals" % streak)
+    return None
+
+
+def assert_no_action_class_disables_a_detector():
+    """STRUCTURAL GUARD (ratified constraint): no authority a master password or a track
+    record can grant may disable a required-detector's coverage. Authority classes act on
+    alerts/IPs/files -- never on detector enable-state. This proves that stays true: any
+    action class whose name implies disabling/stopping a detector/module/service is a
+    violation. Run as a self-test; a future class that breaks it fails LOUDLY here rather
+    than silently creating a password-reachable coverage-disable."""
+    banned = ("disable", "stop", "unload", "deactivate", "turn_off", "kill")
+    bad = [c for c in ACTION_CLASS_CEILINGS
+           if any(b in c for b in banned)
+           and any(t in c for t in ("detector", "module", "service", "canary",
+                                    "scan", "monitor", "watch"))]
+    return {"ok": not bad, "violations": bad}
+
 def register_undo_handler(action_class: str, handler) -> None:
     """Declare how to REVERSE one class of action.
 
@@ -4094,14 +4212,24 @@ def respond_to_proposal(proposal_id: int, response: str, responded_by: str) -> d
         conn = _conn()
         conn.execute("UPDATE ai_proposals SET human_response=?, responded_at=?, "
                      "responded_by=? WHERE id=?",
-                     (response, datetime.now().isoformat(timespec="seconds"),
+                     (response, datetime.now().isoformat(),   # microsecond resolution
                       responded_by, proposal_id))
         conn.commit()
         conn.close()
-        return {"ok": True, "id": proposal_id, "response": response}
     except Exception as exc:                                 # noqa: BLE001
         log.exception("ai_engine: respond_to_proposal failed")
         return {"ok": False, "error": str(exc)[:200]}
+    # Graduated trust: an approval may earn a promotion; a rejection breaks the streak
+    # (handled inside the counter). Done AFTER the response is durably recorded, and never
+    # allowed to fail the response itself.
+    promoted = None
+    if response == "approved":
+        try:
+            promoted = _consider_promotion(p["action_class"])
+        except Exception:                                    # noqa: BLE001
+            promoted = None
+    return {"ok": True, "id": proposal_id, "response": response,
+            "promoted": promoted}
 
 
 def execute_proposal(proposal_id: int, executor, actor: str | None = None) -> dict:
