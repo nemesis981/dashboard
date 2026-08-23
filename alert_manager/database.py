@@ -522,6 +522,54 @@ def get_remote_observe_every_n():
     return n
 
 
+
+def init_notify_tables():
+    """Canonical DDL for the digest queue and its send-state.
+
+    Two tables, and the split is load-bearing:
+
+      * `notify_queue`  -- events routed to BUNDLE, held until a digest goes out.
+        Without somewhere to hold them, `route()` returning BUNDLE means the event
+        is simply dropped, which is exactly the silent-loss shape the digest
+        exists to avoid. `sent_at`/`digest` stay NULL until a send genuinely
+        succeeds.
+      * `notify_state`  -- when each digest last went out. Kept OUT of the queue
+        table on purpose: "when did the OPEN digest last send" must survive the
+        queue being pruned, and a MAX(sent_at) over the queue would return NULL
+        for a digest that correctly sent an empty report.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notify_queue (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                queued_at   TEXT NOT NULL,
+                severity    TEXT NOT NULL,
+                surface     TEXT,
+                family_key  TEXT,
+                subject     TEXT NOT NULL,
+                body        TEXT,
+                digest      TEXT,
+                sent_at     TEXT,
+                actor       TEXT
+            )
+        """)
+        # Pending lookup is the hot path: every tick asks "what is unsent".
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notify_pending "
+                     "ON notify_queue(sent_at, queued_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_notify_family "
+                     "ON notify_queue(family_key)")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS notify_state (
+                key        TEXT PRIMARY KEY,
+                value      TEXT,
+                updated_at TEXT
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
 def init_memory_recovery_tables():
     """Canonical DDL for the production memory-injection ladder loop (mem_appliance
     run_ladder_cycle). Two tables: the persisted ladder STATE (so streaks survive a
