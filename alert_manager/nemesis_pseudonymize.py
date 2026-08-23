@@ -74,9 +74,60 @@ _ADDR_RE = re.compile(
     r"(?<![\w.\-])(?:" + _MAC + r"|" + _IPV6 + r"|" + _IPV4 + r")(?![\w.\-])"
 )
 
+#: Names get their OWN token namespace. Addresses and names are different kinds
+#: of identifier and a reader (human or model) benefits from knowing which is
+#: which -- "device-A at host-B" says more than "host-A at host-B". It also means
+#: adding name coverage could not renumber or collide with existing address
+#: tokens, so `resolve()` on an old mapping keeps working unchanged.
+_NAME_PREFIX = "device-"
+
 #: Boundary-anchored so "host-A" cannot match inside "host-AA". ``[A-Z]+`` is
 #: greedy, so the longest run is always captured and looked up whole.
-_TOKEN_RE = re.compile(r"\b" + _TOKEN_PREFIX + r"([A-Z]+)\b")
+_TOKEN_RE = re.compile(
+    r"\b(?:" + _TOKEN_PREFIX + r"|" + _NAME_PREFIX + r")([A-Z]+)\b")
+
+#: A supplied name shorter than this is NOT scrubbed. A 2-3 character "name"
+#: ("PC", "TV", "NAS") appears inside ordinary words and punctuation and would
+#: shred the surrounding text for no privacy gain -- it identifies nobody.
+_MIN_NAME_LEN = 4
+
+#: Generic names that identify NOTHING and appear as ordinary vocabulary in a
+#: security prompt. A device literally named "Router" is real and common, and
+#: tokenizing every occurrence of the word "router" would destroy the model's
+#: ability to reason about the network while protecting no one.
+#:
+#: THE LINE THIS DRAWS, STATED PLAINLY: the goal is to remove data that
+#: IDENTIFIES a person or household, not to remove every string that happens to
+#: be stored in a name column. "Reception-Laptop" and "Pauls-iPhone" identify;
+#: "printer" does not. Anything not on this list is scrubbed, so the default is
+#: still to protect.
+_GENERIC_NAMES = frozenset({
+    "router", "gateway", "switch", "printer", "laptop", "desktop", "server",
+    "phone", "tablet", "camera", "unknown", "localhost", "device", "computer",
+    "firewall", "modem", "access point", "network", "guest", "host",
+})
+
+
+def _scrubbable_names(names):
+    """Filter + order supplied names for substitution.
+
+    LONGEST FIRST, and that ordering is load-bearing: with "Reception" and
+    "Reception-Laptop" both known, shortest-first would rewrite the prefix and
+    strand "-Laptop" in the outgoing text, which leaks the distinguishing half
+    of the name while looking like it worked.
+    """
+    seen, out = set(), []
+    for raw in names or ():
+        if not isinstance(raw, str):
+            continue
+        name = raw.strip()
+        key = name.casefold()
+        if (len(name) < _MIN_NAME_LEN or key in _GENERIC_NAMES or key in seen):
+            continue
+        seen.add(key)
+        out.append(name)
+    out.sort(key=len, reverse=True)
+    return out
 
 
 def _looks_like_mac(value: str) -> bool:
@@ -118,10 +169,22 @@ def _token_for(index: int) -> str:
             return _TOKEN_PREFIX + letters
 
 
-def pseudonymize(text):
-    """Replace every network address in ``text`` with a stable token.
+def pseudonymize(text, names=None):
+    """Replace every network address -- and every supplied device name -- in
+    ``text`` with a stable token.
 
-    Returns ``(clean_text, mapping)`` where ``mapping`` is ``{token: address}``.
+    Returns ``(clean_text, mapping)`` where ``mapping`` is ``{token: original}``.
+
+    ``names`` is an iterable of known device/host names. It must be SUPPLIED:
+    a name is not pattern-recognisable the way an address is, so there is no way
+    to detect one from the text alone. The caller that knows the fleet passes
+    them in (`ai_engine` reads them from the devices tables at the chokepoint).
+    Passing nothing keeps the previous address-only behaviour exactly.
+
+    NAMES ARE SUBSTITUTED BEFORE ADDRESSES. A name is the longer, more specific
+    unit, and some real device names contain digits and dots; scrubbing
+    addresses first could bite a chunk out of one and leave the remainder
+    behind as a partial leak.
 
     Tokens are assigned in first-appearance order, and a repeated address always
     receives the token it was given the first time — that repetition is what
@@ -136,6 +199,23 @@ def pseudonymize(text):
 
     assigned = {}   # address -> token, so a repeat address reuses its token
     mapping = {}    # token -> address, the direction resolve() needs
+
+    # ── names first (see docstring) ───────────────────────────────────────────
+    name_assigned = {}
+    for _n, canonical in enumerate(_scrubbable_names(names)):
+        # Case-insensitive: the same device is written "Reception-Laptop" in one
+        # place and "reception-laptop" in another, and a leak is a leak in either
+        # case. The mapping stores the CANONICAL spelling from the devices table,
+        # so what the operator sees resolved back is the name they actually know
+        # the device by, not whichever casing the prompt happened to use.
+        pattern = re.compile(r"(?<![\w-])" + re.escape(canonical) + r"(?![\w-])",
+                             re.IGNORECASE)
+        if not pattern.search(text):
+            continue                      # not mentioned; do not mint a token
+        token = _NAME_PREFIX + _token_for(len(name_assigned))[len(_TOKEN_PREFIX):]
+        name_assigned[canonical.casefold()] = token
+        mapping[token] = canonical
+        text = pattern.sub(token, text)
 
     def _sub(match):
         raw = match.group(0)

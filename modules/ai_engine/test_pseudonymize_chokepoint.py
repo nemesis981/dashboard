@@ -16,10 +16,13 @@ asserts on those bytes. A test that only exercised `nemesis_pseudonymize`
 directly would have passed happily throughout the entire period the leak existed
 -- the helper was never broken; nothing called it.
 
-⚠ SCOPE, STATED HONESTLY. `nemesis_pseudonymize` replaces ADDRESSES (IPv4/IPv6
-and MACs). It does NOT replace hostnames or device names. The name leak is still
-open, and `test_names_are_NOT_covered` below pins that as a known gap so nobody
-reads this suite as proving more than it does.
+⚠ SCOPE, STATED HONESTLY (updated 2026-08-23). `nemesis_pseudonymize` replaces
+ADDRESSES (IPv4/IPv6, MACs) AND known device names. The name leak this suite used
+to pin as a known gap is CLOSED: names are read from the devices tables at the
+chokepoint and passed in, because a name cannot be pattern-detected the way an
+address can. Two honest limits remain, each pinned by its own check below: a name
+absent from those tables is not recognised as a name, and deliberately generic
+names ("router") are left readable because they identify nobody.
 
 CONTROLS. Every "the address is gone" assertion is paired with proof the
 detector can see an address when one is present, and with an address-free
@@ -46,6 +49,7 @@ import modules                                          # noqa: E402
 modules.set_shared_db_path(_db)
 
 from modules.ai_engine import module as ai               # noqa: E402
+import prompt_fields as _pf                              # noqa: E402  (NPFA/1)
 
 passed = failed = 0
 SENT = []            # every kwargs dict the stub client was called with
@@ -112,7 +116,13 @@ ai._record_call_success = lambda: None
 
 def run(prompt, system=None):
     SENT.clear()
-    return ai._analyze_inner(prompt, system, 500, None, 0, False)
+    # Wrapped in the NPFA/1 proof type because this suite exercises the
+    # PSEUDONYMIZATION chokepoint, not the allowlist -- the allowlist has its own
+    # suite (alert_manager/test_prompt_allowlist.py). Constructing the type
+    # directly is legitimate here and says something true about the design: the
+    # type is a proof carried from assembly to the wire, defending against
+    # ACCIDENT, not a capability check against hostile in-process code.
+    return ai._analyze_inner(_pf.BuiltPrompt(prompt), system, 500, None, 0, False)
 
 
 REAL_IP, REAL_IP2 = "192.0.2.5", "198.51.100.77"
@@ -190,7 +200,12 @@ def main():
     _p.pseudonymize = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom"))
     try:
         SENT.clear()
-        blocked = ai._analyze_inner("leak %s" % REAL_IP, None, 500, None, 0, False)
+        # BuiltPrompt so the NPFA/1 boundary (which runs first) passes and this
+        # check actually reaches the pseudonymization failure it is testing. A
+        # raw string here would be refused one layer earlier and the test would
+        # "pass" while measuring the wrong guard entirely.
+        blocked = ai._analyze_inner(_pf.BuiltPrompt("leak %s" % REAL_IP),
+                                    None, 500, None, 0, False)
         check("the call is refused", blocked.get("ok") is False, repr(blocked)[:200])
         check("the reason names pseudonymization",
               "pseudonym" in (blocked.get("reason") or "").lower(),
@@ -208,12 +223,59 @@ def main():
     check("nemesis_pseudonymize resolved WITHOUT the test adding it to sys.path",
           "nemesis_pseudonymize" in sys.modules)
 
-    print("\n-- KNOWN GAP, pinned deliberately: names are NOT addresses --")
+    print("\n-- names ARE covered now (was a pinned gap until 2026-08-23) --")
+    # Seed the fleet: a name is only recognisable because the deployment knows it.
+    # Seeded with RAW sqlite3, deliberately: `devices` is a CORE table and the
+    # Data Manager correctly refuses to let module 'ai_engine' create it
+    # (write-own/read-any, ADR 0001/0006). That refusal is the enforcement
+    # working, not an obstacle to route around -- the code under test only ever
+    # READS this table, which is permitted. A fixture is the one place raw
+    # sqlite3 is right, and only against this throwaway DB.
+    import sqlite3 as _sq
+    _raw = _sq.connect(_db)
+    try:
+        _raw.execute("CREATE TABLE IF NOT EXISTS devices "
+                     "(mac TEXT, ip TEXT, friendly_name TEXT, hostname TEXT)")
+        _raw.execute("INSERT INTO devices (mac, ip, friendly_name, hostname) "
+                     "VALUES (?,?,?,?)",
+                     ("aa:bb:cc:dd:ee:ff", "192.0.2.77", "Reception-Laptop", "router"))
+        _raw.commit()
+    finally:
+        _raw.close()
+    ai._names_cache = (0.0, ())          # defeat the TTL cache for the test
+
     run("device Reception-Laptop contacted %s" % REAL_IP)
     wire = SENT[0]["messages"][0]["content"]
-    check("device NAMES still reach the wire (documented, still open)",
-          "Reception-Laptop" in wire,
-          "If this now FAILS, name coverage was added — update the audit and this test.")
+    check("the device NAME no longer reaches the wire", "Reception-Laptop" not in wire)
+    check("  ...it is replaced by a device- token", "device-A" in wire)
+    check("  ...and the address is still tokenized too", REAL_IP not in wire)
+
+    # CONTROL: the detector can see the name when it is genuinely present.
+    check("CONTROL: the un-scrubbed prompt really did contain the name",
+          "Reception-Laptop" in ("device Reception-Laptop contacted %s" % REAL_IP))
+
+    # PINNED LIMIT 1: a name the deployment does not know is not scrubbed.
+    run("device Unregistered-Tablet contacted %s" % REAL_IP)
+    check("a name absent from the device tables is NOT scrubbed (honest limit)",
+          "Unregistered-Tablet" in SENT[0]["messages"][0]["content"])
+
+    # PINNED LIMIT 2: a generic name stays readable on purpose.
+    run("the router dropped the connection")
+    check("a generic name is deliberately left readable (honest limit)",
+          "router" in SENT[0]["messages"][0]["content"])
+
+    print("\n-- a name-lookup failure BLOCKS the call, never sends unscrubbed --")
+    _orig = ai._known_device_names
+    ai._known_device_names = lambda: (_ for _ in ()).throw(RuntimeError("table gone"))
+    try:
+        SENT.clear()
+        r = ai.analyze("device Reception-Laptop contacted %s" % REAL_IP,
+                       cache_hours=0, force=True)
+        check("the call is refused", r.get("ok") is False)
+        check("  ...and NOTHING went over the wire", len(SENT) == 0)
+    finally:
+        ai._known_device_names = _orig
+        ai._names_cache = (0.0, ())
 
     print("\n%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0

@@ -39,7 +39,7 @@ sys.path.insert(0, REPO)
 
 import nemesis_pseudonymize as P   # noqa: E402  (path set above)
 
-EXPECTED_CHECKS = 51
+EXPECTED_CHECKS = 67   # 51 + 16 device-name checks (2026-08-23)
 
 _results = []
 
@@ -243,7 +243,68 @@ def main():
     fn_src = ast.get_source_segment(src, fn) or ""
     check("the pseudonymized value is bound back onto alert_body",
           "alert_body, _addr_map = _pseudo.pseudonymize(alert_body)" in fn_src, True)
-    check("the prompt still interpolates alert_body", "Alert: {alert_body}" in fn_src, True)
+    # The prompt stopped being an f-string when NPFA/1 landed (ADR 0025): the
+    # body now enters as a DECLARED field. Assert the declaration, which is the
+    # stronger property -- an f-string could interpolate anything, a typed field
+    # cannot.
+    check("alert_body reaches the prompt as a DECLARED field",
+          '("Alert", _pf.LABEL, alert_body)' in fn_src, True)
+
+    # ── device-name coverage (added 2026-08-23, closing the pinned name gap) ──
+    print("\n-- device names: supplied, not detected --")
+
+    NAMES = ["Reception-Laptop", "Reception", "Router", "PC", "Pauls-iPhone"]
+
+    t, m = P.pseudonymize(
+        "Reception-Laptop talked to Pauls-iPhone", names=NAMES)
+    check("a known name is tokenized", "Reception-Laptop" not in t, True)
+    check("a second known name gets its OWN token",
+          len({v for v in m.values()}), 2)
+    check("name tokens use the device- namespace",
+          all(k.startswith("device-") for k in m), True)
+    check("round-trips back to the canonical spelling",
+          P.resolve(t, m), "Reception-Laptop talked to Pauls-iPhone")
+
+    # LONGEST-FIRST is load-bearing: shortest-first would rewrite the "Reception"
+    # prefix and strand "-Laptop", leaking the distinguishing half.
+    check("a name that PREFIXES another does not shred it",
+          "-Laptop" not in t, True)
+
+    # CONTROL: the same call with NO names supplied leaves everything alone.
+    t2, m2 = P.pseudonymize("Reception-Laptop talked to Pauls-iPhone")
+    check("CONTROL: no names supplied -> nothing tokenized",
+          t2, "Reception-Laptop talked to Pauls-iPhone")
+    check("CONTROL: ...and the mapping is empty", m2, {})
+
+    # Case-insensitive, because a leak is a leak in either casing.
+    t3, m3 = P.pseudonymize("reception-laptop woke up", names=NAMES)
+    check("a lowercase mention is still caught", "reception-laptop" not in t3, True)
+    check("  ...and resolves to the canonical spelling",
+          P.resolve(t3, m3), "Reception-Laptop woke up")
+
+    # Honest limits, pinned so they cannot silently change.
+    t4, _ = P.pseudonymize("the Router rebooted", names=NAMES)
+    check("a GENERIC name is deliberately left readable", "Router" in t4, True)
+    t5, _ = P.pseudonymize("the PC rebooted", names=NAMES)
+    check("a too-short name is left readable", "PC" in t5, True)
+    t6, _ = P.pseudonymize("Unregistered-Tablet rebooted", names=NAMES)
+    check("an UNKNOWN name is not scrubbed (cannot be detected)",
+          "Unregistered-Tablet" in t6, True)
+
+    # Names and addresses coexist in one mapping without colliding.
+    t7, m7 = P.pseudonymize(
+        "Reception-Laptop at 192.0.2.5", names=NAMES)
+    check("both kinds are tokenized in one pass",
+          ("Reception-Laptop" not in t7) and ("192.0.2.5" not in t7), True)
+    check("the two namespaces do not collide",
+          sorted(m7), ["device-A", "host-A"])
+    check("and it all round-trips", P.resolve(t7, m7),
+          "Reception-Laptop at 192.0.2.5")
+
+    # A name is only tokenized if it actually appears -- no token minted for a
+    # device that was never mentioned, which would bloat every mapping.
+    t8, m8 = P.pseudonymize("nothing here", names=NAMES)
+    check("an unmentioned name mints no token", m8, {})
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)

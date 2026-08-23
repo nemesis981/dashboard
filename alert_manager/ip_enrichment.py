@@ -1,5 +1,6 @@
 import os
 import json
+import logging
 import sqlite3
 import ipaddress
 from datetime import datetime, timedelta
@@ -9,6 +10,8 @@ from urllib.error import URLError, HTTPError
 _HERE = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
 import data_manager
+
+log = logging.getLogger("nemesis.ip_enrichment")
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 
 # How long a losing caller waits for the in-flight lookup before giving up and
@@ -191,6 +194,41 @@ def _empty_result(ip, reason=None):
     return result
 
 
+def _own_public_addresses():
+    """Public addresses belonging to THIS box, read from its own interfaces.
+
+    Reuses `firewall._local_addresses()` -- the same enumerator the never-block
+    guard relies on -- rather than growing a second, drifting copy of "what are
+    my addresses". Returns only the routable ones: private/loopback/link-local
+    are already refused upstream, so including them here would be noise.
+
+    A FAILED ENUMERATION RETURNS AN EMPTY SET, and that is the one place this
+    module tolerates it: the caller's next step is an external lookup that was
+    already going to happen, so an empty set preserves today's behaviour exactly.
+    It is logged, never silent -- the same shape and the same reasoning as the
+    never-block guard's own fallback.
+    """
+    try:
+        from firewall import _local_addresses
+    except Exception:                                            # noqa: BLE001
+        try:
+            from alert_manager.firewall import _local_addresses  # type: ignore
+        except Exception as exc:                                 # noqa: BLE001
+            log.warning("ip_enrichment: cannot enumerate local addresses (%s) — "
+                        "own-public-address guard inactive this call", exc)
+            return frozenset()
+
+    out = set()
+    for addr in _local_addresses():
+        try:
+            obj = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if not (obj.is_private or obj.is_loopback or obj.is_link_local):
+            out.add(addr)
+    return frozenset(out)
+
+
 def enrich_ip(ip_address):
     try:
         ip_obj = ipaddress.ip_address(ip_address)
@@ -200,6 +238,24 @@ def enrich_ip(ip_address):
     if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
         result = _empty_result(ip_address, reason=f"{ip_address} - private/local address")
         return result
+
+    # ── This appliance's OWN public address is never sent out (2026-08-23) ────
+    # The private/loopback/link-local guard above is what keeps household LAN
+    # addresses off the wire, and it always has. It does NOT cover one case: an
+    # appliance with a routable address directly on a WAN interface. That address
+    # is public, so it sails past the check above -- and it identifies THIS
+    # household, unlike every other address reaching here (which belongs to the
+    # remote party and is the entire subject of the lookup).
+    #
+    # HONEST LIMIT, stated rather than papered over: when the box sits behind
+    # NAT, its public address is the router's and appears on no local interface,
+    # so this cannot see it. Learning it would mean asking an external service
+    # what our address is -- which is the very disclosure being prevented. So
+    # this closes the case it can actually see and does not pretend to close the
+    # other. See `_own_public_addresses()`.
+    if ip_address in _own_public_addresses():
+        return _empty_result(
+            ip_address, reason=f"{ip_address} - this appliance's own public address")
 
     init_db()
 

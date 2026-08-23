@@ -38,6 +38,9 @@ os.environ["ANTHROPIC_API_KEY"] = "sk-ant-test-not-a-real-key"
 
 import modules                                                  # noqa: E402
 modules.set_shared_db_path(_db)
+import sys as _s_npfa
+_s_npfa.path.insert(0, '/opt/nemesis/alert_manager')
+import prompt_fields as _pf                    # noqa: E402  (NPFA/1)
 import modules_loader                                           # noqa: E402
 modules_loader._db_path = _db
 
@@ -109,8 +112,11 @@ def install_stub(resp):
 
 def call():
     """Drive the real path. cache_key=None so nothing short-circuits."""
+    # NPFA/1 (ADR 0025): this suite exercises response-block parsing, not the
+    # allowlist. The prompt is wrapped in the proof type so the boundary
+    # passes and the guard under test is the one actually measured.
     return ai._analyze_inner(
-        prompt="test data 2026-08-04 — response block parsing",
+        prompt=_pf.BuiltPrompt("test data 2026-08-04 — response block parsing"),
         system_prompt=None, max_tokens=64,
         cache_key=None, cache_hours=0, force=True)
 

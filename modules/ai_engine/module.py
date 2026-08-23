@@ -946,6 +946,21 @@ def ask_followup(surface_key: str, row_id, question: str,
         job_id=f"chat:{surface_key}:{row_id}:{used + 1}:{tier_name}",
         model=tier_model,
         effort=_CHAT_EFFORT,
+        # ── THE ONE NPFA/1 EXEMPTION (see prompt_fields.py and ADR 0025) ──
+        # A follow-up question is text a human deliberately typed -- often pasted
+        # command output, which is what the 4000-char limit exists for. No
+        # allowlist can express "whatever the operator decided to type", so
+        # forcing one here would DELETE this feature rather than tighten it.
+        #
+        # This is consented disclosure, not silent disclosure: the operator is
+        # composing a message in a chat widget with a visible cost estimate. The
+        # pseudonymization chokepoint still scrubs addresses and known device
+        # names from it. The residual -- an UNKNOWN name inside text the operator
+        # chose to send -- is disclosed in the product privacy notice.
+        #
+        # This must remain the ONLY caller passing this argument. ADR 0025 §6
+        # is the conformance list; a test asserts the count.
+        free_text_reason="operator-authored follow-up question (chat surface)",
     )
     if not res.get("ok"):
         return {"ok": False, "code": "call_failed",
@@ -1666,6 +1681,77 @@ def get_spend_by_surface(window_days: int | None = None) -> list:
     except Exception:                                        # noqa: BLE001
         log.exception("ai_engine: get_spend_by_surface failed")
         return []
+
+
+#: Device-name cache for the pseudonymization chokepoint. A fleet's names change
+#: on the order of days; re-reading two tables on every AI call would be pure
+#: overhead. Short enough that a rename is picked up within the same session.
+# NPFA/1: the allowlist lives in alert_manager/ (same path situation as
+# nemesis_pseudonymize -- see the chokepoint below for why the insert is needed).
+def _load_prompt_fields():
+    import sys as _s, os as _o
+    _a = _o.path.join(
+        _o.path.dirname(_o.path.dirname(_o.path.dirname(_o.path.abspath(__file__)))),
+        "alert_manager")
+    if _a not in _s.path:
+        _s.path.insert(0, _a)
+    import prompt_fields as _pf
+    return _pf
+
+
+_prompt_fields = _load_prompt_fields()
+
+
+_NAMES_TTL_S = 300.0
+_names_cache: tuple = (0.0, ())
+_names_lock = threading.Lock()
+
+
+def _known_device_names() -> tuple:
+    """Every device/host name this deployment knows, for pseudonymization.
+
+    RAISES on failure -- deliberately, and the caller (the chokepoint) turns that
+    into a BLOCKED call. Returning an empty tuple instead would be the classic
+    failed-read-as-legal-value: "no names to scrub" and "the name lookup broke"
+    would become indistinguishable, and the second one silently puts real
+    customer device names on the wire while the product claims they are
+    pseudonymized. An outage is recoverable; that claim being false is not.
+    """
+    global _names_cache
+    now = time.time()
+    with _names_lock:
+        stamp, cached = _names_cache
+        if cached and (now - stamp) < _NAMES_TTL_S:
+            return cached
+
+    names = set()
+    conn = _conn()
+    try:
+        for table, cols in (("devices", ("friendly_name", "hostname")),
+                            ("agent_devices", ("device_name",))):
+            have = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+            wanted = [c for c in cols if c in have]
+            if not wanted:
+                # The table exists but not the column: schema drift, not an
+                # empty fleet. Skip THIS source rather than failing the whole
+                # call -- the other source still yields real coverage.
+                continue
+            rows = conn.execute(
+                "SELECT %s FROM %s" % (", ".join(wanted), table)).fetchall()
+            for row in rows:
+                for value in row:
+                    if value:
+                        names.add(str(value))
+    finally:
+        try:
+            conn.close()
+        except Exception:                                        # noqa: BLE001
+            pass
+
+    result = tuple(sorted(names))
+    with _names_lock:
+        _names_cache = (now, result)
+    return result
 
 
 def _check_rate_limit(conn) -> tuple:
@@ -3154,6 +3240,7 @@ def analyze(
     model: str | None = None,
     effort: str | None = None,
     surface: str | None = None,
+    free_text_reason: str | None = None,
 ) -> dict:
     """
     Single entry point for all Anthropic API calls.
@@ -3180,7 +3267,8 @@ def analyze(
     try:
         return _analyze_inner(prompt, system_prompt, max_tokens, cache_key,
                               cache_hours, force, model, effort,
-                              job_id=job_id, surface=surface)
+                              job_id=job_id, surface=surface,
+                              free_text_reason=free_text_reason)
     finally:
         if job_id:
             with _in_flight_lock:
@@ -3198,7 +3286,36 @@ def _analyze_inner(
     effort: str | None = None,
     job_id: str | None = None,
     surface: str | None = None,
+    free_text_reason: str | None = None,
 ) -> dict:
+    # ── NPFA/1 ENFORCEMENT BOUNDARY ──────────────────────────────────────────
+    # A machine-generated prompt must arrive as a `BuiltPrompt` -- assembled only
+    # from declared, type-validated fields (see prompt_fields.py and ADR 0025).
+    # A plain `str` is refused.
+    #
+    # WHY THE TYPE AND NOT AN INSPECTION: you cannot look at a finished string
+    # and tell which parts were runtime data. The type carries that proof from
+    # where the knowledge exists (assembly) to where it is needed (the wire).
+    # Any str operation on a BuiltPrompt returns a plain str, so tampering
+    # downgrades it and lands here -- which is asserted directly in the tests.
+    #
+    # THE SINGLE EXEMPTION is `free_text_reason`: the follow-up chat, where a
+    # human deliberately composes a message (often pasted output) and no
+    # allowlist can express "whatever the operator typed". It is a marked path,
+    # not a general hatch -- the reason string is required, recorded, and the
+    # chokepoint below still scrubs addresses and known device names from it.
+    if not isinstance(prompt, _prompt_fields.BuiltPrompt):
+        if not free_text_reason:
+            log.error("ai_engine: REFUSED an unstructured prompt (surface=%r). "
+                      "Machine-generated prompts must be built via "
+                      "prompt_fields.build(); free text requires an explicit "
+                      "free_text_reason.", surface)
+            return {"ok": False,
+                    "reason": "prompt was not built from declared fields "
+                              "(NPFA/1) and no free_text_reason was given"}
+        log.info("ai_engine: free-text prompt admitted (surface=%r, reason=%r)",
+                 surface, free_text_reason)
+
     # A non-default model gets its own cache namespace. Without this a cached
     # answer from one model would be served for a request that explicitly asked
     # for another -- silently, and looking exactly like a normal cache hit.
@@ -3285,13 +3402,19 @@ def _analyze_inner(
     # incident analysis. That is the same argument `_chat_system_prompt` already
     # makes about scope: "a property enforced in six places is enforced in none."
     #
-    # ⚠ SCOPE OF THE GUARANTEE, STATED HONESTLY: `nemesis_pseudonymize` replaces
-    # ADDRESSES -- IPv4/IPv6 and MACs. It does NOT replace hostnames or device
-    # names, because those are not address-shaped and it has no way to recognise
-    # them. Anomaly's prompt still carries real device names (`_build_ai_prompt`
-    # in that module). This change closes the address leak for every present and
-    # future caller; the NAME leak is a separate, still-open item and must not be
-    # described as covered.
+    # ⚠ SCOPE OF THE GUARANTEE, STATED HONESTLY (updated 2026-08-23): addresses
+    # -- IPv4/IPv6 and MACs -- AND known device names are both replaced now. The
+    # name half closed the gap this comment used to describe as still open.
+    #
+    # Names cannot be pattern-detected the way an address can, so they are read
+    # from the devices tables here and passed in. Two consequences worth knowing:
+    #   * a name that is NOT in those tables is not scrubbed, because nothing
+    #     knows it is a name. Free-text an operator typed into a note is the
+    #     realistic case.
+    #   * generic names ("router", "printer") are deliberately left alone -- see
+    #     `_GENERIC_NAMES`. They identify nobody, and tokenizing every occurrence
+    #     of the word "router" would wreck the model's reasoning for no gain.
+    # Both are honest limits of the mechanism, not gaps being glossed over.
     #
     # ONE MAPPING ACROSS BOTH FIELDS. `pseudonymize()` assigns tokens from "A"
     # per call with no way to seed it, so scrubbing `prompt` and `system` in two
@@ -3330,15 +3453,17 @@ def _analyze_inner(
         if _amgr not in _sys.path:
             _sys.path.insert(0, _amgr)
         import nemesis_pseudonymize as _pseudo
+        _names = _known_device_names()
         if _SEP in prompt or (system_prompt and _SEP in system_prompt):
             raise ValueError("input contains the internal boundary sentinel")
         if system_prompt:
-            _joined, _addr_map = _pseudo.pseudonymize(system_prompt + _SEP + prompt)
+            _joined, _addr_map = _pseudo.pseudonymize(system_prompt + _SEP + prompt,
+                                                      names=_names)
             _wire_system, _, _wire_prompt = _joined.partition(_SEP)
             if not _wire_prompt and prompt:
                 raise ValueError("boundary sentinel did not survive pseudonymization")
         else:
-            _wire_prompt, _addr_map = _pseudo.pseudonymize(prompt)
+            _wire_prompt, _addr_map = _pseudo.pseudonymize(prompt, names=_names)
             _wire_system = None
     except Exception as exc:                                    # noqa: BLE001
         log.exception("ai_engine: pseudonymization failed — call BLOCKED")

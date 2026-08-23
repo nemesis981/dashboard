@@ -30,6 +30,14 @@ from contextlib import contextmanager, closing
 from datetime import datetime, timedelta
 
 from modules import NemesisModule, get_data_manager
+import sys as _sys_npfa, os as _os_npfa
+_amgr_npfa = _os_npfa.path.join(
+    _os_npfa.path.dirname(_os_npfa.path.dirname(_os_npfa.path.dirname(
+        _os_npfa.path.abspath(__file__)))), "alert_manager")
+if _amgr_npfa not in _sys_npfa.path:
+    _sys_npfa.path.insert(0, _amgr_npfa)
+import prompt_fields as _pf                      # noqa: E402  (NPFA/1, ADR 0025)
+
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -958,25 +966,48 @@ def _build_ai_prompt(domain: str, itype: str, score: float, label: str,
         for i, d in enumerate(device_list)
     ) or "  (no device detail)"
 
-    return f"""You are Nemesis, an AI security assistant for a home network firewall.
-Analyze this anomaly detection incident and respond in JSON only, no markdown:
-
-Target domain: {domain}
-Incident type: {itype.replace('_', ' ').title()}
-Severity: {score:.0f}/100 ({label})
-Detection pattern: {pattern_desc}
-Domain baseline: {obs} observation day(s) at this hour (0 = never seen before on this network)
-{recurrence_note}
-
-Devices that queried this domain:
-{dev_lines}
-
-{{
-    "explanation": "Plain-English explanation of what this incident means for a home network user (2-3 sentences)",
-    "threat_assessment": "Most likely scenario — benign / suspicious / malicious — and the key reason why",
-    "recommended_action": "Specific action the user should take (e.g. Monitor for 24h, Block via firewall, Investigate device X)",
-    "confidence": "HIGH/MEDIUM/LOW"
-}}"""
+    # ── NPFA/1: assembled from DECLARED fields, never free-form (ADR 0025) ────
+    # `pattern_desc` and `recurrence_note` are LITERAL because they are composed
+    # in THIS file from source-authored templates plus numbers -- no operator
+    # text reaches them. Device names are DEVICE_NAME so the chokepoint scrubs
+    # them; addresses are ADDRESS for the same reason.
+    parts = [
+        "You are Nemesis, an AI security assistant for a home network firewall.",
+        "Analyze this anomaly detection incident and respond in JSON only, no markdown:",
+        "",
+        ("Target domain", _pf.DOMAIN, domain),
+        ("Incident type", _pf.LABEL, itype.replace("_", " ").title()),
+        ("Severity", _pf.LABEL, "%.0f/100 (%s)" % (score, label)),
+        ("Detection pattern", _pf.LABEL, pattern_desc),
+        ("Domain baseline", _pf.LABEL,
+         "%d observation day(s) at this hour (0 = never seen before on this network)" % obs),
+        (None, _pf.LABEL, recurrence_note),
+        "",
+        "Devices that queried this domain:",
+    ]
+    if device_list:
+        for i, d in enumerate(device_list):
+            # Each device contributes THREE separately-typed fields. Rendering
+            # them as one pre-formatted string would smuggle a name past the
+            # allowlist inside a literal, which is the exact hole this closes.
+            parts.append("  %d." % (i + 1))
+            parts.append((None, _pf.DEVICE_NAME, str(d.get("name") or d.get("ip") or "?")))
+            parts.append((None, _pf.ADDRESS, str(d.get("ip") or "0.0.0.0")))
+            parts.append((None, _pf.LABEL, "first query at %s, %d DNS query/queries" % (
+                datetime.fromtimestamp(d.get("first_seen_ts", 0)).strftime("%H:%M:%S"),
+                int(d.get("query_count", 1)))))
+    else:
+        parts.append("  (no device detail)")
+    parts += [
+        "",
+        "{",
+        '    "explanation": "Plain-English explanation of what this incident means for a home network user (2-3 sentences)",',
+        '    "threat_assessment": "Most likely scenario — benign / suspicious / malicious — and the key reason why",',
+        '    "recommended_action": "Specific action the user should take (e.g. Monitor for 24h, Block via firewall, Investigate device X)",',
+        '    "confidence": "HIGH/MEDIUM/LOW"',
+        "}",
+    ]
+    return _pf.build(parts)
 
 
 def _ai_analyze_incident(inc_id: int, domain: str, itype: str, score: float,

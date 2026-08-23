@@ -13,6 +13,14 @@ import html as _html
 from datetime import datetime
 
 from modules import NemesisModule, get_data_manager
+import sys as _sys_npfa, os as _os_npfa
+_amgr_npfa = _os_npfa.path.join(
+    _os_npfa.path.dirname(_os_npfa.path.dirname(_os_npfa.path.dirname(
+        _os_npfa.path.abspath(__file__)))), "alert_manager")
+if _amgr_npfa not in _sys_npfa.path:
+    _sys_npfa.path.insert(0, _amgr_npfa)
+import prompt_fields as _pf                      # noqa: E402  (NPFA/1, ADR 0025)
+
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -163,25 +171,29 @@ def add_to_queue(source_type: str, domain_or_ip: str, detection_type: str,
 # AI analysis
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_ai_prompt(row) -> str:
-    return f"""You are Nemesis, a home network security AI. Assess whether the following anomaly detection should be submitted to a community threat intelligence feed so other home users can be protected.
-
-Domain/IP: {row["domain_or_ip"]}
-Detection type: {row["detection_type"] or "Unknown"}
-Confidence score: {row["confidence_score"]}/100
-Devices affected: {row["device_count"] or 1}
-First detected: {row["first_detected"] or "Unknown"}
-Last detected: {row["last_detected"] or "Unknown"}
-
-Respond with JSON only, no markdown:
-{{
-  "confidence": "high|uncertain|low",
-  "assessment": "One or two sentences explaining whether this is worth sharing and why."
-}}
-
-confidence=high: Clearly malicious/suspicious — other users should be warned.
-confidence=uncertain: Possibly suspicious but could be legitimate software — more context needed.
-confidence=low: Likely a false positive or benign behaviour — do not share."""
+def _build_ai_prompt(row):
+    """NPFA/1 (ADR 0025): built from declared fields, never an f-string of
+    whatever the row happened to contain."""
+    return _pf.build([
+        "You are Nemesis, a home network security AI. Assess whether the following anomaly detection should be submitted to a community threat intelligence feed so other home users can be protected.",
+        "",
+        ("Domain/IP", _pf.DOMAIN, row["domain_or_ip"]),
+        ("Detection type", _pf.LABEL, row["detection_type"] or "Unknown"),
+        ("Confidence score", _pf.NUMBER, float(row["confidence_score"] or 0), {"fmt": "%.0f"}),
+        ("Devices affected", _pf.NUMBER, int(row["device_count"] or 1)),
+        ("First detected", _pf.TIMESTAMP, str(row["first_detected"] or "Unknown")),
+        ("Last detected", _pf.TIMESTAMP, str(row["last_detected"] or "Unknown")),
+        "",
+        "Respond with JSON only, no markdown:",
+        "{",
+        '  "confidence": "high|uncertain|low",',
+        '  "assessment": "One or two sentences explaining whether this is worth sharing and why."',
+        "}",
+        "",
+        "confidence=high: Clearly malicious/suspicious — other users should be warned.",
+        "confidence=uncertain: Possibly suspicious but could be legitimate software — more context needed.",
+        "confidence=low: Likely a false positive or benign behaviour — do not share.",
+    ])
 
 
 def _analyse_one(row) -> dict:
@@ -833,3 +845,20 @@ try:
     )
 except Exception:
     log.exception("community_queue: could not register chat anchor")
+
+
+# ── Write gate (2026-08-23) ──────────────────────────────────────────────────
+# Applied at IMPORT time, so it protects every importer -- including watchdog,
+# hw_monitor and nemesis_connectivity_notify, which never run modules_loader and
+# therefore cannot see in-process load state. The names come from the manifest so
+# the declaration lives in one place; `gate_module_writes` RAISES if a declared
+# name is missing, rather than silently gating nothing.
+from modules.gate import gate_module_writes as _gate_writes   # noqa: E402
+import json as _json_gate, os as _os_gate                     # noqa: E402
+_gate_writes(
+    "community_queue",
+    globals(),
+    _json_gate.load(open(_os_gate.path.join(_os_gate.path.dirname(
+        _os_gate.path.abspath(__file__)), "manifest.json"),
+        encoding="utf-8")).get("write_functions", []),
+)

@@ -40,6 +40,9 @@ os.environ.setdefault("ANTHROPIC_API_KEY", "test-key-not-real")
 
 import modules                                          # noqa: E402
 modules.set_shared_db_path(_db)
+import sys as _s_npfa
+_s_npfa.path.insert(0, '/opt/nemesis/alert_manager')
+import prompt_fields as _pf                    # noqa: E402  (NPFA/1)
 
 # `get_status()` asks modules_loader whether ai_engine is enabled, and the loader
 # gets its DB path from `init(app, db_path, modules_dir)` — which needs a Flask
@@ -134,7 +137,10 @@ def limit():
 
 def call(prompt="hello", cache_key=None):
     SENT.clear()
-    return ai._analyze_inner(prompt, None, 200, cache_key, 0, False)
+    # NPFA/1 (ADR 0025): this suite exercises rate limiting and degradation, not the
+    # allowlist. The prompt is wrapped in the proof type so the boundary
+    # passes and the guard under test is the one actually measured.
+    return ai._analyze_inner(_pf.BuiltPrompt(prompt), None, 200, cache_key, 0, False)
 
 
 def sent0(field):
