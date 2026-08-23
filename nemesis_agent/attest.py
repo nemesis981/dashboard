@@ -87,6 +87,32 @@ ABSENT = "absent"
 # Where a verified manifest is cached after arriving via a signed envelope.
 MANIFEST_NAME = "manifest.json"
 
+#: Manifest SHAPE. The agent ships in two forms and they cannot be attested the
+#: same way, so the manifest says which form it describes.
+#:
+#:   KIND_SOURCE — Linux/macOS install loose .py files; `files` maps
+#:                 manifest-relative path -> sha256, one entry per covered file.
+#:   KIND_FROZEN — Windows ships a PyInstaller bundle with no loose .py on disk;
+#:                 `files` maps the executable's BASENAME -> sha256 of the
+#:                 executable, exactly one entry.
+#:
+#: `files` is deliberately the container for BOTH. Keeping one shape means
+#: `compare()`, `load_manifest()` and `install_manifest()` need no frozen-specific
+#: branch, and a manifest written before this field existed still loads: absent
+#: `kind` means KIND_SOURCE, which is what every pre-2026-08-23 manifest is.
+KIND_SOURCE = "source"
+KIND_FROZEN = "frozen"
+
+
+def manifest_kind(manifest: dict) -> str:
+    """The shape a manifest describes. Absent field == source (backwards compat)."""
+    return (manifest or {}).get("kind") or KIND_SOURCE
+
+
+def runtime_kind() -> str:
+    """The shape THIS process actually is."""
+    return KIND_FROZEN if is_frozen() else KIND_SOURCE
+
 # Files that legitimately differ per install or change at runtime. Excluding
 # them is a correctness requirement, not a convenience: a manifest that covers
 # runtime state can never match, and an attestation that always fails gets
@@ -145,6 +171,26 @@ def compute_digests(root: str | None = None) -> dict:
     return out
 
 
+def executable_path() -> str:
+    """The frozen bundle's own executable. Meaningless on a source install."""
+    return os.path.abspath(sys.executable)
+
+
+def compute_executable_digest() -> dict:
+    """{basename: sha256} for the running frozen executable.
+
+    Same failure discipline as `compute_digests`: an unreadable executable RAISES
+    rather than yielding {}. An empty map would compare equal to an empty
+    manifest and report ATTESTED while having measured nothing.
+    """
+    path = executable_path()
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return {os.path.basename(path): h.hexdigest()}
+
+
 def build_manifest(agent_version: str, root: str | None = None) -> dict:
     """The manifest body. Signed and distributed by the server, not by this.
 
@@ -153,7 +199,15 @@ def build_manifest(agent_version: str, root: str | None = None) -> dict:
     only way to tell them apart is for the manifest to say which build it
     describes.
     """
+    if is_frozen():
+        # A frozen build has no loose sources to hash; the executable IS the
+        # artefact. Declared explicitly so a frozen manifest can never be
+        # evaluated as a source one.
+        return {"agent_version": agent_version,
+                "kind": KIND_FROZEN,
+                "files": compute_executable_digest()}
     return {"agent_version": agent_version,
+            "kind": KIND_SOURCE,
             "files": compute_digests(root)}
 
 
@@ -247,31 +301,40 @@ def evaluate(root: str | None = None, agent_version: str | None = None) -> dict:
     """
     # ⚠ PLATFORM GAP, guarded explicitly rather than discovered in the field.
     #
-    # Linux/macOS install the agent as .py SOURCE (`cp -r` + `ExecStart=python3
-    # .../agent.py`), so source digests describe the running code. The Windows
-    # agent is a PyInstaller-FROZEN bundle with no loose .py files on disk —
-    # `compute_digests()` would return {} there, `compare()` would report every
-    # manifest entry as missing, and every Windows device would report FAILED
-    # forever.
+    # ── BOTH SHAPES ARE ATTESTED NOW (2026-08-23) ────────────────────────────
+    # Linux/macOS install the agent as loose .py SOURCE, so source digests
+    # describe the running code. The Windows agent is a PyInstaller-FROZEN
+    # bundle with no loose .py on disk: `compute_digests()` returns {} there, so
+    # this used to report ABSENT unconditionally and EVERY frozen device was
+    # permanently unattested — which mattered increasingly as the Windows freeze
+    # pipeline became the real shipping path.
     #
-    # That false positive is worse than no signal: a check that always fails
-    # gets ignored, and then it is not there when it matters. Report ABSENT with
-    # a reason instead — truthful (these devices genuinely are not attested) and
-    # it cannot be mistaken for healthy, since only the literal 'attested' is.
+    # The fix the old comment described ("hash the executable itself, which needs
+    # the manifest to carry a per-platform shape") is now implemented: see
+    # KIND_SOURCE / KIND_FROZEN above.
     #
-    # The real fix is to hash the executable itself on frozen builds, which
-    # needs the manifest to carry a per-platform shape. Deliberately NOT bodged
-    # in here: a manifest format change wants its own increment.
-    if is_frozen():
-        return {"state": ABSENT,
-                "detail": "frozen build — source-digest attestation does not "
-                          "apply; executable hashing not yet implemented",
-                "agent_version": agent_version}
-
+    # ⚠ WHAT A FROZEN ATTESTATION IS WORTH, STATED PLAINLY. The executable hashes
+    # ITSELF, so a tampered build can simply report whatever it likes. That is
+    # equally true of the source path (agent.py can be patched to lie) and is why
+    # this whole mechanism is an OBSERVE-ONLY Tier 1 self-check: it detects
+    # accidental drift, partial upgrades and unsophisticated tampering, not a
+    # determined adversary with local write access. The server-side challenge
+    # flow is the stronger signal. Do not let "attested" be read as "trusted".
     root = root or agent_dir()
     manifest = load_manifest(root)
     if manifest is None:
         return {"state": ABSENT, "detail": "no usable manifest present",
+                "agent_version": agent_version}
+
+    # A manifest describing the OTHER shape is ABSENT, not FAILED — same
+    # reasoning as the version guard below. A source manifest evaluated on a
+    # frozen install would report every entry missing and read as tampering,
+    # which is the false positive that gets the whole signal ignored.
+    m_kind, r_kind = manifest_kind(manifest), runtime_kind()
+    if m_kind != r_kind:
+        return {"state": ABSENT,
+                "detail": "manifest describes a %s build, this agent is %s"
+                          % (m_kind, r_kind),
                 "agent_version": agent_version}
 
     # A manifest for a different build is ABSENT, not FAILED. Reporting a
@@ -285,7 +348,8 @@ def evaluate(root: str | None = None, agent_version: str | None = None) -> dict:
                 "agent_version": agent_version}
 
     try:
-        live = compute_digests(root)
+        live = (compute_executable_digest() if r_kind == KIND_FROZEN
+                else compute_digests(root))
     except Exception as exc:                     # noqa: BLE001
         return {"state": ABSENT,
                 "detail": "could not read agent files: %s" % exc,
