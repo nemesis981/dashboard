@@ -1,3 +1,29 @@
+# ⚠ READ THIS BEFORE ADDING A NAME TO module.py THAT ANYTHING ELSE IMPORTS.
+#
+# THE RECURRING DEFECT, four times now: a bare `except` around an import turns a
+# MISSING EXPORT into a feature that looks switched off. Consumers import from
+# this PACKAGE, and registration sites wrap the import in try/except so one module
+# cannot take the app down -- so a name that is in `module.py` but absent from the
+# list below fails, gets logged, and is ignored. Nothing crashes. The capability
+# is simply gone.
+#
+#   2026-08-04  anchors  -> every chat affordance unregistered
+#   2026-08-23  register_undo_handler / undo_handler_for -> three L2 classes had
+#               no undo handler, and the engine REFUSES to act at L2 without one:
+#               the whole reversible-action tier was inert
+#   2026-08-23  raise_authority -> /api/ai/authority/raise returned 503 on every
+#               call; the ladder could not be raised at all
+#   2026-08-23  get_pricing_drift_banner_html -> the operator never saw a drift
+#
+# The general form, worth carrying beyond this file: AN IMPORT THAT FAILS IS A
+# FINDING EVEN WHEN IT IS NOT THE FINDING YOU ARE CHASING. A caught ImportError
+# means a name that was supposed to exist does not, and the blast radius is never
+# visible from the exception itself.
+#
+# `test_package_exports.py` now enforces this at the package boundary: it parses
+# every repo file for `from modules.ai_engine import ...` and fails if any name
+# does not resolve. A comment predicting this failure existed from 2026-08-04 and
+# did not prevent its recurrence -- which is why there is a test as well.
 from .module import (
     is_enabled, get_status, analyze, get_usage_stats, get_pricing,
     get_settings,
@@ -16,6 +42,22 @@ from .module import (
     register_anchor, registered_anchors,
     ask_followup, get_chat_state, estimate_question_cost,
     get_chat_widget_html, get_chat_js,
+    # ADDED 2026-08-23 — and this omission was not cosmetic. `register_undo_handler`
+    # existed in module.py but was never re-exported, so dashboard.py's registration
+    # block raised ImportError and was swallowed by its own try/except. Three L2
+    # classes -- alert_disposition, ip_quarantine_external, ip_block_permanent --
+    # had NO undo handler, and `_undo_warnings` refuses to act at L2 without one.
+    # The entire reversible-action tier was inert. Exactly the failure the comment
+    # above predicts for anchors, in a different symbol, ~3 weeks later.
+    register_undo_handler, undo_handler_for,
+    # Found 2026-08-23 by test_package_exports.py on its FIRST run -- two more of
+    # the same class, neither of them cosmetic:
+    #   raise_authority              — backs /api/ai/authority/raise. The import
+    #     failed, so the route returned 503 "ai_engine unavailable" on EVERY call
+    #     and the ladder could not be raised at all.
+    #   get_pricing_drift_banner_html — the drift banner was swallowed by a bare
+    #     `except Exception: pass`, so the operator never saw a pricing change.
+    raise_authority, get_pricing_drift_banner_html,
 )
 
 __all__ = [
@@ -30,4 +72,6 @@ __all__ = [
     "register_anchor", "registered_anchors",
     "ask_followup", "get_chat_state", "estimate_question_cost",
     "get_chat_widget_html", "get_chat_js",
+    "register_undo_handler", "undo_handler_for",
+    "raise_authority", "get_pricing_drift_banner_html",
 ]
