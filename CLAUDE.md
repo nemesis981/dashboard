@@ -855,6 +855,48 @@ compares, derives, or verifies something, not just network/security-adjacent pat
 - **Grep for this shape in every retro/review pass**, alongside the existing #1-recurring-bug
   check — same category of standing check, different failure class.
 
+### Check the SHAPE of output, not just whether the value looks plausible (standing practice, added 2026-08-23)
+
+**A lookup or control that reads the wrong source can return a value indistinguishable from
+the right one.** Assert the shape of the output — count, type, source identity — not only
+that the value looks reasonable.
+
+This is the sibling of the rule above and the harder half of it. That one is about an
+instrument that can only produce one answer. This one is about an instrument that produced a
+*perfectly plausible* answer, from somewhere other than where its label claimed. There is
+nothing wrong-looking to notice, which is exactly why reading the result more carefully does
+not help.
+
+**Seven instances in one day (2026-08-23), across two windows.** Listed because the pattern
+is only visible in aggregate — individually each looked like an ordinary slip:
+
+| # | What happened | What made it invisible |
+|---|---|---|
+| 1 | A mutation test asserting an unreadable setting could not fall through to a BUNDLE default — it passed against the mutant, because `route()` already fails safe on `None` | The check could not fail. A pass proved nothing |
+| 2 | A page-render probe reported every element absent; the response was **302** (unauthenticated), so every assertion would have been False whatever the template contained | "Element missing" and "page never rendered" produce identical output |
+| 3 | A control labelled *"from /opt/nemesis"* that actually ran from `/tmp`, because a single `cd` at the top of the block applied to every line | A control that did not run looks identical to one that passed |
+| 4 | `find / -name X.service \| head -1` returned a `/sys/fs/cgroup/...` pseudo-directory; `grep` on it printed nothing silently, so the next command's output was read as this one's | The value was a real PYTHONPATH from a real unit — just the wrong unit. **The tell was the line COUNT: two files queried, one line returned** |
+| 5 | A `head -12` on a grep silently truncated the result set that a conclusion was drawn from | A short list and a complete short list look the same |
+| 6 | A `python3 -c` path test run from the repo root, where the cwd lands on `sys.path` and every variant reports importable | A uniform "all OK" reads as a clean result, not a contaminated one |
+| 7 | A cross-shape check that returned the correct state **for the wrong reason** | Right answer, wrong derivation — passes every check on the answer |
+
+**What to actually do:**
+- **Assert the count.** Two files queried should produce two lines. Instance 4 was catchable
+  and was walked past because only the value was inspected.
+- **Assert the source identity**, not just the value — which file, which host, which commit.
+  `git show HEAD:<path>` rather than a working-tree read when handing a fact to someone else.
+- **Never `head -n` a set you are about to draw a conclusion from** without separately
+  reporting whether it was truncated.
+- **A control needs its own precondition checked.** Prove the harness was in the state the
+  label claims before trusting what it reports.
+- **Prefer a neutral cwd** for any path/import test; the repo root silently rescues imports
+  that would fail in a service.
+
+**Grep for this shape in every retro/review pass**, alongside the two checks above. Three
+standing checks now, one failure class each: a bug that hides in rendering (#1 recurring bug),
+an instrument that cannot fail (the rule above), and an instrument that answered from the
+wrong place (this one).
+
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
   credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
