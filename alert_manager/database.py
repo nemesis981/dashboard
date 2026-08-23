@@ -570,6 +570,49 @@ def init_notify_tables():
     finally:
         conn.close()
 
+def init_capability_tables():
+    """Canonical DDL for per-capability learning-gate unlocks (ADR 0026 §5).
+
+    CORE-OWNED AND UNPREFIXED, deliberately: it belongs beside `users`, and the
+    role model is core's, not any module's. Per ADR 0001 that makes it core's to
+    create; per ADR 0006 every WRITE routes through the Data Manager with an
+    actor, which `alert_manager/capabilities.py` does -- this function only
+    creates the table.
+
+    `UNIQUE(user_id, capability)` makes re-earning an UPSERT rather than a second
+    row, so "is this unlocked" can never be ambiguous. Without it a re-take after
+    a quiz revision would leave two rows disagreeing about the version, and the
+    read path would have to pick one.
+
+    `quiz_version` holds the CONTENT-DERIVED version from
+    `quizzes.effective_version()`, not the author's declared label. That is what
+    makes a quiz edit invalidate the unlock automatically instead of relying on
+    someone remembering to bump a number.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_capability_unlocks (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id       INTEGER NOT NULL,
+                capability    TEXT    NOT NULL,
+                unlocked_at   TEXT    NOT NULL,
+                quiz_version  TEXT    NOT NULL,
+                quiz_score    INTEGER NOT NULL,
+                attempts      INTEGER NOT NULL DEFAULT 1,
+                granted_by    TEXT,
+                UNIQUE(user_id, capability)
+            )
+        """)
+        # The hot path is "what has this user unlocked", asked on every request
+        # that a sub-admin makes against a capability-covered route.
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_capability_unlocks_user "
+                     "ON user_capability_unlocks(user_id)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_memory_recovery_tables():
     """Canonical DDL for the production memory-injection ladder loop (mem_appliance
     run_ladder_cycle). Two tables: the persisted ladder STATE (so streaks survive a

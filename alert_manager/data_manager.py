@@ -422,6 +422,16 @@ NAMESPACES = {
             # provably mounted (ADR 0018 keeps it unmounted otherwise). No other
             # component observes the backup medium, so no sharing is expected.
             "backup_media_status",
+            # SOLE writer. Per-capability learning-gate unlocks (ADR 0026 §5),
+            # written only from alert_manager/capabilities.py when a delegated
+            # operator passes a capability's quiz, and deleted on revoke.
+            #
+            # Core-owned by ADR 0001 (unprefixed, extends `users` above), granted
+            # HERE because a namespace is keyed by the writing component and the
+            # dashboard process is what writes it. Nothing else does, and nothing
+            # else should -- an unlock created outside the grading path would be a
+            # capability granted without the training it attests to.
+            "user_capability_unlocks",
         ),
         # COLUMN GRANT. hw_monitor owns agent_devices rows (it INSERTs them at
         # enrollment); dashboard never inserts, and only UPDATEs these four for
