@@ -126,8 +126,19 @@ APPLIANCE_RESERVATIONS = {
     # baseline and every budget entry's `basis`.
     "memory-injection-scan": {
         "pct": 3.0, "min_mb": 128.0, "max_mb": 384.0,
-        "basis": "PROVISIONAL: bounded chunked read window for the memory-"
-                 "injection detector (step 4, not yet built); no disk fallback",
+        # Step 4 IS built now (2026-08-22): agent-side detector (meminject_scan +
+        # the private classifier), bounded page-prefix reads, measured ~0.1s full
+        # sweep. CONSUMER IS AGENT-SIDE, not an appliance throttle-component -- this
+        # is why memory-injection is deliberately NOT in RUNG_AVAILABILITY: there is
+        # no appliance service to assign ladder rungs to. If/when the appliance runs
+        # its own sweep on itself (requires the classifier deployed to the appliance
+        # path), THAT component gets a RUNG_AVAILABILITY entry; the reservation here
+        # stands regardless, because the RAM to hold one bounded read window must be
+        # guaranteed wherever the read runs. The 384 MB clamp still bounds it; the
+        # number stays provisional pending real appliance-side measurement.
+        "basis": "agent-side memory-injection detector (step 4, built 2026-08-22): "
+                 "bounded chunked read window, no disk fallback; provisional pending "
+                 "appliance-side measurement",
     },
     # Consumers (ii) tmpfs scratch bounds and (iii) a future RAM-backed detonation
     # VM share this table when they are scoped — they are the same shape (headroom
