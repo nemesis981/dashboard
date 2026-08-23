@@ -9,7 +9,7 @@ import data_manager
 import subprocess
 import time
 
-from email_utils import send_email
+import notify
 
 SERVICES = [
     "pihole-FTL",
@@ -109,10 +109,18 @@ def send_email_alert(service: str) -> None:
         f"Host: {os.uname().nodename}\n"
         f"Please investigate as soon as possible."
     )
-    if send_email(subject, body):
-        logging.info("Sent alert email for %s", service)
+    # HIGH, not CRITICAL: a service that could not be restarted is serious and
+    # should not wait for a digest by default, but it is not the "no setting may
+    # ever defer this" tier that CRITICAL reserves. The family key is the service
+    # name, so a service flapping all night collapses to one "(xN)" digest line
+    # instead of N emails -- the exact repeat pattern this layer was built for.
+    result = notify.notify("HIGH", subject, body,
+                           family_key="service-down:%s" % service,
+                           actor="system:watchdog")
+    if result["ok"]:
+        logging.info("Sent alert for %s (%s)", service, result["delivery"])
     else:
-        logging.error("Failed to send alert email for %s", service)
+        logging.error("Failed to send alert for %s: %s", service, result["error"])
 
 
 def _fetch_latest_hw_sample():
@@ -414,10 +422,22 @@ def _send_hw_alert(key, severity, breach, recommendation, sample):
         f"Current readings:\n{_format_reading(sample)}\n"
         f"Recommendation: {recommendation}\n"
     )
-    if send_email(subject, body):
-        logging.warning("HW alert sent: %s (%s)", key, breach)
+    # `severity` is passed straight through: every caller supplies a canonical
+    # value (CRITICAL / HIGH / MEDIUM -- verified against all seven call sites),
+    # so no mapping layer is needed and none should be added. CRITICAL breaches
+    # (CPU/GPU temp, stalled CPU fan) therefore stay immediate automatically.
+    #
+    # `key` is already the per-sensor cooldown identifier, which is exactly the
+    # right family: a sensor breaching repeatedly overnight collapses to one
+    # "(xN)" line. This is the 204-tickets-in-two-days case that motivated the
+    # digest.
+    result = notify.notify(severity, subject, body, family_key="hw:%s" % key,
+                           actor="system:watchdog")
+    if result["ok"]:
+        logging.warning("HW alert sent: %s (%s, %s)", key, breach, result["delivery"])
     else:
-        logging.error("HW alert email failed: %s (cooldown still recorded)", key)
+        logging.error("HW alert failed: %s (cooldown still recorded): %s",
+                      key, result["error"])
 
     try:
         import sys
