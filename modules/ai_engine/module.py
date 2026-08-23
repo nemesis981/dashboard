@@ -1392,7 +1392,7 @@ def _notify_pricing_drift(result) -> None:
     try:
         import sys as _sys
         _sys.path.insert(0, "/opt/nemesis/alert_manager")
-        from email_utils import send_email
+        import notify as _notify
         body = ["Anthropic's published pricing differs from the rates this "
                 "Nemesis server uses for cost estimates.", ""]
         for d in divs:
@@ -1408,7 +1408,19 @@ def _notify_pricing_drift(result) -> None:
                  "If these figures are correct, update _MODEL_RATES and bump",
                  "_PRICING_DEFAULTS_CONFIRMED in the same change.",
                  f"", f"Checked at {result.get('checked_at', '?')}."]
-        send_email("[Nemesis] Anthropic pricing has changed", "\n".join(body))
+        # LOW: pricing drift is a "look at this when convenient" notice -- nothing
+        # is charged differently and nothing has changed automatically, which the
+        # body says explicitly. It is exactly the class the digest exists for.
+        #
+        # The family key is the drift signature, so repeated detections of the SAME
+        # drift collapse to one digest line. Note this is belt-and-braces: the
+        # `_DRIFT_NOTIFIED_KEY` guard below already suppresses a repeat of an
+        # identical signature, so in practice the family rarely bundles. Set anyway
+        # because the two guards protect different things -- that one stops the
+        # notice recurring at all, this one groups it if the guard is ever relaxed.
+        _notify.notify("LOW", "[Nemesis] Anthropic pricing has changed",
+                       "\n".join(body), family_key="ai-pricing-drift:%s" % sig,
+                       actor="system:ai_engine")
         _set_setting(_DRIFT_NOTIFIED_KEY, sig)
         log.info("ai_engine: pricing drift notification sent (%d model(s))", len(divs))
     except Exception:
