@@ -111,6 +111,7 @@ import hw_monitor
 import modules_loader
 import diagnostics as _diag
 import email_utils
+import notify            # delivery routing: immediate vs twice-daily digest
 
 import bcrypt
 import psutil
@@ -860,7 +861,13 @@ def _alert_recovery_code_used(user_id: int, ip=None):
             "Nemesis sends this every time a recovery code is used. It does not email\n"
             "routine sign-ins, so this message always means something worth reading.\n"
         )
-        _notify_email_async(subject, body)
+        # CRITICAL, so no notify_mode can defer it. A recovery code is the
+        # break-glass path into an account; if the operator did not use it, this
+        # is a compromise in progress and a twice-daily digest is the wrong place
+        # to learn that. Rare by nature, so there is no flood risk in forcing it
+        # immediate -- the body itself says Nemesis sends this every time.
+        _notify_email_async("CRITICAL", subject, body,
+                            family_key="auth-recovery-code:%s" % username)
     except Exception:
         # Never let alerting affect the unlock that just succeeded.
         auth_log.exception("auth: recovery-code alert failed")
@@ -939,10 +946,20 @@ def _register_credential_failure(row, username, ip, ua,
              f"(source: {source}). Account locked for {mins} minutes (tier {tnum})."),
             severity)
         if do_email:
+            # Severity comes from _LOCKOUT_TIERS, which already encodes exactly the
+            # right answer: tier 3 (10 attempts) is CRITICAL and can never be
+            # deferred, so a sustained brute force still mails immediately, while
+            # tier 2 (HIGH) may ride in the digest. Do not override that here --
+            # the tier table is where that judgement belongs.
+            #
+            # Family is the account, so repeated lockouts of one username collapse
+            # to a single "(xN)" line rather than one mail per lockout.
             _notify_email_async(
+                severity,
                 f"[Nemesis] Login lockout tier {tnum} ({severity}) for {username}",
                 f"{fa} failed credential attempts for '{username}' from {ip} "
-                f"(source: {source}). Locked for {mins} minutes.")
+                f"(source: {source}). Locked for {mins} minutes.",
+                family_key="auth-lockout:%s" % username)
         return True, mins, tnum
 
     _log_login_event(username, ip, False, reason, tier, ua, source=source, action=action)
@@ -1116,14 +1133,23 @@ def _open_security_ticket(title, body, severity):
         auth_log.exception("auth: security ticket creation failed")
 
 
-def _notify_email(subject, body):
+def _notify_email(severity, subject, body, family_key=None):
+    """Best-effort auth alert. Swallows everything -- see `_notify_email_async`.
+
+    Routed through `notify.notify()` so an operator running in digest mode gets
+    auth alerts bundled with everything else. The severity is what decides
+    whether that is allowed: CRITICAL is never deferred by any setting, so a
+    tier-3 lockout (10 failed attempts) and a recovery-code use still mail
+    immediately, while a tier-2 lockout can ride in the digest.
+    """
     try:
-        email_utils.send_email(subject, body)
+        notify.notify(severity, subject, body, family_key=family_key,
+                      actor="system:auth")
     except Exception:
-        auth_log.exception("auth: email notify failed")
+        auth_log.exception("auth: notify failed")
 
 
-def _notify_email_async(subject, body):
+def _notify_email_async(severity, subject, body, family_key=None):
     """Send an alert email WITHOUT holding the request open.
 
     `_notify_email` is best-effort but BLOCKING: email_utils.send_email uses a
@@ -1152,7 +1178,8 @@ def _notify_email_async(subject, body):
     failure, become an authentication outcome.
     """
     try:
-        threading.Thread(target=_notify_email, args=(subject, body),
+        threading.Thread(target=_notify_email,
+                         args=(severity, subject, body, family_key),
                          name="nemesis-alert-mail", daemon=True).start()
     except Exception:
         auth_log.exception("auth: could not start alert-mail thread")
@@ -7249,6 +7276,30 @@ def _undo_ip_block(proposal, context=None):
     return True, detail
 
 
+# ── IF YOU ARE WRITING A REGISTRATION BLOCK LIKE THIS ONE, READ THIS ─────────
+# The try/except below is correct — a registration failure must not take down the
+# dashboard. But it has a failure mode that has now bitten FOUR times (anchors
+# 2026-08-04; register_undo_handler, undo_handler_for, raise_authority and
+# get_pricing_drift_banner_html, all 2026-08-23):
+#
+#   A name that is defined in `modules/ai_engine/module.py` but NOT re-exported by
+#   `modules/ai_engine/__init__.py` raises ImportError here, the except swallows
+#   it, and the feature is simply never wired. Nothing crashes. It looks exactly
+#   like the feature is switched off.
+#
+# The cost is not theoretical: three L2 action classes had no undo handler, so the
+# entire reversible-action tier was inert, and `/api/ai/authority/raise` returned
+# 503 on every call because `raise_authority` failed to import here.
+#
+# THE GENERAL FORM, worth carrying to any block of this shape: an import that
+# fails is a finding even when it is not the finding you are chasing. A caught
+# ImportError means a name that was supposed to exist does not, and the blast
+# radius is never visible from the exception itself.
+#
+# Enforced now by `modules/ai_engine/test_package_exports.py`, which parses every
+# `from modules.ai_engine import ...` in the repo and asserts each name resolves.
+# Add a symbol to the package's __all__ when you import it here — do not rely on
+# noticing the log line.
 try:
     from modules.ai_engine import register_undo_handler as _ai_register_undo
     _ai_register_undo("alert_disposition", _undo_alert_disposition)
@@ -7295,6 +7346,64 @@ def api_set_observe_every_n():
     # agents will get it from -- so the UI confirms the STORED value rather than
     # the submitted one.
     return jsonify({"ok": True, "value": database.get_remote_observe_every_n()})
+
+
+@app.route("/api/settings/digest", methods=["POST"])
+def api_set_digest_settings():
+    """Save the four digest settings as ONE form.
+
+    POST, never GET: it changes when and whether notifications are delivered, so a
+    GET would be CSRF-triggerable by an <img> tag under default SameSite=Lax
+    cookies — the same shape the standing route audit already names. Auth-gated by
+    absence from `_AUTH_EXEMPT`, matching every other state-changing route, and
+    admin-gated by its entry in `roles.ROUTE_MINIMUMS`.
+
+    ALL FOUR OR NOTHING. `notify.save_digest_settings()` refuses the whole form if
+    any field is invalid and writes nothing. Accepting a valid start time while
+    rejecting an invalid end time would leave a stored schedule the operator never
+    chose and the form no longer shows — and a digest would then fire at a time
+    nobody picked.
+
+    Validation lives in `notify`, not here. This route's job is transport: the
+    rules belong beside `route()` and the schedule resolver that consume them, so
+    a second caller (a future CLI, the installer) cannot get a different answer.
+    """
+    data = request.get_json(silent=True) or {}
+    ok, errors = notify.save_digest_settings(
+        (data.get("open") or "").strip(),
+        (data.get("close") or "").strip(),
+        (data.get("tz") or "").strip(),
+        (data.get("mode") or "").strip(),
+        set_setting=database.set_setting,
+        actor=_current_actor_label(),
+    )
+    if not ok:
+        return jsonify({"ok": False, "errors": errors}), 400
+
+    # Echo back the RESOLVED schedule, read through notify's own resolver rather
+    # than the submitted values. If notify fell back on anything — an unusable
+    # zone, an unparseable time — the operator sees what will actually run, not
+    # what they typed. Reporting the submission back would confirm a schedule that
+    # is not the one in effect.
+    try:
+        sched = notify.digest_schedule(database.get_setting)
+        return jsonify({
+            "ok": True,
+            "mode": (database.get_setting(notify.KEY_NOTIFY_MODE,
+                                          notify.DEFAULT_NOTIFY_MODE) or "").strip().lower(),
+            "open": sched["open"].strftime("%H:%M") if sched["open"] else "",
+            "close": sched["close"].strftime("%H:%M") if sched["close"] else "",
+            "tz": sched.get("tz_name") or "",
+            "warnings": list(notify.schedule_warnings(sched) or []),
+        })
+    except Exception:
+        # The write SUCCEEDED; only the read-back failed. Say exactly that rather
+        # than returning an error the operator would read as "not saved" — they
+        # would retry a save that already happened.
+        auth_log.exception("settings: digest saved but could not be read back")
+        return jsonify({"ok": True, "readback": False,
+                        "warnings": ["saved, but the resulting schedule could not "
+                                     "be read back — reload to confirm"]})
 
 
 @app.route("/api/ai/authority")
@@ -7602,6 +7711,57 @@ def settings_page():
         obs_n_max   = database.REMOTE_OBSERVE_N_MAX
     except Exception:
         obs_n_value, obs_n_min, obs_n_max = 6, 1, 48
+
+    # Digest delivery + schedule. All four keys are read through notify's own
+    # resolver rather than raw get_setting, so the page shows the schedule that
+    # will ACTUALLY be used -- including any fallback notify applied -- instead of
+    # the raw stored strings. `problems` is surfaced in the card: a digest running
+    # at 08:00 because that is the default and one running at 08:00 because the
+    # operator chose it must not look identical to whoever is debugging why 09:30
+    # never arrived.
+    try:
+        _dg = notify.digest_schedule(database.get_setting)
+        dg_open  = _dg["open"].strftime("%H:%M") if _dg["open"] else notify.DEFAULT_OPEN_TIME
+        dg_close = _dg["close"].strftime("%H:%M") if _dg["close"] else notify.DEFAULT_CLOSE_TIME
+        dg_tz    = _dg.get("tz_name") or ""
+        # schedule_warnings() ALREADY includes schedule["problems"] -- read its
+        # first line. Concatenating both lists duplicates every problem.
+        dg_problems = list(notify.schedule_warnings(_dg) or [])
+    except Exception:
+        auth_log.exception("settings: could not resolve the digest schedule")
+        dg_open, dg_close, dg_tz = notify.DEFAULT_OPEN_TIME, notify.DEFAULT_CLOSE_TIME, ""
+        dg_problems = ["the digest schedule could not be read; showing defaults"]
+    try:
+        dg_mode = (database.get_setting(notify.KEY_NOTIFY_MODE,
+                                        notify.DEFAULT_NOTIFY_MODE)
+                   or notify.DEFAULT_NOTIFY_MODE).strip().lower()
+    except Exception:
+        dg_mode = notify.DEFAULT_NOTIFY_MODE
+    if dg_mode not in notify.NOTIFY_MODES:
+        # An unreadable/legacy value ("both" is the known one) is shown as what
+        # route() will ACTUALLY do with it, not echoed back as if it were a valid
+        # choice the operator had made.
+        dg_problems.append(
+            "delivery mode %r is not a supported choice; notifications are being "
+            "sent immediately" % dg_mode)
+        dg_mode = notify.MODE_IMMEDIATE
+    dg_notice = "".join('<li>%s</li>' % html.escape(str(p)) for p in dg_problems)
+    # Escaped even though none of these can currently carry a quote: the times come
+    # from strftime and `tz_name` is only ever returned when ZoneInfo() accepted it,
+    # so it is a real IANA name. That safety lives in notify.resolve_timezone --
+    # ANOTHER module. Escaping here means this template does not silently become an
+    # attribute-injection point if that invariant is ever loosened.
+    dg_open = html.escape(dg_open, quote=True)
+    dg_close = html.escape(dg_close, quote=True)
+    dg_tz = html.escape(dg_tz, quote=True)
+    # Options are GENERATED from notify.NOTIFY_MODES, never hardcoded here, so the
+    # page cannot offer a mode the validator will refuse. Same reason the lookup
+    # module serves RRTYPES to its own UI instead of duplicating the list.
+    dg_mode_options = "".join(
+        '<option value="%s"%s>%s</option>'
+        % (html.escape(m), " selected" if m == dg_mode else "",
+           html.escape(notify.mode_label(m)))
+        for m in notify.NOTIFY_MODES)
 
     # Read AI Engine settings from the shared DB via the ai_engine module API
     # (ADR 0001 Stage 3 — no longer reaches into modules/ai_engine/ai_engine.db).
@@ -8567,6 +8727,70 @@ def settings_page():
         </div>
     </div>
 
+    <!-- Notification delivery + digest schedule -->
+    <div class="card">
+        <h2>&#128231; <span class="tier-text"
+            data-beginner="When Nemesis Emails You"
+            data-intermediate="Notification Delivery"
+            data-pro="Notification Routing &amp; Digest">Notification Delivery</span></h2>
+        <div style="padding:0 4px">
+            <p style="margin:0 0 10px;font-size:0.86em;color:#bbb">
+                <span class="tier-text"
+                    data-beginner="Nemesis can email you the moment something happens, or collect the less urgent things and send them together twice a day. Anything genuinely urgent is always sent straight away, whichever you pick."
+                    data-intermediate="Choose immediate delivery or a twice-daily digest. CRITICAL events bypass the digest and are always sent immediately."
+                    data-pro="route() decides severity BEFORE reading notify_mode, so no setting can defer a CRITICAL. Non-critical events accumulate in notify_queue and are bundled by family_key.">Urgent alerts are always sent immediately, whichever option you choose.</span>
+            </p>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+                <label style="font-size:0.86em;color:#eee" for="dgMode">
+                    <span class="tier-text"
+                        data-beginner="How should Nemesis send notifications?"
+                        data-intermediate="Delivery mode"
+                        data-pro="notify_mode">Delivery mode</span>
+                </label>
+                <select id="dgMode"
+                        style="background:#0d1117;border:1px solid #00d4ff;color:#eee;padding:5px;border-radius:3px">{dg_mode_options}</select>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <label style="font-size:0.86em;color:#eee" for="dgOpen">
+                    <span class="tier-text"
+                        data-beginner="Morning summary at"
+                        data-intermediate="Start-of-day digest"
+                        data-pro="digest_open_time">Start-of-day digest</span>
+                </label>
+                <input id="dgOpen" type="time" value="{dg_open}"
+                       style="background:#0d1117;border:1px solid #00d4ff;color:#eee;padding:5px;border-radius:3px">
+                <label style="font-size:0.86em;color:#eee" for="dgClose">
+                    <span class="tier-text"
+                        data-beginner="evening summary at"
+                        data-intermediate="end-of-day digest"
+                        data-pro="digest_close_time">End-of-day digest</span>
+                </label>
+                <input id="dgClose" type="time" value="{dg_close}"
+                       style="background:#0d1117;border:1px solid #00d4ff;color:#eee;padding:5px;border-radius:3px">
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px">
+                <label style="font-size:0.86em;color:#eee" for="dgTz">
+                    <span class="tier-text"
+                        data-beginner="Your time zone"
+                        data-intermediate="Time zone"
+                        data-pro="digest_timezone (IANA)">Time zone</span>
+                </label>
+                <input id="dgTz" type="text" value="{dg_tz}" placeholder="Europe/London"
+                       style="width:180px;background:#0d1117;border:1px solid #00d4ff;color:#eee;padding:5px;border-radius:3px">
+                <button onclick="saveDigestSettings()"
+                        style="background:#00d4ff;color:#1a1a2e;border:none;padding:5px 14px;cursor:pointer;border-radius:3px;font-weight:bold">Save</button>
+                <span id="dgStatus" style="font-size:0.82em;color:#bbb"></span>
+            </div>
+            <p style="margin:8px 0 0;font-size:0.78em;color:#888">
+                <span class="tier-text"
+                    data-beginner="Leave the time zone blank to use this machine&#39;s own setting. A summary is sent even when there is nothing to report, so silence always means something is wrong rather than nothing happened."
+                    data-intermediate="Blank time zone uses the system zone. An empty digest is still delivered, deliberately &mdash; a report that only arrives with bad news cannot tell you it is still working."
+                    data-pro="Blank resolves to a real IANA zone name, never a fixed-offset snapshot. Empty digests are sent by design; both times are compared as local calendar days so DST cannot double-fire or skip.">Leave the time zone blank to use this machine&#39;s own setting.</span>
+            </p>
+            <ul id="dgNotice" style="margin:8px 0 0;padding-left:18px;font-size:0.78em;color:#ffb454">{dg_notice}</ul>
+        </div>
+    </div>
+
     <!-- Licence -->
     <div class="card">
         <h2>&#128273; <span class="tier-text"
@@ -9051,6 +9275,60 @@ def settings_page():
                   el.value = d.value;
                   st.style.color = '#00ff88';
                   st.textContent = 'saved — applies on each agent\u2019s next check-in';
+              }})
+              .catch(function(e) {{
+                  st.style.color = '#ff4444';
+                  st.textContent = 'error: ' + e;
+              }});
+        }}
+
+        function saveDigestSettings() {{
+            var st = document.getElementById('dgStatus');
+            st.style.color = '#bbb';
+            st.textContent = 'saving…';
+            fetch('/api/settings/digest', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{
+                    mode:  document.getElementById('dgMode').value,
+                    open:  document.getElementById('dgOpen').value,
+                    close: document.getElementById('dgClose').value,
+                    tz:    document.getElementById('dgTz').value
+                }})
+            }})
+              .then(function(r) {{ return r.json(); }})
+              .then(function(d) {{
+                  var notice = document.getElementById('dgNotice');
+                  notice.innerHTML = '';
+                  if (!d.ok) {{
+                      // The server refuses the WHOLE form if any field is bad and
+                      // writes nothing, so show every field error at once rather
+                      // than making the operator fix them one refusal at a time.
+                      st.style.color = '#ff8800';
+                      st.textContent = 'not saved';
+                      var errs = d.errors || {{}};
+                      Object.keys(errs).forEach(function(k) {{
+                          var li = document.createElement('li');
+                          li.style.color = '#ff8800';
+                          li.textContent = k + ': ' + errs[k];
+                          notice.appendChild(li);
+                      }});
+                      return;
+                  }}
+                  // Reflect what was STORED and how notify actually resolved it --
+                  // a fallback (bad zone, defaulted time) must be visible here, or
+                  // the operator believes a schedule that is not running.
+                  document.getElementById('dgMode').value  = d.mode;
+                  document.getElementById('dgOpen').value  = d.open;
+                  document.getElementById('dgClose').value = d.close;
+                  document.getElementById('dgTz').value    = d.tz;
+                  (d.warnings || []).forEach(function(w) {{
+                      var li = document.createElement('li');
+                      li.textContent = w;
+                      notice.appendChild(li);
+                  }});
+                  st.style.color = '#00ff88';
+                  st.textContent = 'saved';
               }})
               .catch(function(e) {{
                   st.style.color = '#ff4444';
