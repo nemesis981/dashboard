@@ -3785,7 +3785,7 @@ nothing guarded it against a future regression.
 survival, malformed/hostile input, drain→restore→drain round-trip) — file total 36/36.
 No further action needed.
 
-### [MEDIUM] Malware Layer-C AI verdicts are computed, billed, and stored — never shown (found 2026-08-21)
+### [DONE — 2026-08-21] Malware Layer-C AI verdicts are computed, billed, and stored — never shown (found 2026-08-21)
 Filed independent of any future AI-automation-mode work (Window 3's AI-surfacing audit,
 `~/work/nemesis-internal/audits/ai-surfacing-audit-2026-08-21.md`, §3 F1) — this is a
 present-day bug, not a scoping concern.
@@ -3802,6 +3802,16 @@ is the only one where the render step is missing.
 **Compounding:** the chat prompt for a malware finding injects the literal line "Verdict
 already shown to the user," which is false whenever this bug is live — handing the model a
 false premise it will then reference in conversation.
+
+**Fixed same day, commit `7945d26`** ("fix(malware): render the Layer-C AI verdict that was
+already paid for") — a full three-state render (ok/unavailable/unparsed) in `_card_js()`
+(`modules/malware_detection/module.py:4084`), labelled ADVISORY ONLY, model text
+HTML-escaped. The chat prompt's "already shown" claim is now true as a consequence, not
+fixed separately. **Found stale-and-still-open in the 2026-08-23 V2.0 gap-scan** — the
+gap-scan trusted this PUNCHLIST entry's open status rather than checking the code; the fix
+landed the same day the entry was written, presumably after. Independently re-verified
+2026-08-23 (not taken on a peer's word): `7945d26` confirmed an ancestor of HEAD, the cited
+renderer/text confirmed present at the cited line.
 
 **Candidate fix:** add the missing renderer call in the finding-detail JS (mirror
 `_format_ai_report_html()`'s pattern from `anomaly_detection/module.py`), and drop the
