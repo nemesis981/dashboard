@@ -6590,6 +6590,25 @@ def _tiered_explanations(analysis, rule_id=None):
     return tuple(got[t] or fallback for t in _EXPLANATION_TIERS)
 
 
+# ── NPFA/1: the fixed tail of the alert-analysis prompt (ADR 0025) ───────────
+# Source-authored literal text, held as a constant so the prompt assembly reads
+# as a list of declared parts rather than a wall of embedded string.
+_NPFA_ALERT_TAIL = """
+Write THREE explanations of the SAME finding, for three different readers. They
+must differ in depth and vocabulary, not merely in length -- do not pad one to
+make another. All three describe the same conclusion; only the reader changes.
+
+{
+    "explanation_beginner": "For someone with no networking or security knowledge. Explain what happened, why it matters, and whether to worry. Assume nothing.",
+    "explanation_intermediate": "For a confident computer user. Balanced detail, enough to act on, without explaining fundamentals.",
+    "explanation_pro": "For a network/security professional. Terse and technical. Protocol names, attack terminology and abbreviations are expected.",
+    "risk_level": "LOW/MEDIUM/HIGH",
+    "is_threat": true/false,
+    "recommended_action": "Block/Ignore/Monitor",
+    "reason": "Brief reason"
+}"""
+
+
 @app.route("/api/analyze/<rule_id>")
 def analyze_alert(rule_id):
     try:
@@ -6763,25 +6782,20 @@ def analyze_alert(rule_id):
         # mechanism tier.js already documents as its Method 2 for server-rendered
         # content. This route stops being an exception to the tier architecture.
         from modules.ai_engine import analyze as ai_analyze
+        # ── NPFA/1 (ADR 0025) ────────────────────────────────────────────
+        # `alert_body` is Suricata signature text -- machine-generated, already
+        # address-pseudonymized above -- so it enters as a declared LABEL field
+        # rather than being interpolated straight into an f-string. The rest of
+        # the prompt is source-authored literal text.
+        import prompt_fields as _pf
         ai_result = ai_analyze(
-            f"""You are Nemesis, an AI security assistant for a home network firewall.
-Analyze this Suricata alert and respond in JSON only, no markdown:
-
-Alert: {alert_body}
-
-Write THREE explanations of the SAME finding, for three different readers. They
-must differ in depth and vocabulary, not merely in length -- do not pad one to
-make another. All three describe the same conclusion; only the reader changes.
-
-{{
-    "explanation_beginner": "For someone with no networking or security knowledge. Explain what happened, why it matters, and whether to worry. Assume nothing.",
-    "explanation_intermediate": "For a confident computer user. Balanced detail, enough to act on, without explaining fundamentals.",
-    "explanation_pro": "For a network/security professional. Terse and technical. Protocol names, attack terminology and abbreviations are expected.",
-    "risk_level": "LOW/MEDIUM/HIGH",
-    "is_threat": true/false,
-    "recommended_action": "Block/Ignore/Monitor",
-    "reason": "Brief reason"
-}}""",
+            _pf.build([
+                "You are Nemesis, an AI security assistant for a home network firewall.",
+                "Analyze this Suricata alert and respond in JSON only, no markdown:",
+                "",
+                ("Alert", _pf.LABEL, alert_body),
+                _NPFA_ALERT_TAIL,
+            ]),
             # Raised from 500 for the three-variant reply. NOT a measured floor:
             # the single-variant replies this route produced were ~120-160 tokens
             # (measured across the two 2026-08-06 verification calls), so three
@@ -10202,10 +10216,10 @@ def diagnostics_page():
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,212,255,0.15)">
             <strong>What this does not cover:</strong>
             <span class="tier-text"
-                data-beginner="This hides passwords and keys. AI alert analysis no longer sends your device addresses out: each one is swapped for a stand-in label (host-A, host-B) before the alert is sent, and swapped back for you to read. The swap list never leaves your network. One thing this does NOT cover: when an alert is looked up in the AbuseIPDB and ipinfo.io reputation services, the real source address IS sent, because those services cannot look up an address they are not given."
-                data-intermediate="Scope is secrets only. Network identifiers are not redacted in general. The AI alert-analysis prompt IS pseudonymized: IPs and MACs are replaced with stable tokens before the call and resolved back for display, and the mapping stays local. SEPARATE EXPOSURE, unaffected by that: IP reputation enrichment sends the real source IP to AbuseIPDB and ipinfo.io, which those APIs require in order to function."
-                data-pro="redact.py matches _SECRET_KEYS + values &ge;8 chars from nemesis.env only; no PII or network-identifier handling. /api/analyze/&lt;rule_id&gt; pseudonymizes its prompt via alert_manager/nemesis_pseudonymize.py (IPv4/IPv6/MAC &rarr; host-N tokens on the assembled body, resolved before storage; map is per-request, never persisted). NOT covered: enrich_ip() (alert_manager/ip_enrichment.py) transmits the real src_ip to api.abuseipdb.com and ipinfo.io on the same route, before the AI call. Pseudonymization cannot apply there — the lookup is the address.">
-                Secrets only. AI alert analysis is pseudonymized, but IP-reputation lookups still send the real source address to AbuseIPDB and ipinfo.io.
+                data-beginner="This hides passwords and keys. Everything sent to the AI is cleaned first, not just alert analysis: your device addresses and your device names are each swapped for a stand-in label (host-A, device-A) before anything leaves, and swapped back for you to read. The swap list never leaves your network. Machine-written reports can now ONLY contain a fixed list of approved details &mdash; there is no way for stray text to slip in. Two things are still sent for real, and always will be, because they ARE the question being asked: when an address is checked against the AbuseIPDB and ipinfo.io reputation services, and when a website name is checked for danger. Nobody can look up an address or a name they were not given. Address checks only ever use a PUBLIC address belonging to the other side &mdash; never your own devices, never this box. One more thing worth knowing: if you type a question to the AI yourself and mention a name we do not already know, that name goes as you typed it."
+                data-intermediate="Scope is secrets only. Network identifiers are not redacted in general. EVERY AI call is pseudonymized at a single chokepoint, not just alert analysis: IPs, MACs and known device names become stable tokens before the call and are resolved back for display, and the mapping stays local. The chokepoint fails closed &mdash; if scrubbing cannot run, the call is not sent. Machine-generated prompts are additionally built from a fixed allowlist of typed fields (NPFA/1, ADR 0025), so unrecognised text cannot enter one at all. TWO DISCLOSURES REMAIN, AND BOTH ARE STRUCTURAL rather than pending work: IP-reputation enrichment sends a real address to AbuseIPDB and ipinfo.io (public addresses only &mdash; private, loopback, link-local and this appliance&#39;s own public addresses are refused before any call), and domain/DNS analysis sends the domain. In both cases the identifier IS the question; neither can be tokenized without removing the feature that needs it. Separately, the follow-up chat sends what you type: addresses and known device names are still scrubbed from it, but a name we do not know is not."
+                data-pro="redact.py matches _SECRET_KEYS + values &ge;8 chars from nemesis.env only; no PII or network-identifier handling. TWO LAYERS. (1) Pseudonymization is enforced inside ai_engine.analyze() &mdash; the single outbound chokepoint &mdash; covering every caller: alert_manager/nemesis_pseudonymize.py maps IPv4/IPv6/MAC &rarr; host-N and known device names &rarr; device-N over the assembled system+user body, resolved before storage, map per-request and never persisted. Names come from devices.friendly_name/hostname + agent_devices.device_name (300s cache); a lookup failure BLOCKS the call rather than sending unscrubbed. (2) NPFA/1 (ADR 0025): the five machine-generated builders (anomaly, community_queue, malware Layer C, dashboard alert, hw_discover) assemble prompts only from typed, validated fields via alert_manager/prompt_fields.py; analyze() refuses any prompt that is not a BuiltPrompt, and tampering downgrades the type. There is no free-text kind. STRUCTURAL DISCLOSURES, PERMANENT BY CONSTRUCTION: enrich_ip() (alert_manager/ip_enrichment.py) transmits a real src_ip to api.abuseipdb.com and ipinfo.io &mdash; public-only, with is_private/is_loopback/is_link_local and _own_public_addresses() refused first; and the DOMAIN field kind reaches the vendor in anomaly/community_queue analysis. Both are the subject of the query, not metadata attached to it, so tokenizing them removes the capability rather than protecting it &mdash; they will not close later. Behind NAT the box cannot know its own public address without asking an external service, which would be the disclosure being avoided; stated, not silently unhandled. ONE EXEMPTION: ask_followup() passes free_text_reason= (the only production caller; asserted by conformance test) because an operator-authored question, often pasted output, cannot be expressed as an allowlist. Chokepoint scrubbing still applies to it; residual is an UNKNOWN name in text the operator chose to send. Generic names (router, printer) are left readable BY DESIGN &mdash; they identify nobody and tokenizing them would wreck prompt semantics; that is a design decision, not a limitation.">
+                Secrets only. Every AI call is pseudonymized and machine-written prompts are built from a fixed field allowlist. Two disclosures are permanent by design &mdash; IP-reputation lookups and domain checks &mdash; because in both the identifier is the question being asked.
             </span>
         </div>
     </div>
@@ -11190,7 +11204,16 @@ def api_hw_rediscover():
     by deleting hw_map.json so the daemon picks up sensors fresh next cycle.
     """
     import subprocess as _sp
-    discover_path = os.path.join(os.path.dirname(hw_monitor.DB_PATH), "hw_discover.py")
+    # PATH BUG FIXED 2026-08-23. This resolved against `dirname(hw_monitor.DB_PATH)`,
+    # which was correct only while the DB lived inside the tree. The 2026-07-27 move
+    # to /var/lib/nemesis/ silently broke it: the path became
+    # /var/lib/nemesis/hw_discover.py, which does not exist, so this route took the
+    # else-branch below and returned ok:True with "not found -- will be rebuilt from
+    # auto-discovery" every single time. A success-shaped answer for work that never
+    # happened -- exactly the failed-read-as-legal-value shape the standing check
+    # forbids. hw_discover.py lives beside the rest of alert_manager/, so resolve it
+    # there, against this file, not against wherever the database happens to be.
+    discover_path = os.path.join(_HERE, "alert_manager", "hw_discover.py")
     try:
         if os.path.exists(discover_path):
             result = _sp.run(
