@@ -1,8 +1,22 @@
 # ADR 0026 — RBAC Learning Gate (per-capability delegated authorization)
 
-- **Status:** **PROPOSED — SPEC ONLY, NO CODE.** Resolves the four decisions the roadmap
-  left open so a build can start. Nothing here is implemented; the build lands via
-  `docs/roadmap/rbac-learning-gate-build-spec.md`.
+- **Status:** **Accepted, 2026-08-23. Partially implemented, 2026-08-23.** Resolves the four
+  decisions the roadmap left open so a build could start.
+  **Landed:** D1 (`sub_admin` rank inserted into `roles.py`, proven additive by
+  recomputing all 2,700 pre-existing (role, endpoint, method) answers against the frozen
+  3-role ordering — zero differences, pinned in the import-time canary) and D2
+  (`CAPABILITY_ROUTES` declared with `push_and_run`/`firewall_change`/`approve_enrollment`
+  all still empty, `may_with_unlocks()`, `assert_capabilities_sane()`), the
+  `user_capability_unlocks` schema (§5), the hand-authored quiz engine (D4) with one real
+  quiz (`push_and_run`), and the unlock read/write/invalidation lifecycle
+  (`alert_manager/{roles,capabilities,quizzes}.py`).
+  **Not yet landed:** D3 (the admin companion-app key-pair and inner-envelope signing),
+  any UI (no quiz-taking page, no unlock display, no settings route), and — as a direct
+  consequence of D2's capabilities all still being empty — no capability currently grants
+  anything and this ADR's code so far changes **no live behavior**. The private build spec
+  (`docs/roadmap/rbac-learning-gate-build-spec.md`, held per the Rule 10 split below — a
+  public reader following this sentence's original wording would find nothing) sequences
+  what remains.
 - **Date:** 2026-08-23
 - **Graduates:** `docs/roadmap/dashboard-roles-access-control.md` (the design of record,
   which names this ADR as its own next step) and
