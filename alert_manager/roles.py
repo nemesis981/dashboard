@@ -248,6 +248,10 @@ ROUTE_MINIMUMS = {
     "api_config_test_email":          (_A, _A),
     "api_config_validate_key":        (_A, _A),
     "api_set_observe_every_n":        (_A, _A),
+    # Admin for both methods. It is POST-only, so the safe minimum is unreachable
+    # in practice -- set to admin anyway rather than left permissive, because a
+    # later GET view added to the same endpoint would otherwise inherit it.
+    "api_set_digest_settings":        (_A, _A),
     "api_backup_schedule":            (_A, _A),
     "api_backup_create":              (_A, _A),
     "api_restart":                    (_A, _A),
