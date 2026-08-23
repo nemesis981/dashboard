@@ -11,7 +11,7 @@ from logging.handlers import RotatingFileHandler
 
 from database import init_db as init_alerts_db, init_quarantines_table
 from ip_enrichment import enrich_ip
-from email_utils import send_email
+import notify
 from firewall import (
     parse_alert,
     ufw_insert_top,
@@ -209,7 +209,13 @@ def send_quarantine_email(parsed, enrichment):
         f"Threat enrichment:\n  {(enrichment or {}).get('summary', 'no enrichment data')}\n\n"
         f"Review at the dashboard to confirm or lift. Auto-expires in {QUARANTINE_HOURS} hour(s)."
     )
-    send_email(subject, body)
+    # CRITICAL, so `route()` sends this immediately no matter what notify_mode
+    # says -- an auto-quarantine that could ride in a twice-daily digest would be
+    # a coverage disable wearing a schedule. The family key is therefore inert
+    # today; it is set because it is the correct grouping (repeat quarantines of
+    # the same address) if this severity is ever revised downward.
+    notify.notify("CRITICAL", subject, body, family_key="quarantine:%s" % ip,
+                  actor="system:alert-watcher")
 
 
 def process_new_alert(parsed):
