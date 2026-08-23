@@ -2,23 +2,36 @@
 """
 hw_discover.py — one-time hardware sensor discovery for Nemesis Firewall.
 
-If ANTHROPIC_API_KEY is present in /etc/nemesis.env, makes a single Claude
-API call to classify all sensors, then lets the user accept or override each
-field.  Falls back to an interactive heuristic flow if no key is available.
+Classifies sensors with a single AI call, then lets the user accept or override
+each field.  Falls back to a heuristic flow when AI is unavailable.
+
+⚠ THE AI CALL GOES THROUGH `ai_engine.analyze()` AND NOWHERE ELSE (2026-08-23).
+This script used to POST directly to the vendor API with a key read out of
+/etc/nemesis.env.  That path was invisible to every control the engine provides
+— no rate limit, no spend accounting, no monthly cap, no circuit breaker, no
+pseudonymization, no cache — so every spend figure the product showed the user
+was understated by whatever this script cost, and the cap could not restrain it.
+There is now exactly one way out to the vendor from this file, and it is
+governed.  See `_governed_ask()`.
+
+IF GOVERNANCE IS UNREACHABLE, NO AI CALL HAPPENS AT ALL.  It deliberately does
+NOT fall back to an ungoverned request: that would reintroduce the whole defect
+under a different name.  Discovery degrades to the heuristic/manual path, which
+is fully supported and always has been.
 
 Saves the final mapping to alert_manager/hw_map.json for use by
 hw_monitor.py.  Supports any number of fans — no limit.
 
-Usage:  python3 hw_discover.py
+Usage:  python3 hw_discover.py           (interactive)
+        python3 hw_discover.py --auto    (non-interactive; never prompts)
 """
 
+import argparse
 import json
 import os
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 
 # ── ANSI colours ─────────────────────────────────────────────────────────────
 G = "\033[32m"    # green   — success / values
@@ -29,12 +42,23 @@ D = "\033[2m"     # dim     — secondary info
 R = "\033[31m"    # red     — errors
 X = "\033[0m"     # reset
 
+import sys as _sys_npfa
 _HERE        = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in _sys_npfa.path:
+    _sys_npfa.path.insert(0, _HERE)
+import prompt_fields as _pf                # NPFA/1 (ADR 0025)
 HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
 NEMESIS_ENV  = "/etc/nemesis.env"
 SERVICE_NAME = "hw-monitor.service"
+#: Model for sensor classification. Passed to `ai_engine.analyze(model=...)`,
+#: which prices and records the call against THIS model rather than assuming the
+#: engine default -- an assumed price is how spend under-reporting starts.
 CLAUDE_MODEL = "claude-haiku-4-5-20251001"
-CLAUDE_URL   = "https://api.anthropic.com/v1/messages"
+
+#: Set by --auto. When true NOTHING in this file may call input(): the caller is
+#: a subprocess with no tty and a hard timeout, so a prompt is not "waiting for
+#: input", it is a hang that ends in a timeout kill.
+AUTO = False
 
 
 # ── Sensor I/O ────────────────────────────────────────────────────────────────
@@ -185,21 +209,48 @@ def print_fan_list(fan_data, selected=None):
 
 
 def suggest_temp(temp_sensors, test):
-    """Print a suggestion hint if any sensor passes test(adapter, unique_key, label)."""
+    """Print a suggestion hint if any sensor passes test(adapter, unique_key, label).
+
+    Returns the matching (adapter, unique_key, label) 3-tuple, or None. It used to
+    return a bare bool, which meant --auto had no way to ACT on the same heuristic
+    the interactive user is shown -- the suggestion existed only as printed text.
+    Returning the entry keeps one heuristic serving both modes instead of letting
+    an --auto-only copy drift away from what the human sees.
+    """
     for i, (adapter, ukey, label, _) in enumerate(temp_sensors, start=1):
         if test(adapter, ukey, label):
             print(f"  {D}Suggested: [{i}]  {adapter} / {label} ({ukey}){X}")
-            return True
-    return False
+            return (adapter, ukey, label)
+    return None
 
 
 # ── Input helpers ──────────────────────────────────────────────────────────────
 
-def ask(prompt, idx_map, required=True, skip_text="skip"):
+def ask(prompt, idx_map, required=True, skip_text="skip", auto_pick=None):
     """
     Prompt for a numbered choice from idx_map.
     Returns the value stored in idx_map (a 3-tuple), or None if the user skips.
+
+    Under --auto this NEVER prompts. It takes `auto_pick` when one was found; an
+    optional field with no pick resolves to None (genuinely "not present on this
+    hardware"). A REQUIRED field with no pick EXITS NON-ZERO rather than guessing:
+    a wrong CPU-temperature sensor is not a smaller failure than no sensor map, it
+    is a monitor that reports confident nonsense, and the caller can only tell the
+    difference if this fails loudly.
     """
+    if AUTO:
+        if auto_pick is not None:
+            print(f"  {D}--auto: {prompt} → {auto_pick[0]} / {auto_pick[2]} ({auto_pick[1]}){X}")
+            return auto_pick
+        if required:
+            print(f"\n  {R}--auto: no sensor could be resolved for a REQUIRED field "
+                  f"({prompt}).{X}", file=sys.stderr)
+            print(f"  {R}Refusing to guess. Re-run interactively to choose one.{X}",
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"  {D}--auto: {prompt} → not present{X}")
+        return None
+
     valid   = set(idx_map.keys())
     max_n   = max(valid) if valid else 0
     range_s = f"1–{max_n}"
@@ -220,19 +271,41 @@ def ask(prompt, idx_map, required=True, skip_text="skip"):
 
 # ── Claude integration ─────────────────────────────────────────────────────────
 
-def _load_api_key():
-    """Read ANTHROPIC_API_KEY from /etc/nemesis.env. Returns key or None."""
+def _load_engine():
+    """Resolve `ai_engine.analyze` for this standalone process, or explain why not.
+
+    Returns (analyze_callable, None) or (None, reason_string).
+
+    THE REASON IS RETURNED, NEVER SWALLOWED. A failed read that comes back as a
+    bare None is indistinguishable from "AI is switched off" to the caller, and
+    the operator then sees "using manual discovery" with no idea whether the key
+    is missing, the DB is absent, or the import broke. Each of those wants a
+    different fix, so each gets its own sentence.
+
+    This runs as a subprocess (install.sh, and the dashboard rebuild route), so
+    it must register the shared DB path BEFORE importing anything that reaches
+    the DB -- `modules.get_shared_db_path()` raises until it is set and this
+    process never runs `modules_loader.init()`. Same discipline as
+    malware_canary.py and the diagnostics watcher.
+    """
+    repo_root = os.path.dirname(_HERE)
     try:
-        with open(NEMESIS_ENV) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip('"').strip("'")
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        print(f"  {Y}Warning: could not read {NEMESIS_ENV}: {e}{X}")
-    return None
+        if repo_root not in sys.path:
+            sys.path.insert(0, repo_root)
+        sys.path.insert(0, _HERE)              # nemesis_paths lives here
+        import nemesis_paths                    # noqa: E402
+        db = nemesis_paths.db_path(None)
+        if not os.path.exists(db):
+            # Install time: the DB does not exist yet. There is no governed path
+            # to take, so there is no AI call -- see the module docstring.
+            return None, (f"the shared database does not exist yet ({db}) — "
+                          "normal during a fresh install")
+        import modules                          # noqa: E402
+        modules.set_shared_db_path(db)
+        from modules.ai_engine import analyze    # noqa: E402
+        return analyze, None
+    except Exception as e:                       # noqa: BLE001
+        return None, f"ai_engine is unavailable ({type(e).__name__}: {e})"
 
 
 def _build_sensor_text(temp_sensors, fan_sensors):
@@ -258,25 +331,25 @@ def _build_sensor_text(temp_sensors, fan_sensors):
     return "\n".join(lines)
 
 
-def _ask_claude(api_key, sensor_text):
-    """Call Claude to classify sensors. Returns parsed JSON dict or None on failure."""
-    prompt = f"""Classify these Linux hardware sensors into roles for a system health monitor.
-
-{sensor_text}
+#: NPFA/1 (ADR 0025): source-authored instruction text for the sensor prompt,
+#: held as constants so the assembly reads as declared parts.
+_SENSOR_PROMPT_HEAD = ("Classify these Linux hardware sensors into roles for a "
+                       "system health monitor.")
+_SENSOR_PROMPT_TAIL = """
 
 Each sensor is identified by its unique_key (e.g. fan10_input, temp2_input) shown in
 parentheses after the label.  Use unique_key — not label — in your response, because
 labels may be duplicated across sensors while unique_keys are always distinct.
 
 Respond with ONLY this JSON (no explanation, no markdown fences):
-{{
-  "cpu_temp": {{"adapter": "...", "unique_key": "temp1_input"}},
-  "ambient_temp": {{"adapter": "...", "unique_key": "temp2_input"}} or null,
-  "nvme_temp": {{"adapter": "...", "unique_key": "temp1_input"}} or null,
+{
+  "cpu_temp": {"adapter": "...", "unique_key": "temp1_input"},
+  "ambient_temp": {"adapter": "...", "unique_key": "temp2_input"} or null,
+  "nvme_temp": {"adapter": "...", "unique_key": "temp1_input"} or null,
   "fans": [
-    {{"adapter": "...", "unique_key": "fan1_input", "confidence": "high|medium|low", "reason": "..."}}
+    {"adapter": "...", "unique_key": "fan1_input", "confidence": "high|medium|low", "reason": "..."}
   ]
-}}
+}
 
 Rules:
 - cpu_temp: Single best CPU die/package temperature. Prefer "Package id", "Tdie", or "Tctl" over individual core temps. Required.
@@ -284,35 +357,57 @@ Rules:
 - nvme_temp: NVMe SSD temperature. Prefer label "Composite" from an nvme adapter. Null if absent.
 - fans: ALL sensors reporting RPM that are real physical fans — include every one found, with no limit. Use confidence "low" for sensors stuck at 0 RPM or with names suggesting phantom/unused headers."""
 
-    payload = json.dumps({
-        "model": CLAUDE_MODEL,
-        "max_tokens": 1024,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode()
 
-    req = urllib.request.Request(
-        CLAUDE_URL,
-        data=payload,
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
+def _governed_ask(analyze, sensor_text):
+    """Classify sensors via ai_engine. Returns (dict, None) or (None, reason).
+
+    THE ONLY OUTBOUND AI CALL IN THIS FILE. Everything the engine enforces --
+    rate limit, spend accounting against the real model price, monthly cap,
+    incident circuit breaker, pseudonymization, cache -- applies because the
+    request leaves through `analyze()` and not a socket opened here.
+
+    `surface` is set so this call is attributable in `ai_usage` rather than
+    landing in whatever bucket an unlabelled call falls into: the whole point
+    of routing it through the engine is that its cost becomes visible.
+    """
+    # NPFA/1 (ADR 0025): the instructions are source-authored literal text and
+    # the sensor block enters as declared LABEL fields -- hardware/vendor
+    # strings, which identify a chip model rather than a household, so unlike
+    # DEVICE_NAME they are deliberately not scrubbed.
+    _parts = [_SENSOR_PROMPT_HEAD]
+    for _line in sensor_text.splitlines():
+        _parts.append((None, _pf.LABEL, _line) if _line.strip() else "")
+    _parts.append(_SENSOR_PROMPT_TAIL)
+    prompt = _pf.build(_parts)
+    result = analyze(
+        prompt,
+        max_tokens=1024,
+        model=CLAUDE_MODEL,
+        cache_key="hw_discover:" + _sensor_fingerprint(sensor_text),
+        cache_hours=0,
+        surface="hw_discover",
     )
+    if not result.get("ok"):
+        # Surface the engine's OWN reason (rate limited / cap reached / breaker
+        # open / pseudonymization failed). Flattening these to "AI unavailable"
+        # would hide a spend cap behind what looks like a network problem.
+        return None, result.get("reason", "the AI engine declined the call")
+
+    text = (result.get("text") or "").strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
-            text = data["content"][0]["text"].strip()
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            return json.loads(text)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()[:300]
-        print(f"\n  {R}Claude API error {e.code}: {body}{X}")
-        return None
-    except Exception as e:
-        print(f"\n  {R}Claude API call failed: {e}{X}")
-        return None
+        return json.loads(text), None
+    except json.JSONDecodeError as e:
+        return None, f"the model returned unparseable JSON ({e})"
+
+
+def _sensor_fingerprint(sensor_text):
+    """Stable short digest of the sensor set, so a re-run on UNCHANGED hardware
+    can hit the engine cache instead of paying twice. Hardware changes change the
+    text, which changes the key -- that is the intended invalidation."""
+    import hashlib
+    return hashlib.sha256(sensor_text.encode("utf-8")).hexdigest()[:16]
 
 
 def _sensor_live_value(parsed, adapter, unique_key):
@@ -390,18 +485,20 @@ def _show_proposal(proposal, parsed):
     print()
 
 
-def _claude_discovery(api_key, parsed, temp_sensors, fan_sensors):
+def _claude_discovery(analyze, parsed, temp_sensors, fan_sensors):
     """
-    Run Claude-assisted sensor classification.
+    Run AI-assisted sensor classification through ai_engine.
     Returns (cpu_map, ambient_map, fans_map, nvme_map) or None to fall back to manual.
     Each map is a {adapter, unique_key, label} dict (or None for optional fields).
     fans_map is a list of such dicts.
     """
-    print(f"\n  Consulting {B}Claude{X} ({CLAUDE_MODEL}) to classify sensors …")
-    proposal = _ask_claude(api_key, _build_sensor_text(temp_sensors, fan_sensors))
+    print(f"\n  Consulting {B}Claude{X} ({CLAUDE_MODEL}) via ai_engine to classify sensors …")
+    proposal, why = _governed_ask(analyze, _build_sensor_text(temp_sensors, fan_sensors))
 
     if proposal is None:
-        print(f"  {Y}Falling back to manual discovery.{X}")
+        # Say WHICH control declined, not just that something did.
+        print(f"  {Y}AI classification unavailable: {why}{X}")
+        print(f"  {Y}Falling back to {'automatic heuristics' if AUTO else 'manual discovery'}.{X}")
         return None
 
     # Validate every proposed entry actually exists in the live data
@@ -417,9 +514,17 @@ def _claude_discovery(api_key, parsed, temp_sensors, fan_sensors):
 
     _show_proposal(proposal, parsed)
 
-    print(f"  {B}[Enter]{X} Accept all     {B}[c]{X} Override CPU     {B}[a]{X} Override ambient")
-    print(f"  {B}[n]{X}     Override NVMe   {B}[f]{X} Override fans    {B}[m]{X} Full manual mode")
-    raw = input(f"\n  {C}▶ Choice{X}: ").strip().lower()
+    if AUTO:
+        # Non-interactive: accept the proposal as-is. It has already been
+        # validated against the live sensor data above, so "accept all" here is
+        # not a blind default -- an entry that did not exist returned None before
+        # reaching this point.
+        print(f"  {D}--auto: accepting the proposal without prompting.{X}")
+        raw = ""
+    else:
+        print(f"  {B}[Enter]{X} Accept all     {B}[c]{X} Override CPU     {B}[a]{X} Override ambient")
+        print(f"  {B}[n]{X}     Override NVMe   {B}[f]{X} Override fans    {B}[m]{X} Full manual mode")
+        raw = input(f"\n  {C}▶ Choice{X}: ").strip().lower()
 
     if raw == "m":
         return None
@@ -440,9 +545,9 @@ def _claude_discovery(api_key, parsed, temp_sensors, fan_sensors):
     if raw == "c" or cpu_map is None:
         hdr("OVERRIDE — CPU TEMPERATURE")
         idx = print_temp_list(temp_sensors)
-        suggest_temp(temp_sensors,
+        pick = suggest_temp(temp_sensors,
                      lambda a, k, l: any(x in l.lower() for x in ("package", "tdie", "tctl")))
-        ch = ask("Select CPU temperature sensor", idx, required=True)
+        ch = ask("Select CPU temperature sensor", idx, required=True, auto_pick=pick)
         cpu_map = {"adapter": ch[0], "unique_key": ch[1], "label": ch[2]}
         print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
 
@@ -488,6 +593,18 @@ def _select_fans_manual(fan_sensors, parsed):
     """
     if not fan_sensors:
         return []
+
+    if AUTO:
+        # No live view (it sleeps 6s and the caller has a hard timeout) and no
+        # prompt. Take every sensor actually reporting rotation: a 0-RPM header is
+        # the phantom/unused case the AI prompt already calls out, and including
+        # one would show the operator a fan that does not exist.
+        picked = [{"adapter": a, "unique_key": k, "label": lbl}
+                  for a, k, lbl, rpm in fan_sensors if rpm and rpm > 0]
+        hdr(f"FAN SENSORS  {D}(--auto: {len(picked)} spinning of {len(fan_sensors)} detected){X}")
+        for f in picked:
+            print(f"  {G}✓  {f['adapter']} / {f['label']} ({f['unique_key']}){X}")
+        return picked
 
     hdr(f"FAN SENSORS — LIVE VIEW  {Y}(optional, select any number){X}")
     print(f"  {D}Values refresh 3 times, 2 s apart. Touch or block a fan to see")
@@ -561,33 +678,34 @@ def main():
     print(f"  {D}(for reference — each role selection uses its own 1-based list){X}\n")
     print_all_sensors(temp_sensors, fan_sensors)
 
-    # ── Try Claude first ───────────────────────────────────────────────────────
-    api_key = _load_api_key()
+    # ── Try the GOVERNED AI path first ─────────────────────────────────────────
+    analyze, why = _load_engine()
     cpu_map = ambient_map = nvme_map = None
     fans_map = []
 
-    if api_key:
-        result = _claude_discovery(api_key, parsed, temp_sensors, fan_sensors)
+    if analyze is not None:
+        result = _claude_discovery(analyze, parsed, temp_sensors, fan_sensors)
         if result is not None:
             cpu_map, ambient_map, fans_map, nvme_map = result
     else:
-        print(f"  {D}ANTHROPIC_API_KEY not found in {NEMESIS_ENV} — using manual discovery.{X}")
+        print(f"  {D}AI classification skipped: {why}{X}")
+        print(f"  {D}Using {'automatic heuristics' if AUTO else 'manual discovery'}.{X}")
 
     # ── Manual discovery (fallback or if Claude returned None) ─────────────────
     if cpu_map is None:
         hdr("CPU TEMPERATURE  (required)")
         idx = print_temp_list(temp_sensors)
-        suggest_temp(temp_sensors,
+        pick = suggest_temp(temp_sensors,
                      lambda a, k, l: any(x in l.lower() for x in ("package", "tdie", "tctl")))
-        ch = ask("Select CPU temperature sensor", idx, required=True)
+        ch = ask("Select CPU temperature sensor", idx, required=True, auto_pick=pick)
         cpu_map = {"adapter": ch[0], "unique_key": ch[1], "label": ch[2]}
         print(f"\n  {G}✓  CPU temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
 
         hdr(f"AMBIENT / CHASSIS TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
-        suggest_temp(temp_sensors, lambda a, k, l: "ambient" in l.lower())
+        pick = suggest_temp(temp_sensors, lambda a, k, l: "ambient" in l.lower())
         ch = ask("Select ambient temperature sensor", idx,
-                 required=False, skip_text="not present on this hardware")
+                 required=False, skip_text="not present on this hardware", auto_pick=pick)
         ambient_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
         if ambient_map:
             print(f"\n  {G}✓  Ambient temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
@@ -602,11 +720,12 @@ def main():
 
         hdr(f"NVME TEMPERATURE  {Y}(optional){X}")
         idx = print_temp_list(temp_sensors)
-        if not suggest_temp(temp_sensors,
-                            lambda a, k, l: "nvme" in a.lower() and l.lower() == "composite"):
-            suggest_temp(temp_sensors, lambda a, k, l: "nvme" in a.lower())
+        pick = suggest_temp(temp_sensors,
+                            lambda a, k, l: "nvme" in a.lower() and l.lower() == "composite")
+        if pick is None:
+            pick = suggest_temp(temp_sensors, lambda a, k, l: "nvme" in a.lower())
         ch = ask("Select NVMe temperature sensor", idx,
-                 required=False, skip_text="not present on this hardware")
+                 required=False, skip_text="not present on this hardware", auto_pick=pick)
         nvme_map = ({"adapter": ch[0], "unique_key": ch[1], "label": ch[2]} if ch else None)
         if nvme_map:
             print(f"\n  {G}✓  NVMe temp  →  {ch[0]} / {ch[2]} ({ch[1]}){X}")
@@ -657,5 +776,21 @@ def main():
     print()
 
 
+def _parse_args(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Hardware sensor discovery for Nemesis Firewall.")
+    ap.add_argument("--auto", action="store_true",
+                    help="Non-interactive: never prompt. Accepts the AI proposal, "
+                         "or falls back to the same heuristics the interactive "
+                         "suggestions use. Exits non-zero if a REQUIRED field "
+                         "cannot be resolved without asking.")
+    return ap.parse_args(argv)
+
+
 if __name__ == "__main__":
+    # --auto was passed by the dashboard rebuild route from the day it was written
+    # and silently ignored here, because this file had no argv handling at all
+    # (grep count: zero). The flag did nothing, the script reached input() with no
+    # tty, and the caller's 30s timeout killed it. Parsing it is the fix.
+    AUTO = _parse_args().auto
     main()
