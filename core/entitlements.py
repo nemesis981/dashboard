@@ -56,11 +56,19 @@ TIER_COMMERCIAL = "commercial"
 #: protected machines as it likes; the cap is only on how many may reach the
 #: server over the VPN.
 #:
-#: Overridable via NEMESIS_FREE_REMOTE_CAP for testing only. It is deliberately
-#: NOT a database setting: a value that decides entitlements must not be reachable
-#: from an API write path, the same reasoning that keeps the agent auth mode in
-#: the environment rather than in `settings`.
-FREE_TIER_REMOTE_CAP = int(os.environ.get("NEMESIS_FREE_REMOTE_CAP", "5"))
+#: It is deliberately NOT a database setting: a value that decides entitlements
+#: must not be reachable from an API write path.
+#:
+#: ⚠ NOT ENVIRONMENT-OVERRIDABLE EITHER (fixed 2026-08-23). This used to read
+#: `os.environ.get("NEMESIS_FREE_REMOTE_CAP", "5")` with a comment saying "for
+#: testing only" -- but a comment is a convention, not a control. Proven:
+#: NEMESIS_FREE_REMOTE_CAP=999999 raised the cap to 999999.
+#:
+#: The original reasoning was exactly right and simply did not go far enough: a
+#: value that decides entitlements must not be reachable from an API write path
+#: OR from the process environment. Both are inputs the person being metered
+#: controls. TESTS monkeypatch this module attribute.
+FREE_TIER_REMOTE_CAP = 5
 
 #: Commercial is uncapped, contingent on the gateway being attached. "Gateway
 #: attached" is not yet machine-evaluable (no gateway_mode flag exists anywhere —

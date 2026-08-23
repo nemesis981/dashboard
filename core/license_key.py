@@ -43,12 +43,8 @@ __all__ = ["verify", "Verdict", "LicenseError", "PUBLIC_KEY_B64",
 KEY_PREFIX = "NEMLIC1"
 
 #: The issuing PUBLIC key (base64url, 32 bytes). Safe to ship -- it can only
-#: verify, never sign. Overridable via NEMESIS_LICENSE_PUBKEY so a test or a
-#: self-hosted deployment can use its own issuer without patching the source.
+#: verify, never sign.
 #:
-#: PLACEHOLDER until the real issuing keypair is generated on an offline machine
-#: and its public half pasted here. `verify()` refuses to run against the
-#: placeholder rather than silently rejecting every real key.
 #: The real issuing key, generated 2026-08-17 on the operator's machine. Its
 #: PRIVATE half lives outside every repository (`~/nemesis-issuer/`, mode 0600)
 #: and is never committed — see scripts/nemesis-license-issue, whose `keygen`
@@ -56,10 +52,25 @@ KEY_PREFIX = "NEMLIC1"
 #:
 #: Publishing the public half is the point: every install must trust the same
 #: issuer, and a public key can only verify, never sign.
+#:
+#: ⚠ NOT ENVIRONMENT-OVERRIDABLE, AND THAT IS THE WHOLE POINT (fixed 2026-08-23).
+#: This used to read `os.environ.get("NEMESIS_LICENSE_PUBKEY", ...)`, which made
+#: the VERIFICATION key caller-controlled. Proven exploitable end-to-end: generate
+#: an Ed25519 keypair, export NEMESIS_LICENSE_PUBKEY=<your public key>, sign
+#: {"tier": "commercial"} with your private half, and `verify()` returned
+#: verdict=valid, tier=commercial. No source access, no patching, no tooling --
+#: one environment variable defeated the entire licensing system.
+#:
+#: The name is legitimate on the ISSUER side (`licensing-backend/` configures a
+#: verification key that way, correctly). Carrying the same affordance into the
+#: CLIENT turned it into a bypass. A verifier must trust exactly one issuer, and
+#: "exactly one" cannot be a runtime input.
+#:
+#: TESTS: monkeypatch the module attribute (`lk.PUBLIC_KEY_B64 = ...`) or use
+#: `_load_public_key`'s cache reset — see core/test_licensing.py. A test-only
+#: seam that exists in the shipped binary is not a test seam, it is a back door.
 _PLACEHOLDER = "REPLACE_WITH_ISSUER_PUBLIC_KEY"
-_BUILTIN_PUBLIC_KEY = "kuTKVWzH-vzIR5Sl7Chf8Z5gf2_yGjE19p_slMqYaOs"
-PUBLIC_KEY_B64 = os.environ.get("NEMESIS_LICENSE_PUBKEY",
-                                _BUILTIN_PUBLIC_KEY).strip()
+PUBLIC_KEY_B64 = "kuTKVWzH-vzIR5Sl7Chf8Z5gf2_yGjE19p_slMqYaOs"
 
 
 class Verdict:
@@ -125,7 +136,7 @@ def _load_public_key():
     if not PUBLIC_KEY_B64 or PUBLIC_KEY_B64 == _PLACEHOLDER:
         raise LicenseError(
             "no issuer public key configured (still the build placeholder). "
-            "Set NEMESIS_LICENSE_PUBKEY or bake the real key into "
+            "Bake the real issuer key into "
             "core/license_key.PUBLIC_KEY_B64.")
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     try:

@@ -47,11 +47,15 @@ _PRIV = Ed25519PrivateKey.generate()
 _PUB_B64 = _b64u(_PRIV.public_key().public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw))
-os.environ["NEMESIS_LICENSE_PUBKEY"] = _PUB_B64
-
 from core import license_key as lk  # noqa: E402
-import importlib  # noqa: E402
-importlib.reload(lk)
+
+# The issuer public key is COMPILED IN and is deliberately not environment- or
+# config-overridable (2026-08-23): making it a runtime input let anyone point the
+# verifier at their own keypair and mint themselves a commercial licence. Tests
+# therefore monkeypatch the module attribute, which exists only in-process and
+# ships in no build. `_load_public_key()` reads this global at call time, so the
+# assignment takes effect without a reload.
+lk.PUBLIC_KEY_B64 = _PUB_B64
 
 
 def make_key(install_id="INSTALL-A", tier="commercial", days=0, priv=None,

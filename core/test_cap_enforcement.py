@@ -153,15 +153,18 @@ def test_unlimited_never_refuses_and_never_calls_the_api():
         os.unlink(db)
 
 
-def test_degraded_census_fails_OPEN_loudly():
-    print("\n[unreconcilable census: permits, but marks it unverified]")
+def test_degraded_census_fails_CLOSED_loudly():
+    print("\n[unreconcilable census: REFUSES, and says it could not check]")
     db = make_db(remote_rows=9)
     try:
         d = decide(db, used_nodes=0, ts=FakeTS(boom=True))
-        # Pinned deliberately: fail-closed here would hard-lock every install on
-        # a vendor outage. See cap_guard's docstring.
-        check("permitted", d.permitted, True)
-        check("state is ALLOW_UNVERIFIED", d.state, "allow_unverified")
+        # CHANGED 2026-08-23: this used to PERMIT. Granting a remote slot is an
+        # ENTITLEMENT decision, and an entitlement that cannot be metered is not
+        # issued -- breaking the census on purpose was a bypass. Protection is a
+        # separate question and is never gated here: the device still installs
+        # and still gets full local protection.
+        check("REFUSED (entitlement fails closed)", d.permitted, False)
+        check("state is REFUSE_UNVERIFIED", d.state, "refuse_unverified")
         # The crucial distinction: permitted, but NOT measured.
         check("NOT verified", d.verified, False)
         check("used is None, not a fabricated number", d.used, None)
@@ -172,12 +175,14 @@ def test_degraded_census_fails_OPEN_loudly():
         os.unlink(db)
 
 
-def test_missing_column_also_fails_open():
-    print("\n[missing remote_enabled column: permits, unverified]")
+def test_missing_column_also_fails_closed():
+    print("\n[missing remote_enabled column: REFUSES, unverified]")
     db = make_db(with_col=False)
     try:
         d = decide(db, used_nodes=0)
-        check("permitted", d.permitted, True)
+        # Same reasoning as the degraded-census case: a schema we cannot read is
+        # a count we cannot verify, and an unmeterable entitlement is not issued.
+        check("REFUSED (entitlement fails closed)", d.permitted, False)
         check("not verified", d.verified, False)
         check("reason names the column", "remote_enabled" in d.reason, True)
     finally:
@@ -286,8 +291,8 @@ if __name__ == "__main__":
     test_the_sixth_is_refused()
     test_boundary_is_exact()
     test_unlimited_never_refuses_and_never_calls_the_api()
-    test_degraded_census_fails_OPEN_loudly()
-    test_missing_column_also_fails_open()
+    test_degraded_census_fails_CLOSED_loudly()
+    test_missing_column_also_fails_closed()
     test_revoked_devices_free_their_slot()
     test_local_devices_are_never_counted()
     test_source_level_wiring()

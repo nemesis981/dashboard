@@ -25,15 +25,29 @@ sails through unverified).
   | census     | internet reachable | decision                 |
   |------------|--------------------|--------------------------|
   | reconciled | —                  | ALLOW / REFUSE by count  |
-  | degraded   | ONLINE             | ALLOW_UNVERIFIED         |
+  | degraded   | ONLINE             | REFUSE_UNVERIFIED        |
   | degraded   | OFFLINE            | REFUSE_NO_CONNECTIVITY   |
-  | degraded   | INCONCLUSIVE       | ALLOW_UNVERIFIED, escalated |
+  | degraded   | INCONCLUSIVE       | REFUSE_UNVERIFIED, escalated |
 
-**Fail-open on ONLINE** — the original reasoning, unchanged. Refusing on
-infrastructure failure punishes the user for the vendor's outage: a Tailscale API
-blip would block every enrollment on every install at once, which is DRM
-behaviour and worse than a briefly over-run cap. An over-count is recoverable; a
-fleet that cannot enroll is an incident.
+**FAIL-CLOSED ON ENTITLEMENT, FAIL-OPEN ON PROTECTION (revised 2026-08-23).**
+These are two different questions and are now governed separately rather than by
+one rule:
+
+  * *"Should this device keep being protected?"* — ALWAYS yes. Protection is never
+    gated on licence or census state, and nothing in this module is consulted on
+    that path. A vendor outage must never reduce anyone's security coverage.
+  * *"May I grant a NEW remote slot?"* — only when the count can actually be
+    verified. **An entitlement that cannot be metered is not issued.**
+
+The earlier reasoning ("a Tailscale API blip would block every enrollment, which
+is DRM behaviour") was answering the first question with machinery that only ever
+decides the second. Granting a new remote slot is a rare, deliberate admin action;
+it is not a hot path, and it is not protection. During a vendor outage: every
+existing device keeps working, every existing remote peer keeps working, LOCAL
+installer generation is unaffected, and the only thing withheld is *adding a new
+remote device until the count can be checked again*. That is a materially smaller
+cost than the original paragraph assumed, and it removes a bypass that was
+reachable by breaking the census on purpose.
 
 **Refuse on OFFLINE** — and this costs the user almost nothing, which is what
 makes it defensible rather than punitive: with no internet the tailnet has no
@@ -41,8 +55,11 @@ coordination server, so a remote device could not reach this box even if the
 grant were issued. Withholding it withholds something unusable. Local installer
 generation is unaffected under all conditions.
 
-**Fail-open on INCONCLUSIVE** — refusing when the CHECKER is broken would let a
-broken checker deny service and make reachability probing a licensing dependency.
+**INCONCLUSIVE also refuses** — for the same reason. A broken checker cannot
+distinguish "the vendor is down" from "someone broke the checker to defeat the
+cap", and the second is the case this exists to handle. The refusal is a distinct
+state with its own remedy ("retry shortly"), never conflated with "you are at your
+limit", so a user is never told to buy slots because a probe failed.
 
 This check has known limitations and is not intended to be airtight against a
 determined local adversary. Full detail is tracked separately (Rule 10 — see
@@ -52,14 +69,22 @@ than spelled out here.
 
 import logging
 
-__all__ = ["Decision", "check_admission", "ALLOW", "REFUSE", "ALLOW_UNVERIFIED",
+__all__ = ["Decision", "check_admission", "ALLOW", "REFUSE", "REFUSE_UNVERIFIED",
            "REFUSE_NO_CONNECTIVITY", "PERMITTING_STATES", "ALL_STATES"]
 
 log = logging.getLogger("nemesis.cap_guard")
 
 ALLOW = "allow"
 REFUSE = "refuse"
-ALLOW_UNVERIFIED = "allow_unverified"
+#: The census could not be reconciled while the box IS online (vendor outage, or
+#: an inconclusive reachability probe). Kept as a DISTINCT state from REFUSE
+#: because the cause and remedy differ -- "you are at your limit" needs a slot
+#: purchase or a revoke; this needs a retry in a few minutes.
+#:
+#: ⚠ THIS USED TO PERMIT (fixed 2026-08-23). It was named ALLOW_UNVERIFIED and sat
+#: in PERMITTING_STATES, so breaking the census while staying online granted
+#: unlimited remote slots. See the FAIL-CLOSED section of the module docstring.
+REFUSE_UNVERIFIED = "refuse_unverified"
 #: The census could not be reconciled AND this box has no internet at all --
 #: which is indistinguishable from someone disconnecting it to defeat the cap.
 #: Distinct from REFUSE because the cause and the remedy are completely
@@ -69,14 +94,18 @@ REFUSE_NO_CONNECTIVITY = "refuse_no_connectivity"
 #: The ONLY states that permit a grant. Everything else refuses.
 #: Enumerated explicitly, and asserted by a backstop test, so that adding a new
 #: state cannot accidentally default to permitting.
-PERMITTING_STATES = (ALLOW, ALLOW_UNVERIFIED)
-ALL_STATES = (ALLOW, REFUSE, ALLOW_UNVERIFIED, REFUSE_NO_CONNECTIVITY)
+#: THE ONLY state that permits a grant. A grant is an ENTITLEMENT decision, and an
+#: entitlement that cannot be metered must not be issued -- see the module
+#: docstring. Enumerated explicitly, and asserted by a backstop test, so adding a
+#: new state cannot accidentally default to permitting.
+PERMITTING_STATES = (ALLOW,)
+ALL_STATES = (ALLOW, REFUSE, REFUSE_UNVERIFIED, REFUSE_NO_CONNECTIVITY)
 
 
 class Decision:
     """A cap decision. `permitted` is the only thing callers should branch on.
 
-    Deliberately not a boolean: ALLOW and ALLOW_UNVERIFIED both permit, but only
+    Deliberately not a boolean: only ALLOW permits, but the refusals differ in
     one of them was actually measured, and the caller must be able to record
     which — otherwise an unverified grant is indistinguishable from a verified
     one the moment it is written to the database.
@@ -130,10 +159,12 @@ class Decision:
                     "Nemesis over the VPN. To add it remotely, revoke a device "
                     "you no longer use, or upgrade your licence."
                     % (self.limit if self.limit is not None else 0))
-        if self.state == ALLOW_UNVERIFIED:
-            return ("Remote access granted, but the remote-device count could "
-                    "not be checked: %s. Review your remote devices when "
-                    "convenient." % self.reason)
+        if self.state == REFUSE_UNVERIFIED:
+            return ("The number of remote devices in use could not be checked "
+                    "right now (%s), so a new remote slot cannot be granted "
+                    "yet. The device can still be installed and will get full "
+                    "local protection. This is usually temporary — try again "
+                    "in a few minutes." % self.reason)
         if self.limit is None:
             return "Remote access granted (unlimited remote devices)."
         return ("Remote access granted. %d of %d remote slots in use."
@@ -164,7 +195,8 @@ def check_admission(db_path=None, additional=1):
         limit = ent.remote_cap_for_license(db_path)
     except Exception as e:
         log.exception("cap guard: could not read the licence")
-        return Decision(ALLOW_UNVERIFIED, reason="licence unreadable: %s" % str(e)[:120])
+        return Decision(REFUSE_UNVERIFIED,
+                        reason="licence unreadable: %s" % str(e)[:120])
 
     if limit is None:
         # Unlimited. No census needed -- do not make an API call to answer a
@@ -176,7 +208,7 @@ def check_admission(db_path=None, additional=1):
         census = remote_census.take(db_path=db_path)
     except Exception as e:
         log.exception("cap guard: census raised")
-        return Decision(ALLOW_UNVERIFIED, limit=limit,
+        return Decision(REFUSE_UNVERIFIED, limit=limit,
                         reason="census failed: %s" % str(e)[:120])
 
     if not census.reconciled or census.count is None:
@@ -201,9 +233,9 @@ def check_admission(db_path=None, additional=1):
 def _degraded_decision(limit, census, db_path=None):
     """The census could not reconcile. Is the internet reachable at all?
 
-    ONLINE       -> vendor outage. ALLOW_UNVERIFIED, as before.
+    ONLINE       -> vendor outage. REFUSE_UNVERIFIED (see the fail-closed note).
     OFFLINE      -> REFUSE_NO_CONNECTIVITY.
-    INCONCLUSIVE -> ALLOW_UNVERIFIED, escalated.
+    INCONCLUSIVE -> REFUSE_UNVERIFIED, escalated.
 
     ── WHY REFUSING WHILE OFFLINE COSTS THE USER (ALMOST) NOTHING ────────────
     If the box has no internet, a remote device cannot reach it anyway -- the
@@ -261,7 +293,7 @@ def _degraded_decision(limit, census, db_path=None):
         log.error("cap guard: granting remote access UNVERIFIED and could not "
                   "establish internet reachability either (limit=%s) — census: %s "
                   "— reachability: %s", limit, census.reason, detail)
-        return Decision(ALLOW_UNVERIFIED, used=None, limit=limit,
+        return Decision(REFUSE_UNVERIFIED, used=None, limit=limit,
                         reason="%s; reachability inconclusive: %s"
                                % (census.reason, detail), census=census)
 
@@ -269,5 +301,5 @@ def _degraded_decision(limit, census, db_path=None):
     log.warning("cap guard: granting remote access WITHOUT a verified count "
                 "(limit=%s) — %s (internet reachable: %s)",
                 limit, census.reason, detail)
-    return Decision(ALLOW_UNVERIFIED, used=None, limit=limit,
+    return Decision(REFUSE_UNVERIFIED, used=None, limit=limit,
                     reason=census.reason, census=census)

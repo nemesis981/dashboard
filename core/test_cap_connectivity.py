@@ -1,4 +1,8 @@
-"""Tests for the connectivity-aware fail-open logic in cap_guard.
+"""Tests for the connectivity-aware admission logic in cap_guard.
+
+FAIL-CLOSED ON ENTITLEMENT since 2026-08-23 (was fail-open): granting a remote
+slot requires a verified count. Protection is a separate question and is never
+decided here -- a refused grant still leaves the device fully protected locally.
 
 Run:  python3 core/test_cap_connectivity.py
 
@@ -95,16 +99,26 @@ def decide(db, ts, reach_state, corro=None, cap=5, reach_raises=False):
 
 # ── the two halves of the line ───────────────────────────────────────────────
 
-def test_case1_vendor_outage_still_fails_open():
-    """Tailscale down, internet fine -> unchanged behaviour."""
-    print("\n[CASE 1: Tailscale API down, internet ONLINE -> still fails open]")
+def test_case1_vendor_outage_fails_closed():
+    """Tailscale down, internet fine -> REFUSES the grant (changed 2026-08-23).
+
+    This asserted fail-OPEN until the entitlement/protection split. Granting a
+    remote slot is an ENTITLEMENT decision and an entitlement that cannot be
+    metered is not issued -- breaking the census on purpose was otherwise a
+    one-step bypass. Protection is a separate question and is not decided here:
+    the device still installs and still gets full local protection.
+    """
+    print("\n[CASE 1: Tailscale API down, internet ONLINE -> refuses, unverified]")
     db = make_db(remote_rows=99)          # far over cap: only the state matters
     try:
         d = decide(db, FakeTS(boom=True), nr.ONLINE)
-        check("permitted", d.permitted, True)
-        check("state", d.state, cap_guard.ALLOW_UNVERIFIED)
+        check("REFUSED", d.permitted, False)
+        check("state", d.state, cap_guard.REFUSE_UNVERIFIED)
         check("not verified", d.verified, False)
         check("used is None, not fabricated", d.used, None)
+        # Distinct from "you are at your limit" -- different cause, different remedy.
+        check("not conflated with the cap being full",
+              d.state != cap_guard.REFUSE, True)
     finally:
         os.unlink(db)
 
@@ -165,23 +179,35 @@ def test_disagreement_the_other_way_is_inconclusive():
     try:
         d = decide(db, FakeTS(boom=True), nr.ONLINE,
                    corro=(nr.OFFLINE, "diagnostics verdict LOCAL_FAIL (30s old)"))
-        check("permitted", d.permitted, True)
-        check("state", d.state, cap_guard.ALLOW_UNVERIFIED)
+        check("REFUSED", d.permitted, False)
+        check("state", d.state, cap_guard.REFUSE_UNVERIFIED)
+        # The point of this test is unchanged by the fail-closed switch: the two
+        # signals disagree and neither is silently preferred. Only the decision
+        # that follows changed.
         check("reason records the disagreement", "disagree" in d.reason, True)
     finally:
         os.unlink(db)
 
 
-def test_broken_probe_permits():
-    """A probe that raises must not deny service."""
-    print("\n[broken probe -> INCONCLUSIVE, permitted, recorded]")
+def test_broken_probe_refuses_and_says_why():
+    """A probe that raises must not silently grant.
+
+    This asserted "must not deny service" until 2026-08-23. It still does not
+    deny the PRODUCT -- local installation and protection are untouched. It
+    declines to mint a new remote slot while the checker is broken, because a
+    broken checker cannot distinguish a vendor outage from someone breaking the
+    checker to defeat the cap, and the second is the case this exists to handle.
+    """
+    print("\n[broken probe -> INCONCLUSIVE, refused, recorded]")
     db = make_db()
     try:
         d = decide(db, FakeTS(boom=True), nr.ONLINE, reach_raises=True)
-        check("permitted", d.permitted, True)
-        check("state", d.state, cap_guard.ALLOW_UNVERIFIED)
+        check("REFUSED", d.permitted, False)
+        check("state", d.state, cap_guard.REFUSE_UNVERIFIED)
         check("reason names the probe failure",
               "inconclusive" in d.reason.lower(), True)
+        check("message tells the user to retry, not to buy slots",
+              "try again" in d.user_message().lower(), True)
     finally:
         os.unlink(db)
 
@@ -191,8 +217,13 @@ def test_partial_reachability_is_not_offline():
     db = make_db()
     try:
         d = decide(db, FakeTS(boom=True), nr.INCONCLUSIVE)
-        check("permitted (ordinary internet weather)", d.permitted, True)
-        check("state", d.state, cap_guard.ALLOW_UNVERIFIED)
+        check("REFUSED", d.permitted, False)
+        # THE POINT OF THIS TEST IS UNCHANGED: partial reachability is
+        # INCONCLUSIVE, never OFFLINE. Both refuse now, so the distinction lives
+        # in WHICH refusal -- and it still matters, because "reconnect this
+        # server" and "try again shortly" are different instructions.
+        check("state", d.state, cap_guard.REFUSE_UNVERIFIED)
+        check("NOT classified as offline", d.state != cap_guard.REFUSE_NO_CONNECTIVITY, True)
     finally:
         os.unlink(db)
 
@@ -251,13 +282,17 @@ def test_stale_diagnostics_gives_no_opinion():
 
 # ── backstops ────────────────────────────────────────────────────────────────
 
-def test_only_two_states_permit():
-    print("\n[backstop: exactly two states permit a grant]")
+def test_only_one_state_permits():
+    """Backstop: adding a state must not accidentally default to permitting.
+
+    Was "exactly two states permit" until 2026-08-23. ALLOW is now the only one:
+    a grant requires a verified count, not merely the absence of a refusal.
+    """
+    print("\n[backstop: exactly ONE state permits a grant]")
     permitting = [s for s in cap_guard.ALL_STATES
                   if cap_guard.Decision(s, limit=5).permitted]
     check("all states enumerated", len(cap_guard.ALL_STATES), 4)
-    check("exactly ALLOW and ALLOW_UNVERIFIED permit",
-          sorted(permitting), sorted([cap_guard.ALLOW, cap_guard.ALLOW_UNVERIFIED]))
+    check("exactly ALLOW permits", sorted(permitting), [cap_guard.ALLOW])
 
 
 def test_no_message_contradicts_its_decision():
@@ -267,15 +302,27 @@ def test_no_message_contradicts_its_decision():
     the trailing "Remote access granted..." text. That is worse than no message.
     """
     print("\n[backstop: no refusing state produces a 'granted' message]")
+    # MATCH THE CLAIM, NOT THE WORD (corrected 2026-08-23). The bare substring
+    # "granted" flagged REFUSE_UNVERIFIED's correct message -- "a new remote slot
+    # cannot be granted yet" -- as though it claimed a grant. The matcher was
+    # wrong, not the wording. A refusal that contains the word while denying it
+    # is exactly what this backstop should tolerate; what it must catch is a
+    # refusal that reads as "Remote access granted".
+    CLAIM = "access granted"
     for s in cap_guard.ALL_STATES:
         d = cap_guard.Decision(s, used=2, limit=5)
         msg = d.user_message().lower()
         if not d.permitted:
-            check("%s does not say 'granted'" % s, "granted" in msg, False)
+            check("%s does not CLAIM a grant" % s, CLAIM in msg, False)
+            # Paired positive: absence of the claim is not enough -- the message
+            # must actually read as a refusal, or an empty string would pass.
+            check("%s reads as a refusal" % s,
+                  any(w in msg for w in ("cannot", "no internet", "used all",
+                                         "not be granted", "try again")), True)
         else:
-            # CONTROL: permitting states SHOULD say granted, or the check above
+            # CONTROL: permitting states SHOULD claim a grant, or the check above
             # would pass against a function that never says it at all.
-            check("CONTROL %s does say 'granted'" % s, "granted" in msg, True)
+            check("CONTROL %s does claim a grant" % s, CLAIM in msg, True)
 
 
 
@@ -305,17 +352,17 @@ def test_route_reports_the_right_cause():
 
 
 if __name__ == "__main__":
-    print("cap guard — connectivity-aware fail-open")
-    test_case1_vendor_outage_still_fails_open()
+    print("cap guard — connectivity-aware admission (fail-closed on entitlement)")
+    test_case1_vendor_outage_fails_closed()
     test_case2_no_internet_refuses()
     test_connectivity_never_overrides_a_real_count()
     test_frozen_cache_bypass_is_closed()
     test_disagreement_the_other_way_is_inconclusive()
-    test_broken_probe_permits()
+    test_broken_probe_refuses_and_says_why()
     test_partial_reachability_is_not_offline()
     test_quorum_classification()
     test_stale_diagnostics_gives_no_opinion()
-    test_only_two_states_permit()
+    test_only_one_state_permits()
     test_no_message_contradicts_its_decision()
     test_route_reports_the_right_cause()
 
