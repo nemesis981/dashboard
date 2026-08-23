@@ -10,5 +10,11 @@
   "enabled_by_default": true,
   "confirmation_required": false,
   "apt_deps": [],
-  "pip_deps": []
+  "pip_deps": [],
+  "write_functions": [
+    "open_ticket",
+    "add_note",
+    "scan_agent_error_reports_for_tickets",
+    "scan_error_ledger_for_tickets"
+  ]
 }

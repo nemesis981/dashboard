@@ -1256,3 +1256,20 @@ class Module(NemesisModule):
             ("/api/tickets/settings",
              _api_ticket_settings,      {"methods": ["GET", "POST"]}),
         ]
+
+
+# ── Write gate (2026-08-23) ──────────────────────────────────────────────────
+# Applied at IMPORT time, so it protects every importer -- including watchdog,
+# hw_monitor and nemesis_connectivity_notify, which never run modules_loader and
+# therefore cannot see in-process load state. The names come from the manifest so
+# the declaration lives in one place; `gate_module_writes` RAISES if a declared
+# name is missing, rather than silently gating nothing.
+from modules.gate import gate_module_writes as _gate_writes   # noqa: E402
+import json as _json_gate, os as _os_gate                     # noqa: E402
+_gate_writes(
+    "tickets",
+    globals(),
+    _json_gate.load(open(_os_gate.path.join(_os_gate.path.dirname(
+        _os_gate.path.abspath(__file__)), "manifest.json"),
+        encoding="utf-8")).get("write_functions", []),
+)

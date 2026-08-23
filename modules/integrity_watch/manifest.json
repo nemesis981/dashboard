@@ -10,5 +10,8 @@
   "enabled_by_default": false,
   "confirmation_required": false,
   "apt_deps": [],
-  "pip_deps": []
+  "pip_deps": [],
+  "write_functions": [
+    "evaluate"
+  ]
 }

@@ -80,6 +80,15 @@ def set_enabled(name: str, enabled: bool, actor: str = None) -> None:
     if not enabled and _manifests[name].get("required"):
         raise ValueError(f"Module {name!r} is required and cannot be disabled")
     _set_enabled_in_db(name, enabled, actor)
+    # Drop the write gate's cached answer so a toggle takes effect in THIS process
+    # immediately rather than up to its TTL later. Other processes pick it up on
+    # their own next TTL expiry -- that lag is the documented cost of sharing the
+    # state through the database, which is the only thing they all see.
+    try:
+        from modules import gate as _gate
+        _gate.invalidate(name)
+    except Exception:                                            # noqa: BLE001
+        log.exception("modules_loader: could not invalidate write-gate cache for %s", name)
     if enabled:
         _load_module(name)
     else:
@@ -317,13 +326,58 @@ def _load_module(name: str) -> None:
         for rule, view_func, options in routes:
             endpoint = f"module_{name}_{view_func.__name__}"
             try:
-                _app.add_url_rule(rule, endpoint, view_func, **options)
+                _app.add_url_rule(rule, endpoint,
+                                  _guard_view(name, view_func), **options)
             except AssertionError:
                 # Route already registered (e.g. module reloaded in dev)
                 log.debug("Route %s already registered, skipping", rule)
 
     _loaded[name] = instance
     log.info("modules_loader: loaded module %s", name)
+
+
+def _guard_view(name: str, view_func):
+    """Wrap a module view so it stops serving when the module is disabled.
+
+    WHY A WRAPPER AND NOT DEREGISTRATION: Flask builds `url_map` at registration and
+    exposes no supported way to remove a rule. Before this, `_unload_module` popped the
+    instance from `_loaded` and the route kept serving 200s from the still-bound
+    instance -- a disabled module answering writes. Reproduced directly before the fix.
+
+    503, not 404: the route exists and is expected to work again the moment the module
+    is re-enabled. 404 would say "no such endpoint", which is false and would send an
+    operator looking for a routing bug instead of a switched-off module.
+
+    ⚠ TWO CASES, AND THEY BEHAVE DIFFERENTLY. Confirmed on a live appliance 2026-08-23:
+
+      * TOGGLED OFF in a running process -> the route is registered, this guard runs,
+        the caller gets 503.
+      * ALREADY OFF AT STARTUP -> `_load_all_enabled()` never loads the module, so
+        `_load_module` never runs and the route is NEVER REGISTERED. Flask answers 404.
+
+    Quiescence holds in both cases -- no handler runs, nothing is written -- so this is
+    a DIAGNOSTIC inconsistency, not a safety one. But it is exactly the misleading
+    signal the paragraph above argues against, so it is written down rather than left
+    for someone to rediscover: after a restart, a disabled module's routes 404.
+
+    Making it uniformly 503 means registering routes for modules that are not running,
+    which requires separating "construct the instance to read its routes" from "start
+    it" -- a real change to the module contract, deliberately not folded in here.
+    Tracked as a follow-up.
+    """
+    def _guarded(*a, **k):
+        if name not in _loaded:
+            from flask import jsonify
+            return jsonify({
+                "ok": False,
+                "error": f"module {name!r} is disabled",
+                "module": name,
+            }), 503
+        return view_func(*a, **k)
+    _guarded.__name__ = view_func.__name__
+    _guarded.__doc__ = view_func.__doc__
+    _guarded.__wrapped__ = view_func
+    return _guarded
 
 
 def _unload_module(name: str) -> None:

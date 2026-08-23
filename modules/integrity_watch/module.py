@@ -421,3 +421,22 @@ class Module(NemesisModule):
         # new dashboard route triggers the standing route-level security audit
         # and an explicit _AUTH_EXEMPT check, so it lands as its own change.
         return None
+
+
+# ── Write gate (2026-08-23) ──────────────────────────────────────────────────
+# Applied at IMPORT time so it protects every importer, including processes that
+# never run modules_loader. Names come from the manifest; `gate_module_writes`
+# RAISES if a declared name is missing rather than silently gating nothing.
+#
+# These three were invisible to the conformance detector until it learned to
+# follow indirection (Window 3's finding, same day): each writes through a
+# helper rather than executing SQL itself.
+from modules.gate import gate_module_writes as _gate_writes   # noqa: E402
+import json as _json_gate, os as _os_gate                     # noqa: E402
+_gate_writes(
+    "integrity_watch",
+    globals(),
+    _json_gate.load(open(_os_gate.path.join(_os_gate.path.dirname(
+        _os_gate.path.abspath(__file__)), "manifest.json"),
+        encoding="utf-8")).get("write_functions", []),
+)

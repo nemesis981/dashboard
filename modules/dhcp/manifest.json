@@ -11,7 +11,11 @@
     "mode": {
       "type": "choice",
       "default": "provider",
-      "choices": ["nemesis", "pihole", "provider"],
+      "choices": [
+        "nemesis",
+        "pihole",
+        "provider"
+      ],
       "label": "Which system serves DHCP?",
       "help": "Changing this does not reconfigure your router. Whichever option you pick, make sure exactly ONE system on your network is serving DHCP.",
       "choice_labels": {
@@ -28,7 +32,14 @@
   },
   "enabled_by_default": false,
   "confirmation_required": true,
-  "confirmation_message": "This controls which system hands out IP addresses on your network.\n\nIf you select 'Nemesis serves DHCP', you MUST first turn DHCP off on your router. Two DHCP servers running at the same time cause address conflicts and connectivity failures for every device on the network.\n\nThe other two options do not change your network — they tell Nemesis to stay out of DHCP, and the module will explain which features are unavailable as a result.",
-  "apt_deps": ["dnsmasq-base"],
-  "pip_deps": []
+  "confirmation_message": "This controls which system hands out IP addresses on your network.\n\nIf you select 'Nemesis serves DHCP', you MUST first turn DHCP off on your router. Two DHCP servers running at the same time cause address conflicts and connectivity failures for every device on the network.\n\nThe other two options do not change your network \u2014 they tell Nemesis to stay out of DHCP, and the module will explain which features are unavailable as a result.",
+  "apt_deps": [
+    "dnsmasq-base"
+  ],
+  "pip_deps": [],
+  "write_functions": [],
+  "write_functions_exempt": {
+    "ensure_codes_registered": "Registers this module's error-code VOCABULARY in the shared error_codes catalog. Not module work: it takes an explicit conn, is only ever called from start() (which cannot run while disabled), and the codes must remain resolvable so previously-recorded errors still render after the module is switched off. Gating it would add a failure mode and protect nothing.",
+    "check_preconditions": "A PREDICATE, not module work: it answers 'could this module serve?' and is run precisely to decide whether to enable it, so gating it is a chicken-and-egg \u2014 you could never check preconditions on a disabled module, which is the only time you need to. Its write is an incidental audit side-effect (occurrence recording, skipped entirely when conn=None). RESIDUAL, recorded not hidden: called with a live conn while disabled it would still record occurrences. Bounded \u2014 audit rows only, no dhcp state, no service action."
+  }
 }
