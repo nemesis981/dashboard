@@ -176,7 +176,29 @@ def _degraded(code: str, severity: str, message: str, context: dict) -> None:
 
 
 def _email_async(subject: str, body: str) -> None:
-    """Off-thread so a 30s SMTP timeout cannot stall detection of the next event."""
+    """Off-thread so a 30s SMTP timeout cannot stall detection of the next event.
+
+    DELIBERATELY STILL `send_email`, NOT `notify.notify()` — do not "finish" the
+    2026-08-23 digest wiring by converting this. Every other alert path in the
+    product now routes through `notify.notify()`, which makes this look like an
+    oversight. It is not.
+
+    In digest mode `notify.notify()` OPENS THE SHARED DATABASE to queue the event.
+    This process must never do that, for the reason `_audit_row` above records in
+    full: it runs as root with CAP_NET_ADMIN and no CAP_DAC_OVERRIDE, so opening
+    alerts.db creates the WAL sidecars owned by ROOT, and the unprivileged
+    dashboard is then silently locked out of writing to its own database. That
+    happened on 2026-08-01 and was measured, not theorised.
+
+    The trap is that it would look fine in testing: the shipped default
+    (`notify_mode = "immediate"`) never opens the DB, so the fault stays latent
+    until an operator switches to digest — at which point the FIRST firewall
+    tamper alert breaks the dashboard's writes.
+
+    If bundling these alerts is ever genuinely wanted, the route is the one
+    `_audit_row` already uses: write to the degraded journal and let the dashboard
+    ingest and enqueue it as the user that owns the database.
+    """
     def _send():
         try:
             import email_utils
