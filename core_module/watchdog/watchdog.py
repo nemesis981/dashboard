@@ -602,6 +602,41 @@ def _check_sleep(seconds):
         time.sleep(seconds)
 
 
+
+def _digest_tick() -> None:
+    """Send any due twice-daily digest. Never raises into the loop.
+
+    HOSTED HERE because the watchdog is the one core service that already runs a
+    steady loop, already holds a DB path, and already owns "notice something and
+    email about it". Adding a second always-on service to send two emails a day
+    would be more moving parts for no gain.
+
+    SAFE TO CALL EVERY CYCLE. `run_digest_tick` consults the recorded last-sent,
+    so at most one OPEN and one CLOSE go out per local day no matter how often
+    this fires. That property is what makes hosting it on a short-interval loop
+    correct rather than merely convenient — and it is asserted directly in
+    `alert_manager/test_notify.py`, not assumed here.
+    """
+    try:
+        import notify                                       # noqa: PLC0415
+        import database as _db_notify                       # noqa: PLC0415
+    except Exception:                                       # noqa: BLE001
+        return
+    conn = sqlite3.connect(HW_DB_PATH, timeout=5.0)
+    try:
+        result = notify.run_digest_tick(conn, _db_notify.get_setting)
+    finally:
+        conn.close()
+    for r in result.get("results", []):
+        if r.get("ok"):
+            logging.info("digest: sent %s (%d event(s))", r["which"], r.get("sent", 0))
+        else:
+            # Loud, because the events are still queued and a silent failure here
+            # is indistinguishable from a quiet day.
+            logging.error("digest: %s FAILED (%s); %d event(s) remain queued",
+                          r.get("which"), r.get("error"), r.get("queued", 0))
+
+
 def main() -> None:
     logging.info("Watchdog started. Monitoring: %s", ", ".join(SERVICES))
     _init_cooldown_table()
@@ -614,6 +649,7 @@ def main() -> None:
         import throttle                                  # noqa: PLC0415
         import database as _db_throttle                  # noqa: PLC0415
         _db_throttle.init_throttle_tables()
+        _db_throttle.init_notify_tables()
         _throttle = throttle.register_throttle_aware(
             "watchdog", data_manager.DataManager(HW_DB_PATH))
         logging.info("throttle: watchdog registered as throttle-aware")
@@ -640,6 +676,12 @@ def main() -> None:
             check_hw_metrics()
         except Exception as exc:
             logging.exception("Unexpected error in check_hw_metrics: %s", exc)
+        try:
+            _digest_tick()
+        except Exception as exc:                           # noqa: BLE001
+            # A digest failure must never stop health monitoring. The watchdog's
+            # job is watching services; mailing a summary is strictly secondary.
+            logging.exception("Unexpected error in _digest_tick: %s", exc)
         _check_sleep(CHECK_INTERVAL_SECONDS)
 
 
