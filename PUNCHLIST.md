@@ -3801,20 +3801,20 @@ false premise it will then reference in conversation.
 `_format_ai_report_html()`'s pattern from `anomaly_detection/module.py`), and drop the
 now-inaccurate "already shown" line from the chat prompt until it is.
 
-### [LOW] `ARCHITECTURE.md` documents an approval vocabulary the shipped code doesn't use (found 2026-08-21)
+### [DONE — 2026-08-21] `ARCHITECTURE.md` documents an approval vocabulary the shipped code doesn't use (found 2026-08-21)
 Filed independent of any future AI-automation-mode work (same audit, §3 F9) — a docs/code
 consistency gap, not a defect in running behavior.
 
-`ARCHITECTURE.md` describes "Teaching Mode" and "Automated Mode" with a LOW/MEDIUM/HIGH
-tiered-approval vocabulary (click OK / confirm / type YES). Neither string appears anywhere
+`ARCHITECTURE.md` described "Teaching Mode" and "Automated Mode" with a LOW/MEDIUM/HIGH
+tiered-approval vocabulary (click OK / confirm / type YES). Neither string appeared anywhere
 in the codebase (`teaching_mode` / `automated_mode` / `auto_execute`: 0 hits). What actually
 shipped is a different, better design — a graduated L0_OBSERVE→L4_GOVERN authority ladder
-with per-action-class ceilings (`ai_engine/module.py`) — but the doc was never updated to
-match, so the product currently describes two incompatible approval models on paper.
+with per-action-class ceilings (`ai_engine/module.py`).
 
-**Candidate fix:** retire the LOW/MEDIUM/HIGH language from `ARCHITECTURE.md` and document
-the L0–L4 ladder as the real design. Small, no code change — but worth doing before anyone
-scopes automation work against the stale description.
+**Fixed same day, commit `c7ac0cc`** ("docs(architecture): replace the fictional
+Teaching/Automated Mode note with the real L0-L4 ladder"), later extended by `b77c3b6`
+(the ladder's `alert_disposition` reconciliation). Found stale-and-still-open in the
+2026-08-23 V2.0 gap-scan — the fix had already landed, this checkbox just hadn't been.
 
 ### [HIGH — private writeup] A second AI code path bypasses every control the engine provides (found 2026-08-21)
 Filed independent of any future AI-automation-mode work (same audit, §6 S1) — a present-day
