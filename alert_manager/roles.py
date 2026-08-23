@@ -71,12 +71,28 @@ __all__ = [
 # ── The roles ────────────────────────────────────────────────────────────────
 
 ROLE_ADMIN = "admin"
+ROLE_SUB_ADMIN = "sub_admin"
 ROLE_USER = "user"
 ROLE_VIEWONLY = "viewonly"
 
 # Ordered least- to most-privileged. Order is the authority for `rank`; do not
 # reorder without understanding that every comparison below depends on it.
-ROLES = (ROLE_VIEWONLY, ROLE_USER, ROLE_ADMIN)
+#
+# SUB_ADMIN INSERTED 2026-08-23 (ADR 0026 D1), between user and admin. The
+# insertion is deliberately ADDITIVE — it does not change what any existing role
+# may do:
+#
+#   * an entry whose minimum is `admin` still excludes sub_admin (3 > 2), which is
+#     correct: a sub-admin reaches those routes only by unlocking the capability
+#     that covers them, never by rank alone;
+#   * an entry whose minimum is `user` or `viewonly` admits sub_admin, which is
+#     also correct — a sub-admin is at least an ordinary user.
+#
+# So no per-entry review of the registry was required, and none was done by hand.
+# That property is ASSERTED rather than assumed: the canary below pins every
+# existing role's answer for every registry entry against the pre-insertion
+# ranking, so a future reorder that silently changed one cannot pass.
+ROLES = (ROLE_VIEWONLY, ROLE_USER, ROLE_SUB_ADMIN, ROLE_ADMIN)
 
 _RANK = {name: i for i, name in enumerate(ROLES)}
 
@@ -87,6 +103,7 @@ DEFAULT_ROLE = ROLE_USER
 
 _LABELS = {
     ROLE_ADMIN: "Administrator",
+    ROLE_SUB_ADMIN: "Delegated operator",
     ROLE_USER: "Standard user",
     ROLE_VIEWONLY: "View only",
 }
@@ -94,6 +111,12 @@ _LABELS = {
 _DESCRIPTIONS = {
     ROLE_ADMIN: ("Full control, including settings, modules, user accounts, and "
                  "tools that reach out to other machines."),
+    # Deliberately describes what they can EARN, not what they hold. A sub-admin
+    # with no unlocks is exactly a standard user, and the label would otherwise
+    # promise access the account does not have.
+    ROLE_SUB_ADMIN: ("Everything a standard user can do, plus any powerful tools "
+                     "they have earned by completing that tool's training. Starts "
+                     "with none of them."),
     ROLE_USER: ("Day-to-day use: read everything, deal with alerts, and run "
                 "look-up tools. Cannot change settings or probe other machines."),
     ROLE_VIEWONLY: ("Can read dashboards, alerts and reports. Cannot change "
@@ -125,8 +148,13 @@ def normalise_role(raw):
     text = re.sub(r"[\s_-]+", "", str(raw).strip().lower())
     if not text:
         raise UnknownRole("empty role")
+    # Note the normalisation above strips [\s_-], so "sub_admin", "sub-admin" and
+    # "Sub Admin" all arrive here as "subadmin". Listing the punctuated spellings
+    # would be dead code, not extra safety.
     aliases = {
         "admin": ROLE_ADMIN, "administrator": ROLE_ADMIN, "superuser": ROLE_ADMIN,
+        "subadmin": ROLE_SUB_ADMIN, "delegated": ROLE_SUB_ADMIN,
+        "delegatedoperator": ROLE_SUB_ADMIN,
         "user": ROLE_USER, "standard": ROLE_USER, "standarduser": ROLE_USER,
         "viewonly": ROLE_VIEWONLY, "readonly": ROLE_VIEWONLY,
         "view": ROLE_VIEWONLY, "reader": ROLE_VIEWONLY,
@@ -449,6 +477,132 @@ def may(role, endpoint, method="GET"):
     return at_least(role, required_role(endpoint, method))
 
 
+# ── Capabilities (ADR 0026 D2) ───────────────────────────────────────────────
+
+class UnknownCapability(RoleError):
+    """A capability name that is not in CAPABILITY_ROUTES.
+
+    RAISED, never treated as "not unlocked". A typo'd capability that reads as
+    merely-locked is the `_AUTH_EXEMPT` failure in a new place: it looks like
+    coverage and protects nothing, and every caller would see a plausible denial
+    instead of a broken name.
+    """
+
+
+#: Capability -> the endpoints unlocking it grants a sub-admin.
+#:
+#: ALL THREE ARE DELIBERATELY EMPTY. These are the capability keys the roadmap
+#: names, and none of the features exists yet -- `push_and_run`,
+#: `firewall_change` and `approve_enrollment` have zero code presence repo-wide
+#: (verified 2026-08-23). Declaring them empty records the intent without
+#: inventing route names for features nobody has built; each fills in when its
+#: feature lands. An empty capability is a legal, meaningful state -- see
+#: `capability_state`.
+CAPABILITY_ROUTES = {
+    "push_and_run": frozenset(),
+    "firewall_change": frozenset(),
+    "approve_enrollment": frozenset(),
+}
+
+#: A capability that is declared but has no endpoints yet.
+CAP_DECLARED = "declared"
+#: A capability with at least one endpoint -- actually unlockable.
+CAP_BUILT = "built"
+
+
+def capability_state(capability):
+    """CAP_DECLARED or CAP_BUILT. Raises UnknownCapability for a bad name.
+
+    The UI MUST distinguish these. Offering a quiz for a declared-but-unbuilt
+    capability would let someone complete training that unlocks nothing, which
+    reads to them as a broken reward rather than an unfinished feature.
+    """
+    try:
+        routes = CAPABILITY_ROUTES[capability]
+    except KeyError:
+        raise UnknownCapability("%r is not a declared capability" % (capability,)) from None
+    return CAP_BUILT if routes else CAP_DECLARED
+
+
+def capability_for_endpoint(endpoint):
+    """Which capability covers this endpoint, or None.
+
+    One endpoint may belong to at most ONE capability -- enforced by
+    `assert_capabilities_sane()`. Two capabilities covering the same route makes
+    "which unlock applies" unanswerable the moment they disagree.
+    """
+    for name, routes in CAPABILITY_ROUTES.items():
+        if endpoint in routes:
+            return name
+    return None
+
+
+def assert_capabilities_sane(endpoints=None):
+    """The four D2 rules, checked mechanically. Raises RoleError listing failures.
+
+    `endpoints` is the live set from `app.url_map` when available; pass it and the
+    existence rule is checked against reality rather than a second hand-kept list.
+    """
+    problems = []
+    seen = {}
+    for name, routes in CAPABILITY_ROUTES.items():
+        for ep in routes:
+            if ep in seen:
+                problems.append("endpoint %r is claimed by BOTH %r and %r; "
+                                "which unlock applies is unanswerable"
+                                % (ep, seen[ep], name))
+            seen[ep] = name
+            # A capability may only cover endpoints that are admin-only for
+            # unsafe methods. Elevating to something a plain user already has is
+            # decoration, and a reader would reasonably assume it did something.
+            entry = ROUTE_MINIMUMS.get(ep)
+            if entry is not None and entry[1] != ROLE_ADMIN:
+                problems.append("capability %r covers %r, whose unsafe minimum is "
+                                "%r rather than admin -- unlocking it would grant "
+                                "nothing" % (name, ep, entry[1]))
+    if endpoints is not None:
+        known = set(endpoints)
+        for name, routes in CAPABILITY_ROUTES.items():
+            missing = sorted(set(routes) - known)
+            if missing:
+                problems.append("capability %r names endpoint(s) that do not exist "
+                                "(a typo protects nothing while looking like "
+                                "coverage): %s" % (name, ", ".join(missing)))
+    if problems:
+        raise RoleError(" | ".join(problems))
+    return True
+
+
+def may_with_unlocks(role, unlocks, endpoint, method="GET"):
+    """May this PRINCIPAL call `endpoint`, given the capabilities they have earned?
+
+    `unlocks` is an explicit iterable of capability names -- this module never
+    reads them itself. That is the whole reason `roles.py` still has no I/O and
+    can run its canary at import, in the production path (ADR 0026 D1). The gate
+    fetches unlocks from the DB and hands them in. DO NOT "simplify" this later by
+    having this function look them up.
+
+    Semantics: rank first, then -- for a sub-admin only -- an unlocked capability
+    covering this endpoint. A sub-admin with no unlocks is exactly a standard user.
+    An unlock NEVER lowers a requirement for any other role, and never grants
+    anything to viewonly or user, who cannot hold unlocks at all.
+    """
+    if may(role, endpoint, method):
+        return True
+    # Rank was not enough. Only a sub-admin can make up the difference.
+    if normalise_role(role) != ROLE_SUB_ADMIN:
+        return False
+    covering = capability_for_endpoint(endpoint)
+    if covering is None:
+        return False
+    for name in (unlocks or ()):
+        # Raises on an unknown name rather than skipping it: a typo in stored
+        # unlock rows must be loud, not silently equivalent to "not unlocked".
+        if capability_state(name) and name == covering:
+            return True
+    return False
+
+
 def is_at_least(role, minimum):
     """Non-raising variant for TEMPLATE and UI use only.
 
@@ -546,6 +700,56 @@ def _raises(fn, exc=RoleError):
         return False
 
 
+#: The role ordering as it shipped 2026-08-22, BEFORE sub_admin was inserted.
+#: Frozen deliberately: it is the baseline the additivity check measures against,
+#: so it must not be derived from ROLES or it would move with the thing it checks.
+_PRE_SUBADMIN_ORDER = ("viewonly", "user", "admin")
+
+
+def _additivity_pairs():
+    """Every (role, endpoint, method) an existing role could ask about."""
+    eps = list(ROUTE_MINIMUMS) + sorted(SELF_SERVICE | UNAUTHENTICATED)
+    for ep in eps:
+        for role in _PRE_SUBADMIN_ORDER:
+            for method in ("GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"):
+                yield role, ep, method
+
+
+def _additivity_sample_size():
+    return sum(1 for _ in _additivity_pairs())
+
+
+def _additivity_holds():
+    """True if inserting sub_admin changed NO answer for any pre-existing role.
+
+    Recomputes each answer under the ORIGINAL 3-role ranking and compares it to
+    what `may()` says now. This is the check that makes "additive" a measured
+    property rather than an intention -- and it is why no hand review of the 135
+    registry entries was needed or done.
+    """
+    old = {name: i for i, name in enumerate(_PRE_SUBADMIN_ORDER)}
+    for role, ep, method in _additivity_pairs():
+        if ep in UNAUTHENTICATED or ep in SELF_SERVICE:
+            continue                                    # unconditionally allowed
+        entry = ROUTE_MINIMUMS.get(ep)
+        need = ROLE_ADMIN if entry is None else (
+            entry[0] if str(method).upper() in SAFE_METHODS else entry[1])
+        if (old[role] >= old[need]) != may(role, ep, method):
+            return False
+    return True
+
+
+def _sub_admin_equals_user_without_unlocks():
+    """A sub-admin holding no unlocks must answer identically to a user."""
+    eps = list(ROUTE_MINIMUMS) + sorted(SELF_SERVICE | UNAUTHENTICATED)
+    for ep in eps:
+        for method in ("GET", "POST"):
+            if (may_with_unlocks(ROLE_SUB_ADMIN, (), ep, method)
+                    != may(ROLE_USER, ep, method)):
+                return False
+    return True
+
+
 _CASES = [
     # Ordering is the foundation everything else rests on.
     _H.bad("admin outranks user",
@@ -558,6 +762,45 @@ _CASES = [
            lambda: (not at_least(ROLE_USER, ROLE_ADMIN)) or None),
     _H.good("CONTROL: the ordering is not vacuously true both ways",
             lambda: at_least(ROLE_VIEWONLY, ROLE_ADMIN) or None),
+
+    # ── sub_admin sits BETWEEN user and admin (ADR 0026 D1) ─────────────────
+    _H.bad("sub_admin outranks user",
+           lambda: at_least(ROLE_SUB_ADMIN, ROLE_USER) or None),
+    _H.bad("sub_admin does NOT reach admin by rank alone",
+           lambda: (not at_least(ROLE_SUB_ADMIN, ROLE_ADMIN)) or None),
+    _H.bad("admin outranks sub_admin",
+           lambda: at_least(ROLE_ADMIN, ROLE_SUB_ADMIN) or None),
+    _H.bad("its punctuated spellings all normalise",
+           lambda: (normalise_role("sub-admin") == normalise_role("Sub Admin")
+                    == normalise_role("SUB_ADMIN") == ROLE_SUB_ADMIN) or None),
+
+    # THE ADDITIVITY PROPERTY. Inserting a rank must not change what any
+    # PRE-EXISTING role may do. Recomputed here against the original 3-role
+    # ordering rather than trusted -- a future reorder that silently altered one
+    # answer would otherwise pass every other check in this file.
+    _H.bad("inserting sub_admin changed NO answer for viewonly/user/admin",
+           lambda: (_additivity_holds() or None)),
+    _H.good("CONTROL: that comparison is not vacuous (it really compares)",
+            lambda: (None if _additivity_sample_size() > 100 else "too few cases"),),
+
+    # ── capability layer (ADR 0026 D2) ──────────────────────────────────────
+    _H.bad("an unknown capability RAISES rather than reading as locked",
+           lambda: _raises(lambda: capability_state("no_such_capability"),
+                           UnknownCapability) or None),
+    _H.bad("a declared-but-empty capability is distinguishable from a built one",
+           lambda: (capability_state("push_and_run") == CAP_DECLARED) or None),
+    _H.bad("an unlock grants NOTHING while its capability has no endpoints",
+           lambda: (not may_with_unlocks(ROLE_SUB_ADMIN, ["push_and_run"],
+                                         "settings_page", "POST")) or None),
+    _H.bad("a sub_admin with no unlocks is exactly a standard user",
+           lambda: _sub_admin_equals_user_without_unlocks() or None),
+    _H.bad("an unlock never elevates viewonly or user",
+           lambda: (not may_with_unlocks(ROLE_USER, ["push_and_run"],
+                                         "settings_page", "POST")
+                    and not may_with_unlocks(ROLE_VIEWONLY, ["push_and_run"],
+                                             "settings_page", "POST")) or None),
+    _H.bad("the capability rules hold for the shipped table",
+           lambda: assert_capabilities_sane() or None),
 
     # An unparseable role must never resolve to anything.
     _H.bad("an unknown role raises rather than defaulting",

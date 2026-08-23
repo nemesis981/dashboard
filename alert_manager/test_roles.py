@@ -491,9 +491,15 @@ MUTATIONS = [
     ("SECURITY: an unparseable role defaults to admin instead of raising",
      '        raise UnknownRole("%r is not a known role" % (raw,)) from None',
      "        return ROLE_ADMIN"),
+    # Anchor updated 2026-08-23 when sub_admin was inserted. The previous anchor
+    # named the 3-role tuple and stopped matching, which this suite reported as
+    # "anchor not found -- this TEST is stale, not the code" rather than passing.
+    # That is the behaviour to preserve: a mutation whose anchor has drifted must
+    # fail loudly, because a silently-unapplied mutation is a check that cannot
+    # fail.
     ("SECURITY: the ordering is inverted",
-     "ROLES = (ROLE_VIEWONLY, ROLE_USER, ROLE_ADMIN)",
-     "ROLES = (ROLE_ADMIN, ROLE_USER, ROLE_VIEWONLY)"),
+     "ROLES = (ROLE_VIEWONLY, ROLE_USER, ROLE_SUB_ADMIN, ROLE_ADMIN)",
+     "ROLES = (ROLE_ADMIN, ROLE_SUB_ADMIN, ROLE_USER, ROLE_VIEWONLY)"),
     ("SECURITY: at_least becomes an equality test (admin loses everything)",
      "    return rank(role) >= rank(minimum)",
      "    return rank(role) == rank(minimum)"),
