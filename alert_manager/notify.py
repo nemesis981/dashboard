@@ -510,3 +510,239 @@ def _run_selftests() -> None:
 
 
 _run_selftests()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELIVERY — the half that turns a routing decision into an email
+#
+# Everything above decides WHETHER and WHEN. None of it sends anything, and a
+# `BUNDLE` verdict with nowhere to put the event is just a drop with extra steps.
+# This section closes that: queue -> build -> send -> mark sent.
+#
+# THE ORDERING RULE, and it is the whole safety property:
+#     mark sent ONLY after the send genuinely succeeded.
+# `send_email` returns False on failure rather than raising, so a caller that
+# marks first and sends second loses every event in a failed digest with no
+# trace. Marked-after means the worst case is a repeated digest, which an
+# operator notices, rather than a silent hole, which nobody does.
+# ─────────────────────────────────────────────────────────────────────────────
+
+import sqlite3
+
+#: notify_state keys recording when each digest last went out.
+_STATE_LAST_SENT = "digest_last_sent_%s"
+
+
+def _utcnow():
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def enqueue(conn, severity, subject, body="", surface=None, family_key=None,
+            actor=None, now=None):
+    """Hold one event for the next digest. Returns the row id.
+
+    Callers must route() FIRST and only enqueue a BUNDLE verdict. This function
+    deliberately does not call route() itself: a helper that both decides and
+    stores would make "was this event held on purpose, or did the caller forget
+    to send it immediately?" unanswerable after the fact.
+    """
+    ts = (now or _utcnow()).isoformat(timespec="seconds")
+    cur = conn.execute(
+        "INSERT INTO notify_queue(queued_at, severity, surface, family_key, "
+        "subject, body, actor) VALUES(?,?,?,?,?,?,?)",
+        (ts, (severity or "").upper(), surface, family_key, subject, body, actor))
+    conn.commit()
+    return cur.lastrowid
+
+
+def pending(conn, limit=500):
+    """Unsent queued events, oldest first. `sent_at IS NULL` is the whole test."""
+    rows = conn.execute(
+        "SELECT id, queued_at, severity, surface, family_key, subject, body "
+        "FROM notify_queue WHERE sent_at IS NULL ORDER BY queued_at, id "
+        "LIMIT ?", (int(limit),)).fetchall()
+    return [dict(zip(("id", "queued_at", "severity", "surface", "family_key",
+                      "subject", "body"), r)) for r in rows]
+
+
+#: Severity order for digest grouping, most urgent first.
+_SEV_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
+
+def bundle(events):
+    """Collapse events by family_key. Returns [(count, representative)] sorted.
+
+    This is where the measured 65% repeat rate is paid off: 28 CPU-temperature
+    notices become one line reading "28x", not 28 lines. An event with NO family
+    key is never collapsed — it stands alone, because inventing a grouping for
+    something that has none is how unrelated events get silently merged.
+    """
+    groups, singles = {}, []
+    for e in events:
+        fk = (e.get("family_key") or "").strip()
+        if not fk:
+            singles.append((1, e))
+            continue
+        g = groups.setdefault(fk, [])
+        g.append(e)
+    # The representative is the MOST SEVERE member, not the first.
+    #
+    # Taking v[0] understates the family: a "disk 80%" LOW followed by a
+    # "disk 85%" MEDIUM would report as LOW, and the digest's own subject line
+    # ("highest: ...") would then be wrong about the worst thing in it. Caught by
+    # a test, not by reading — the collapse looked obviously correct.
+    out = [(len(v), min(v, key=lambda e: _SEV_RANK.get(
+                (e.get("severity") or "").upper(), 9)))
+           for v in groups.values()] + singles
+    out.sort(key=lambda ce: (_SEV_RANK.get((ce[1].get("severity") or "").upper(), 9),
+                             ce[1].get("queued_at") or ""))
+    return out
+
+
+def build_digest(which, events, schedule, now=None):
+    """(subject, body) for one digest. Pure — no I/O, so it is directly testable.
+
+    An EMPTY digest is still sent, deliberately. Twice-daily mail saying "nothing
+    to report" is mildly annoying; silence is worse, because it is
+    indistinguishable from a digest that has broken. The whole reason this feature
+    exists is that 23 hours of DNS failure once passed unnoticed — a scheduled
+    report that only appears when there is bad news cannot tell you it is alive.
+    """
+    now = now or _utcnow()
+    tz = schedule.get("tz")
+    local = now.astimezone(tz) if tz else now
+    label = ("Start of day" if which == DIGEST_OPEN else "End of day")
+    bundled = bundle(events)
+    total = sum(c for c, _ in bundled)
+
+    if not bundled:
+        subject = "Nemesis %s digest — nothing to report" % label.lower()
+        body = ("%s digest for %s.\n\nNo notifications were held since the last "
+                "digest.\n\nThis report is sent even when empty, on purpose: a "
+                "digest that only arrives with bad news cannot tell you it is "
+                "still working.\n" % (label, local.strftime("%Y-%m-%d %H:%M %Z")))
+        return subject, body
+
+    worst = min((_SEV_RANK.get((e.get("severity") or "").upper(), 9)
+                 for _c, e in bundled), default=9)
+    worst_name = next((k for k, v in _SEV_RANK.items() if v == worst), "INFO")
+    subject = ("Nemesis %s digest — %d notification%s (highest: %s)"
+               % (label.lower(), total, "" if total == 1 else "s", worst_name))
+
+    lines = ["%s digest for %s." % (label, local.strftime("%Y-%m-%d %H:%M %Z")),
+             "", "%d notification%s held since the last digest:"
+             % (total, "" if total == 1 else "s"), ""]
+    for count, e in bundled:
+        sev = (e.get("severity") or "INFO").upper()
+        times = (" (x%d)" % count) if count > 1 else ""
+        lines.append("  [%-8s] %s%s" % (sev, e.get("subject") or "(no subject)", times))
+        detail = (e.get("body") or "").strip().splitlines()
+        if detail:
+            lines.append("             %s" % detail[0][:110])
+    lines += ["", "Critical notifications are NOT held for a digest — they are "
+              "sent immediately and are not listed here.", ""]
+    for w in schedule_warnings(schedule):
+        lines.append("  ! schedule warning: %s" % w)
+    return subject, "\n".join(lines)
+
+
+def mark_sent(conn, ids, which, now=None):
+    """Mark rows delivered. Called ONLY after a genuinely successful send."""
+    if not ids:
+        return 0
+    ts = (now or _utcnow()).isoformat(timespec="seconds")
+    conn.executemany("UPDATE notify_queue SET sent_at=?, digest=? WHERE id=?",
+                     [(ts, which, i) for i in ids])
+    conn.commit()
+    return len(ids)
+
+
+def _get_state(conn, key, default=None):
+    row = conn.execute("SELECT value FROM notify_state WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def _set_state(conn, key, value, now=None):
+    conn.execute(
+        "INSERT INTO notify_state(key, value, updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+        "updated_at=excluded.updated_at",
+        (key, str(value), (now or _utcnow()).isoformat(timespec="seconds")))
+    conn.commit()
+
+
+def last_sent_map(conn):
+    """{digest_name: aware datetime} for due_digests(). Unparseable -> absent.
+
+    An unreadable timestamp is treated as "never sent", which sends one extra
+    digest. The opposite default — treating it as just-sent — would suppress a
+    digest on the strength of a value nobody could read.
+    """
+    out = {}
+    for which in (DIGEST_OPEN, DIGEST_CLOSE):
+        raw = _get_state(conn, _STATE_LAST_SENT % which)
+        if not raw:
+            continue
+        try:
+            dt = datetime.datetime.fromisoformat(raw)
+            out[which] = dt if dt.tzinfo else dt.replace(tzinfo=datetime.timezone.utc)
+        except (TypeError, ValueError):
+            log.warning("notify: unreadable last-sent for %s (%r); treating as "
+                        "never sent", which, raw)
+    return out
+
+
+def send_digest(conn, which, schedule, sender=None, recipient=None, now=None):
+    """Build and deliver one digest. Returns a result dict. Never raises.
+
+    `sender` is injected so the whole path is testable without SMTP.
+    """
+    now = now or _utcnow()
+    events = pending(conn)
+    subject, body = build_digest(which, events, schedule, now=now)
+    ids = [e["id"] for e in events]
+
+    if sender is None:
+        import email_utils                                   # noqa: PLC0415
+        sender = email_utils.send_email
+
+    try:
+        ok = bool(sender(subject, body, recipient) if recipient
+                  else sender(subject, body))
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("notify: digest send raised")
+        return {"ok": False, "which": which, "queued": len(ids), "sent": 0,
+                "error": "%s: %s" % (type(exc).__name__, exc)}
+
+    if not ok:
+        # Nothing is marked. The events stay queued for the next attempt, which
+        # is the entire reason marking happens after the send and not before.
+        log.error("notify: %s digest send FAILED; %d event(s) remain queued",
+                  which, len(ids))
+        return {"ok": False, "which": which, "queued": len(ids), "sent": 0,
+                "error": "send_email returned False"}
+
+    marked = mark_sent(conn, ids, which, now=now)
+    _set_state(conn, _STATE_LAST_SENT % which, now.isoformat(timespec="seconds"), now=now)
+    return {"ok": True, "which": which, "queued": len(ids), "sent": marked,
+            "subject": subject}
+
+
+def run_digest_tick(conn, get_setting, sender=None, recipient=None, now=None):
+    """Scheduler entry point: send whatever is due. Never raises.
+
+    Idempotent by construction — `due_digests` consults the recorded last-sent,
+    so calling this every minute sends at most one OPEN and one CLOSE per local
+    day. That matters because the intended host is a loop that already runs on a
+    short interval; a tick that resent on every call would mail continuously.
+    """
+    try:
+        schedule = digest_schedule(get_setting)
+        due = due_digests(schedule, now or _utcnow(), last_sent_map(conn))
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("notify: could not determine due digests")
+        return {"ok": False, "due": [], "results": [],
+                "error": "%s: %s" % (type(exc).__name__, exc)}
+    results = [send_digest(conn, w, schedule, sender=sender,
+                           recipient=recipient, now=now) for w in due]
+    return {"ok": all(r.get("ok") for r in results), "due": due, "results": results}
