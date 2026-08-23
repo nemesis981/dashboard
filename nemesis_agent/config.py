@@ -100,6 +100,33 @@ DEFAULTS = {
     # toggle becomes read-only. Left here so the GUI and enforcement can already be
     # written to honour it, without the push machinery existing yet.
     "dmz_locked_by_appliance": "false",
+    # ── Roaming traffic steering (tunnel-back §5) — DEFAULT OFF, doubly gated ──
+    # This is the endpoint half of tunnel-back. It is DEFAULT OFF and must stay so
+    # until the forwarder + appliance-side gate exist: steering with nowhere to
+    # forward would break the device. Two independent interlocks keep it inert:
+    #   1. steering_enabled=false -> the controller is never even instantiated.
+    #   2. even if enabled, the lease only grants when the appliance pushes down a
+    #      gate-armed signal (steering_gate_armed), which no channel sets yet -> false.
+    # So today this wires the plumbing without arming the house (ADR-style seam).
+    "steering_enabled": "false",
+    # Gate-armed posture pushed DOWN from the appliance (tunnel-back §5.2 / §7). No
+    # channel writes it yet, so it is false and the lease can never grant. Left as a
+    # conf key so the future downward push lands as config, not code.
+    "steering_gate_armed": "false",
+    # Lease TTL seconds: how long a single good heartbeat entitles steering before
+    # it must be renewed. Kept a small multiple of the poll interval so a couple of
+    # missed beats lapse it. FLOOR-guarded on read.
+    "steering_lease_ttl": "900",
+    # Local forwarder LISTEN port. Empty => the forwarder binds an ephemeral port
+    # (the nft redirect uses whatever it bound). A fixed value is only needed if the
+    # redirect must target a known port.
+    "steering_forwarder_port": "",
+    # The appliance TUNNEL ENDPOINT the forwarder connects to: "host:port". EMPTY by
+    # default and until the appliance-side endpoint exists -- with no upstream the
+    # backend applies the INERT table and starts NO forwarder, so nothing is steered.
+    # Redirecting to a forwarder that can reach no appliance would break the device's
+    # TLS, so an empty upstream is the safe default, not a missing config.
+    "steering_appliance_upstream": "",
     # ── owner-gated enrollment (keypair lives alongside this .conf) ──
     "enrollment_status": "",          # mirrors the server: 'pending'|'approved'|'rejected'
     "enrollment_token": "",           # single-use installer token → server auto-approves

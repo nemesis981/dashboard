@@ -121,6 +121,13 @@ E_AGENT_CODES = {
                     "Persisting a task result failed; the result may not reach "
                     "the server on the next beat.", "low"),
 
+    # ── 090–099  Agent GUI ──
+    "E-AGENT-090": ("Agent GUI findings render failed",
+                    "The agent GUI could not render the local findings view, so "
+                    "the user cannot see their own device's findings even though "
+                    "the agent may be reporting them. Reported by the GUI over the "
+                    "loopback control channel.", "low"),
+
     # ── Memory-injection detection (100 block) ──
     "E-AGENT-100": ("Memory-scan capability absent",
                     "memscan is ENABLED for this device but the agent cannot read "

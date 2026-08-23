@@ -117,6 +117,26 @@ RAMP_BEATS = 4    # number of ramping beats (geometric doubling) before settling
 # written to conf — a hint is a request about the next beat, not a setting.
 _poll_hint = None
 
+# Steering gate posture pushed DOWN by the appliance each beat (tunnel-back §5.2).
+# FRESH-ONLY and fail-safe: set True only by a heartbeat response that says so; a
+# response that omits it, a failed post, or a fresh process start all leave it
+# False. It re-arms to False on every process start (module load), so a restart
+# never inherits an authorisation to steer — the appliance must re-confirm.
+# Consumed by _steering_evidence(); one of the three facts the lease requires.
+#
+# HONEST LIMITATION (stated, not hidden): this rides the same UNSIGNED response
+# channel as next_poll_hint/observe_every_n. A party able to forge the heartbeat
+# RESPONSE could set it True. The blast radius is bounded and is NOT interception:
+# a spuriously-armed lease steers traffic to the configured forwarder → the real
+# appliance over the Tailscale-authenticated tunnel (whose target is set
+# separately, not by this signal), so a forged 'armed' causes at worst useless
+# tunnelling to a non-inspecting appliance, never redirection to an attacker — and
+# it is moot unless steering_enabled is ALSO deliberately on. A forged 'not armed'
+# only prevents steering (the safe direction). Signing the whole response is a
+# separate change; this is the low-risk shape the codebase already accepts for
+# per-beat posture hints.
+_gate_armed = False
+
 # ── Event-triggered check-in ──────────────────────────────────────────────────
 #
 # WHAT THIS IS, AND WHAT IT IS NOT. A REPORTING accelerator: it gets
@@ -316,6 +336,123 @@ def _effective_interval(beat_index, poll_interval, hint):
     if hint is None:
         return base
     return max(POLL_INTERVAL_FLOOR, min(base, hint))
+
+
+# ── Roaming traffic steering (tunnel-back §5) — DEFAULT OFF ───────────────────
+#
+# Held across poll cycles like the memory-ladder state. None until main() decides
+# whether to arm it. When steering_enabled is false (the default and the only
+# supported state today) this stays None and the poll loop touches nothing -- the
+# feature is wired but inert, "leave the socket, don't wire the house".
+_steering = None
+
+
+def _steering_ttl(conf):
+    """Lease TTL, floor-guarded so a mis-set tiny value can't make steering thrash."""
+    try:
+        v = int(conf.get("steering_lease_ttl", "900"))
+    except (TypeError, ValueError):
+        v = 900
+    return max(POLL_INTERVAL_FLOOR * 2, v)
+
+
+def _init_steering(conf):
+    """Build + boot-reconcile the steering controller IFF steering is enabled.
+
+    Returns a SteeringController or None. Called once in main(), before the poll
+    loop. Boot reconciliation (§5.3) runs here: the controller drives to the proven-
+    safe state before it will ever grant a lease, so nothing steering-related is
+    inherited from a previous run. If reconciliation cannot confirm safe, the
+    controller still exists (its own guards keep it from arming) -- we do not
+    silently drop it.
+    """
+    if str(conf.get("steering_enabled", "false")).strip().lower() != "true":
+        return None
+    try:
+        import steering_lease
+    except Exception:                                        # noqa: BLE001
+        log.exception("steering enabled but steering_lease unavailable -- not arming")
+        return None
+
+    # Backend by platform. Only Linux/nftables exists today; other platforms get a
+    # null backend that steers nothing, so an enabled flag on an unsupported OS is
+    # inert-and-logged rather than a crash.
+    backend = None
+    if _platform_name == "Linux":
+        try:
+            import steering_nft
+            backend = steering_nft.NftablesSteeringBackend()
+        except Exception:                                    # noqa: BLE001
+            log.exception("nft steering backend unavailable -- not arming")
+            return None
+    else:
+        log.warning("steering_enabled on %s, but no steering backend for it yet -- "
+                    "using an inert backend (no traffic will be steered)",
+                    _platform_name)
+        backend = steering_lease.NullRecordingBackend()
+
+    def _alarm(reason, detail):
+        # A teardown that could not be proven safe. Record it as a structured agent
+        # error so it rides the heartbeat digest -- this is exactly the class of
+        # thing an operator must see about a security-relevant device.
+        try:
+            agent_errors.record("E-AGENT-070",
+                                "steering teardown not proven safe: %s (%s)"
+                                % (reason, detail))
+        except Exception:                                    # noqa: BLE001
+            pass
+
+    ctrl = steering_lease.SteeringController(
+        backend, ttl_seconds=_steering_ttl(conf), on_alarm=_alarm)
+    ok = ctrl.reconcile_boot()
+    log.info("steering controller initialised (boot_safe=%s, ttl=%ds)",
+             ok, _steering_ttl(conf))
+    return ctrl
+
+
+def _steering_evidence(conf, appliance_reachable):
+    """The three facts that entitle holding steering for another lease period.
+
+    gate_armed comes from the appliance-pushed _gate_armed (heartbeat response,
+    fresh-only, fail-safe) -- the downward push is now wired. It is a SECOND
+    interlock beyond steering_enabled: even enabled, no lease grants while the
+    appliance's inspection gate is not armed (or unreachable, or stale).
+    """
+    import steering_lease
+    return steering_lease.RenewalEvidence(
+        appliance_reachable=appliance_reachable,
+        device_approved=(str(conf.get("enrollment_status", "")).strip().lower()
+                         == "approved"),
+        # AUTHORITATIVE source is the appliance-pushed _gate_armed (in memory,
+        # fresh-only). The conf key is a TEST-ONLY override for exercising the lease
+        # without a real appliance push; it needs a deliberate conf edit AND
+        # steering_enabled, so it is not a bypass a stray default could trip.
+        gate_armed=(_gate_armed or
+                    str(conf.get("steering_gate_armed", "false")).strip().lower()
+                    == "true"),
+    )
+
+
+def _steering_plan(conf):
+    """The steering plan the backend applies. `appliance_upstream` empty => the
+    backend stays INERT (no forwarder, no redirect); that is the default and stays
+    so until the appliance tunnel endpoint exists."""
+    port = conf.get("steering_forwarder_port", "")
+    try:
+        port = int(port) if str(port).strip() else None
+    except (TypeError, ValueError):
+        port = None
+    upstream = None
+    raw = str(conf.get("steering_appliance_upstream", "")).strip()
+    if raw:
+        try:
+            host, _, port_s = raw.rpartition(":")
+            up_port = int(port_s)
+            if host and 0 < up_port < 65536:
+                upstream = (host, up_port)
+        except (TypeError, ValueError):
+            upstream = None      # malformed -> inert, never a guessed endpoint
+    return {"forwarder_port": port, "appliance_upstream": upstream}
 
 
 def udp_filtering_suppressed(conf):
@@ -1339,6 +1476,13 @@ def _handle_response_tasks(response, device_id):
     if _clamped is not None:
         _remote_observe_n = _clamped
 
+    # Steering gate posture (tunnel-back §5.2). FRESH-ONLY: set from THIS response,
+    # so a response that omits the field reads as not-armed (fail-safe). Read
+    # alongside the other unsigned hints, and for the same reasons -- see the
+    # _gate_armed global's honest-limitation note.
+    global _gate_armed
+    _gate_armed = bool(body.get("steering_gate_armed"))
+
     # Acks are processed BEFORE the anchor gate, deliberately: an agent whose
     # anchor is missing still has to be able to retire reports it already made,
     # or an outage that costs the anchor leaves a queue that can never drain.
@@ -1498,7 +1642,7 @@ def _rotate_server_anchor(envelope, device_id):
 
 
 def _post_payload(conf, payload):
-    global _last_post_ok_at, _last_post_fail_at, _last_post_error
+    global _last_post_ok_at, _last_post_fail_at, _last_post_error, _gate_armed
     url = f"http://{conf['nemesis_ip']}:{conf['nemesis_port']}/hw_data"
     try:
         # Serialise ONCE and post the exact bytes we signed. Letting requests
@@ -1526,17 +1670,20 @@ def _post_payload(conf, payload):
             # when a 401 skew rejection read as a generic connectivity problem.
             _last_post_fail_at = time.time()
             _last_post_error = "the appliance rejected this check-in (HTTP %d)" % r.status_code
+            _gate_armed = False        # no fresh confirmation -> not armed (fail-safe)
             agent_errors.restore(payload.get("agent_errors"))
     except requests.exceptions.ConnectionError:
         log.warning("Cannot reach Nemesis at %s (will retry)", url)
         _last_post_fail_at = time.time()
         _last_post_error = "cannot reach the appliance at %s:%s" % (
             conf.get("nemesis_ip", "?"), conf.get("nemesis_port", "?"))
+        _gate_armed = False            # unreachable -> not armed (fail-safe)
         agent_errors.restore(payload.get("agent_errors"))
     except Exception as e:
         log.error("POST failed: %s", e)
         _last_post_fail_at = time.time()
         _last_post_error = str(e)[:160]
+        _gate_armed = False            # post failed -> not armed (fail-safe)
         agent_errors.restore(payload.get("agent_errors"))
 
 
@@ -1560,6 +1707,24 @@ def _poll_loop():
             _conf = config.load()
             payload = _collect_payload(_conf)
             _post_payload(_conf, payload)
+
+            # Roaming steering lease (tunnel-back §5). Inert unless steering_enabled
+            # AND the appliance has pushed gate-armed down -- both false by default,
+            # so _steering is None here and this whole block is skipped. When armed,
+            # the beat's outcome IS the evidence: appliance_reachable == this post
+            # succeeded (_last_post_error cleared on the 200 just above).
+            if _steering is not None:
+                try:
+                    reachable = _last_post_error is None
+                    _steering.on_heartbeat(_steering_evidence(_conf, reachable),
+                                           plan=_steering_plan(_conf))
+                    _steering.tick()
+                except Exception:                            # noqa: BLE001
+                    log.exception("steering lease update failed -- tearing down to safe")
+                    try:
+                        _steering.tick()   # tick alone still drives toward safe on error
+                    except Exception:                        # noqa: BLE001
+                        pass
 
             # On-reconnect scan
             if (not _scan_on_reconnect_done and
@@ -1722,6 +1887,10 @@ def _status_snapshot():
         "last_checkin_error": _last_post_error,
         "next_checkin_due_at_estimate": _next_beat_due_at,
         "scan_on_reconnect_done": _scan_on_reconnect_done,
+        # Steering lease status (None when steering is not armed, which is the
+        # default). Read-only observability; the GUI/dashboard can show whether a
+        # roaming device is currently steered and whether the failsafe is healthy.
+        "steering": (_steering.status() if _steering is not None else None),
     }
 
     # Derived values are best-effort and fail to None -- an explicit "could not
@@ -2020,6 +2189,15 @@ def _shutdown(*_):
     _wake.set()
     if _suricata_mod:
         _suricata_mod.stop()
+    # Steering fail-safe: tear it down on shutdown so the box is never left steered
+    # when the agent stops. This is BELT to the lease's braces -- even without this,
+    # the lease would lapse and boot reconciliation would clean up next start -- but
+    # an explicit teardown-and-verify here closes the window between stop and restart.
+    if _steering is not None:
+        try:
+            _steering._drive_safe("agent_shutdown")
+        except Exception:                                    # noqa: BLE001
+            log.exception("steering teardown on shutdown failed")
     # L1 fail-safe: if DNS enforcement was active, revert it on shutdown so the box is
     # never left with enforced DNS when the agent stops. No-op if never enforced.
     try:
@@ -2135,6 +2313,12 @@ def main():
             l2_windivert.start_background(_conf)
         except Exception:
             log.exception("L2 WinDivert init failed — continuing (fail-open)")
+
+    # Roaming steering controller (tunnel-back §5) -- boot-reconciles to the safe
+    # state before the poll loop can ever arm it. Returns None (and does nothing)
+    # unless steering_enabled is true, which it is not by default.
+    global _steering
+    _steering = _init_steering(_conf)
 
     # Behavioral monitor (Malware Layer B). No-op unless enabled + falco present +
     # consented; otherwise the engine inventory simply reports the coverage gap.
