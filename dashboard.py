@@ -100,9 +100,12 @@ import database          # module handle: canonical DDL owner (init_audit_log_ta
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
                       init_enrollment_tokens_table, init_recovery_codes_table,
-                      init_licensing_tables,
+                      init_licensing_tables, init_capability_tables,
                       init_settings_table, init_error_tables,
                       init_conn_events_tables, init_tier2_gate_tables)
+# Imported HERE and not in database.py -- see the call site below for the measured
+# PYTHONPATH constraint that makes this the only safe place for it.
+from core.admin_approval_store import init_admin_approval_tables
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append, list_blocked,
@@ -135,6 +138,26 @@ init_enrollment_tokens_table()
 # fresh install, which is exactly the `devices`-table failure and the same trap
 # init_tier2_gate_tables was added to avoid below.
 init_licensing_tables()
+# Per-capability learning-gate unlocks (ADR 0026 §5, canonical DDL in
+# alert_manager/database.py). Dashboard-only writer: unlocks are created by the
+# quiz grader and removed on revoke, both of which live here.
+init_capability_tables()
+# Admin-approval request state machine (core/admin_approval_store.py, which owns
+# its own DDL). Called from HERE and not from database.py, and that is a measured
+# constraint rather than a preference:
+#
+#   PYTHONPATH=/opt/nemesis/alert_manager                -> `core` NOT importable
+#   PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis   -> importable
+#
+# Neither dashboard.service nor nemesis-fw-watch.service puts /opt/nemesis on
+# PYTHONPATH. A top-level `from core...` in database.py would therefore break
+# nemesis-fw-watch, which imports database.py and does not need this table at all.
+# It resolves HERE because dashboard.py lives in the repo root, so the repo root
+# is sys.path[0] for this process specifically.
+#
+# Verified from a NEUTRAL cwd. Running the same check from /opt/nemesis makes
+# `python3 -c` put the cwd on sys.path and every variant falsely passes.
+init_admin_approval_tables()
 # Track C (ADR 0001 canonical DDL in alert_manager/database.py). Created here AND
 # by hw_monitor's startup — deliberately both, the same reasoning as
 # init_quarantines_table: there is no systemd ordering between the two services,
