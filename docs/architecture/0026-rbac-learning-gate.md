@@ -72,7 +72,7 @@ resolves all four.
 
 | Thing | State |
 |---|---|
-| `roles.py` linear model + 134-entry registry | **Shipped.** Pure decision layer — no Flask, no DB, no I/O; 48-case canary asserted at import |
+| `roles.py` linear model + 135-entry registry | **Shipped.** Pure decision layer — no Flask, no DB, no I/O; 48-case canary asserted at import |
 | `before_request` enforcement covering every live endpoint | **Shipped.** A decorator-only design would miss the module-registered routes, which cannot be decorated from `dashboard.py` |
 | `users.role` column, `'admin'|'user'|'viewonly'` | **Shipped**, DEFAULT `'admin'` for pre-RBAC installs |
 | `assert_registry_complete()` (missing AND phantom entries) | **Shipped** |
