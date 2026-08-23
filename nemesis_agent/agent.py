@@ -620,21 +620,20 @@ _behavioral_thread = None
 
 
 def _start_behavioral_monitor(conf):
-    """Start the behavioral monitor + its Falco-tail thread, IFF enabled + present +
-    consented. No-op otherwise. Best-effort; a failure here never blocks startup."""
-    global _behavioral_monitor, _behavioral_thread
+    """Start the behavioral monitor + its platform observer thread, IFF enabled +
+    consented + the observer is present. Falco tail on Linux, Sysmon poll on
+    Windows -- both end at the SAME BehavioralMonitor, so dedup/rate-ceiling/
+    heartbeat are shared. No-op when disabled/unconsented/observer-absent. A genuine
+    start FAILURE (as opposed to a clean 'not installed' skip) is E-AGENT-081, so an
+    operator sees a behavioral_enabled endpoint that is silently reporting nothing."""
+    global _behavioral_monitor
     if str(conf.get("behavioral_enabled", "false")).strip().lower() != "true":
         return
     try:
-        import shutil as _sh
         import consent as _consent
         import behavioral_agent
     except Exception as exc:                                 # noqa: BLE001
         log.warning("behavioral: modules unavailable, not starting: %s", exc)
-        return
-    if not _sh.which("falco"):
-        log.warning("behavioral_enabled but falco not installed -- inventory will "
-                    "report the coverage gap; not tailing")
         return
     if not _consent.collection_allowed():
         log.info("behavioral: monitoring enabled but consent not granted -- not tailing")
@@ -646,14 +645,91 @@ def _start_behavioral_monitor(conf):
         _behavioral_monitor = behavioral_agent.BehavioralMonitor(
             conf.get("device_id", "unknown"), window_s=window, max_per_window=cap,
             severity_floor=floor)
-        out_path = conf.get("behavioral_falco_output", "/var/log/falco/events.json")
-        _behavioral_thread = threading.Thread(
-            target=_behavioral_tail, args=(out_path,), daemon=True,
-            name="behavioral-tail")
-        _behavioral_thread.start()
-        log.info("behavioral monitor started (tailing %s)", out_path)
+        if _platform_name == "Windows":
+            _start_sysmon_monitor(conf)
+        else:
+            _start_falco_monitor(conf)
     except Exception as exc:                                 # noqa: BLE001
+        agent_errors.record("E-AGENT-081", "behavioral start: %s" % exc)
         log.warning("behavioral: failed to start: %s", exc)
+
+
+def _start_falco_monitor(conf):
+    """Linux observer: tail Falco's JSON file. A missing falco is a clean skip (the
+    engine inventory reports the coverage gap), not a start failure."""
+    global _behavioral_thread
+    import shutil as _sh
+    if not _sh.which("falco"):
+        log.warning("behavioral_enabled but falco not installed -- inventory will "
+                    "report the coverage gap; not tailing")
+        return
+    out_path = conf.get("behavioral_falco_output", "/var/log/falco/events.json")
+    _behavioral_thread = threading.Thread(
+        target=_behavioral_tail, args=(out_path,), daemon=True, name="behavioral-tail")
+    _behavioral_thread.start()
+    log.info("behavioral monitor started (Falco, tailing %s)", out_path)
+
+
+def _start_sysmon_monitor(conf):
+    """Windows observer: poll the Sysmon Operational Event Log. Sysmon writes no
+    file, so the agent shells out to PowerShell/Get-WinEvent via sysmon_collector's
+    live poller. A missing PowerShell is a start failure (E-AGENT-081); a missing
+    Sysmon channel surfaces per-poll as E-AGENT-080 in the tail, and as an ABSENT/
+    DEGRADED line in the engine inventory -- explicit degradation, never silence."""
+    global _behavioral_thread
+    import shutil as _sh
+    if not (_sh.which("powershell") or _sh.which("powershell.exe") or _sh.which("pwsh")):
+        agent_errors.record("E-AGENT-081", "sysmon start: PowerShell not found")
+        log.warning("behavioral_enabled but PowerShell not found -- cannot poll "
+                    "Sysmon; not starting")
+        return
+    interval = float(conf.get("behavioral_sysmon_poll_s", "10"))
+    _behavioral_thread = threading.Thread(
+        target=_sysmon_tail, args=(interval,), daemon=True, name="behavioral-sysmon")
+    _behavioral_thread.start()
+    log.info("behavioral monitor started (Sysmon poll every %ss)", interval)
+
+
+def _sysmon_tail(poll_interval):
+    """Poll the Sysmon log for NEW events and feed the monitor -- the Windows
+    counterpart of _behavioral_tail. Tracks a high-water RecordId so each poll only
+    fetches what is new. Consent is re-checked each poll (a mid-session revoke stops
+    ingestion at once). A read failure is E-AGENT-080 with exponential backoff; the
+    reader loop never dies on it."""
+    import subprocess as _sp
+    import consent as _consent
+    import sysmon_collector as _sc
+
+    def _run_ps(argv):
+        p = _sp.run(argv, capture_output=True, text=True, timeout=30)
+        if p.returncode != 0:
+            # A non-zero exit is a REAL read failure (e.g. the agent user is not in
+            # Event Log Readers), NOT 'no events' -- stream_command exits 0 for that.
+            # Raise so read_new_events -> SysmonPollError -> E-AGENT-080, never a
+            # silent empty that reads as 'nothing happening'.
+            raise RuntimeError((p.stderr or "").strip()[:200]
+                               or ("Get-WinEvent exit %d" % p.returncode))
+        return p.stdout or ""
+
+    after = 0
+    backoff = 0
+    while _running:
+        try:
+            if not _consent.collection_allowed():
+                _wake.wait(poll_interval)
+                continue
+            records, after = _sc.read_new_events(_run_ps, after_record_id=after)
+            cv = _consent.consent_version()
+            for rec in records:
+                if _behavioral_monitor is not None:
+                    _behavioral_monitor.ingest_sysmon(rec, cv)
+            backoff = 0
+        except _sc.SysmonPollError as exc:
+            agent_errors.record("E-AGENT-080", "sysmon poll: %s" % exc)
+            backoff = min(backoff + 1, 5)
+        except Exception as exc:                             # noqa: BLE001
+            log.debug("sysmon tail hiccup: %s", exc)
+        _wake.wait(poll_interval * (2 ** backoff))
 
 
 def _behavioral_tail(path):

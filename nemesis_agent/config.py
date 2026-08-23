@@ -77,6 +77,7 @@ DEFAULTS = {
     "behavioral_window_s": "60",
     "behavioral_max_per_window": "100",
     "behavioral_severity_floor": "low",   # low|medium|high
+    "behavioral_sysmon_poll_s": "10",     # Windows: Sysmon Event Log poll interval (s)
     "dns_enforce_enabled": "false",       # L1: default OFF (plumbing; not pointed at tunnel Pi-hole yet — ADR 0005)
     "dns_enforce_target": "",             # L1: DNS server(s) to set when enabled; blank = no-op
     "l2_enforce_enabled": "false",        # L2: default OFF (WinDivert reputation blocking on TCP handshake-initiation, bidirectional: outbound SYN + SYN-ACK)

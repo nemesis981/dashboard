@@ -121,6 +121,18 @@ E_AGENT_CODES = {
                     "Persisting a task result failed; the result may not reach "
                     "the server on the next beat.", "low"),
 
+    # ── 080–089  Behavioral monitoring (Windows / Sysmon arm) ──
+    "E-AGENT-080": ("Sysmon collector poll failed",
+                    "The Windows behavioral poller could not read new events from "
+                    "the Sysmon Operational log (Get-WinEvent failed or returned "
+                    "unparseable output). Behavioral coverage on this endpoint is "
+                    "degraded until it recovers.", "medium"),
+    "E-AGENT-081": ("Behavioral monitor start failed",
+                    "The behavioral monitor could not be started although "
+                    "behavioral_enabled is set (Falco tail on Linux, Sysmon poll "
+                    "on Windows) — no behavioral events will be reported until "
+                    "this is resolved.", "medium"),
+
     # ── 090–099  Agent GUI ──
     "E-AGENT-090": ("Agent GUI findings render failed",
                     "The agent GUI could not render the local findings view, so "
