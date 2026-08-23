@@ -7,8 +7,9 @@
   "provides_dashboard_card": true,
   "requires_background_service": false,
   "config_keys": [],
-  "enabled_by_default": false,
+  "enabled_by_default": true,
   "confirmation_required": false,
   "apt_deps": [],
-  "pip_deps": []
+  "pip_deps": [],
+  "required": true
 }

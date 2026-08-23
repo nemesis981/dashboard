@@ -109,6 +109,46 @@ def module_status(name: str) -> dict:
         return {"state": "error", "detail": str(e)}
 
 
+#: A required detector must be enabled AND healthy. These states count as healthy;
+#: anything else on a REQUIRED module is SUPPRESSED coverage. Same vocabulary as the
+#: settings-row honesty fix (R2) so the two never disagree about what "healthy" means.
+_HEALTHY_DETECTOR_STATES = frozenset({"active", "running", "ok", "healthy", "enabled"})
+
+
+def required_detector_coverage() -> list:
+    """Findings for any REQUIRED module whose coverage is suppressed. Empty == all covered.
+
+    R6 (2026-08-22): a required detector that is enabled-but-erroring, or somehow not
+    enabled, is a loss of protection coverage — and it is alertable ON ITS OWN, without
+    waiting on attestation deployment. This reuses the required flag (R1) and the real
+    status() (R2): required + not-healthy = suppression. Fail-closed: a status that cannot
+    be read counts as suppressed (a detector we cannot confirm is running is not confirmed
+    coverage), never silently passed.
+
+    Each finding: {module, reason, state, detail}. Read-only; records nothing itself so it
+    is safe to call from any watcher — the caller decides how loudly to alert.
+    """
+    findings = []
+    for name, man in _manifests.items():
+        if not man.get("required"):
+            continue
+        if not is_enabled(name):
+            # The loader refuses set_enabled(False) for required modules, so this should be
+            # unreachable — which is exactly why it is worth catching if it ever happens.
+            findings.append({"module": name, "reason": "required detector is DISABLED",
+                             "state": "disabled", "detail": ""})
+            continue
+        st = module_status(name) or {}
+        state = str(st.get("state", "")).lower()
+        if state not in _HEALTHY_DETECTOR_STATES:
+            findings.append({
+                "module": name,
+                "reason": "required detector enabled but not healthy (coverage suppressed)",
+                "state": state or "unknown",
+                "detail": str(st.get("detail", ""))[:160]})
+    return findings
+
+
 def get_loaded_modules() -> dict:
     return dict(_loaded)
 
