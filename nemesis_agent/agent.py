@@ -1610,13 +1610,53 @@ def _handle_response_tasks(response, device_id):
         # so spending its one-shot claim would teach nothing and would make the
         # refusal indistinguishable from a replay in the claims directory.
         try:
-            task_mod.assert_dispatchable(verified["action"])
+            _disp = task_mod.assert_dispatchable(verified["action"])
+            if _disp == task_mod.DISP_APPROVAL_REQUIRED:
+                # ADR 0026 §D3. The outer signature above proves the SERVER sent
+                # this; it cannot prove a human approved it, because the appliance
+                # holds the key that makes it. Verified HERE against a key pinned
+                # at enrollment, so an appliance that has been taken over cannot
+                # simply patch out its own gate and sign whatever it likes.
+                #
+                # Inside the same try as the classification check, deliberately:
+                # both are TaskRejected subclasses, both are refusals rather than
+                # errors, and both must land BEFORE claim_task so a refused task
+                # does not spend a claim it can never use.
+                #
+                # `appliance_id` is NOT checked yet, and that is deliberate rather
+                # than forgotten: no appliance-identity value exists on either side
+                # to compare against. Passing a guess (the configured IP, say)
+                # would compare the approval's field against something the
+                # appliance never puts there and refuse EVERY approval -- a check
+                # that always fails is no better than one that always passes. The
+                # `target` binding below already blocks cross-device replay, which
+                # is the risk appliance-binding would add to. Wire it the moment a
+                # real appliance identity exists.
+                task_mod.verify_admin_approval(verified, device_id,
+                                               appliance_id=None)
         except task_mod.UnclassifiedAction as exc:
             log.error("task refused (%s): %s", exc.reason, exc)
             agent_errors.record("E-AGENT-117", str(verified["action"])[:200])
             # Reported back, not silently dropped: the server believes it sent
             # runnable work, and an unclassified action is precisely the case an
             # operator needs told about rather than left to infer from silence.
+            task_mod.record_result(verified["task_id"], False, str(exc),
+                                   verified["action"])
+            continue
+        except task_mod.TaskRejected as exc:
+            # Every approval refusal (missing/malformed/unpinned/wrong-target/
+            # expired/bad-signature/replayed) lands here with its own typed reason.
+            # Caught SEPARATELY from UnclassifiedAction so the two are never
+            # conflated: "this agent does not run that action" and "a human did not
+            # authorise this one" are different operator problems.
+            #
+            # An uncaught TaskRejected here would escape the whole handler and take
+            # the poll loop down with it -- the refusal path must never be able to
+            # do more damage than the task it refused.
+            log.error("task refused (%s): %s", getattr(exc, "reason", "?"), exc)
+            agent_errors.record("E-AGENT-118",
+                                "%s: %s" % (verified["action"],
+                                            getattr(exc, "reason", "?"))[:200])
             task_mod.record_result(verified["task_id"], False, str(exc),
                                    verified["action"])
             continue

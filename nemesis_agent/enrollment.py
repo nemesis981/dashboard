@@ -150,6 +150,345 @@ def pin_server_key(b64_der: str) -> bool:
         return False
 
 
+# ── admin-approval authenticators (ADR 0026 §D3) ──────────────────────────
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT THE SERVER KEY.
+#
+# `server_public.pem` above answers "did this task come from the real server?".
+# It CANNOT answer "did a human approve this action", because the appliance holds
+# the private half -- so an appliance that has been taken over can sign whatever
+# it likes with it. ADR 0026 §D3 exists precisely to close that: the admin private
+# key lives in a companion app on the operator's phone and the appliance never
+# holds it, so a compromised appliance cannot forge an approval.
+#
+# That guarantee only reaches the AGENT if the agent verifies the approval
+# itself, against a key it pinned rather than one the appliance hands it at
+# task time. This store is that pin. Accepting a public key off the wire would
+# hand the whole property straight back: an attacker who can mint outer
+# signatures would simply ship its own key alongside its own signature.
+#
+# A SET, not a single key. `admin_approval_pairing.MIN_AUTHENTICATORS_FOR_UNLOCK`
+# is 2 -- deliberately, so losing one device does not strand the operator and no
+# single device can act alone. The store therefore holds every registered
+# authenticator and lookup is BY `authenticator_id`.
+
+ADMIN_AUTH_NAME = "admin_authenticators.json"
+
+#: JSON has no byte string. COSE keys are full of them (`-2`/`-3` are coordinates,
+#: `rp_id_hash` is 32 raw bytes), so they are tagged on the way out and restored on
+#: the way in. A tag rather than "assume these labels are bytes": a bare base64
+#: string is indistinguishable from a genuine text value, and guessing by label
+#: would silently break the first time a COSE key type with different labels is
+#: supported.
+_BYTES_TAG = "__bytes_b64__"
+
+
+class AdminKeyStoreError(Exception):
+    """The pinned authenticator store exists but could not be read as one.
+
+    DELIBERATELY DISTINCT from "nothing is pinned", which is an empty list. A
+    corrupt store and an unprovisioned device both end in refusing approval-gated
+    work -- the security outcome is identical -- but they need different operator
+    responses, and collapsing them would make a damaged file look like a device
+    that was simply never set up.
+
+    Note this diverges from `pinned_server_key()`, which returns None on any
+    failure. That sibling predates the standing practice about failed reads never
+    surfacing as a legal default value; it is not changed here (one change at a
+    time), but it deserves the same treatment when it is next touched.
+    """
+
+
+def _admin_auth_path():
+    return os.path.join(config.keys_dir(), ADMIN_AUTH_NAME)
+
+
+def _tag_bytes(obj):
+    """Recursively make a registration record JSON-encodable."""
+    if isinstance(obj, bytes):
+        return {_BYTES_TAG: base64.b64encode(obj).decode("ascii")}
+    if isinstance(obj, dict):
+        # COSE keys use INTEGER labels; JSON object keys are always strings, so
+        # the label's type is recorded in the key text and restored on read.
+        return {("int:%d" % k) if isinstance(k, int) else ("str:%s" % k):
+                _tag_bytes(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_tag_bytes(v) for v in obj]
+    return obj
+
+
+def _untag_bytes(obj):
+    """Inverse of `_tag_bytes`. Raises AdminKeyStoreError on anything malformed."""
+    if isinstance(obj, dict):
+        if set(obj) == {_BYTES_TAG}:
+            try:
+                return base64.b64decode(obj[_BYTES_TAG], validate=True)
+            except Exception as exc:                              # noqa: BLE001
+                raise AdminKeyStoreError("tagged value is not valid base64: %s"
+                                         % exc) from exc
+        out = {}
+        for k, v in obj.items():
+            if k.startswith("int:"):
+                try:
+                    out[int(k[4:])] = _untag_bytes(v)
+                except ValueError as exc:
+                    raise AdminKeyStoreError("bad integer label %r" % k) from exc
+            elif k.startswith("str:"):
+                out[k[4:]] = _untag_bytes(v)
+            else:
+                raise AdminKeyStoreError("untyped key %r in the pinned store" % k)
+        return out
+    if isinstance(obj, list):
+        return [_untag_bytes(v) for v in obj]
+    return obj
+
+
+def _validate_admin_record(rec):
+    """Raise unless `rec` is a usable registration whose key actually loads.
+
+    Checked at PIN time, not at first use. A key that cannot be parsed is a pin
+    that silently never works, and the failure would otherwise surface much later
+    as an unexplained signature rejection, far from the install that caused it --
+    the same reasoning `pin_server_key` parses DER before writing it.
+    """
+    try:
+        import admin_approval                                     # noqa: PLC0415
+    except ImportError as exc:
+        # Fail loudly rather than storing unvalidated key material. An agent that
+        # cannot verify approvals has no business holding pins for them.
+        raise AdminKeyStoreError(
+            "the admin-approval protocol module is not deployed to this agent, "
+            "so a pinned authenticator could never be verified against: %s" % exc)
+
+    if not isinstance(rec, dict):
+        raise AdminKeyStoreError("registration is not an object")
+    for field in ("authenticator_id", "user_id", "mode", "cose_alg", "public_key"):
+        if rec.get(field) in (None, ""):
+            raise AdminKeyStoreError("registration is missing %s" % field)
+    if rec["cose_alg"] not in admin_approval.SUPPORTED_ALGS:
+        raise AdminKeyStoreError("unsupported cose_alg %r" % (rec["cose_alg"],))
+    if rec["mode"] == admin_approval.MODE_WEBAUTHN:
+        rp = rec.get("rp_id_hash")
+        if not isinstance(rp, bytes) or len(rp) != 32:
+            # Without this the binding check has nothing to compare against and
+            # would either crash or -- far worse -- be skipped.
+            raise AdminKeyStoreError(
+                "a WEBAUTHN registration needs a 32-byte rp_id_hash")
+    try:
+        admin_approval.cose_key_to_public(rec["public_key"])
+    except Exception as exc:                                       # noqa: BLE001
+        raise AdminKeyStoreError("public_key is not usable: %s" % exc) from exc
+
+
+def pin_admin_authenticators(payload) -> bool:
+    """Pin the admin authenticator set, delivered in the install conf.
+
+    Idempotent and NON-DESTRUCTIVE, exactly like `pin_server_key`: an existing
+    store is never silently replaced. Re-running the installer must not be a way
+    to re-anchor which humans this device will accept approvals from -- that is
+    the entire property being protected, and an installer re-run is the easiest
+    thing in the world for a compromised appliance to trigger.
+
+    Returns True if a store is in place afterwards. An absent/empty payload is a
+    quiet False, not a warning: until the appliance emits this conf key, every
+    install would otherwise print a scary message about a feature nobody enabled.
+
+    Replacement (adding a phone, retiring a lost one) is deliberately NOT
+    implemented here. Rotation must be authorised by the outgoing admin key, and
+    a `replace_` function without that check would be an unauthenticated
+    re-anchoring door standing open in the meantime.
+    """
+    if not payload:
+        return False
+    path = _admin_auth_path()
+    if os.path.exists(path):
+        return True
+    try:
+        raw = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+        if not isinstance(raw, list) or not raw:
+            raise AdminKeyStoreError("expected a non-empty list of registrations")
+        records = [_untag_bytes(r) for r in raw]
+        for rec in records:
+            _validate_admin_record(rec)
+
+        ids = [r["authenticator_id"] for r in records]
+        if len(set(ids)) != len(ids):
+            # Two records under one id makes "which key verifies this" ambiguous,
+            # and whichever the lookup happens to return would be arbitrary.
+            raise AdminKeyStoreError("duplicate authenticator_id in the payload")
+
+        os.makedirs(config.keys_dir(), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump([_tag_bytes(r) for r in records], fh,
+                      separators=(",", ":"), sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception as exc:                                       # noqa: BLE001
+        print("WARNING: could not pin the admin authenticators (%s); this device "
+              "will refuse every approval-gated action." % exc)
+        try:
+            if os.path.exists(path + ".tmp"):
+                os.remove(path + ".tmp")
+        except OSError:
+            pass
+        return False
+
+
+def replace_admin_authenticators(payload) -> bool:
+    """Replace the pinned admin set. The deliberate opposite of `pin_...`.
+
+    `pin_admin_authenticators` REFUSES to overwrite, which is right for installs --
+    a re-run of the installer must not be able to re-anchor which humans this
+    device trusts. Rotation is the one legitimate reason to replace the set, and
+    the CALLER is responsible for having verified that the instruction to do so was
+    signed by a CURRENTLY-PINNED admin key. This function does not and cannot check
+    that: it is the write half, and calling it without that check re-opens exactly
+    the hole pinning exists to close. The only caller is the approval-gated task
+    handler in `tasks.py`, downstream of `verify_admin_approval`.
+
+    Atomic, and keeps the outgoing set as `.prev`. A truncated store is a device
+    that refuses every approval-gated action with no local way to repair it, so the
+    write goes to a temp and is `os.replace()`d -- same reasoning as
+    `replace_server_key`.
+
+    Returns True only if the NEW set is on disk and re-readable.
+    """
+    if not payload:
+        return False
+    path = _admin_auth_path()
+    tmp, prev = path + ".tmp", path + ".prev"
+    try:
+        raw = json.loads(payload) if isinstance(payload, (str, bytes)) else payload
+        if not isinstance(raw, list) or not raw:
+            raise AdminKeyStoreError("expected a non-empty list of registrations")
+        records = [_untag_bytes(r) for r in raw]
+        for rec in records:
+            _validate_admin_record(rec)
+        ids = [r["authenticator_id"] for r in records]
+        if len(set(ids)) != len(ids):
+            raise AdminKeyStoreError("duplicate authenticator_id in the payload")
+        if not [r for r in records if not r.get("revoked")]:
+            # An all-revoked set would leave this device unable to accept any
+            # approval and unable to be repaired by one either -- refuse rather
+            # than write a store that can only ever say no.
+            raise AdminKeyStoreError(
+                "refusing a replacement set with no active authenticator")
+
+        os.makedirs(config.keys_dir(), exist_ok=True)
+        if os.path.exists(path):
+            with open(path, "rb") as src, open(prev, "wb") as dst:
+                dst.write(src.read())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump([_tag_bytes(r) for r in records], fh,
+                      separators=(",", ":"), sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        # Read it back before declaring success. A store that wrote but cannot be
+        # parsed is indistinguishable from a working one until the next task
+        # arrives, which is the worst moment to discover it.
+        pinned_admin_authenticators()
+        return True
+    except Exception as exc:                                       # noqa: BLE001
+        print("WARNING: could not replace the admin authenticators (%s)" % exc)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
+        return False
+
+
+def pinned_admin_authenticators():
+    """Every pinned registration. `[]` means none pinned; raises if unreadable.
+
+    The empty list is a real, expected answer -- a device that predates this
+    feature, or one whose operator has not paired a phone. It is NOT the answer
+    for a store that exists and is damaged; that raises `AdminKeyStoreError`, so
+    the two can never be confused by a caller reading the length.
+    """
+    path = _admin_auth_path()
+    if not os.path.isfile(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception as exc:                                       # noqa: BLE001
+        raise AdminKeyStoreError("pinned authenticator store is unreadable: %s"
+                                 % exc) from exc
+    if not isinstance(raw, list):
+        raise AdminKeyStoreError("pinned authenticator store is not a list")
+    return [_untag_bytes(r) for r in raw]
+
+
+def pinned_admin_authenticator(authenticator_id):
+    """The pinned registration for `authenticator_id`, or None.
+
+    None means "this agent has not pinned that authenticator" and the caller MUST
+    refuse -- never fall back to a key supplied with the request. Resolving the id
+    against local state is the whole point: a key that arrived with the assertion
+    proves only that whoever sent it holds its private half, which an attacker
+    minting the envelope trivially does.
+
+    Revoked registrations are treated as absent. A revoked phone that still
+    verified would make revocation advisory.
+    """
+    if not authenticator_id:
+        return None
+    for rec in pinned_admin_authenticators():
+        if rec.get("authenticator_id") == authenticator_id and not rec.get("revoked"):
+            return rec
+    return None
+
+
+def admin_authenticator_fingerprint(rec):
+    """Stable sha256 over one registration's COSE public key.
+
+    EXISTS TO BE COMPARED OUT OF BAND. Enrollment is the trust root here: the
+    install conf comes from the appliance, so an appliance already compromised AT
+    ENROLLMENT TIME can pin its own key and everything downstream follows from a
+    lie. That is structural -- the same is true of the server anchor, and no
+    amount of agent-side code fixes a poisoned root.
+
+    What it is NOT is unmitigable. The companion app holds the real admin key and
+    can display this same fingerprint, so an operator comparing the two at pairing
+    time forces a compromised appliance to also fool a device it does not control.
+    This function is what makes that comparison possible; surfacing it in the
+    installer and the companion UI is what makes it happen.
+    """
+    # Delegates to the ONE shared definition in the mirrored protocol module, so
+    # the appliance's rotation authorization, this store, and the companion app's
+    # display cannot drift into three subtly different digests.
+    import admin_approval                                          # noqa: PLC0415
+    return admin_approval.key_fingerprint(rec.get("public_key"))
+
+
+def admin_authenticators_fingerprint():
+    """One digest over the whole pinned SET, or None if nothing is pinned.
+
+    Order-independent (the per-record fingerprints are sorted before hashing), so
+    two devices pinned from the same registration list agree regardless of the
+    order the appliance happened to serialise them in.
+    """
+    import hashlib                                                 # noqa: PLC0415
+    records = pinned_admin_authenticators()
+    if not records:
+        return None
+    parts = sorted(admin_authenticator_fingerprint(r) for r in records)
+    return hashlib.sha256("".join(parts).encode()).hexdigest()
+
+
 def server_key_fingerprint():
     """sha256 of the pinned anchor's DER, or None if nothing is pinned.
 

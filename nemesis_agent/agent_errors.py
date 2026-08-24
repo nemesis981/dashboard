@@ -199,6 +199,20 @@ E_AGENT_CODES = {
                     "server probing for a reachable action looks like, so a burst of "
                     "these from actions that were never deployed is worth reading as a "
                     "signal rather than a version mismatch.", "medium"),
+    "E-AGENT-118": ("Admin approval refused for a gated task",
+                    "A task requiring admin approval (ADR 0026) arrived with a valid "
+                    "SERVER signature but its inner admin authorization did not "
+                    "verify against this device's PINNED admin keys, so it was "
+                    "REFUSED. The typed reason distinguishes the cases: missing, "
+                    "malformed, an authenticator this device never pinned, bound to "
+                    "another device, expired, a bad signature, or already spent "
+                    "here. Benign causes exist (a device enrolled before admin keys "
+                    "were paired refuses everything; an approval can legitimately "
+                    "expire). But 'bad_signature' or 'unknown_authenticator' on a "
+                    "correctly-provisioned device is the signature of an appliance "
+                    "attempting to authorize work no human approved -- which is "
+                    "precisely the case this layer exists to catch. Investigate "
+                    "rather than re-issue.", "high"),
 }
 
 _MAX_CONTEXT = 300               # hard cap on a context string (bounded input)

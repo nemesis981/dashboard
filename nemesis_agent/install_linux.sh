@@ -320,6 +320,44 @@ if srv_key:
     except Exception as e:
         print("    [!!] could not pin server key: %s" % e)
 
+# Admin-approval authenticators (ADR 0026 §D3) — which HUMANS this device will
+# accept approvals from. Absent conf key = feature not enabled on this appliance;
+# the agent then refuses every approval-gated action, which is fail-closed.
+admin_auth = (conf.get("admin_authenticators") or "").strip()
+if admin_auth:
+    try:
+        if enrollment.pin_admin_authenticators(admin_auth):
+            fp = enrollment.admin_authenticators_fingerprint()
+            n = len(enrollment.pinned_admin_authenticators())
+            print("    [OK] pinned %d admin authenticator(s)" % n)
+            # ── OUT-OF-BAND CHECK — the one thing code cannot do for the operator.
+            #
+            # Everything else this installer pins arrives from the appliance, so an
+            # appliance already compromised RIGHT NOW can pin its own admin key and
+            # every later guarantee follows from a lie. No amount of agent-side
+            # verification detects that; the trust root is genuinely out of reach.
+            #
+            # What IS in reach: the companion app holds the real admin key and can
+            # display this same digest. An operator who compares them forces a
+            # compromised appliance to also fool a device it does not control. That
+            # is why this is printed prominently rather than logged quietly -- an
+            # unread fingerprint mitigates nothing.
+            print("")
+            print("    ┌─ VERIFY THIS ON YOUR PHONE ─────────────────────────────")
+            print("    │  Admin key fingerprint:")
+            print("    │    %s" % fp[:32])
+            print("    │    %s" % fp[32:])
+            print("    │")
+            print("    │  Open the Nemesis companion app and compare. If it does")
+            print("    │  NOT match, STOP: this device has been given admin keys")
+            print("    │  that are not yours, and approvals it accepts would not")
+            print("    │  be yours either.")
+            print("    └─────────────────────────────────────────────────────────")
+            print("")
+    except Exception as e:
+        print("    [!!] could not pin admin authenticators: %s" % e)
+        print("         approval-gated actions will be REFUSED on this device")
+
 # ── IDEMPOTENCE GATE — do not enroll a host that is already enrolled ────────
 #
 # enroll() is a POST, and the server mints a FRESH device_id on every one of

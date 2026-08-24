@@ -106,6 +106,7 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
 # Imported HERE and not in database.py -- see the call site below for the measured
 # PYTHONPATH constraint that makes this the only safe place for it.
 from core.admin_approval_store import init_admin_approval_tables
+from core.admin_approval_authenticators import init_authenticator_tables
 from ip_enrichment import enrich_ip
 import tailscale_api
 from firewall import (parse_alert, ufw_delete, ufw_deny_append, list_blocked,
@@ -160,6 +161,10 @@ init_capability_tables()
 # Verified from a NEUTRAL cwd. Running the same check from /opt/nemesis makes
 # `python3 -c` put the cwd on sys.path and every variant falsely passes.
 init_admin_approval_tables()
+# §5 authenticator registrations. Same call-site reasoning as the line above --
+# see that module's docstring for the measured PYTHONPATH constraint that keeps
+# both of these out of database.py's module scope.
+init_authenticator_tables()
 # Track C (ADR 0001 canonical DDL in alert_manager/database.py). Created here AND
 # by hw_monitor's startup — deliberately both, the same reasoning as
 # init_quarantines_table: there is no systemd ordering between the two services,
@@ -4908,6 +4913,49 @@ def _render_install_conf(server_host: str, token: str, hint: str,
     except Exception as exc:
         log.warning("no server public key to bake into the installer conf (%s); "
                     "agents from this installer will not accept signed tasks", exc)
+    # Admin-approval authenticators (ADR 0026 §D3). Same out-of-band delivery
+    # channel as the server anchor above, and for a STRONGER version of the same
+    # reason: this set decides which humans the agent will accept approvals from,
+    # so learning it on first contact would be trust-on-first-use over exactly the
+    # link an attacker would own.
+    #
+    # PUBLIC KEYS ONLY. The admin private key lives on the operator's phone and the
+    # appliance never holds it -- that is the whole point of §D3 -- so nothing here
+    # is secret and this needs none of the consume-and-delete handling `preauth_key`
+    # gets below. `export_for_installer()` also drops `created_by`/`revoked_by`,
+    # which are operator identity and have no business in a file one careless paste
+    # from somewhere public (Rule 8).
+    #
+    # ⚠ THE TRUST ROOT IS HERE, AND CODE DOES NOT CLOSE IT. An appliance already
+    # compromised at THIS moment can bake in its own key and every downstream
+    # guarantee follows from a lie -- exactly as true of `server_public_key` above.
+    # The mitigation is out of band: the agent exposes
+    # `enrollment.admin_authenticators_fingerprint()`, the companion app displays
+    # the same digest, and an operator comparing them forces a compromised
+    # appliance to also fool a device it does not control.
+    #
+    # Best-effort, like the anchor: a missing value must not break installer
+    # generation. An agent that pins nothing refuses every approval-gated action --
+    # the fail-closed direction, and what every agent does today regardless.
+    try:
+        from core.admin_approval_authenticators import export_for_installer
+        _conn = _dm_conn()   # admin-approval authenticator export
+        try:
+            _records = export_for_installer(_conn)
+        finally:
+            _conn.close()
+        if _records:
+            # configparser reads this file, so the value must be ONE line. Asserted
+            # rather than assumed: a stray newline would silently truncate the conf
+            # at that point and every key after it would vanish.
+            _blob = json.dumps(_records, separators=(",", ":"), sort_keys=True)
+            if "\n" in _blob:
+                raise ValueError("serialised authenticators contain a newline")
+            lines.append(f"admin_authenticators = {_blob}")
+    except Exception as exc:
+        log.warning("no admin authenticators to bake into the installer conf (%s); "
+                    "agents from this installer will refuse approval-gated actions",
+                    exc)
     if preauth_key:
         lines.append(f"preauth_key = {preauth_key}")
     if poll_interval:
