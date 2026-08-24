@@ -501,11 +501,12 @@ if _live:
 
     # ── 10. THE GATE ACTUALLY READS THE UNLOCK ────────────────────────────────
     print("\n-- 10. an unlock changes a real HTTP status, not just a table --")
-    # Every capability ships with an EMPTY endpoint set today, so the gate's
-    # unlock branch is unreachable in production and a test written against the
-    # shipped configuration would pass while proving nothing -- the exact shape
-    # that let capabilities._conn() ship broken (its default path had no
-    # coverage because every test passed an explicit conn=).
+    # `approve_enrollment` was populated 2026-08-24 (ADR 0026 §6 step 5), but the
+    # OTHER capabilities still ship empty, so the gate's unlock branch is still
+    # not exercised for them by the shipped configuration -- and a test written
+    # against it would pass while proving nothing. That is the exact shape that
+    # let capabilities._conn() ship broken (its default path had no coverage
+    # because every test passed an explicit conn=).
     #
     # So: populate a capability with a REAL admin-only endpoint for the duration
     # of this section, and assert live status codes. `api_users_list` is chosen
@@ -522,8 +523,15 @@ if _live:
 
     try:
         roles.CAPABILITY_ROUTES[CAP] = frozenset({TARGET_EP})
+        # The endpoint set must cover EVERY declared capability, not just this
+        # fixture's target. Passing `{TARGET_EP}` alone worked only while all
+        # capabilities were empty; the moment a real one was populated
+        # (`approve_enrollment`, 2026-08-24) that call started reporting the
+        # SHIPPED capability's endpoints as nonexistent -- a fixture too narrow
+        # to describe reality, failing as though the product were broken.
+        _eps = {TARGET_EP}.union(*roles.CAPABILITY_ROUTES.values())
         check("CONTROL: the fixture is a sane capability declaration",
-              roles.assert_capabilities_sane({TARGET_EP}))
+              roles.assert_capabilities_sane(_eps))
         check("CONTROL: the capability now reads as BUILT, not DECLARED",
               roles.capability_state(CAP) == roles.CAP_BUILT)
 
@@ -583,10 +591,17 @@ if _live:
         clear_unlocks(S)
         clear_unlocks(U)
 
+    # Asserts RESTORATION, not a particular product state. The second clause used
+    # to be `all(not v for v in ...)` -- every capability empty -- which was true
+    # when written and silently became a false failure the moment a real
+    # capability was populated (`approve_enrollment`, 2026-08-24). A cleanup check
+    # that also encodes what the shipped table happens to contain fails for the
+    # wrong reason and points at the product rather than the fixture.
     check("CONTROL: CAPABILITY_ROUTES was restored to the shipped declaration",
-          roles.CAPABILITY_ROUTES == _orig_routes and
-          all(not v for v in roles.CAPABILITY_ROUTES.values()),
+          roles.CAPABILITY_ROUTES == _orig_routes,
           roles.CAPABILITY_ROUTES)
+    check("CONTROL: ...and this fixture's capability is empty again",
+          not roles.CAPABILITY_ROUTES[CAP], roles.CAPABILITY_ROUTES[CAP])
     check("CONTROL: with the fixture gone, the sub_admin is refused again (403)",
           sessions[S].get(TARGET_URL).status_code == 403)
 

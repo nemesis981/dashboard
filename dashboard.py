@@ -16714,6 +16714,24 @@ if __name__ == "__main__":
     # directives fail open, so the unit file is never evidence of confinement.
     import nemesis_privsep
     nemesis_privsep.attest_from_env("dashboard")
+
+    # Capability→route sanity, checked against the LIVE url_map (ADR 0026 D2).
+    #
+    # `endpoints=` is passed deliberately and must stay passed. Called bare, the
+    # check's existence rule compares a capability's endpoints against nothing
+    # external -- as of 2026-08-24 an unregistered name is caught by ROUTE_MINIMUMS
+    # too, but the url_map is the stronger source: it is what Flask will actually
+    # route, rather than a table someone maintains alongside it. A capability that
+    # names an endpoint Flask has never heard of protects nothing while reading as
+    # coverage, and the first moment that matters is the first moment a capability
+    # is populated -- which is now.
+    #
+    # Fails LOUD and at startup rather than at first unlock. A misconfigured
+    # capability discovered when a sub-admin is refused a route they earned is a
+    # support ticket; discovered here it is a stack trace with the offending name
+    # in it.
+    _roles.assert_capabilities_sane(
+        endpoints={r.endpoint for r in app.url_map.iter_rules()})
     # Started here, not at import: this spawns a thread that writes the live
     # database, which a test import or py_compile has no business doing.
     _start_degraded_ingest()

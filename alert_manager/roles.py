@@ -519,17 +519,33 @@ class UnknownCapability(RoleError):
 
 #: Capability -> the endpoints unlocking it grants a sub-admin.
 #:
-#: ALL THREE ARE DELIBERATELY EMPTY. These are the capability keys the roadmap
-#: names, and none of the features exists yet -- `push_and_run`,
-#: `firewall_change` and `approve_enrollment` have zero code presence repo-wide
-#: (verified 2026-08-23). Declaring them empty records the intent without
-#: inventing route names for features nobody has built; each fills in when its
-#: feature lands. An empty capability is a legal, meaningful state -- see
-#: `capability_state`.
+#: `approve_enrollment` IS POPULATED (2026-08-24 -- ADR 0026 §6 step 5, first
+#: real capability). The other two stay empty, for two different reasons that
+#: should not be confused:
+#:
+#:  * `push_and_run` -- THE FEATURE DOES NOT EXIST. ADR §6 names it as the first
+#:    capability to build, but a repo-wide search on 2026-08-24 found no
+#:    push/run-command endpoint anywhere; the only near hit is
+#:    `/api/agent/<id>/notify`, which pushes a notification, not a command. So
+#:    populating it is a feature build, not a wiring job, and its agent-side half
+#:    additionally needs admin-approval signing (blocked on Stage 0: WebAuthn
+#:    requires a secure context, and the appliance serves plain HTTP on a bare-IP
+#:    server_name -- verified live). §6's "push_and_run first" ordering predates
+#:    anyone checking whether it existed.
+#:  * `firewall_change` -- the endpoints DO exist (`api_firewall_unblock`,
+#:    `api_firewall_credential_drop`, `api_quarantine_lift`, all admin-only and
+#:    all confirmed to pass the D2 rules). Held back deliberately, one capability
+#:    at a time: `api_firewall_unblock` REMOVES a deny rule, which is the least
+#:    defensible thing to hand a newly-qualified sub-admin first.
+#:
+#: An empty capability remains a legal, meaningful state -- see `capability_state`.
 CAPABILITY_ROUTES = {
     "push_and_run": frozenset(),
     "firewall_change": frozenset(),
-    "approve_enrollment": frozenset(),
+    # Approving and revoking a device: one coherent concept, both actions
+    # reversible, both already route-audited, and both admin-only today. That
+    # bounded blast radius is why this is the capability that goes first.
+    "approve_enrollment": frozenset({"api_agent_approve", "api_agent_revoke"}),
 }
 
 #: A capability that is declared but has no endpoints yet.
@@ -584,7 +600,23 @@ def assert_capabilities_sane(endpoints=None):
             # unsafe methods. Elevating to something a plain user already has is
             # decoration, and a reader would reasonably assume it did something.
             entry = ROUTE_MINIMUMS.get(ep)
-            if entry is not None and entry[1] != ROLE_ADMIN:
+            if entry is None:
+                # ⚠ THE GAP THIS CLOSES. Until 2026-08-24 this branch did not
+                # exist, and the `endpoints is not None` block below was the ONLY
+                # existence check -- so a bare `assert_capabilities_sane()` call
+                # silently accepted an endpoint name that matched nothing at all.
+                # A typo passed clean and read as a verified capability, which is
+                # the `_AUTH_EXEMPT` shape exactly: looks like coverage, protects
+                # nothing. Callers SHOULD still pass `endpoints=app.url_map` (the
+                # live map is a stronger source than this table), but the bare
+                # call must not be the weak one -- a check whose strictness
+                # depends on which arguments the caller remembered is a check
+                # nobody can reason about.
+                problems.append(
+                    "capability %r covers %r, which is not in ROUTE_MINIMUMS at "
+                    "all -- a name that matches no registered route protects "
+                    "nothing while looking like coverage" % (name, ep))
+            elif entry[1] != ROLE_ADMIN:
                 problems.append("capability %r covers %r, whose unsafe minimum is "
                                 "%r rather than admin -- unlocking it would grant "
                                 "nothing" % (name, ep, entry[1]))

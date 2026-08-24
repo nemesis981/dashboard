@@ -1,0 +1,64 @@
+{
+  "capability": "approve_enrollment",
+  "quiz_version": "1",
+  "review_status": "CONTENT PENDING WINDOW 3 REVIEW (authored by Window 1, 2026-08-24). The mechanics and the facts are verified against the live route implementations in dashboard.py; the wording and pedagogy are Window 3's to revise. NOTE FOR THE REVISER: effective_version() digests only each question's id, prompt, options and correct index -- so 'title', 'intro', 'why' and this field can all be rewritten freely WITHOUT invalidating anyone's earned unlock. Changing a prompt, an option or a correct answer does force a retake, by design.",
+  "title": "Approving and revoking devices",
+  "intro": "Approving a device is the moment an unknown machine becomes a trusted one. Revoking is the moment you take that back. Both are reversible on paper, but each has a consequence that is easy to get wrong, and the recovery is not symmetrical.",
+  "questions": [
+    {
+      "id": "reject_vs_revoke",
+      "prompt": "A device is sitting in the enrolment list and you do not want it trusted. When should you REVOKE rather than REJECT?",
+      "options": [
+        "They do the same thing; use whichever the interface offers",
+        "Reject a request that was never approved; revoke a device that WAS trusted and is being withdrawn",
+        "Revoke first, then reject, so the device is removed from both lists"
+      ],
+      "correct": 1,
+      "why": "They are deliberately separate routes because they mean different things in the audit trail. 'Rejected' means an enrolment request was denied and the device was never trusted. 'Revoked' means a device that WAS trusted has had that trust deliberately withdrawn. Collapsing the two loses the distinction in the one place it matters most: later, when someone is asking what this machine was allowed to do and when."
+    },
+    {
+      "id": "readmission_scan",
+      "prompt": "You revoked a laptop last week and now you are approving it again. What happens that would NOT happen for a brand-new device?",
+      "options": [
+        "Nothing extra — an approval is an approval",
+        "A mandatory scan is queued, because trust was deliberately withdrawn and then restored",
+        "Its previous alert history is deleted so it starts clean"
+      ],
+      "correct": 1,
+      "why": "Re-approving a device that was revoked or uninstalled queues a MANDATORY reinstatement scan. The gap length is irrelevant — an hour is enough to introduce something — and the ordinary time-based triggers cannot help, because the extended-absence check needs 24 hours and first-connect never fires for a device whose record survived the revocation. If you ever see a readmission where that scan failed to queue, that is the one outcome worth stopping for rather than shrugging at."
+    },
+    {
+      "id": "revoke_is_a_network_fact",
+      "prompt": "You revoke a device and the response says the revocation succeeded but reports a separate problem removing it from the VPN. What is the actual state?",
+      "options": [
+        "Fully revoked — the VPN part is cosmetic bookkeeping",
+        "Blocked in Nemesis, but still on the VPN and still able to reach this box",
+        "Not revoked at all; the whole operation rolled back"
+      ],
+      "correct": 1,
+      "why": "Those are two different facts and the response keeps them separate on purpose. The local revocation commits FIRST, so the device is blocked here even if the network call then fails — the reverse order would let a network error leave a device the owner believes is revoked still fully trusted. But 'blocked in Nemesis' is not 'off the VPN'. Read the network outcome as its own answer; it is never folded into the success flag, precisely so you cannot miss it. The usual first-run cause is an under-scoped API token."
+    },
+    {
+      "id": "no_free_readmission",
+      "prompt": "After a device has been revoked, what does it need in order to be trusted again?",
+      "options": [
+        "Nothing — re-approving restores access using the key it already holds",
+        "A new key, because revocation removes it from the tailnet rather than only flipping a status",
+        "A factory reset of the agent before it can re-enrol"
+      ],
+      "correct": 1,
+      "why": "This one changed, and the old behaviour is the trap. Revocation used to flip a status and nothing else, leaving the device its network membership and its existing key — the interface even said 'Re-approving restores access using the key they already hold.' It now removes the node from the tailnet, so readmission needs a NEW key. That also makes key generation a second enforcement point for the device cap, rather than a one-time gate at first enrolment."
+    },
+    {
+      "id": "quiz_is_not_authorisation",
+      "prompt": "What does passing this quiz actually prove?",
+      "options": [
+        "That you are authorised to approve and revoke devices",
+        "That you understand the capability — authorisation is a separate, independent check",
+        "That your account has been verified as belonging to you"
+      ],
+      "correct": 1,
+      "why": "It proves competence, not authorisation. The quiz stops a well-meaning person withdrawing trust from a machine without understanding what that does; it would not inconvenience an attacker for a second. Your role, this unlock, and the route's own gate are all still checked on every request. If you ever hear the training described as the thing keeping the capability safe, that is wrong and worth correcting out loud."
+    }
+  ]
+}
