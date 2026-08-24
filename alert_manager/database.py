@@ -599,6 +599,17 @@ def init_capability_tables():
                 unlocked_at   TEXT    NOT NULL,
                 quiz_version  TEXT    NOT NULL,
                 quiz_score    INTEGER NOT NULL,
+                -- READ THE NAME CAREFULLY: this counts PASSES, not tries.
+                -- It increments only when `record_unlock` succeeds, so a learner
+                -- who failed nine times and passed once has attempts=1, and a
+                -- value of 3 means "earned, then re-earned twice after the quiz
+                -- was revised". Failed submissions write nothing at all.
+                -- Deliberate: a row here IS the unlock (presence plus a matching
+                -- version), so recording failures would mean putting rows that
+                -- must NOT count as unlocks into the table authorization reads.
+                -- Counting real tries needs its own table; nothing consumes that
+                -- today, so it is not built. The training page words this as
+                -- "recorded N times", never as "N attempts".
                 attempts      INTEGER NOT NULL DEFAULT 1,
                 granted_by    TEXT,
                 UNIQUE(user_id, capability)

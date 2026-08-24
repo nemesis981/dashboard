@@ -49,17 +49,51 @@ def _now():
 
 
 def _conn():
-    """A connection through the Data Manager, per ADR 0006."""
-    import data_manager                                        # noqa: PLC0415
-    return data_manager.get_data_manager().connect(MODULE)
+    """A connection through the Data Manager, per ADR 0006.
+
+    `modules.get_data_manager()` is the process-wide accessor -- NOT
+    `data_manager.get_data_manager()`, which does not exist. That was this
+    function's original body and it raised AttributeError on every call.
+    It survived review because every test passed an explicit `conn=`, so the
+    default path had no coverage at all: the module's own suite was 42/0 green
+    against a function that could not run in production. Found 2026-08-24 the
+    first time a caller (the training page) actually let it build its own
+    connection.
+
+    The lesson is worth keeping next to the fix -- a default argument branch
+    that no test ever takes is untested code wearing a passing suite, which is
+    exactly the "instrument that cannot fail" shape this codebase already tracks
+    in two other forms. `test_training_ui.py` now exercises this path for real.
+
+    Safe from a request handler: `modules_loader.init()` publishes the shared DB
+    path at dashboard import, long before any route is served. If it has NOT been
+    published this raises rather than inventing a path -- the right direction,
+    since a silently-wrong database would answer authorization questions from the
+    wrong table.
+    """
+    import modules                                             # noqa: PLC0415
+    return modules.get_data_manager().connect(MODULE)
 
 
-def unlocks_for(user_id, conn=None):
-    """Capabilities this user has CURRENTLY earned, as a frozenset.
+def _field(row, index, key):
+    """One column, whether the driver hands back a tuple, Row, or dict."""
+    if isinstance(row, dict):
+        return row[key]
+    try:
+        return row[key]                    # sqlite3.Row supports both
+    except (IndexError, KeyError, TypeError):
+        return row[index]
 
-    Returns an empty frozenset for a user with none -- that is a real answer, and
-    it is also what every non-sub-admin gets, since only a sub-admin's unlocks are
-    ever consulted.
+
+def unlock_details(user_id, conn=None):
+    """Every CURRENTLY-VALID unlock this user holds, as {capability: row-dict}.
+
+    The single source of truth for "what has this user earned". `unlocks_for()`
+    is this function's keys, and that is deliberate rather than tidiness: the
+    invalidation rules below decide whether an unlock counts, and a second reader
+    applying its own copy of them is one edit away from the UI calling an unlock
+    current while the gate treats it as expired. Two answers to that question is
+    the failure; one function producing both is the fix.
 
     A row is DROPPED (and logged) when:
       * its capability is no longer declared -- the feature was removed;
@@ -79,13 +113,17 @@ def unlocks_for(user_id, conn=None):
         conn = _conn()
     try:
         rows = conn.execute(
-            "SELECT capability, quiz_version FROM user_capability_unlocks "
+            "SELECT capability, quiz_version, unlocked_at, quiz_score, attempts, "
+            "       granted_by FROM user_capability_unlocks "
             "WHERE user_id=?", (int(user_id),)).fetchall()
     except Exception:
         # An unreadable unlock table must not grant anything. Loud, and empty.
+        # Returning {} here is safe in the one direction that matters -- it can
+        # only ever remove access -- and it is why this is the ONLY default this
+        # module returns on a failed read.
         log.exception("capabilities: could not read unlocks for user %s; "
                       "treating as NO unlocks", user_id)
-        return frozenset()
+        return {}
     finally:
         if owned:
             try:
@@ -93,10 +131,10 @@ def unlocks_for(user_id, conn=None):
             except Exception:                                  # noqa: BLE001
                 pass
 
-    live = set()
+    live = {}
     for row in rows:
-        cap = row[0] if not isinstance(row, dict) else row["capability"]
-        stored = row[1] if not isinstance(row, dict) else row["quiz_version"]
+        cap = _field(row, 0, "capability")
+        stored = _field(row, 1, "quiz_version")
         if cap not in roles.CAPABILITY_ROUTES:
             log.warning("capabilities: user %s holds an unlock for %r, which is "
                         "no longer a declared capability; ignoring", user_id, cap)
@@ -111,8 +149,28 @@ def unlocks_for(user_id, conn=None):
             log.info("capabilities: user %s must re-earn %r -- the quiz changed "
                      "(held %r, current %r)", user_id, cap, stored, current)
             continue
-        live.add(cap)
-    return frozenset(live)
+        live[cap] = {
+            "capability": cap,
+            "quiz_version": stored,
+            "unlocked_at": _field(row, 2, "unlocked_at"),
+            "quiz_score": _field(row, 3, "quiz_score"),
+            "attempts": _field(row, 4, "attempts"),
+            "granted_by": _field(row, 5, "granted_by"),
+        }
+    return live
+
+
+def unlocks_for(user_id, conn=None):
+    """Capabilities this user has CURRENTLY earned, as a frozenset.
+
+    Returns an empty frozenset for a user with none -- that is a real answer, and
+    it is also what every non-sub-admin gets, since only a sub-admin's unlocks are
+    ever consulted.
+
+    This is `unlock_details()` reduced to its keys. See there for the
+    invalidation rules and for why they live in exactly one place.
+    """
+    return frozenset(unlock_details(user_id, conn=conn))
 
 
 def record_unlock(user_id, capability, score, actor=None, conn=None):

@@ -150,7 +150,20 @@ _live_ok = os.path.exists(_live)
 if not _live_ok:
     check("a database was available to copy", False, _live)
 else:
-    shutil.copy(_live, _db)
+    # A CONSISTENT snapshot, not shutil.copy. The live DB is WAL-mode with
+    # dashboard/watchdog/alert-watcher writing to it; copying the main file
+    # without its -wal sidecar can yield a torn snapshot, and in THIS suite a
+    # torn copy would read as a capability bug rather than a harness artifact.
+    # Raises rather than falling back, so the hazard cannot return silently.
+    _src = sqlite3.connect("file:%s?mode=ro" % _live, uri=True)
+    try:
+        _dst = sqlite3.connect(_db)
+        try:
+            _src.backup(_dst)
+        finally:
+            _dst.close()
+    finally:
+        _src.close()
     import database
     database.DB_PATH = _db
     database.init_capability_tables()
@@ -183,20 +196,40 @@ else:
     check("...and accumulates attempts", row2[0] == row[0] + 1, (row[0], row2[0]))
 
     print("\n-- 5b. THE PROPERTY: editing a quiz invalidates the unlock --")
-    _real = os.path.join(_HERE, "quizzes", "%s.json" % CAP)
-    _bak = os.path.join(_tmpdir, "real.bak")
-    shutil.copy(_real, _bak)
+    # EDITED ON A COPY, NEVER IN THE REPO.
+    #
+    # This used to rewrite alert_manager/quizzes/<CAP>.json in place and restore
+    # it in a `finally`. That covers an exception and nothing else: not SIGKILL,
+    # not a closed terminal, not the OOM killer. And the damage would not be a
+    # stale temp file -- quiz versions are a CONTENT DIGEST, so a quiz left
+    # reworded silently invalidates every real unlock earned against the original
+    # wording on a live install. The next run would still pass, because it
+    # re-derives the version from whatever is on disk. Pointing the loader at a
+    # copy removes the exposure instead of narrowing it.
+    _qdir = os.path.join(_tmpdir, "live-quizzes")
+    shutil.copytree(os.path.join(_HERE, "quizzes"), _qdir,
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    _repo_quiz = os.path.join(_HERE, "quizzes", "%s.json" % CAP)
+    _before = open(_repo_quiz, encoding="utf-8").read()
+    _copied = os.path.join(_qdir, "%s.json" % CAP)
+    q._HERE = _qdir
     try:
-        _d = json.load(open(_real, encoding="utf-8"))
+        check("CONTROL: the unlock is intact before the edit",
+              cap.unlocks_for(UID, conn=conn) == {CAP})
+        _d = json.load(open(_copied, encoding="utf-8"))
         _d["questions"][0]["prompt"] += " (reworded by the test)"
-        with open(_real, "w", encoding="utf-8") as fh:
+        with open(_copied, "w", encoding="utf-8") as fh:
             json.dump(_d, fh)
         check("after a content edit the unlock is GONE",
               cap.unlocks_for(UID, conn=conn) == frozenset())
+        with open(_copied, "w", encoding="utf-8") as fh:
+            fh.write(_before)
+        check("CONTROL: restoring the quiz restores the unlock",
+              cap.unlocks_for(UID, conn=conn) == {CAP})
     finally:
-        shutil.copy(_bak, _real)
-    check("CONTROL: restoring the quiz restores the unlock",
-          cap.unlocks_for(UID, conn=conn) == {CAP})
+        q._HERE = _orig_here
+    check("CONTROL: the REPO quiz was never written to",
+          open(_repo_quiz, encoding="utf-8").read() == _before)
 
     check("revoke removes it", cap.revoke(UID, CAP, conn=conn) is True)
     check("...and reports a no-op honestly the second time",
