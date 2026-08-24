@@ -1,7 +1,7 @@
 {
   "capability": "approve_enrollment",
   "quiz_version": "1",
-  "review_status": "CONTENT PENDING WINDOW 3 REVIEW (authored by Window 1, 2026-08-24). The mechanics and the facts are verified against the live route implementations in dashboard.py; the wording and pedagogy are Window 3's to revise. NOTE FOR THE REVISER: effective_version() digests only each question's id, prompt, options and correct index -- so 'title', 'intro', 'why' and this field can all be rewritten freely WITHOUT invalidating anyone's earned unlock. Changing a prompt, an option or a correct answer does force a retake, by design.",
+  "review_status": "Reviewed 2026-08-24 (Window 3). Facts re-verified independently against api_agent_approve/api_agent_revoke in dashboard.py, not just re-trusted from the authoring claim -- all four accurate, including the readmission-scan timing mechanics and the tailnet-removal/new-key behavior. Wording tightened for a delegated-operator audience: Q2's explanation was carrying more engineering mechanism than the lesson needed, Q3 implied the operator should debug an API token scope issue that is actually an administrator's task, Q4 used 'device cap' without defining it. Content, not mechanics, is what changed.",
   "title": "Approving and revoking devices",
   "intro": "Approving a device is the moment an unknown machine becomes a trusted one. Revoking is the moment you take that back. Both are reversible on paper, but each has a consequence that is easy to get wrong, and the recovery is not symmetrical.",
   "questions": [
@@ -25,7 +25,7 @@
         "Its previous alert history is deleted so it starts clean"
       ],
       "correct": 1,
-      "why": "Re-approving a device that was revoked or uninstalled queues a MANDATORY reinstatement scan. The gap length is irrelevant — an hour is enough to introduce something — and the ordinary time-based triggers cannot help, because the extended-absence check needs 24 hours and first-connect never fires for a device whose record survived the revocation. If you ever see a readmission where that scan failed to queue, that is the one outcome worth stopping for rather than shrugging at."
+      "why": "Re-approving a device that was revoked or uninstalled queues a MANDATORY reinstatement scan, no matter how short the gap was — an hour is enough for something to have changed on that machine. This is a deliberate exception: none of Nemesis's ordinary time-based checks are built to catch a readmission like this one, so the scan doesn't wait for them. If you ever see a readmission where the scan didn't queue, that's the one outcome worth stopping and flagging rather than letting go."
     },
     {
       "id": "revoke_is_a_network_fact",
@@ -36,7 +36,7 @@
         "Not revoked at all; the whole operation rolled back"
       ],
       "correct": 1,
-      "why": "Those are two different facts and the response keeps them separate on purpose. The local revocation commits FIRST, so the device is blocked here even if the network call then fails — the reverse order would let a network error leave a device the owner believes is revoked still fully trusted. But 'blocked in Nemesis' is not 'off the VPN'. Read the network outcome as its own answer; it is never folded into the success flag, precisely so you cannot miss it. The usual first-run cause is an under-scoped API token."
+      "why": "Those are two different facts and the response keeps them separate on purpose. The local revocation commits FIRST, so the device is blocked here even if the network call then fails — the reverse order would let a network error leave a device the owner believes is revoked still fully trusted. But 'blocked in Nemesis' is not 'off the VPN'. Read the network outcome as its own answer; it is never folded into the success flag, precisely so you cannot miss it. If you see this, the device is genuinely blocked and there's nothing more for you to do — flag the VPN error to an administrator rather than trying to resolve it yourself; it's usually a network-integration configuration issue on their side, not anything about the device or the revocation itself."
     },
     {
       "id": "no_free_readmission",
@@ -47,7 +47,7 @@
         "A factory reset of the agent before it can re-enrol"
       ],
       "correct": 1,
-      "why": "This one changed, and the old behaviour is the trap. Revocation used to flip a status and nothing else, leaving the device its network membership and its existing key — the interface even said 'Re-approving restores access using the key they already hold.' It now removes the node from the tailnet, so readmission needs a NEW key. That also makes key generation a second enforcement point for the device cap, rather than a one-time gate at first enrolment."
+      "why": "This one changed, and the old behaviour is the trap. Revocation used to flip a status and nothing else, leaving the device its network membership and its existing key — the interface even said 'Re-approving restores access using the key they already hold.' It now removes the node from the tailnet, so readmission needs a NEW key. That's not just a technicality: it means every readmission goes through key issuance again, which is also where Nemesis enforces the limit on how many remote devices this install may have — not only once, at a device's very first enrolment."
     },
     {
       "id": "quiz_is_not_authorisation",
