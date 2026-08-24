@@ -384,8 +384,13 @@ capability's behaviour changes, its quiz version bumps and **every existing unlo
 capability is invalidated and must be re-earned.** Without this, training silently goes
 stale while the UI continues to assert the user was trained — the same stale-claim failure
 class this codebase has repeatedly been bitten by. `quiz_score` records the passing
-attempt's score (always 100 under the above) alongside the attempt count, so the column the
-roadmap specified keeps a defined meaning.
+attempt's score (always 100 under the above) alongside `attempts`, which counts **passes
+only, not tries.** A wrong-answer retake never writes a row — that is precisely why retakes
+are free: rows that shouldn't count as an unlock must not enter this authorization-read
+table. So `attempts` means "how many times this capability's quiz has been earned or
+re-earned," not a tally of every right/wrong question attempt along the way. This keeps a
+defined meaning for the column the roadmap specified, without a failed try ever touching the
+table that gates a real capability.
 
 ---
 
@@ -424,7 +429,8 @@ user_capability_unlocks (
     unlocked_at   TEXT    NOT NULL,
     quiz_version  TEXT    NOT NULL,      -- invalidates the unlock when it changes
     quiz_score    INTEGER NOT NULL,      -- the PASSING attempt's score
-    attempts      INTEGER NOT NULL DEFAULT 1,
+    attempts      INTEGER NOT NULL DEFAULT 1, -- count of PASSES/re-earns, not tries; a
+                                               -- failed quiz try never writes a row here
     granted_by    TEXT,                  -- actor seam: who/what recorded this
     UNIQUE(user_id, capability)
 )
