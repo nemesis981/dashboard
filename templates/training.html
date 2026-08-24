@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall &mdash; Capability Training</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; padding:26px 12px; box-sizing:border-box; }
+    .wrap { max-width:760px; margin:0 auto; }
+    h1 { color:#00d4ff; margin:0 0 4px; font-size:1.35em; }
+    .who { color:#8a98b3; font-size:0.82em; margin:0 0 20px; }
+    .lede { background:#16213e; border:1px solid #00d4ff33; border-radius:12px;
+            padding:18px 20px; margin:0 0 22px; font-size:0.88em; line-height:1.6; color:#ccd; }
+    .lede strong { color:#eee; }
+    .cap { background:#16213e; border:1px solid #2a3450; border-radius:12px;
+           padding:18px 20px; margin:0 0 14px; }
+    .cap h2 { margin:0 0 3px; font-size:1.05em; color:#eee; text-transform:capitalize; }
+    .sub { color:#8a98b3; font-size:0.78em; margin:0 0 12px; }
+    .intro { font-size:0.86em; line-height:1.6; color:#ccd; margin:0 0 14px; }
+    .tags { margin:0 0 12px; }
+    .tag { display:inline-block; font-size:0.72em; padding:3px 9px; border-radius:20px;
+           margin:0 6px 6px 0; border:1px solid; }
+    .t-live    { color:#7ee787; border-color:#7ee78766; background:#7ee7871a; }
+    .t-pending { color:#ffd98a; border-color:#ffb01a66; background:#ffb01a1a; }
+    .t-earned  { color:#00d4ff; border-color:#00d4ff66; background:#00d4ff1a; }
+    .t-broken  { color:#ff8888; border-color:#ff444488; background:#ff44441a; }
+    .t-none    { color:#8a98b3; border-color:#39435c; background:#0d0d1e; }
+    .note { border-left:3px solid #ffb01a; background:#ffb01a12; padding:10px 13px;
+            font-size:0.81em; line-height:1.55; color:#ffd98a; border-radius:0 6px 6px 0;
+            margin:0 0 13px; }
+    .note.grey { border-left-color:#39435c; background:#0d0d1e; color:#8a98b3; }
+    .note.bad  { border-left-color:#ff4444; background:#ff44441a; color:#ff9999; }
+    .earned { font-size:0.8em; color:#8a98b3; margin:0 0 12px; line-height:1.6; }
+    .earned b { color:#00d4ff; }
+    a.btn { display:inline-block; background:#00d4ff; color:#062; text-decoration:none;
+            border-radius:8px; padding:9px 16px; font-size:0.88em; font-weight:bold; }
+    a.btn.ghost { background:transparent; color:#00d4ff; border:1px solid #00d4ff66; }
+    .back { display:inline-block; margin-top:14px; color:#6b7689; font-size:0.82em;
+            text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>&#127891; Capability Training</h1>
+    <p class="who">Signed in as {{ current_user.username }} &mdash; {{ role_label }}</p>
+
+    <div class="lede">
+      Some actions in Nemesis can affect machines other than this appliance. Those are
+      held behind <strong>capabilities</strong>, and a capability is earned by working
+      through its training rather than being switched on for you.
+      <br><br>
+      Passing a quiz shows <strong>you understand what the capability does</strong>. It is
+      not what makes the action safe, and it is not a permission by itself &mdash; every
+      use still needs your account's role, an approval signed on the administrator's
+      phone, and the target device's own consent. If you ever hear the training described
+      as the thing keeping a capability safe, that is wrong and worth correcting.
+      {% if role != sub_admin_role %}
+      <br><br>
+      Your account is <strong>{{ role_label }}</strong>. Capabilities are applied to
+      sub-administrator accounts, so passing these now records your training and takes
+      effect if an administrator moves you to that role later. There is no harm in
+      working through them first.
+      {% endif %}
+    </div>
+
+    {% for r in rows %}
+    <div class="cap">
+      <h2>{{ r.title or r.label }}</h2>
+      <p class="sub">{{ r.name }}</p>
+
+      <div class="tags">
+        {% if r.built %}
+          <span class="tag t-live">Active in Nemesis</span>
+        {% else %}
+          <span class="tag t-pending">Not built yet</span>
+        {% endif %}
+        {% if r.unlock %}
+          <span class="tag t-earned">You have passed this</span>
+        {% endif %}
+        {% if r.training == 'broken' %}
+          <span class="tag t-broken">Training unavailable</span>
+        {% elif r.training == 'none' %}
+          <span class="tag t-none">No training written yet</span>
+        {% endif %}
+      </div>
+
+      {% if not r.built %}
+      <div class="note">
+        This capability is <strong>declared but not built</strong> &mdash; nothing in
+        Nemesis uses it yet, so passing its training will not switch anything on today.
+        It is listed so the training is ready when the feature is, and so this page never
+        implies you have been given something you have not.
+      </div>
+      {% endif %}
+
+      {% if r.intro %}<p class="intro">{{ r.intro }}</p>{% endif %}
+
+      {% if r.unlock %}
+      <p class="earned">
+        Passed <b>{{ r.unlock.unlocked_at }}</b> at <b>{{ r.unlock.quiz_score }}%</b>.
+        {% if r.unlock.attempts and r.unlock.attempts > 1 %}
+          Recorded {{ r.unlock.attempts }} times &mdash; the training was revised and
+          re-earned.
+        {% endif %}
+        <br>
+        If the training is ever rewritten, this is retired automatically and you will be
+        asked to sit the new version. That is deliberate: training that has quietly gone
+        out of date is worse than none, because the record still says you did it.
+      </p>
+      {% endif %}
+
+      {% if r.training == 'ready' %}
+        <a class="btn {% if r.unlock %}ghost{% endif %}"
+           href="{{ url_for('training_quiz', capability=r.name) }}">
+          {% if r.unlock %}Read it again{% else %}Start &mdash; {{ r.questions }} question{{ 's' if r.questions != 1 }}{% endif %}
+        </a>
+      {% elif r.training == 'broken' %}
+        <div class="note bad">
+          The training for this capability is installed but cannot be read, so it cannot
+          be sat. This is a fault on the appliance rather than anything you have done
+          &mdash; it has been written to the log for whoever maintains this system.
+        </div>
+      {% else %}
+        <div class="note grey">
+          No training has been written for this capability yet, so there is nothing to
+          sit. It will appear here when it exists.
+        </div>
+      {% endif %}
+    </div>
+    {% endfor %}
+
+    <a class="back" href="/">&larr; Back to dashboard</a>
+  </div>
+</body>
+</html>

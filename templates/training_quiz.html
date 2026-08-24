@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemesis Firewall &mdash; {{ (doc and doc.title) or capability }}</title>
+  <style>
+    body { background:#0d0d1e; color:#eee; font-family:-apple-system,Segoe UI,Roboto,sans-serif;
+           margin:0; padding:26px 12px; box-sizing:border-box; }
+    .wrap { max-width:720px; margin:0 auto; }
+    h1 { color:#00d4ff; margin:0 0 4px; font-size:1.3em; }
+    .sub { color:#8a98b3; font-size:0.8em; margin:0 0 20px; }
+    .card { background:#16213e; border:1px solid #2a3450; border-radius:12px;
+            padding:20px 22px; margin:0 0 16px; }
+    .intro { font-size:0.9em; line-height:1.65; color:#ccd; margin:0; }
+    .note { border-left:3px solid #ffb01a; background:#ffb01a12; padding:11px 14px;
+            font-size:0.83em; line-height:1.6; color:#ffd98a; border-radius:0 6px 6px 0;
+            margin:0 0 16px; }
+    .note.bad { border-left-color:#ff4444; background:#ff44441a; color:#ff9999; }
+    .q { background:#16213e; border:1px solid #2a3450; border-radius:12px;
+         padding:18px 20px; margin:0 0 14px; }
+    .q .n { color:#8a98b3; font-size:0.74em; letter-spacing:0.06em; text-transform:uppercase;
+            margin:0 0 7px; }
+    .q .p { font-size:0.95em; line-height:1.6; margin:0 0 14px; color:#eee; }
+    label.opt { display:block; background:#0d0d1e; border:1px solid #2a3450; border-radius:8px;
+                padding:11px 13px; margin:0 0 8px; font-size:0.88em; line-height:1.5;
+                color:#ccd; cursor:pointer; }
+    label.opt:hover { border-color:#00d4ff66; }
+    label.opt input { margin-right:9px; }
+    button { background:#00d4ff; color:#062; border:none; border-radius:8px;
+             padding:12px 22px; font-size:0.98em; font-weight:bold; cursor:pointer; }
+    .banner { border-radius:12px; padding:18px 20px; margin:0 0 18px; font-size:0.9em;
+              line-height:1.65; }
+    .pass { background:#7ee7871a; border:1px solid #7ee78766; color:#b9f0c1; }
+    .fail { background:#ffb01a1a; border:1px solid #ffb01a66; color:#ffd98a; }
+    .banner h2 { margin:0 0 8px; font-size:1.08em; }
+    .rev { background:#16213e; border:1px solid #ff444455; border-radius:12px;
+           padding:17px 19px; margin:0 0 13px; }
+    .rev .p { font-size:0.9em; line-height:1.55; color:#eee; margin:0 0 11px; }
+    .rev .yours { font-size:0.82em; color:#ff9999; margin:0 0 4px; }
+    .rev .right { font-size:0.82em; color:#7ee787; margin:0 0 11px; }
+    .rev .why { font-size:0.86em; line-height:1.65; color:#ccd; border-left:3px solid #00d4ff55;
+                padding-left:12px; margin:0; }
+    a.btn { display:inline-block; background:#00d4ff; color:#062; text-decoration:none;
+            border-radius:8px; padding:11px 20px; font-size:0.9em; font-weight:bold; }
+    a.btn.ghost { background:transparent; color:#00d4ff; border:1px solid #00d4ff66; }
+    .back { display:inline-block; margin-top:16px; color:#6b7689; font-size:0.82em;
+            text-decoration:none; }
+    .actions { margin-top:18px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+
+  {% if unavailable %}
+    <h1>Training unavailable</h1>
+    <p class="sub">{{ capability }}</p>
+    <div class="note bad">
+      {% if malformed %}
+        This capability&rsquo;s training is installed but cannot be read, so it cannot be
+        sat right now. That is a fault on the appliance rather than anything you have
+        done, and it has been written to the log for whoever maintains this system.
+      {% else %}
+        No training has been written for this capability yet, so there is nothing to sit.
+      {% endif %}
+    </div>
+    <a class="btn ghost" href="{{ url_for('training_page') }}">&larr; All training</a>
+
+  {% else %}
+    <h1>{{ doc.title or capability }}</h1>
+    <p class="sub">{{ capability }} &mdash; {{ doc.questions|length }}
+       question{{ 's' if doc.questions|length != 1 }}, every one must be right to pass</p>
+
+    {% if not built %}
+    <div class="note">
+      This capability is <strong>declared but not built</strong>. Nothing in Nemesis uses
+      it yet, so passing today will not switch anything on &mdash; it records that you have
+      done the training, ready for when the feature exists. Saying so plainly here is
+      deliberate: offering training that quietly unlocks nothing would be worse than not
+      offering it.
+    </div>
+    {% endif %}
+
+    {% if result %}
+      {% if result.passed and recorded %}
+        <div class="banner pass">
+          <h2>&#10003; Passed &mdash; {{ result.score }}%</h2>
+          You answered every question correctly and your training for
+          <strong>{{ capability }}</strong> has been recorded.
+          {% if not built %}
+            This capability is not built yet, so nothing has changed in what your account
+            can do. When it ships, your training will already be on file.
+          {% else %}
+            This is one of the checks required to use it. Using it still needs your
+            account&rsquo;s role, an approval signed on the administrator&rsquo;s phone,
+            and the target device&rsquo;s own consent &mdash; passing this quiz did not,
+            by itself, authorise anything.
+          {% endif %}
+        </div>
+      {% elif result.passed and not recorded %}
+        <div class="banner fail">
+          <h2>Passed, but not recorded</h2>
+          You answered every question correctly, but the result could not be saved, so
+          your training is <strong>not</strong> on file and nothing has been unlocked.
+          Please try again; if it keeps happening, this needs whoever maintains the
+          appliance to look at it.
+          {% if record_error %}<br><br><code>{{ record_error }}</code>{% endif %}
+        </div>
+      {% else %}
+        <div class="banner fail">
+          <h2>Not passed &mdash; {{ result.score }}%</h2>
+          {{ result.wrong|length }} of {{ result.total }}
+          {{ 'answers were' if result.wrong|length != 1 else 'answer was' }} wrong.
+          Everything must be right to pass, and there is no limit on how many times you
+          can sit this &mdash; it is here to teach rather than to examine, so the
+          reasoning for each one is below.
+        </div>
+
+        {% for r in review %}
+        <div class="rev">
+          <p class="p">{{ r.prompt }}</p>
+          {% if r.chosen_text %}
+            <p class="yours">You chose: {{ r.chosen_text }}</p>
+          {% else %}
+            <p class="yours">You did not answer this one.</p>
+          {% endif %}
+          <p class="right">Correct: {{ r.correct_text }}</p>
+          <p class="why">{{ r.why }}</p>
+        </div>
+        {% endfor %}
+      {% endif %}
+
+      <div class="actions">
+        {% if result.passed and recorded %}
+          <a class="btn" href="{{ url_for('training_page') }}">Back to training</a>
+        {% else %}
+          <a class="btn" href="{{ url_for('training_quiz', capability=capability) }}">Try again</a>
+          <a class="btn ghost" href="{{ url_for('training_page') }}">All training</a>
+        {% endif %}
+      </div>
+
+    {% else %}
+      {% if doc.intro %}
+      <div class="card"><p class="intro">{{ doc.intro }}</p></div>
+      {% endif %}
+
+      <form method="POST" action="{{ url_for('training_quiz', capability=capability) }}">
+        {% for q in doc.questions %}
+        <div class="q">
+          <p class="n">Question {{ loop.index }} of {{ doc.questions|length }}</p>
+          <p class="p">{{ q.prompt }}</p>
+          {% for opt in q.options %}
+          <label class="opt">
+            <input type="radio" name="q_{{ q.id }}" value="{{ loop.index0 }}">
+            {{ opt }}
+          </label>
+          {% endfor %}
+        </div>
+        {% endfor %}
+        <button type="submit">Submit answers</button>
+      </form>
+    {% endif %}
+
+    <br>
+    <a class="back" href="{{ url_for('training_page') }}">&larr; All training</a>
+  {% endif %}
+
+  </div>
+</body>
+</html>

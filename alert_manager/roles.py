@@ -413,6 +413,34 @@ ROUTE_MINIMUMS = {
     "api_users_update":               (_A, _A),
     "api_users_delete":               (_A, _A),
     "api_users_roles":                (_A, _A),
+
+    # ── Learning gate (ADR 0026 D4) ──────────────────────────────────────────
+    # `user` AND ABOVE -- NOT sub_admin-and-above, which is what this first said.
+    #
+    # The import canary rejected the stricter version, and it was right to. D1's
+    # invariant is that a sub_admin is EXACTLY a user plus their unlocks: the
+    # base rank grants nothing a user lacks, and `_sub_admin_equals_user_without
+    # _unlocks()` checks that over every endpoint. A training page only a
+    # sub_admin could open would have been a rank-granted power with no unlock
+    # behind it -- a real break of the property, caught mechanically rather than
+    # by review.
+    #
+    # The reasoning that produced the stricter version was: only a sub_admin's
+    # unlocks are ever consulted, so training anyone else "unlocks nothing".
+    # That extends D2 rule 4 from CAPABILITY STATE (declared vs built, which the
+    # ADR does say) to TAKER'S ROLE (which it does not). Pre-training before a
+    # promotion is a sensible order to do things in, and the unlock row is
+    # already inert until the account is a sub_admin.
+    #
+    # viewonly is below the floor because submitting a quiz WRITES, and a role
+    # defined as read-only should not hold the only action this page offers. A
+    # page it could read but never use is a worse dead end than a clean refusal.
+    #
+    # Both minimums are the same. The POST records an unlock against the
+    # caller's OWN user id and nothing else, so it is exactly as privileged as
+    # the GET that renders the questions.
+    "training_page":                  (_U, _U),
+    "training_quiz":                  (_U, _U),
 }
 
 # Reachable by ANY authenticated principal, whatever their role. These are not

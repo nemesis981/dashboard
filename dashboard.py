@@ -122,6 +122,8 @@ from flask_login import (LoginManager, UserMixin, login_user, logout_user,
                          login_required, current_user)
 
 import roles as _roles
+import capabilities as _caps   # learning-gate unlocks: read/write (ADR 0026)
+import quizzes as _quizzes     # hand-authored capability quizzes (ADR 0026 D4)
 from core import entitlements, passphrase
 
 init_alerts_db()
@@ -1627,8 +1629,59 @@ def _enforce_role():
         _errors_record_rbac("E-RBAC-002", {"endpoint": ep, "method": request.method})
 
     need = _roles.required_role(ep, request.method)
-    if not _roles.at_least(have, need):
-        return _role_denied(ep, need, have)
+    if _roles.at_least(have, need):
+        return
+
+    # ── Rank was not enough. A sub-admin may have EARNED this endpoint ────────
+    #
+    # THIS IS THE ONLY PLACE UNLOCKS ARE READ, AND IT IS DELIBERATELY ON THE
+    # DENIAL PATH. Reading them for every request would put a database round
+    # trip in front of all 143 endpoints to answer a question that is "no" for
+    # every role except one, on the small set of routes a capability covers.
+    # Here it costs a read only when a sub-admin has actually been refused by
+    # rank on a capability-covered route, which is the rare case by construction.
+    #
+    # WHY THIS BLOCK MAY SWALLOW AN EXCEPTION WHEN THE FUNCTION ABOVE MAY NOT.
+    # The header of this section says an authorization policy must never swallow,
+    # because swallowing fails OPEN. That reasoning inverts here and the
+    # inversion is the whole reason this is safe: control has already reached a
+    # refusal, and this block can only ever GRANT an exception to it. An error
+    # that leaves `unlocks` empty therefore denies -- the same answer as not
+    # having asked. Failing loudly with a 500 would be no safer and would turn a
+    # transient database problem into a broken dashboard for the one role that
+    # depends on this path.
+    #
+    # `may_with_unlocks` re-derives the rank decision internally rather than
+    # trusting that we got here by failing it. That is intentional duplication:
+    # it keeps roles.py's answer a pure function of its arguments, so its
+    # import-time canary tests the same code the gate runs.
+    if have == _roles.ROLE_SUB_ADMIN and _roles.capability_for_endpoint(ep):
+        unlocks = frozenset()
+        try:
+            unlocks = _caps.unlocks_for(current_user.id)
+        except Exception:                                      # noqa: BLE001
+            auth_log.exception(
+                "authz: could not read capability unlocks for %s; "
+                "treating as none and refusing %s",
+                getattr(current_user, "username", "?"), ep)
+        try:
+            if _roles.may_with_unlocks(have, unlocks, ep, request.method):
+                # Attributed, because this is the one path where two accounts
+                # with the same role get different answers. Without a line here
+                # the audit trail cannot explain why.
+                auth_log.info(
+                    "authz: %s allowed %s %s via the %r capability unlock",
+                    getattr(current_user, "username", "?"), request.method, ep,
+                    _roles.capability_for_endpoint(ep))
+                return
+        except _roles.RoleError:
+            # An unlock naming a capability that no longer exists. unlocks_for()
+            # already filters these, so reaching here means the two disagree --
+            # refuse, and say so rather than 500ing.
+            auth_log.exception("authz: unusable capability unlock for %s on %s",
+                               getattr(current_user, "username", "?"), ep)
+
+    return _role_denied(ep, need, have)
 
 
 
@@ -2194,6 +2247,213 @@ def recovery_codes_page():
     auth_log.info("auth: recovery codes regenerated for %s from %s", row["username"], ip)
     return render_template("recovery_codes.html", codes=codes, first_run=False,
                            generated_at=datetime.now().strftime("%Y-%m-%d %H:%M"))
+
+
+# ── Learning gate: capability training (ADR 0026 D4) ─────────────────────────
+#
+# WHAT THIS PAGE IS, AND THE ONE THING IT MUST NEVER IMPLY
+#   Passing a quiz proves COMPETENCE, not AUTHORIZATION. It stops an untrained
+#   delegate firing a dangerous task by accident; it does not inconvenience an
+#   attacker for a second. A dangerous action still needs the role, this unlock,
+#   the admin-approval signature, and the target device's own consent (ADR 0026
+#   §4). Every string rendered below is written to say that plainly, because a
+#   training page that reads like a security control teaches the one wrong idea
+#   that matters here.
+#
+# WHY JINJA AND NOT AN f-STRING PAGE
+#   This file's single most recurring defect is a JS/HTML string built inside a
+#   Python f-string, where one apostrophe in rendered prose is a silent
+#   SyntaxError. These pages carry a lot of authored English -- quiz prompts and
+#   explanations full of contractions -- so they are templates. The quiz text is
+#   Jinja-escaped data, never Python source.
+#
+# THREE STATES, AND WHY CONFLATING TWO OF THEM WOULD BE A BUG
+#   A capability's training is "ready", "none" (no quiz authored yet), or
+#   "broken" (a quiz file exists but will not load). `quizzes.load()` already
+#   distinguishes the last two by exception type, and this code keeps them
+#   distinct all the way to the page. Rendering a malformed quiz as "not
+#   available yet" would be the standing failure this codebase keeps naming: a
+#   failed read dressed up as a legitimate answer, indistinguishable to the
+#   reader from the real thing.
+
+#: How a capability's training presents. Kept separate from the capability's own
+#: DECLARED/BUILT state -- they answer different questions and a reader needs
+#: both: "is there training?" and "does passing it switch anything on yet?"
+_TRAINING_READY, _TRAINING_NONE, _TRAINING_BROKEN = "ready", "none", "broken"
+
+
+def _training_rows(user_id):
+    """Every declared capability, its training state, and this user's unlock.
+
+    Reads unlocks through `capabilities.unlock_details()` -- the same function
+    whose keys the authorization path consumes -- so the page cannot call an
+    unlock current while the gate treats it as expired.
+    """
+    held = _caps.unlock_details(user_id)
+    rows = []
+    for cap in sorted(_roles.CAPABILITY_ROUTES):
+        row = {
+            "name": cap,
+            "label": cap.replace("_", " "),
+            # DECLARED means the capability grants no endpoints yet. ADR 0026 D2
+            # rule 4 requires this be VISIBLE and not merely true.
+            "state": _roles.capability_state(cap),
+            "built": _roles.capability_state(cap) == _roles.CAP_BUILT,
+            "unlock": held.get(cap),
+            "training": _TRAINING_NONE,
+            "title": None, "intro": None, "questions": 0, "problem": None,
+        }
+        try:
+            doc = _quizzes.load(cap)
+        except _quizzes.QuizUnavailable:
+            pass                          # genuinely not authored yet
+        except _quizzes.QuizMalformed as exc:
+            # NOT folded into the branch above. A quiz that exists and is broken
+            # is an authoring fault someone must fix; one that was never written
+            # is an empty backlog slot. Same blank page, opposite meanings.
+            row["training"] = _TRAINING_BROKEN
+            row["problem"] = str(exc)
+            log.error("training: %s has an unusable quiz: %s", cap, exc)
+        else:
+            row["training"] = _TRAINING_READY
+            row["title"] = doc.get("title") or row["label"]
+            row["intro"] = doc.get("intro")
+            row["questions"] = len(doc["questions"])
+        rows.append(row)
+    return rows
+
+
+@app.route("/account/training")
+@login_required
+def training_page():
+    """The learning-gate overview: what can be earned, and what this user holds.
+
+    Read-only GET. Gated at `user` and above by the registry in roles.py, not by
+    a decorator here -- see the before_request gate.
+    """
+    return render_template(
+        "training.html",
+        rows=_training_rows(current_user.id),
+        role=_roles.normalise_role(getattr(current_user, "role", None)),
+        role_label=_roles.role_label(
+            _roles.normalise_role(getattr(current_user, "role", None))),
+        sub_admin_role=_roles.ROLE_SUB_ADMIN,
+    )
+
+
+@app.route("/account/training/<capability>", methods=["GET", "POST"])
+@login_required
+def training_quiz(capability):
+    """Sit a capability's quiz (GET) and submit it (POST).
+
+    THE UNLOCK IS ALWAYS FOR `current_user`, NEVER FOR A REQUESTED ID.
+      There is deliberately no user parameter anywhere in this route. An admin
+      granting someone else a capability is a different action with different
+      authorization, and it is not this one -- if it is ever built it gets its
+      own route rather than a parameter here, because a parameter here is a
+      privilege-escalation shape sitting one typo away from being reachable.
+
+    GRADING IS SERVER-SIDE AND THE ANSWER KEY IS NEVER SENT TO THE PAGE.
+      The rendered form carries prompts and options only. `correct` and `why`
+      stay on the server until after a submission is graded, so the page cannot
+      be read for the answers before sitting it.
+
+    POST-ONLY FOR THE WRITE, matching every other state-changing route here: a
+    GET that recorded an unlock would be CSRF-triggerable by an <img> tag under
+    the default SameSite=Lax cookie.
+    """
+    # Validate against the declared set FIRST. An unknown name is a 404, not a
+    # 500 and not a silent "locked" -- `capability_state` raises for exactly
+    # this reason, and swallowing it into a denial is the `_AUTH_EXEMPT` failure
+    # again: it would look like a working gate over a route that does not exist.
+    if capability not in _roles.CAPABILITY_ROUTES:
+        abort(404)
+
+    try:
+        doc = _quizzes.load(capability)
+    except _quizzes.QuizError as exc:
+        # Unavailable and malformed both land here for the LEARNER, who can do
+        # nothing about either -- but they are logged differently above and the
+        # page says which it is rather than inventing a reason.
+        log.warning("training: %s cannot be sat: %s", capability, exc)
+        return render_template(
+            "training_quiz.html", capability=capability, doc=None,
+            unavailable=str(exc),
+            malformed=isinstance(exc, _quizzes.QuizMalformed)), 404
+
+    state = _roles.capability_state(capability)
+    built = state == _roles.CAP_BUILT
+
+    if request.method == "GET":
+        return render_template("training_quiz.html", capability=capability,
+                               doc=doc, built=built, state=state, result=None,
+                               unavailable=None, malformed=False)
+
+    # ── POST: grade it ────────────────────────────────────────────────────────
+    # An answer that is missing, non-numeric or out of range is WRONG, not
+    # skipped -- `quizzes.grade()` enforces that, and it is why the form fields
+    # are read permissively here rather than validated into a 400. A submission
+    # that omitted every hard question must score zero on them, not be rejected
+    # in a way that hides which ones were left blank.
+    answers = {}
+    for q in doc["questions"]:
+        raw = request.form.get("q_%s" % q["id"])
+        try:
+            answers[q["id"]] = int(raw)
+        except (TypeError, ValueError):
+            answers[q["id"]] = None
+
+    result = _quizzes.grade(capability, answers, doc=doc)
+
+    # Join the grader's terse output back to displayable text. The grader
+    # deliberately returns ids, not prose -- it is graded logic, not a view.
+    by_id = {q["id"]: q for q in doc["questions"]}
+    review = []
+    for w in result["wrong"]:
+        q = by_id.get(w["id"])
+        if not q:
+            continue
+        chosen = answers.get(w["id"])
+        review.append({
+            "prompt": q["prompt"],
+            "why": w["why"],
+            "correct_text": q["options"][w["correct"]],
+            "chosen_text": (q["options"][chosen]
+                            if isinstance(chosen, int) and not isinstance(chosen, bool)
+                            and 0 <= chosen < len(q["options"]) else None),
+        })
+
+    recorded = False
+    record_error = None
+    if result["passed"]:
+        try:
+            _caps.record_unlock(
+                current_user.id, capability, result["score"],
+                actor="user:%s" % getattr(current_user, "username", "?"))
+            recorded = True
+        except Exception as exc:                               # noqa: BLE001
+            # A pass we could not persist must NOT be reported as an unlock.
+            # Saying "unlocked" over a failed write is the stale-claim failure
+            # this whole versioning scheme exists to avoid, one layer up.
+            record_error = str(exc)
+            log.exception("training: %s passed %s but the unlock could not "
+                              "be recorded", getattr(current_user, "username", "?"),
+                              capability)
+        else:
+            _audit("capability_unlocked")
+            auth_log.info("training: %s passed %s (%s%%) -- unlock recorded",
+                          getattr(current_user, "username", "?"), capability,
+                          result["score"])
+    else:
+        auth_log.info("training: %s did not pass %s (%s%%, %d wrong)",
+                      getattr(current_user, "username", "?"), capability,
+                      result["score"], len(result["wrong"]))
+
+    return render_template("training_quiz.html", capability=capability, doc=doc,
+                           built=built, state=state, result=result,
+                           review=review, recorded=recorded,
+                           record_error=record_error, unavailable=None,
+                           malformed=False)
 
 
 # How long a recovery-code sign-in may set a new password without supplying the
@@ -14527,6 +14787,8 @@ def dashboard():
             <a href="/settings" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Settings">⚙️ Settings</a>
             &nbsp;|&nbsp;
             <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
+            &nbsp;|&nbsp;
+            <a href="/account/training" data-min-role="user" style="color:#bbb;text-decoration:none" title="Capability training">🎓 Training</a>
         </span>
     </h1>
     <script src="/static/header-status.js"></script>
