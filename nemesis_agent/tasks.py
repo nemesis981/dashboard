@@ -427,6 +427,163 @@ ROTATE_ACTION = "rotate_server_key"
 ATTEST_ACTION = "attest_manifest"
 
 
+# ── task-action classification: DEFAULT-DENY dispatch ─────────────────────
+#
+# WHY THIS EXISTS. Until this landed, a signed task naming ANY action the local
+# `_CommandHandler._dispatch` happened to understand was executed, because the
+# dispatch chain in `agent.py` ended in a bare `else:` that forwarded everything.
+# Adding a new action to that handler — for the GUI, for a local tool, for
+# anything — silently made it REMOTELY executable, with no decision recorded
+# anywhere that it should be.
+#
+# That is the `_AUTH_EXEMPT` failure shape CLAUDE.md already documents, and it
+# fails in the dangerous direction: an action nobody classified runs, rather than
+# being refused. Here the default is inverted. An action this module has never
+# been told about is REFUSED, so the cost of forgetting is a task that does not
+# run — visible, recoverable, and reported with a typed reason — instead of one
+# that runs without anyone having decided it may.
+#
+# This is dispatch safety, NOT authorization. Membership below means only "the
+# outer server signature is a sufficient basis for running this." It says nothing
+# about whether a human approved it; that is a separate question with a separate
+# key, and an action needing it gets a stronger disposition than EXEMPT.
+
+#: Disposition: outer server signature alone is sufficient.
+DISP_EXEMPT = "EXEMPT"
+#: Disposition: this module has never been told about the action. Refuse.
+DISP_UNCLASSIFIED = "UNCLASSIFIED"
+
+
+class UnclassifiedAction(TaskRejected):
+    reason = "action_not_classified"
+
+
+#: Actions executable on the outer signature alone. This set is the STATUS QUO at
+#: the time default-deny landed — every action the dispatcher already accepted
+#: from a signed task — so this change refuses nothing that previously ran. Its
+#: value is entirely prospective: the NEXT action added must be classified here
+#: deliberately, or it does not run remotely.
+#:
+#: Adding a name here is a security decision, not bookkeeping. Ask whether an
+#: appliance that has been taken over should be able to invoke it on every
+#: enrolled endpoint on the strength of its own signature alone. If the answer is
+#: no, it does not belong in this set.
+BASE_EXEMPT_ACTIONS = frozenset({
+    # Read-only / self-reporting.
+    "ping", "status", "scan_status",
+    # Local-effect, already reachable unauthenticated on the loopback listener,
+    # so a signed task grants nothing a local process did not already have.
+    "checkin", "notify",
+    # State-changing but long-established as server-driven, and each already
+    # bounded by its own handler.
+    "scan", "restart", "update_rules",
+    # Trust-plumbing, special-cased upstream of `_dispatch` and verified against
+    # the currently-pinned anchor before either can run.
+    ROTATE_ACTION, ATTEST_ACTION,
+})
+#
+# ⚠ THIS SET CREATES A REAL CROSS-CHANGE DEPENDENCY. Any commit that adds an
+# action to `_CommandHandler._dispatch` must add it here IN THE SAME COMMIT, or
+# the action works locally over the loopback listener and is silently refused when
+# the server sends it. `test_task_classification.py` fails in both directions --
+# a dispatcher action missing from this set, and a set entry with no handler -- so
+# the omission surfaces as a red suite rather than as a field report.
+#
+# Concretely pending at the time this landed: the agent-GUI work (uncommitted in a
+# parallel window) adds `findings` and `report_error`. They are deliberately NOT
+# listed above, because they do not exist on `origin/main` and listing them would
+# be classifying a handler that isn't there. They are also GUI-to-loopback calls
+# rather than server-sent tasks, so they may well never need to be here at all --
+# that is a decision for the commit that introduces them, made with the suite
+# telling it which way is consistent.
+
+#: Actions contributed at runtime by OPTIONAL modules (see `register_exempt_action`).
+#: Separate from the frozen base set so the base set stays auditable as a literal.
+_runtime_exempt = {}
+
+
+def register_exempt_action(action: str, reason: str) -> None:
+    """Let an optional module declare its own action outer-signature-exempt.
+
+    Exists for modules whose action NAMES are not public — the Tier 2
+    challenge-response action is defined in a private module, and hardcoding its
+    literal in this file would move a private detail into the public repo to gain
+    nothing. The module registers it at load time instead.
+
+    `reason` is mandatory and recorded: a registration with no stated reason is
+    indistinguishable from one added by accident, which is the state this whole
+    mechanism exists to prevent. Registration only ever ADDS, never removes, so a
+    module cannot use this to strip a classification another module relies on.
+    """
+    if not action or not isinstance(action, str):
+        raise ValueError("register_exempt_action needs a non-empty action name")
+    if not reason:
+        raise ValueError("register_exempt_action requires a stated reason")
+    _runtime_exempt[action] = reason
+    _log("info", "task action %r registered exempt: %s", action, reason)
+
+
+def disposition(action) -> str:
+    """DISP_EXEMPT or DISP_UNCLASSIFIED. Never raises, never guesses.
+
+    Returns a disposition for ANY input, including None and non-strings, because
+    the caller's job is to act on the answer rather than to pre-validate the
+    question — and a type error here would surface as a crash in the poll loop
+    rather than as a refused task.
+    """
+    if isinstance(action, str) and (action in BASE_EXEMPT_ACTIONS
+                                    or action in _runtime_exempt):
+        return DISP_EXEMPT
+    return DISP_UNCLASSIFIED
+
+
+def assert_dispatchable(action) -> str:
+    """Return the disposition, or raise `UnclassifiedAction`.
+
+    Called BEFORE `claim_task`, deliberately. An unclassified action can never
+    become runnable by being redelivered, so consuming its one-shot claim would
+    spend a marker to learn nothing — and would make the refusal look like a
+    replay to whoever read the claims directory afterwards.
+    """
+    disp = disposition(action)
+    if disp == DISP_UNCLASSIFIED:
+        raise UnclassifiedAction(
+            "action %r is not classified for remote dispatch; a signed task may "
+            "only run an action explicitly listed in BASE_EXEMPT_ACTIONS or "
+            "registered by a loaded module" % (action,))
+    return disp
+
+
+def classification_self_test() -> None:
+    """Prove the classifier can both ADMIT and REFUSE. Raises VerifierBroken.
+
+    Same reasoning as `self_test` below and `nemesis-fw-neverblock`'s CANARIES: a
+    classifier stubbed to return EXEMPT for everything restores the exact
+    default-allow behaviour this replaced, and nothing about that looks wrong from
+    the outside — tasks keep running, which is what they did before. One
+    known-admit and one known-refuse case, run in the production path on every
+    anchor pin, is what catches it.
+
+    The refuse-case name is deliberately one that can never become legitimate.
+    """
+    if disposition("ping") != DISP_EXEMPT:
+        raise VerifierBroken(
+            "action classifier refused a known-exempt action ('ping') — it would "
+            "refuse every task")
+    canary = "__nemesis_unclassified_canary__"
+    if disposition(canary) != DISP_UNCLASSIFIED:
+        raise VerifierBroken(
+            "action classifier admitted %r — it is admitting unknown actions, "
+            "which is the default-allow behaviour it exists to replace" % canary)
+    try:
+        assert_dispatchable(canary)
+    except UnclassifiedAction:
+        pass
+    else:
+        raise VerifierBroken(
+            "assert_dispatchable did not raise for an unclassified action")
+
+
 def verify_rotation(envelope: dict, device_id: str):
     """Return the new public key object a rotation carries, or raise.
 
@@ -503,6 +660,11 @@ def self_test(pinned_key, device_id: str, now=None) -> None:
     """
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    # The action classifier is part of the same trusted path and gets the same
+    # treatment: proven able to both admit and refuse before any real task is
+    # dispatched, not merely assumed to work because tasks kept running.
+    classification_self_test()
 
     now = now or datetime.now()
     probe = rsa.generate_private_key(public_exponent=65537, key_size=2048)

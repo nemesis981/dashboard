@@ -183,6 +183,22 @@ E_AGENT_CODES = {
                     "A target's region map exceeded the configured bounds and was "
                     "truncated. The response says so explicitly; a truncated map must "
                     "not be read as a complete picture of the process.", "low"),
+    "E-AGENT-116": ("Memory-injection sweep flagged a process",
+                    "The observe-only memory-injection sweep classified one or more "
+                    "processes as showing a reflective-image-injection shape (an "
+                    "executable image header at the base of a private, non-file-backed "
+                    "region). Observe-only: nothing was blocked. Investigate the named "
+                    "pid(s); reflective loading is common in real intrusions and also, "
+                    "rarely, in unusual-but-benign software.", "high"),
+    "E-AGENT-117": ("Signed task named an unclassified action",
+                    "A task arrived with a valid server signature but named an action "
+                    "this agent has not classified for remote dispatch, so it was "
+                    "REFUSED rather than run. Expected after a server-side action is "
+                    "added without a matching agent-side classification -- the agent "
+                    "is older than the task. It is also what a compromised or confused "
+                    "server probing for a reachable action looks like, so a burst of "
+                    "these from actions that were never deployed is worth reading as a "
+                    "signal rather than a version mismatch.", "medium"),
 }
 
 _MAX_CONTEXT = 300               # hard cap on a context string (bounded input)

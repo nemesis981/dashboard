@@ -36,6 +36,18 @@ try:
     import tier2_common as _tier2_common        # noqa: PLC0415
 except Exception:                                # ImportError or any load failure
     _tier2_agent = _tier2_common = None
+else:
+    # Tier 2's challenge action is dispatched from a signed task, so under
+    # default-deny it must be classified or it would stop running the moment that
+    # gate landed. Registered here rather than listed in `tasks.py` because the
+    # action's literal name lives in a PRIVATE module — hardcoding it in the
+    # public repo would leak the detail to gain nothing. A device without the
+    # Tier 2 files never registers it and never receives one.
+    import tasks as _tasks_for_registration      # noqa: PLC0415
+    _tasks_for_registration.register_exempt_action(
+        _tier2_common.CHALLENGE_ACTION,
+        "Tier 2 challenge-response; verified against the pinned anchor and "
+        "special-cased upstream of _dispatch")
 
 
 def _challenge_stash_path():
@@ -1589,6 +1601,24 @@ def _handle_response_tasks(response, device_id):
             # task is the protection working. Logged with its typed reason so a
             # rejection is never mistaken for "nothing arrived".
             log.warning("task refused (%s): %s", getattr(exc, "reason", "?"), exc)
+            continue
+        # DEFAULT-DENY. The dispatch chain below ends in a bare `else:` that
+        # forwards to `_CommandHandler._dispatch`, so without this gate any action
+        # that handler understands is remotely executable the moment it is added —
+        # a decision nobody makes explicitly and nothing records. Checked BEFORE
+        # claim_task: an unclassified action cannot become runnable by redelivery,
+        # so spending its one-shot claim would teach nothing and would make the
+        # refusal indistinguishable from a replay in the claims directory.
+        try:
+            task_mod.assert_dispatchable(verified["action"])
+        except task_mod.UnclassifiedAction as exc:
+            log.error("task refused (%s): %s", exc.reason, exc)
+            agent_errors.record("E-AGENT-117", str(verified["action"])[:200])
+            # Reported back, not silently dropped: the server believes it sent
+            # runnable work, and an unclassified action is precisely the case an
+            # operator needs told about rather than left to infer from silence.
+            task_mod.record_result(verified["task_id"], False, str(exc),
+                                   verified["action"])
             continue
         # CLAIM before executing — one atomic operation, not a check followed by
         # a record. Two concurrent deliveries of the same task cannot both win the
