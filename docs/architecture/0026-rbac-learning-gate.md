@@ -441,8 +441,12 @@ The roadmap's own phasing puts key-pair authorization **before** the learning ga
 master plan adds: *"Do NOT wire push-and-run before both exist."* That ordering holds:
 
 1. **(done)** flat role enforcement — shipped 2026-08-22
-2. **D3 admin key-pair** — mint, store via `keyprotect`, sign/verify, inner-envelope
-   integration with `tasks.py`
+2. **D3 admin key-pair** — mint, sign/verify, inner-envelope integration with `tasks.py`.
+   **`keyprotect` does NOT apply here and this is satisfied-by-not-applying, not an
+   outstanding requirement:** per D3's decision above, the admin private key lives in the
+   companion app on the operator's phone — the appliance never holds it, so there is nothing
+   admin-key-shaped on the appliance side for `keyprotect` (appliance-local TPM-backed
+   storage) to protect. The appliance only ever holds and verifies the admin's *public* key.
 3. **D1 + D2** — the `sub_admin` rank, `CAPABILITY_ROUTES`, `may_with_unlocks()`, the
    extended `assert_registry_complete()`, the storage above
 4. **D4** — quiz authoring format, delivery UI, unlock recording, version invalidation
