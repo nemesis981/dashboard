@@ -899,6 +899,7 @@ def _collect_payload(conf):
         # to) do memory inspection, and uneven coverage stays visible rather than
         # silent. 'disabled' by default — an off device never probes foreign memory.
         "memscan_capability": _memscan_capability(),
+        "meminject": _meminject_sweep(),
     }
 
     return {
@@ -1410,6 +1411,49 @@ def _memscan_capability():
     out = dict(_memscan_cache)
     out["enabled"] = True
     return out
+
+
+_meminject_last_sweep = 0.0
+_meminject_last_result = None
+
+
+def _meminject_sweep():
+    """Observe-only memory-injection sweep for the heartbeat. Throttled, fail-soft.
+
+    Runs the detector (private module, skip-if-absent) over readable processes at most
+    once per `meminject_sweep_interval_s`, returning the previous result between runs so
+    the heartbeat field is stable. GATES NOTHING -- it reports. When memscan is disabled
+    it does not scan or even load the detector. Cost was measured in step 4g (~0.1s for a
+    full fleet sweep), which is why a periodic full sweep is acceptable here.
+    """
+    global _meminject_last_sweep, _meminject_last_result
+    import time as _time
+    enabled = str(_conf.get("memscan_enabled", "false")).lower() == "true"
+    if not enabled:
+        return {"enabled": False}
+    try:
+        interval = float(_conf.get("meminject_sweep_interval_s", "300"))
+    except (TypeError, ValueError):
+        interval = 300.0
+    now = _time.time()
+    if interval <= 0:
+        return {"enabled": True, "sweep": "disabled (interval<=0)"}
+    if _meminject_last_result is not None and (now - _meminject_last_sweep) < interval:
+        return _meminject_last_result                      # throttled: last result stands
+    try:
+        import meminject_scan                              # noqa: PLC0415
+        result = meminject_scan.sweep()
+    except Exception as e:                                 # noqa: BLE001
+        log.warning("meminject sweep failed: %s", e)
+        result = {"enabled": True, "sweep": "error", "detail": str(e)[:120]}
+    result["swept_at"] = int(now)
+    if result.get("suspicious"):
+        agent_errors.record("E-AGENT-116",
+                            "memory-injection sweep flagged %d process(es)"
+                            % result.get("suspicious"))
+    _meminject_last_sweep = now
+    _meminject_last_result = result
+    return result
 
 
 def _key_protection_tier():

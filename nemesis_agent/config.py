@@ -69,6 +69,12 @@ DEFAULTS = {
     # all (memcap reports "disabled" without probing). The Windows path (SeDebugPrivilege
     # in a SYSTEM service) is step 3b/3c.
     "memscan_enabled": "false",
+    # Observe-only memory-injection SWEEP cadence (seconds). The detector (private module,
+    # step 4f) runs at most once per this interval when memscan is enabled AND the
+    # classifier is present. Measured (step 4g): a full-fleet sweep is ~0.1s, so this is a
+    # comfort/noise setting, not a load constraint. 0 disables the periodic sweep while
+    # leaving memscan capability reporting intact.
+    "meminject_sweep_interval_s": "300",
     # Where the kernel monitor writes its JSON events for the agent to tail. Falco:
     # configure `json_output: true` + `file_output` to this path. The agent only
     # READS it (the daemon runs as root; the agent does not).
