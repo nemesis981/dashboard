@@ -191,8 +191,16 @@ except Exception as exc:                                           # noqa: BLE00
 
 if _doc:
     check("  it is listed by available()", CAP in Q.available(), repr(Q.available()))
-    check("  it carries the pending-review marker (content is Window 1's, not final)",
-          "PENDING WINDOW 3 REVIEW" in _doc.get("review_status", ""))
+    # Asserts PROVENANCE IS RECORDED, not any particular provenance. The first
+    # version asserted the literal "PENDING WINDOW 3 REVIEW", which was true when
+    # written and became false the moment Window 3 actually reviewed it -- a test
+    # encoding a transient state as an invariant, so doing the right thing broke
+    # the suite. Same shape as the `all(not v ...)` cleanup check fixed in
+    # test_training_ui.py earlier the same day.
+    _rs = _doc.get("review_status", "")
+    check("  the quiz records WHO authored/reviewed it and when",
+          isinstance(_rs, str) and len(_rs) > 40 and "2026-" in _rs,
+          repr(_rs[:60]))
     check("  every question id is distinct (grading would be ambiguous otherwise)",
           len({q["id"] for q in _doc["questions"]}) == len(_doc["questions"]))
 
