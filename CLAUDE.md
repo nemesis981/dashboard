@@ -892,10 +892,37 @@ is only visible in aggregate — individually each looked like an ordinary slip:
 - **Prefer a neutral cwd** for any path/import test; the repo root silently rescues imports
   that would fail in a service.
 
-**Grep for this shape in every retro/review pass**, alongside the two checks above. Three
-standing checks now, one failure class each: a bug that hides in rendering (#1 recurring bug),
-an instrument that cannot fail (the rule above), and an instrument that answered from the
-wrong place (this one).
+**Grep for this shape in every retro/review pass**, alongside the checks above and below.
+Four standing checks now, one failure class each: a bug that hides in rendering (#1 recurring
+bug), an instrument that cannot fail, an instrument that answered from the wrong place (this
+one), and a branch nothing ever walked (below).
+
+### A new branch or default needs a test that EXERCISES it, not one that could (standing practice, added 2026-08-24)
+
+**Three consecutive days produced the same bug shape: a new branch or default that nothing
+exercises, shipping green because every test that ran happened to take a different path.**
+Instances (Window 3's observation, cross-window, 2026-08-24): `capabilities._conn()`,
+`role.js`'s missing `sub_admin` entry, the unwired unlock gate, and a near-miss the same day
+in `test_capabilities.py`, caught before it shipped. None of these were disproven by a
+failing test — none had a test that touched them at all. A green suite and a suite that
+never walked the new code are indistinguishable from their own output, which is exactly the
+"looks like a real result but isn't" shape the other three checks already name, applied here
+to test coverage instead of a verification instrument.
+
+**The check, every review/retro pass: does any new default or branch in this change actually
+have a test that exercises it, not just one that could?**
+- For every new conditional, default value, or branch: name the specific test (or assertion
+  within one) that forces execution down that exact path. If none exists, that IS the
+  finding — not "add a general test later."
+- "The suite is green" is not evidence a new branch works if nothing in the suite runs it.
+  Ask which test would fail if the branch's logic were wrong, and confirm that test actually
+  reaches the branch — a coverage tool if one exists; failing that, a deliberate mutation
+  (break the branch, confirm the suite goes red, revert).
+- A test asserting a new default's VALUE is not the same as a test proving the system behaves
+  correctly while that default is in effect.
+
+**Grep for this shape in every retro/review pass**, alongside the other three above. Four
+standing checks now — see the tally at the end of the SHAPE section above for the full set.
 
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
