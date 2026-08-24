@@ -1,0 +1,18 @@
+[Unit]
+Description=Renew the Nemesis tailnet TLS certificate
+Documentation=https://tailscale.com/kb/1153/enabling-https
+# Needs the tailnet up to derive the domain and to reach the CA.
+After=tailscaled.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# /snap/bin is NOT on systemd's default PATH. Without this a snap-installed
+# tailscale is unreachable from the timer even though it works from a shell.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+ExecStart=/opt/nemesis/scripts/nemesis-cert-renew
+# NOT Restart=on-failure: a failing renewal must stay visibly failed rather than
+# retry-loop into the journal. The timer's next run is the retry, and a cert with
+# 30 days of headroom has ~30 chances before anything breaks.
+[Install]
+WantedBy=multi-user.target

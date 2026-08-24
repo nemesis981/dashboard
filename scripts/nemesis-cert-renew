@@ -1,0 +1,184 @@
+#!/bin/bash
+# Renew the appliance's tailnet TLS certificate and reload nginx if it changed.
+#
+# WHY THIS EXISTS. `tailscale cert` issues a 90-day Let's Encrypt certificate. It
+# does NOT renew itself -- something has to call it. A silently expired cert takes
+# the dashboard offline for every browser at once, and WebAuthn with it, because a
+# secure context is a hard requirement rather than a nicety. "We'll notice" is not
+# a renewal strategy: the failure lands 90 days after anyone last thought about it.
+#
+# DESIGN, and the reasons each choice is not the obvious one:
+#
+#   * `--min-validity` does the deciding. tailscale renews only if the cert has
+#     less than that left, so this can run daily and is a no-op almost every day.
+#     Deciding here -- parsing dates and comparing -- would be a second
+#     implementation of a policy tailscale already implements correctly.
+#   * nginx is reloaded ONLY IF THE CERT ACTUALLY CHANGED, compared by hash. A
+#     daily unconditional reload is 365 needless reloads a year, each one a chance
+#     to fail while nothing was wrong.
+#   * The new cert is PARSED BEFORE the reload. Reloading onto an unreadable cert
+#     turns a renewal problem into an outage, which is strictly worse than an
+#     expired-but-working-until-then cert.
+#   * Every failure exits NON-ZERO so systemd records it. A renewal script that
+#     swallows errors reports success for 90 days and then the site is down.
+set -uo pipefail
+
+DOMAIN="${NEMESIS_CERT_DOMAIN:-}"
+CERT_DIR="${NEMESIS_CERT_DIR:-/etc/nemesis-tls}"
+MIN_VALIDITY="${NEMESIS_CERT_MIN_VALIDITY:-720h}"   # 30 days of headroom
+CERT="$CERT_DIR/tls.crt"
+KEY="$CERT_DIR/tls.key"
+
+log() { echo "nemesis-cert-renew: $*"; }
+die() { log "FAILED: $*"; exit 1; }
+
+# RESOLVE THE BINARY EXPLICITLY. `tailscale` may be a snap, in which case it lives
+# at /snap/bin/tailscale -- and systemd units do NOT get /snap/bin on PATH, so a
+# bare `tailscale` call works interactively and then fails only when the timer
+# fires. Found on the target box (snap install); the VM this was proven on used a
+# deb, so the difference was invisible there.
+TS_BIN="${NEMESIS_TAILSCALE_BIN:-}"
+if [ -z "$TS_BIN" ]; then
+    for c in /usr/bin/tailscale /snap/bin/tailscale "$(command -v tailscale 2>/dev/null)"; do
+        [ -n "$c" ] && [ -x "$c" ] && { TS_BIN="$c"; break; }
+    done
+fi
+[ -n "$TS_BIN" ] || die "tailscale binary not found (checked /usr/bin, /snap/bin, PATH)"
+
+# SOCKET HANDLING IS PROBED, NOT ASSUMED.
+#
+# The snap wrapper at /snap/bin/tailscale ALREADY injects --socket itself, so
+# adding our own produces `flag provided multiple times`, exit 2, and empty
+# output. Measured on the target box 2026-08-24: that is exactly how step 2
+# failed. A deb install needs no --socket either when run as root. So the correct
+# behaviour is to try bare first and only add the flag if that genuinely fails --
+# never to decide from the presence of a socket file, which is what got this
+# wrong.
+_TS_SOCK=/var/snap/tailscale/common/socket/tailscaled.sock
+TS_SOCK_ARGS=()
+_ts_probe=$("$TS_BIN" status --json 2>&1)
+if [ $? -ne 0 ] || [ -z "$_ts_probe" ]; then
+    if [ -S "$_TS_SOCK" ]; then
+        _ts_probe2=$("$TS_BIN" --socket "$_TS_SOCK" status --json 2>&1)
+        if [ $? -eq 0 ] && [ -n "$_ts_probe2" ]; then
+            TS_SOCK_ARGS=(--socket "$_TS_SOCK")
+        else
+            die "tailscale is unreachable both bare and via $_TS_SOCK: $(printf '%s' "$_ts_probe2" | head -1)"
+        fi
+    else
+        die "tailscale status failed: $(printf '%s' "$_ts_probe" | head -1)"
+    fi
+fi
+ts() { "$TS_BIN" "${TS_SOCK_ARGS[@]}" "$@"; }
+
+# The domain is DERIVED from live tailnet identity, not configured. Same reasoning
+# as core/rp_identity.py: a value in a config file gets copied between appliances,
+# and then two boxes disagree about who they are.
+if [ -z "$DOMAIN" ]; then
+    _raw=$(ts status --json 2>&1)
+    _rc=$?
+    if [ $_rc -ne 0 ]; then
+        die "tailscale status failed (rc=$_rc): $(printf '%s' "$_raw" | head -1)"
+    fi
+    DOMAIN=$(printf '%s' "$_raw" \
+             | python3 -c 'import json,sys; print((json.load(sys.stdin).get("Self") or {}).get("DNSName","").rstrip("."))' 2>&1)
+    case "$DOMAIN" in
+        *Traceback*|"")
+            die "could not parse a MagicDNS name from tailscale status: $(printf '%s' "$_raw" | head -c 120)" ;;
+    esac
+fi
+case "$DOMAIN" in
+    *.*) : ;;
+    *) die "derived domain '$DOMAIN' is not a domain name" ;;
+esac
+
+BEFORE=""
+[ -f "$CERT" ] && BEFORE=$(sha256sum "$CERT" | awk '{print $1}')
+
+log "checking $DOMAIN (renew if under $MIN_VALIDITY remaining)"
+mkdir -p "$CERT_DIR" || die "cannot create $CERT_DIR"
+
+# ⚠ THE CERT IS CAPTURED ON STDOUT, NOT WRITTEN BY tailscale. This is the whole
+# reason this section looks indirect, and it is not optional.
+#
+# On the target box tailscale is a STRICTLY CONFINED SNAP. Its AppArmor profile
+# grants network/firewall interfaces and a `system-files` plug scoped to DMI ids
+# only -- nothing that permits writing under /etc. Root does NOT lift snap
+# confinement, so `tailscale cert --cert-file /etc/nemesis-tls/...` fails with
+# `permission denied` even as root, on a directory that is drwxr-xr-x root:root
+# and demonstrably root-writable. Verified on the real box 2026-08-24; the
+# failing path was tailscale's OWN temp file (`.tls.crt.XXXX.tmpNNNN`), not ours.
+#
+# Writing to stdout requires no filesystem access, so it works under confinement
+# AND on an unconfined deb install. ONE path, used everywhere: a fallback branch
+# that only one environment ever exercises is precisely the untested code that
+# produced this bug in the first place.
+#
+# `--cert-file - --key-file -` emits the full chain then the private key, in that
+# order, which splits deterministically at the first PRIVATE KEY header.
+umask 077                    # the key must never exist group/world-readable
+TMPC=$(mktemp "$CERT_DIR/.tls.crt.XXXXXX") || die "mktemp failed"
+TMPK=$(mktemp "$CERT_DIR/.tls.key.XXXXXX") || die "mktemp failed"
+TMPB=$(mktemp "$CERT_DIR/.tls.both.XXXXXX") || die "mktemp failed"
+cleanup() { rm -f "$TMPC" "$TMPK" "$TMPB"; }
+trap cleanup EXIT
+
+# Redirected straight into a 0600 file rather than captured into a shell variable:
+# a private key in a variable can reach the process table or a trace.
+_cert_err=$(ts cert --min-validity "$MIN_VALIDITY" \
+        --cert-file - --key-file - "$DOMAIN" 2>&1 >"$TMPB")
+_cert_rc=$?
+if [ $_cert_rc -ne 0 ]; then
+    die "tailscale cert failed for $DOMAIN (rc=$_cert_rc): $(printf '%s' "$_cert_err" | tr '\n' ' ' | head -c 400)"
+fi
+[ -s "$TMPB" ] || die "tailscale cert produced no output for $DOMAIN"
+
+awk '/-----BEGIN (EC |RSA )?PRIVATE KEY-----/{k=1} {print > (k ? KF : CF)}' \
+    KF="$TMPK" CF="$TMPC" "$TMPB" || die "could not split cert from key"
+rm -f "$TMPB"
+
+[ -s "$TMPC" ] || die "the split produced no certificate -- tailscale output was not the expected chain+key"
+[ -s "$TMPK" ] || die "the split produced no private key -- tailscale output was not the expected chain+key"
+# Both halves must actually PARSE. A split that lands mid-PEM yields two non-empty
+# files that are each garbage, which the size checks above would happily pass.
+openssl pkey -in "$TMPK" -noout 2>/dev/null || die "the split private key does not parse"
+
+# Parse before trusting. A cert that does not load must never reach the live path.
+_parse_err=$(openssl x509 -in "$TMPC" -noout -subject 2>&1 >/dev/null)
+if [ $? -ne 0 ]; then
+    die "the issued certificate does not parse, refusing to install it: $(printf '%s' "$_parse_err" | head -c 200)"
+fi
+NOT_AFTER=$(openssl x509 -in "$TMPC" -noout -enddate 2>/dev/null | cut -d= -f2)
+
+AFTER=$(sha256sum "$TMPC" | awk '{print $1}')
+if [ "$BEFORE" = "$AFTER" ]; then
+    log "unchanged (valid until $NOT_AFTER) -- no reload needed"
+    exit 0
+fi
+
+install -m 0644 "$TMPC" "$CERT" || die "could not install $CERT"
+install -m 0600 "$TMPK" "$KEY"  || die "could not install $KEY"
+log "installed a new certificate, valid until $NOT_AFTER"
+
+# FIRST-ISSUANCE MODE. On a box where nginx has no TLS config yet there is
+# nothing to reload onto, and reloading anyway would mean step 2 of the rollout
+# touches nginx when the whole point of doing certs first is that it does not --
+# an issuance failure must land while nothing depends on it.
+if [ "${NEMESIS_CERT_NO_RELOAD:-0}" = "1" ]; then
+    log "cert installed; reload SKIPPED (NEMESIS_CERT_NO_RELOAD=1)"
+    exit 0
+fi
+
+# Config-test BEFORE reloading. `nginx -s reload` on a bad config leaves the old
+# workers running, which looks fine until the next restart -- so the failure would
+# surface at reboot, far from this script.
+_ngx_err=$(nginx -t 2>&1)
+if [ $? -ne 0 ]; then
+    die "nginx config test failed AFTER installing the cert -- not reloading; the \
+previous cert is gone, so fix nginx and re-run this script. nginx said: \
+$(printf '%s' "$_ngx_err" | tr '\n' ' ' | head -c 300)"
+fi
+_rl_err=$(systemctl reload nginx 2>&1)
+[ $? -eq 0 ] || die "nginx reload failed: $(printf '%s' "$_rl_err" | tr '\n' ' ' | head -c 300)"
+log "nginx reloaded"
+exit 0

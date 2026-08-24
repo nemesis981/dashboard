@@ -1,0 +1,16 @@
+[Unit]
+Description=Daily check of the Nemesis tailnet TLS certificate
+
+[Timer]
+# DAILY, not monthly. The script is a no-op unless the cert is inside its
+# min-validity window, so frequency costs nothing -- and a monthly timer that
+# misses two runs is already inside the danger zone of a 90-day cert.
+OnCalendar=daily
+# Survives the box being off at the scheduled time. Without this, an appliance
+# powered down overnight could skip renewals indefinitely and nobody would know.
+Persistent=true
+RandomizedDelaySec=1h
+Unit=nemesis-cert-renew.service
+
+[Install]
+WantedBy=timers.target
