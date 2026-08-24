@@ -192,6 +192,37 @@ def ufw_insert_top(ip):
     return True
 
 
+def deny_port_on_interface(iface, port, proto="tcp",
+                           username=None, session_id=None, password=None):
+    """Refuse inbound tcp/`port` arriving on `iface`. Routes through the chokepoint.
+
+    ADDED FOR ADR 0026 STAGE 0. Until this existed, `firewall.py` could express
+    only IP-based rules, so the one control that actually keeps the dashboard off
+    plain HTTP from the tailnet had nowhere to live inside the chokepoint --
+    and the alternative was an ad-hoc iptables call, which is exactly the debt
+    ADR 0005 exists to prevent.
+
+    ⚠ NOT A GENERAL PORT-BLOCKING CALL. The helper allowlists both the interface
+    and the port; anything else is refused helper-side. That constraint is what
+    makes it safe to expose to the dashboard at all, so do not "generalise" this
+    wrapper without re-arguing the PEER_POLICY grant behind it.
+    """
+    fw_client.deny_port_on_interface(iface, port, proto, username=username,
+                                     session_id=session_id, password=password)
+    log.info("firewall: deny %s/%s on %s applied via nemesis-fwd", port, proto, iface)
+    return True
+
+
+def allow_port_on_interface(iface, port, proto="tcp",
+                            username=None, session_id=None, password=None):
+    """Remove that rule. The REVERT half, deliberately a first-class operation
+    rather than something an operator reconstructs from memory under pressure."""
+    fw_client.allow_port_on_interface(iface, port, proto, username=username,
+                                      session_id=session_id, password=password)
+    log.info("firewall: allow %s/%s on %s restored via nemesis-fwd", port, proto, iface)
+    return True
+
+
 def ufw_deny_append(ip, username=None, session_id=None, password=None):
     """Append a deny rule (permanent block).
 

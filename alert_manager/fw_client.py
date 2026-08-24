@@ -207,6 +207,26 @@ def reap_zombie(pid, username, session_id, password):
                     username, session_id, password)
 
 
+def deny_port_on_interface(iface, port, proto="tcp",
+                           username=None, session_id=None, password=None):
+    """Ask the helper to drop inbound tcp/`port` arriving on `iface` (raw table).
+
+    The helper allowlists BOTH arguments, so this cannot become a general
+    port-blocking call however it is invoked. See nemesis_fwd.DENY_IFACE_ALLOWED.
+    """
+    return _request("deny_port_on_interface",
+                    {"iface": iface, "port": int(port), "proto": proto},
+                    username=username, session_id=session_id, password=password)
+
+
+def allow_port_on_interface(iface, port, proto="tcp",
+                            username=None, session_id=None, password=None):
+    """Remove that rule -- the revert half, as a first-class operation."""
+    return _request("allow_port_on_interface",
+                    {"iface": iface, "port": int(port), "proto": proto},
+                    username=username, session_id=session_id, password=password)
+
+
 def list_blocked(username, session_id, password=None):
     """Password may be omitted if the helper still holds a live cached
     verification for this (peer, user, session). The helper decides — the

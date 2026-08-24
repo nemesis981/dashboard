@@ -119,10 +119,12 @@ import notify            # delivery routing: immediate vs twice-daily digest
 
 import bcrypt
 import psutil
+from flask.sessions import SecureCookieSessionInterface
 from flask_login import (LoginManager, UserMixin, login_user, logout_user,
                          login_required, current_user)
 
 import roles as _roles
+import session_realm as _session_realm
 import capabilities as _caps   # learning-gate unlocks: read/write (ADR 0026)
 import quizzes as _quizzes     # hand-authored capability quizzes (ADR 0026 D4)
 from core import entitlements, passphrase
@@ -577,15 +579,43 @@ app.secret_key = _load_secret_key()
 #
 # HTTPONLY=True is Flask's default too — pinned so it cannot be silently lost.
 #
-# SECURE is deliberately NOT set. This dashboard is served over plain HTTP on
-# the LAN (nginx :80, no TLS configured), and Secure=True would stop the browser
-# sending the cookie at all — every login would appear to succeed and then bounce
-# straight back to the login page. It becomes correct the moment TLS is in front
-# of this, and should be set THEN, not now.
+# SECURE is deliberately NOT set GLOBALLY, and the reason changed with Stage 0.
+#
+# The original reason still holds: this dashboard is also served over plain HTTP
+# on the LAN, and a global Secure=True would stop the browser sending the cookie
+# there at all — every LAN login would appear to succeed and bounce straight back.
+#
+# But global False is now wrong too, because a second door serves the same app
+# over TLS, and its cookie should not be sendable over plain HTTP to this host.
+# Neither global value is correct, so the flag is set PER REQUEST by
+# _RealmSessionInterface below, following the door the request arrived at.
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
+
+
+class _RealmSessionInterface(SecureCookieSessionInterface):
+    """Sets `Secure` on the session cookie PER REQUEST, by door.
+
+    HYGIENE ON TOP OF the realm split, not a substitute for it. `Secure` alone
+    would not stop a captured LAN cookie being replayed by an attacker who simply
+    speaks HTTPS; the realm stamp is what makes that cookie useless at the other
+    door. This just stops the TLS cookie being handed to a plain-HTTP request in
+    the first place.
+    """
+
+    def get_cookie_secure(self, app):
+        try:
+            return _session_realm.is_secure_realm(_current_door())
+        except Exception:                                          # noqa: BLE001
+            # Outside a request context, or anything unexpected. NOT defaulting
+            # to True (that would silently break LAN login), and the realm gate
+            # refuses a non-door-issued session regardless of this flag.
+            return False
+
+
+app.session_interface = _RealmSessionInterface()
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -1597,6 +1627,54 @@ def _role_denied(ep, need, have):
     return _forbidden_page(need, have), 403
 
 
+def _current_door():
+    """Which door this request came through, per the secret nginx injects.
+
+    NOT `request.scheme`, and NOT a bare `X-Forwarded-Proto`. The app is behind a
+    loopback-bound proxy, so the scheme is always http here — and any local
+    process can connect to :5000 and assert a forwarded-proto header itself,
+    which would let it claim the TLS realm from a plain HTTP connection. The
+    header is only believed when it carries the shared secret, which lives in
+    /etc/nemesis.env (mode 640 root:nemesis) and an arbitrary local process
+    cannot read.
+    """
+    return _session_realm.realm_from_header(
+        request.headers.get(_session_realm.DOOR_HEADER),
+        _session_realm.door_secret())
+
+
+@app.before_request
+def _enforce_session_realm():
+    """A session issued at one door is refused at the other.
+
+    Runs BEFORE the role gate: a session that should not exist here must not get
+    as far as having its role consulted. Ordering matters for the same reason the
+    signature check precedes everything in the task path.
+
+    An unstamped session (every session in existence at deploy time) fails closed
+    and is logged out once. That is expected at rollout, not a bug — see
+    session_realm.realm_matches for why treating unstamped as valid-anywhere
+    would leave the cross-door replay open for as long as those sessions live.
+    """
+    ep = request.endpoint
+    if ep is None or ep.startswith("static"):
+        return
+    if ep in _roles.UNAUTHENTICATED:
+        return
+    if not current_user.is_authenticated:
+        return
+    door = _current_door()
+    if _session_realm.realm_matches(session, door):
+        return
+    stamped = _session_realm.session_realm(session)
+    log.warning("session realm mismatch: session=%r door=%r endpoint=%s — "
+                "logging out", stamped, door, ep)
+    logout_user()
+    session.clear()
+    return redirect(url_for("login", next=request.full_path
+                            if request.method == "GET" else None))
+
+
 @app.before_request
 def _enforce_role():
     ep = request.endpoint
@@ -2538,11 +2616,18 @@ _SESSION_LOCK_LOGGED = "idle_lock_logged"
 
 
 def _stamp_session_start():
-    """Mark a session as freshly authenticated. Call wherever login_user() is."""
+    """Mark a session as freshly authenticated. Call wherever login_user() is.
+
+    Also stamps the DOOR this session was born at (ADR 0026 Stage 0, DP2). Done
+    here rather than at each `login_user()` site deliberately: this function is
+    already the single documented hook for "a session just started", so the realm
+    inherits its call sites instead of adding three more to keep in sync.
+    """
     now = time.time()
     session[_SESSION_LOGIN_AT] = now
     session[_SESSION_LAST_SEEN] = now
     session.pop(_SESSION_LOCK_LOGGED, None)
+    _session_realm.stamp_realm(session, _current_door())
 
 
 def _session_lock_state():

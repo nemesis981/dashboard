@@ -87,6 +87,34 @@ ALERTW_USER = os.environ.get("NEMESIS_ALERTW_USER", "nemesis-alertw")
 FAIL2BAN_USER = os.environ.get("NEMESIS_FAIL2BAN_USER", "nemesis-f2b")
 SOCKET_GROUP = os.environ.get("NEMESIS_FWD_GROUP", "nemesis-fw")
 UFW_BIN = "/usr/sbin/ufw"
+IPTABLES_BIN = "/usr/sbin/iptables"
+IP6TABLES_BIN = "/usr/sbin/ip6tables"
+
+# ── interface-scoped port denial (ADR 0026 Stage 0) ──────────────────────────
+#
+# ⚠ THIS OP IS DELIBERATELY NOT GENERAL-PURPOSE, AND THAT IS THE SECURITY DESIGN.
+#
+# A "drop any port on any interface" primitive would hand a compromised dashboard
+# a network-wide denial-of-service: drop 22 on the LAN interface and the operator
+# loses the recovery path along with everything else. This helper exists to
+# CONTAIN a dashboard compromise, so an op it exposes must not be a bigger weapon
+# than the thing it protects against.
+#
+# So both parameters are ALLOWLISTED to exactly the job: refuse plain-HTTP on the
+# tailnet interface, and nothing else. Widening either list is a security decision
+# to be made here, helper-side, never by the caller.
+#
+# WHY THE RAW TABLE AND NOT ufw. Measured on a VM, 2026-08-24: tailscale installs
+# `ts-input` at INPUT position 1 with a blanket ACCEPT on its own interface, ahead
+# of every ufw chain. A `ufw deny in on tailscale0` rule is therefore unreachable
+# code -- it sat at 0 packets while traffic to the port sailed through and
+# returned 200. The raw table runs BEFORE the filter table, so it cannot be
+# preempted that way.
+DENY_IFACE_ALLOWED = frozenset(
+    x for x in os.environ.get("NEMESIS_FWD_DENY_IFACES", "tailscale0").split(",") if x)
+DENY_PORT_ALLOWED = frozenset(
+    int(x) for x in os.environ.get("NEMESIS_FWD_DENY_PORTS", "80").split(",")
+    if x.strip().isdigit())
 
 #: The environment file write_env maintains. Overridable for testing only.
 NEMESIS_ENV_PATH = os.environ.get("NEMESIS_ENV_PATH", "/etc/nemesis.env")
@@ -191,6 +219,8 @@ AUDIT_ACTION = {
     # happens is memory/process-table hygiene, and the audit trail should read
     # by intent rather than by mechanism.
     "reap_zombie":       "mem_reap_zombie",
+    "deny_port_on_interface":  "fw_deny_port_iface",
+    "allow_port_on_interface": "fw_allow_port_iface",
 }
 
 
@@ -214,8 +244,18 @@ def audit_action_for(op):
 #: regardless of what its own code does or is made to do.
 PEER_POLICY = {
     "dashboard": {
+        # `deny_port_on_interface`/`allow_port_on_interface` are granted here, and
+        # the reasoning is worth stating because granting a firewall op to the
+        # dashboard normally would not be. They are safe to expose ONLY because
+        # both parameters are allowlisted helper-side to a single interface and a
+        # single port: the worst a fully compromised dashboard can do with them is
+        # toggle plain-HTTP reachability on the tailnet interface, which it could
+        # already affect by other means. They are NOT a general port-blocking
+        # primitive -- see DENY_IFACE_ALLOWED above. If either allowlist is ever
+        # widened, THIS grant must be re-argued, not inherited.
         "ops": {"list_blocked", "list_rules", "block_ip", "deny_ip", "unblock_ip",
-                "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie"},
+                "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
+                "deny_port_on_interface", "allow_port_on_interface"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -835,6 +875,94 @@ def op_block_ip(params):
     return {"ip": ip, "output": out.strip()}
 
 
+def _require_iface_port(params):
+    """Validate against the ALLOWLISTS, not merely against a shape.
+
+    A regex that accepts "any plausible interface name" would still accept the
+    LAN interface, which is the one that must never be firewalled from here.
+    Membership is the check; well-formedness is not enough.
+    """
+    p = params or {}
+    iface = p.get("iface")
+    port = p.get("port")
+    proto = (p.get("proto") or "tcp").lower()
+    if not isinstance(iface, str) or iface not in DENY_IFACE_ALLOWED:
+        raise Denied("bad_request",
+                     "interface %r is not in the deny allowlist" % (iface,))
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        raise Denied("bad_request", "port must be an integer")
+    if port not in DENY_PORT_ALLOWED:
+        raise Denied("bad_request",
+                     "port %d is not in the deny allowlist" % port)
+    if proto != "tcp":
+        raise Denied("bad_request", "only tcp is supported")
+    return iface, port, proto
+
+
+def _run_iptables(binary, *args):
+    p = subprocess.run([binary, *args], capture_output=True, text=True, timeout=30)
+    return p.returncode, p.stdout, p.stderr
+
+
+def op_deny_port_on_interface(params):
+    """Drop inbound tcp to `port` arriving on `iface`, in the RAW table.
+
+    IDEMPOTENT: `-C` first, insert only if absent. Re-applying on every boot must
+    not stack duplicate rules.
+
+    INSERTED AT POSITION 1, ahead of any pre-existing jump. A rule placed after a
+    jump can be silently bypassed by whatever that jump does -- which is exactly
+    how the ufw attempt failed. On this appliance position 1 is currently held by
+    a PIA VPN chain; going ahead of it is deliberate, and its consequences are
+    recorded in the Stage 0 plan rather than discovered here.
+
+    Applied to BOTH v4 and v6. A v4-only rule leaves the identical path open over
+    IPv6, which is the same "looks like coverage" failure in a different address
+    family.
+    """
+    iface, port, proto = _require_iface_port(params)
+    applied, already = [], []
+    for binary in (IPTABLES_BIN, IP6TABLES_BIN):
+        rule = ["-t", "raw", "-i", iface, "-p", proto, "--dport", str(port), "-j", "DROP"]
+        rc, _out, _err = _run_iptables(binary, "-C", "PREROUTING", *rule[2:])
+        if rc == 0:
+            already.append(binary)
+            continue
+        rc, _out, err = _run_iptables(binary, "-t", "raw", "-I", "PREROUTING", "1",
+                                      *rule[2:])
+        if rc != 0:
+            raise Denied("iptables_failed",
+                         "%s insert failed: %s" % (binary, (err or "").strip()[:120]))
+        applied.append(binary)
+    return {"iface": iface, "port": port, "proto": proto,
+            "applied": applied, "already_present": already}
+
+
+def op_allow_port_on_interface(params):
+    """Remove the rule op_deny_port_on_interface installed. The REVERT half.
+
+    Exists so the revert is a first-class, testable operation rather than an
+    operator remembering an iptables incantation under pressure. Returns what it
+    actually removed, so the caller can verify rather than assume.
+    """
+    iface, port, proto = _require_iface_port(params)
+    removed, absent = [], []
+    for binary in (IPTABLES_BIN, IP6TABLES_BIN):
+        rule = ["-i", iface, "-p", proto, "--dport", str(port), "-j", "DROP"]
+        rc, _o, _e = _run_iptables(binary, "-t", "raw", "-C", "PREROUTING", *rule)
+        if rc != 0:
+            absent.append(binary)
+            continue
+        rc, _o, err = _run_iptables(binary, "-t", "raw", "-D", "PREROUTING", *rule)
+        if rc != 0:
+            raise Denied("iptables_failed",
+                         "%s delete failed: %s" % (binary, (err or "").strip()[:120]))
+        removed.append(binary)
+    return {"iface": iface, "port": port, "removed": removed, "already_absent": absent}
+
+
 def op_deny_ip(params):
     ip = _require_ip(params)
     rc, out, err = _run_ufw("deny", "from", ip)
@@ -1160,6 +1288,8 @@ OPS = {
     "unblock_ip": op_unblock_ip,
     "write_env": op_write_env,
     "restart_dashboard": op_restart_dashboard,
+    "deny_port_on_interface": op_deny_port_on_interface,
+    "allow_port_on_interface": op_allow_port_on_interface,
 }
 
 
