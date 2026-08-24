@@ -63,6 +63,34 @@ def raises(fn, exc=roles.RoleError):
         return False
 
 
+def snapshot_db(src, dst):
+    """A CONSISTENT copy of the live WAL database.
+
+    NOT `shutil.copy`. The live DB runs in WAL mode with the dashboard, watchdog
+    and alert-watcher all writing to it, so its `-wal` sidecar can hold committed
+    transactions the main file does not have yet. Copying the main file alone can
+    produce a torn snapshot, and the symptom is an intermittent harness-startup
+    failure carrying no useful message -- the kind of unattributable flake that
+    gets re-run until it passes and is then trusted.
+
+    sqlite3's backup API opens a read transaction and copies a coherent view,
+    uncheckpointed pages included.
+
+    It RAISES rather than falling back to `shutil.copy`. A fallback would restore
+    the original hazard silently, leaving a harness that reports a clean run over
+    a database it may have mangled.
+    """
+    src_conn = sqlite3.connect("file:%s?mode=ro" % src, uri=True)
+    try:
+        dst_conn = sqlite3.connect(dst)
+        try:
+            src_conn.backup(dst_conn)
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n== PART 1: the decision layer ==")
 print("\n-- ordering --")
@@ -206,7 +234,7 @@ try:
     src_db = os.environ.get("NEMESIS_TEST_SRC_DB", "/var/lib/nemesis/alerts.db")
     db = os.path.join(_tmp, "alerts.db")
     if os.path.exists(src_db):
-        shutil.copy(src_db, db)
+        snapshot_db(src_db, db)
     os.environ["NEMESIS_DB_PATH"] = db
     for p in (_REPO, _HERE, os.path.join(_REPO, "core_module", "hw_monitor")):
         if p not in sys.path:
@@ -427,6 +455,34 @@ if _live_ok:
     check("roles.py claims nothing unauthenticated that the auth gate gates",
           not (roles.UNAUTHENTICATED - exempt),
           sorted(roles.UNAUTHENTICATED - exempt))
+
+    print("\n-- static/role.js RANK must mirror roles.ROLES --")
+    # The same drift shape as the pair above, in a different language. role.js
+    # hides controls a role cannot use; its RANK map is a hand-written copy of
+    # the server's ordering. It DID drift -- `sub_admin` shipped server-side on
+    # 2026-08-22 and was missing here until 2026-08-24, during which a sub_admin
+    # scored rankOf() === -1, below every minimum, and saw fewer controls than a
+    # view-only account. Nothing caught it because nothing FAILED: no request was
+    # refused, no error logged, the page just quietly rendered less.
+    #
+    # Order matters as much as membership: the ranks are compared with >=, so a
+    # correct set in the wrong order silently rewrites who sees what.
+    _rjs = open(os.path.join(_REPO, "static", "role.js"), encoding="utf-8").read()
+    _rm = _re.search(r"var RANK\s*=\s*\{([^}]*)\}", _rjs)
+    js_rank = ({k: int(v) for k, v in _re.findall(r"(\w+)\s*:\s*(\d+)", _rm.group(1))}
+               if _rm else {})
+    check("CONTROL: role.js RANK was actually parsed (not an empty match)",
+          len(js_rank) >= 3, js_rank)
+    check("role.js names exactly the roles roles.py does",
+          set(js_rank) == set(roles.ROLES),
+          "js=%s py=%s" % (sorted(js_rank), sorted(roles.ROLES)))
+    check("role.js ranks them in the SAME ORDER as roles.ROLES",
+          [r for r in sorted(js_rank, key=js_rank.get)] == list(roles.ROLES),
+          "js=%s py=%s" % (sorted(js_rank, key=js_rank.get), list(roles.ROLES)))
+    check("no role in roles.py would score -1 in role.js "
+          "(which is below every minimum, hiding the whole product)",
+          all(r in js_rank for r in roles.ROLES),
+          sorted(set(roles.ROLES) - set(js_rank)))
 
     print("\n-- registry completeness against the LIVE url_map --")
     live_eps = {r.endpoint for r in app.url_map.iter_rules()}

@@ -20,7 +20,21 @@
 (function () {
   'use strict';
 
-  var RANK = {viewonly: 0, user: 1, admin: 2};
+  /* MUST mirror ROLES in alert_manager/roles.py, in order and by name.
+   *
+   * This is the second source of truth for one ordering, which is a drift risk
+   * by construction -- and it drifted: `sub_admin` was inserted server-side on
+   * 2026-08-22 and this map was not updated until 2026-08-24. An unlisted role
+   * yields rankOf() === -1, and -1 is below EVERY minimum, so a sub_admin was
+   * shown less of the product than a view-only account. The server was correct
+   * throughout; only the presentation was wrong, which is exactly why nothing
+   * caught it -- no request was refused and no error was logged.
+   *
+   * test_roles.py now parses this literal and reconciles it against roles.ROLES,
+   * the same way it already reconciles _AUTH_EXEMPT against UNAUTHENTICATED. Add
+   * a role in roles.py without adding it here and that test fails.
+   */
+  var RANK = {viewonly: 0, user: 1, sub_admin: 2, admin: 3};
 
   // Deliberately NOT initialised to a role. Until the server has answered, we
   // know nothing -- and guessing 'admin' would flash every admin control to a
