@@ -3884,3 +3884,23 @@ detail including the specific route names and each one's actual behavior:
 **Candidate fix:** convert each of the six to POST. Each has its own existing callers, so
 this is a behavior change to already-shipped routes — one variable at a time, own commit
 per route or a single reviewed batch, not folded into any other pass.
+
+### [LOW] `_load_secret_key()` catches `FileNotFoundError` but not `PermissionError` (found 2026-08-25, step-4 VM build)
+`dashboard.py:550-565`. The `try` around `open(_SECRET_KEY_PATH)` catches only
+`FileNotFoundError`, so an existing-but-unreadable secret file propagates and kills the
+process at import time (`app.secret_key = _load_secret_key()`, `:568`) with a bare
+traceback. Hit live on a VM whose `.flask_secret` was still 0600 `<install-user>` after the
+service was moved to the `nemesis-dash` identity — the dashboard crash-looped and the only
+clue was the raw `PermissionError`, three frames deep, with the apport hook itself failing
+on a read-only `/var/crash` on top of it.
+
+Worth noting the write path has the opposite posture — it catches bare `Exception` and
+degrades to a warning (`:563-564`), so a secret that cannot be PERSISTED is survivable
+while one that cannot be READ is fatal. That asymmetry is what makes this a real
+inconsistency rather than just a missing except clause.
+
+**Candidate fix:** catch `PermissionError` alongside `FileNotFoundError` and fail with a
+message naming the path, the expected owner, and the running uid — a permissions problem
+should say so. Deliberately NOT "fall back to a random key on read failure": that would
+silently invalidate every existing session on a transient permission fault, which is worse
+than a loud stop. Product-wide, not specific to any one feature — own commit.
