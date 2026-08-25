@@ -134,12 +134,37 @@ including the harder case, not a reason to drop it.
 
 ### D3 — Provider scope for v1
 
-Falls directly out of D2's split, not a separate judgment call:
+Falls directly out of D2's split, not a separate judgment call — **revised 2026-08-24**
+after the IMAP-auth verification below found a real cost difference between the two
+bare-provider candidates that the original framing did not account for.
 
-| Path | Providers | Why these first |
+| Path | Providers | Why |
 |---|---|---|
-| Owned-domain (MTA-relay) | **Google Workspace, Microsoft 365** | The two dominant hosted-mailbox backends for a domain an SMB actually owns. Relay target after Nemesis clears a message. |
-| Bare-provider (IMAP IDLE) | **Personal Gmail, Outlook.com/Hotmail/Live** | Named directly in the task as highest-value for home users; both support IMAP IDLE. |
+| Owned-domain (MTA-relay) | **Google Workspace, Microsoft 365** | The two dominant hosted-mailbox backends for a domain an SMB actually owns. Relay target after Nemesis clears a message. Unaffected by the revision below — D1's MTA-relay path never touches personal IMAP. |
+| Bare-provider (IMAP IDLE) | **Personal Gmail only, v1.** | See below — Outlook.com deferred. |
+
+**Decision (operator, 2026-08-24): the bare-provider path is Gmail-only in v1.** Verification
+of both providers' current IMAP auth requirements (build spec, 2026-08-24) found they are not
+equivalent in cost, which the original "Personal Gmail, Outlook.com/Hotmail/Live" scoping did
+not know when D2/D3 were first decided:
+
+- **Gmail** still supports app passwords — a user-generated, transitional credential that
+  needs **no OAuth app registration or provider review on Nemesis's side.** This keeps the
+  bare-provider path genuinely cheap, matching the reasoning that justified building it
+  alongside the MTA-relay path in the first place.
+- **Outlook.com has no equivalent.** Basic Auth for SMTP is fully deprecated (March 2026, "no
+  exceptions"), and IMAP/POP now require a client implementing XOAUTH2 — which means a
+  registered Microsoft OAuth app and provider review, **the same cost D1 originally
+  distinguished IMAP from** when rejecting the provider-API transport option. Building Outlook
+  personal-account support in v1 would reintroduce, for one provider, exactly the review
+  overhead the transport decision was framed to avoid.
+
+**Outlook.com personal-account support is deferred, not rejected** — a real follow-up once
+the OAuth registration cost is worth taking on for that provider specifically, tracked in the
+build spec rather than silently dropped. **Business/SMB customers on Microsoft 365 with an
+owned domain are entirely unaffected**; they are served by D1's MTA-relay path regardless of
+this decision, which is what makes deferring Outlook's *personal*-account path an acceptable
+v1 narrowing rather than abandoning Microsoft-ecosystem customers generally.
 
 Self-hosted mail servers (a business running its own Postfix/Exchange) are explicitly **out
 of v1 scope** — different relay topology, different trust model, and no evidence yet that
@@ -212,8 +237,9 @@ the original problem statement is now the customer's to manage, not Nemesis's to
 centrally. This should be surfaced as a pre-flight check or explicit warning in setup, not
 discovered after MX records are already redirected.
 
-**The bare-provider IMAP-IDLE fallback (D2) is entirely unaffected** — it needs no inbound
-reachability at all, so home users on personal Gmail/Outlook lose nothing from this decision.
+**The bare-provider IMAP-IDLE fallback (D2/D3) is entirely unaffected** — it needs no inbound
+reachability at all, so home users on the v1-scoped Gmail path (D3) lose nothing from this
+decision.
 The addressable-market narrowing lands specifically on the SMB/owned-domain track, for
 customers whose connection or hosting can't meet the port-25 bar.
 
