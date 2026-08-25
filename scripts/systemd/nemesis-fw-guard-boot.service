@@ -1,0 +1,59 @@
+[Unit]
+# ADR 0026 step 4 — reassert the tailnet plain-HTTP guard after a reboot.
+#
+# The guard is an `iptables -t raw` rule and raw rules do NOT persist across a restart.
+# Without this unit every reboot silently reopens plain HTTP over the tailnet.
+Description=Nemesis tailnet plain-HTTP guard (boot reassert)
+Documentation=file:///opt/nemesis/docs/architecture/0026-agent-task-authorisation.md
+
+# NOT ordered after tailscaled, deliberately. Verified on an isolated netns 2026-08-25:
+# inserting a rule that matches `-i tailscale0` succeeds while no such interface exists,
+# because iptables matches the interface NAME at packet time rather than resolving a
+# device at insert time. Running early therefore has the rule in place before the
+# interface appears, instead of racing it -- and it keeps this unit independent of
+# whether tailscale comes up at all.
+#
+# It IS ordered after nemesis-fwd: the change goes through the chokepoint, so the helper
+# has to be listening. Wants= rather than Requires= so a helper problem surfaces as THIS
+# unit failing with a readable message, rather than as a dependency cascade.
+After=nemesis-fwd.service
+Wants=nemesis-fwd.service
+
+[Service]
+Type=oneshot
+# Reads NEMESIS_FW_GUARD. Absent or 0 => the script is a no-op and exits 0. Installing
+# this unit must not by itself change network behaviour on a box where the operator has
+# not armed the guard.
+EnvironmentFile=-/etc/nemesis.env
+ExecStart=/opt/nemesis/scripts/nemesis-fw-guard-boot
+RemainAfterExit=yes
+
+# NOT Restart=on-failure. A guard that could not be installed must stay VISIBLY failed:
+# a retry loop buries the one signal that says the box is exposed, and nemesis-fw-watch's
+# periodic check is already the retry -- it re-checks every 60s and repairs what it finds.
+StandardOutput=journal
+StandardError=journal
+
+# Needs CAP_NET_ADMIN to READ the raw table (the write goes through nemesis-fwd, not from
+# here). Everything else is dropped -- same posture as nemesis-fw-watch, designed in
+# rather than retrofitted.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

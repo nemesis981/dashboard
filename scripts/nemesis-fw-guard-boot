@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Reassert the tailnet plain-HTTP guard at boot (ADR 0026 step 4).
+
+WHY A BOOT UNIT IS NEEDED AT ALL. The guard is an `iptables -t raw` rule, and raw rules
+do not survive a reboot -- nothing persists them. Without this, every restart silently
+reopens plain HTTP over the tailnet until something notices. "Something notices" is not
+a persistence strategy: the exposure is live from the moment the network comes up.
+
+WHY IT IS SEPARATE FROM nemesis-fw-watch, WHICH ALSO CHECKS AT STARTUP. Two independent
+layers, and the independence is the point: if fw-watch is stopped, masked, or crash-
+looping, this unit still asserts the guard, and vice versa. A single mechanism that
+covers both the boot case and the runtime case shares a single point of failure with
+itself. Folding this into fw-watch would also have meant ordering fw-watch after
+tailscaled, which would make ADR 0019's enforcement table wait on tailscale coming up --
+the wrong coupling for an unrelated subsystem.
+
+IT DOES NOT NEED TO WAIT FOR tailscale0 TO EXIST. Verified on an isolated netns,
+2026-08-25: `iptables -t raw -I PREROUTING 1 -i tailscale0 ...` succeeds (rc=0) while no
+such interface exists, and `-C` then finds it. iptables treats `-i` as a name to match at
+packet time, not a device to resolve at insert time. So this can run early, and a rule
+installed before tailscaled starts is in place the instant the interface appears -- which
+is strictly better than racing it.
+
+INERT UNLESS ARMED, exactly like the runtime check. `NEMESIS_FW_GUARD=1` is what decides
+that this box should refuse plain HTTP over the tailnet at all. Installing the unit must
+not by itself change network behaviour -- see nemesis_fw_watch.GUARD_ENABLED for the full
+argument. An unarmed run is a success, not a skip-with-a-warning: nothing is wrong.
+
+ROUTES THROUGH THE CHOKEPOINT. This runs as root and could call iptables directly in one
+line. It does not, for the same reason the runtime healer does not: firewall.py is the
+single reviewed path (ADR 0005) and it is what puts the change in the audit trail as
+`fw-healer`. The cost is a dependency on nemesis-fwd being up, which is why the unit is
+ordered after it -- and if the helper is unavailable this exits NON-ZERO and stays
+visibly failed rather than quietly leaving the port open.
+"""
+import os
+import sys
+
+#: Overridable, and the resolved value is LOGGED. A script that hardcodes its own root
+#: cannot be exercised against anything but the live tree, so the only way to test it is
+#: on the box it is meant to protect -- which is the least safe place to find out it is
+#: wrong. Printing the root it actually used also means a run against an unexpected
+#: checkout says so in the journal instead of looking identical to a correct one.
+ROOT = os.environ.get("NEMESIS_ROOT", "/opt/nemesis")
+sys.path.insert(0, os.path.join(ROOT, "alert_manager"))
+
+IFACE = os.environ.get("NEMESIS_FW_GUARD_IFACE", "tailscale0")
+PORT = int(os.environ.get("NEMESIS_FW_GUARD_PORT", "80"))
+PROTO = "tcp"
+IPTABLES = os.environ.get("NEMESIS_IPTABLES", "/usr/sbin/iptables")
+IP6TABLES = os.environ.get("NEMESIS_IP6TABLES", "/usr/sbin/ip6tables")
+
+
+def log(msg):
+    sys.stdout.write("nemesis-fw-guard-boot: %s\n" % msg)
+    sys.stdout.flush()
+
+
+def die(msg):
+    """Non-zero, always. A guard that failed to install must leave a failed unit
+    behind; exiting 0 on failure would report a protected box that is not one."""
+    sys.stderr.write("nemesis-fw-guard-boot: FAILED: %s\n" % msg)
+    raise SystemExit(1)
+
+
+def read_chain(binary):
+    """Ruleset text, or None. A failed read is NEVER an empty string -- '' parses as a
+    ruleset with no rules and is then indistinguishable from a defeated guard."""
+    import subprocess
+    try:
+        r = subprocess.run([binary, "-t", "raw", "-S", "PREROUTING"],
+                           capture_output=True, text=True, timeout=15)
+    except Exception as exc:                                       # noqa: BLE001
+        return None, "%s could not be run (%s)" % (binary, exc)
+    if r.returncode != 0:
+        return None, "%s exited %d: %s" % (binary, r.returncode, (r.stderr or "").strip()[:160])
+    return r.stdout, None
+
+
+def effective(rt, dump):
+    """Is the guard both reached AND ours? Both halves, for the reason raw_traversal
+    documents: a chain policy of DROP blocks the packet while our rule is absent."""
+    res = rt.classify(dump, rt.Packet(IFACE, PROTO, PORT))
+    return (res.status == rt.DROP and res.by_our_rule), res
+
+
+def main():
+    log("root=%s iface=%s port=%s" % (ROOT, IFACE, PORT))
+    if os.environ.get("NEMESIS_FW_GUARD", "0") != "1":
+        log("guard not armed (NEMESIS_FW_GUARD != 1) -- nothing to do")
+        return 0
+
+    try:
+        import raw_traversal as rt
+    except Exception as exc:                                       # noqa: BLE001
+        die("cannot import the traversal checker (%s)" % exc)
+
+    # Check before acting. An already-correct table is the normal case on any boot
+    # where something else got there first, and it must not be churned.
+    states = {}
+    for family, binary in (("v4", IPTABLES), ("v6", IP6TABLES)):
+        dump, err = read_chain(binary)
+        if dump is None:
+            die("could not read the %s raw table: %s" % (family, err))
+        try:
+            ok, res = effective(rt, dump)
+        except rt.SelfTestFailed as exc:
+            die("the traversal checker failed its own self-test, so it cannot vouch "
+                "for the ruleset: %s" % exc)
+        states[family] = (ok, res)
+        log("%s: %s (by_our_rule=%s) -- %s" % (family, res.status, res.by_our_rule, res.reason))
+
+    # UNDETERMINED IS NOT A REASON TO ACT. Something above our rule cannot be modelled,
+    # so whether the packet reaches the DROP is genuinely unknown -- and the thing that
+    # is wrong may not be the thing this script can fix. Reasserting here would be a
+    # change made on the strength of having learned nothing. Fail loudly instead: the
+    # unit stays visibly failed, and nemesis-fw-watch raises NEM-FWW-0006 for the same
+    # condition. This deliberately MATCHES verify_tailnet_guard's behaviour -- the boot
+    # path and the runtime path must not disagree about what an undecidable table means.
+    undecided = [(f, r.reason) for f, (_ok, r) in states.items()
+                 if r.status == rt.UNDETERMINED]
+    if undecided:
+        die("guard state could NOT be determined, so nothing was changed: %s"
+            % "; ".join("%s: %s" % (f, why) for f, why in undecided))
+
+    if all(ok for ok, _ in states.values()):
+        log("guard already effective on both families -- no change made")
+        return 0
+
+    try:
+        import firewall
+    except Exception as exc:                                       # noqa: BLE001
+        die("the firewall chokepoint is unavailable (%s) -- is nemesis-fwd running?" % exc)
+
+    log("asserting the guard via the chokepoint (drop %s/%s inbound on %s)"
+        % (PORT, PROTO, IFACE))
+    try:
+        firewall.reassert_port_on_interface(IFACE, PORT, PROTO)
+    except Exception as exc:                                       # noqa: BLE001
+        die("the helper refused or failed the reassert: %s" % exc)
+
+    # Prove it, independently of what the helper reported. The op verifies its own work
+    # too; this is the caller checking rather than trusting, which is the standard the
+    # rest of this codebase applies to any claimed state change.
+    bad = []
+    for family, binary in (("v4", IPTABLES), ("v6", IP6TABLES)):
+        dump, err = read_chain(binary)
+        if dump is None:
+            bad.append("%s: could not re-read (%s)" % (family, err))
+            continue
+        ok, res = effective(rt, dump)
+        if not ok:
+            bad.append("%s: %s/by_our_rule=%s" % (family, res.status, res.by_our_rule))
+    if bad:
+        die("the reassert reported success but the guard is NOT effective: %s"
+            % "; ".join(bad))
+
+    log("guard asserted and verified effective on both families")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
