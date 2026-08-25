@@ -1633,5 +1633,153 @@ def init_licensing_tables():
         conn.close()
 
 
+def init_email_security_tables():
+    """Canonical DDL for the inbound email security gateway (ADR 0028, build-spec
+    stage 2.6). Two tables, both `email_`-prefixed and MODULE-owned per ADR 0001 --
+    `modules/email_security/` writes them; core only creates them here so the DDL
+    lives in exactly one place like every other table in this file.
+
+    THE PASSWORD IS DELIBERATELY NOT STORED HERE. `email_accounts.credential_ref`
+    names a key in `/etc/nemesis.env` (mode 640 root:nemesis); the secret itself
+    never enters `alerts.db`. Three reasons, none of them stylistic: the DB is
+    backed up to removable media, where a stored app password becomes a credential
+    on a drive that leaves the building; `imap_idle.py` is explicitly built to take
+    credentials as constructor arguments and read no database, so storing one here
+    would contradict the client that consumes it; and a Gmail app password grants
+    FULL mailbox access, not scoped read -- it is not a low-value secret.
+
+    UIDVALIDITY IS PART OF THE MESSAGE KEY, NOT DECORATION. An IMAP UID is unique
+    only within one mailbox at one UIDVALIDITY. If a mailbox is deleted and
+    recreated the server raises UIDVALIDITY and UIDs restart from 1, so a
+    UNIQUE(account_id, uid) would silently collapse a NEW message onto an OLD
+    message's verdict row -- a wrong verdict served with full confidence, which is
+    strictly worse than no verdict. The uniqueness constraint therefore spans
+    (account_id, uidvalidity, uid).
+
+    SIGNALS KEEP fired AND substrate SEPARATE. `fast_check.signals()` returns each
+    signal as {"fired": bool, "substrate": bool} precisely because "did not fire"
+    and "could not be tested" are different facts that look identical once
+    flattened to a boolean -- that distinction is what the D9 measurement campaign
+    exists to preserve, and the measured false-positive rates are only meaningful
+    with it intact. `signals_json` therefore stores the full per-signal structure
+    verbatim. Do NOT "simplify" it to a set of boolean columns later: that would
+    silently invalidate the FP rates the signal set was cleared on.
+
+    QUARANTINE IS NOT ATOMIC ON GMAIL, AND THE SCHEMA SAYS SO. Gmail's IMAP does
+    not support MOVE (verified live against the real mailbox during stage 2.2), so
+    quarantine is COPY -> \\Deleted -> EXPUNGE: three round-trips that can fail
+    between any two. `quarantine_state` enumerates the reachable intermediate
+    states rather than pretending the operation is a boolean, because a process
+    killed mid-sequence leaves the mailbox genuinely half-quarantined and a
+    two-valued column could only describe that as a lie in one direction or the
+    other. Reconciliation needs to know WHICH step completed.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_accounts (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                address        TEXT    NOT NULL,
+                provider       TEXT    NOT NULL DEFAULT 'gmail',
+                imap_host      TEXT    NOT NULL,
+                imap_port      INTEGER NOT NULL DEFAULT 993,
+                mailbox        TEXT    NOT NULL DEFAULT 'INBOX',
+                -- NAME of an /etc/nemesis.env key, never the secret. See docstring.
+                credential_ref TEXT    NOT NULL,
+                -- Enrolment is opt-in and stays off until someone turns it on:
+                -- a mailbox that begins watching itself the moment a row appears
+                -- would read mail nobody consented to scan yet.
+                enabled        INTEGER NOT NULL DEFAULT 0,
+                created_at     TEXT    NOT NULL,
+                -- Actor seam (multi-user-ready-by-default). Populated by the Data
+                -- Manager's current_actor(); present now so adding attribution
+                -- later is not a migration across every write path.
+                created_actor  TEXT,
+                last_connected_at TEXT,
+                -- An explicit failure string, never a default that means something.
+                -- NULL = never attempted; a value = the last real error observed.
+                last_error     TEXT,
+                UNIQUE(address, mailbox)
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_message_verdicts (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id    INTEGER NOT NULL,
+                -- (uidvalidity, uid) together identify the message. See docstring.
+                uidvalidity   INTEGER NOT NULL,
+                uid           INTEGER NOT NULL,
+                -- The RFC 5322 Message-ID header. Useful for correlation, NOT a
+                -- key: it is attacker-controlled and may be absent or duplicated.
+                message_id_hdr TEXT,
+                received_at   TEXT,
+                scanned_at    TEXT    NOT NULL,
+                -- NULL until a verdict is actually reached. `fast_check` returns
+                -- signals and auth facts and deliberately NO verdict, so "scanned"
+                -- and "judged" are separate states and NULL is the honest value
+                -- for the gap between them -- not a default 'clean'.
+                verdict       TEXT,
+                confidence    REAL,
+                -- Human-readable WHY, and the structured evidence behind it.
+                reason        TEXT,
+                signals_json  TEXT,
+                -- Auth facts kept as observed. NULL = not present/not evaluated,
+                -- which is NOT the same as 'fail' -- a missing DMARC record and a
+                -- DMARC failure are different findings.
+                auth_spf      TEXT,
+                auth_dkim     TEXT,
+                auth_dmarc    TEXT,
+                dmarc_policy  TEXT,
+                auth_problems TEXT,
+                -- Reachable states of the non-atomic Gmail sequence:
+                --   none        -- not quarantined, no action attempted
+                --   copied      -- COPY to the quarantine label succeeded only
+                --   flagged     -- COPY + \\Deleted set, EXPUNGE not yet done
+                --   quarantined -- full sequence completed
+                --   torn        -- a step failed mid-sequence; mailbox state is
+                --                  known-inconsistent and needs reconciliation
+                --   failed      -- the attempt failed with nothing applied
+                quarantine_state TEXT NOT NULL DEFAULT 'none',
+                quarantine_at TEXT,
+                quarantine_actor TEXT,
+                UNIQUE(account_id, uidvalidity, uid)
+            )
+        """)
+        # The hot read is "what has this mailbox already been judged on", asked
+        # once per newly-arriving message before any scanning work is done.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_account "
+                  "ON email_message_verdicts(account_id, uidvalidity, uid)")
+        # Reconciliation sweeps look for exactly the half-applied states above;
+        # the index carries the predicate column rather than being a bare scan.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_quarantine "
+                  "ON email_message_verdicts(quarantine_state)")
+
+        # Guarded migrations. Both tables ship complete above, so these are no-ops
+        # on a fresh install; they exist because CREATE TABLE IF NOT EXISTS will
+        # NOT alter a table that already exists, and stage 2.6 may land on a DB
+        # where an earlier shape was already created.
+        _acct = {row[1] for row in
+                 c.execute("PRAGMA table_info(email_accounts)").fetchall()}
+        for _col, _decl in (("created_actor", "TEXT"),
+                            ("last_connected_at", "TEXT"),
+                            ("last_error", "TEXT")):
+            if _col not in _acct:
+                c.execute("ALTER TABLE email_accounts ADD COLUMN %s %s"
+                          % (_col, _decl))
+
+        _verd = {row[1] for row in
+                 c.execute("PRAGMA table_info(email_message_verdicts)").fetchall()}
+        for _col, _decl in (("dmarc_policy", "TEXT"),
+                            ("auth_problems", "TEXT"),
+                            ("quarantine_actor", "TEXT")):
+            if _col not in _verd:
+                c.execute("ALTER TABLE email_message_verdicts ADD COLUMN %s %s"
+                          % (_col, _decl))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     init_db()
