@@ -73,10 +73,64 @@ print("  dispatcher handles %d actions: %s" % (len(DISPATCH_ACTIONS), DISPATCH_A
 check("parsed a PLAUSIBLE number of dispatcher actions (>=8)",
       len(DISPATCH_ACTIONS) >= 8, "got %d" % len(DISPATCH_ACTIONS))
 
+# Every dispatcher action must be CLASSIFIED -- but "classified" is not the same
+# as "exempt". An action may be deliberately loopback-only, and that is a decision
+# rather than a gap. What must never happen is UNCLASSIFIED: that is the state
+# where nobody decided, and where the action works locally while being silently
+# refused from the server.
+_VALID_DISPOSITIONS = (tasks.DISP_EXEMPT,
+                       tasks.DISP_LOOPBACK_ONLY,
+                       tasks.DISP_APPROVAL_REQUIRED)
 for act in DISPATCH_ACTIONS:
-    check("dispatcher action %-14s is classified EXEMPT (no regression)" % act,
-          tasks.disposition(act) == tasks.DISP_EXEMPT,
+    check("dispatcher action %-14s is CLASSIFIED (not left undecided)" % act,
+          tasks.disposition(act) in _VALID_DISPOSITIONS,
           "got %s" % tasks.disposition(act))
+
+# Pin the two classified on 2026-08-25 to the direction each was actually decided
+# in, so a later "make the suite green" edit cannot quietly flip one. Asserting
+# only "is classified" would accept either answer for either action.
+check("`findings` is EXEMPT (read-only; server already holds the data)",
+      tasks.disposition("findings") == tasks.DISP_EXEMPT,
+      "got %s" % tasks.disposition("findings"))
+check("`report_error` is LOOPBACK-ONLY (a write only the local GUI can mean)",
+      tasks.disposition("report_error") == tasks.DISP_LOOPBACK_ONLY,
+      "got %s" % tasks.disposition("report_error"))
+
+# EXERCISE the refusal branch, do not merely assert the classification value.
+# A test that reads the disposition proves the table; it does not prove that
+# `assert_dispatchable` acts on it, which is the thing that actually stops a
+# signed task from running the action.
+try:
+    tasks.assert_dispatchable("report_error")
+except tasks.LoopbackOnlyAction as _e:
+    check("assert_dispatchable RAISES LoopbackOnlyAction for `report_error`", True)
+    check("...and its reason is distinct from an unclassified one",
+          _e.reason == "action_is_loopback_only" and
+          _e.reason != tasks.UnclassifiedAction.reason,
+          "got reason=%r" % _e.reason)
+except Exception as _e:                                        # noqa: BLE001
+    check("assert_dispatchable RAISES LoopbackOnlyAction for `report_error`", False,
+          "raised %r instead" % (_e,))
+else:
+    check("assert_dispatchable RAISES LoopbackOnlyAction for `report_error`", False,
+          "it RETURNED -- a signed server task would be allowed to run it")
+
+# CONTROL: the same call must still SUCCEED for an exempt action, or the check
+# above would pass just as well against a classifier that refuses everything.
+try:
+    tasks.assert_dispatchable("findings")
+    check("CONTROL: assert_dispatchable ADMITS `findings`", True)
+except Exception as _e:                                        # noqa: BLE001
+    check("CONTROL: assert_dispatchable ADMITS `findings`", False,
+          "raised %r -- the refusal test above proves nothing" % (_e,))
+
+# The production self-test must itself exercise the new tier.
+try:
+    tasks.classification_self_test()
+    check("classification_self_test() passes with the loopback tier wired", True)
+except Exception as _e:                                        # noqa: BLE001
+    check("classification_self_test() passes with the loopback tier wired", False,
+          "raised %r" % (_e,))
 
 # The two special-cased task actions never reach `_dispatch`, so the parse above
 # cannot see them -- they are checked by name.
@@ -91,6 +145,13 @@ _known = set(DISPATCH_ACTIONS) | {tasks.ROTATE_ACTION, tasks.ATTEST_ACTION}
 _phantoms = sorted(set(tasks.BASE_EXEMPT_ACTIONS) - _known)
 check("no PHANTOM exempt actions (exempt but unhandled)", not _phantoms,
       "phantoms: %s" % _phantoms)
+
+# Same reverse check for the loopback-only set: an entry naming a handler that
+# does not exist would be a decision recorded about nothing, and would go on
+# looking like a live control long after the action it names was deleted.
+_lb_phantoms = sorted(set(tasks.BASE_LOOPBACK_ONLY_ACTIONS) - _known)
+check("no PHANTOM loopback-only actions (classified but unhandled)",
+      not _lb_phantoms, "phantoms: %s" % _lb_phantoms)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

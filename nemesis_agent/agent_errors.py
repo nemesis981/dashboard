@@ -121,6 +121,13 @@ E_AGENT_CODES = {
                     "Persisting a task result failed; the result may not reach "
                     "the server on the next beat.", "low"),
 
+    # ── 070–079  Roaming traffic steering (failsafe) ──
+    "E-AGENT-070": ("Steering teardown not proven safe",
+                    "Roaming traffic steering could not be confirmed torn down by "
+                    "reading live state back; the device may still be steered. "
+                    "The controller keeps retrying and fails open, but this is a "
+                    "security-relevant condition an operator must see.", "high"),
+
     # ── 080–089  Behavioral monitoring (Windows / Sysmon arm) ──
     "E-AGENT-080": ("Sysmon collector poll failed",
                     "The Windows behavioral poller could not read new events from "
@@ -139,6 +146,9 @@ E_AGENT_CODES = {
                     "the user cannot see their own device's findings even though "
                     "the agent may be reporting them. Reported by the GUI over the "
                     "loopback control channel.", "low"),
+    "E-AGENT-091": ("Agent findings query failed",
+                    "The agent could not build the local recent-findings response "
+                    "for the GUI (findings buffer read failed).", "low"),
 
     # ── Memory-injection detection (100 block) ──
     "E-AGENT-100": ("Memory-scan capability absent",
@@ -199,6 +209,17 @@ E_AGENT_CODES = {
                     "server probing for a reachable action looks like, so a burst of "
                     "these from actions that were never deployed is worth reading as a "
                     "signal rather than a version mismatch.", "medium"),
+    "E-AGENT-119": ("Signed task named a loopback-only action",
+                    "A task arrived with a valid server signature but named an action "
+                    "this agent handles ONLY over its local loopback listener and has "
+                    "deliberately classified as not remotely invocable, so it was "
+                    "REFUSED. Distinct from E-AGENT-117 on purpose: that one means no "
+                    "decision has been made about an action, this one means a decision "
+                    "was made and the answer was no. A server has no legitimate reason "
+                    "to send one of these, so unlike E-AGENT-117 it is NOT explained by "
+                    "a version skew -- read it as a server sending work it should not "
+                    "know to send, and investigate rather than reclassify the action to "
+                    "make it stop.", "medium"),
     "E-AGENT-118": ("Admin approval refused for a gated task",
                     "A task requiring admin approval (ADR 0026) arrived with a valid "
                     "SERVER signature but its inner admin authorization did not "

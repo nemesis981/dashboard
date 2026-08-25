@@ -453,10 +453,24 @@ ATTEST_ACTION = "attest_manifest"
 DISP_EXEMPT = "EXEMPT"
 #: Disposition: this module has never been told about the action. Refuse.
 DISP_UNCLASSIFIED = "UNCLASSIFIED"
+DISP_LOOPBACK_ONLY = "LOOPBACK_ONLY"
 
 
 class UnclassifiedAction(TaskRejected):
     reason = "action_not_classified"
+
+
+class LoopbackOnlyAction(TaskRejected):
+    """A DELIBERATELY local-only action, named by a signed server task.
+
+    Distinct from `UnclassifiedAction` on purpose. That one means "nobody has
+    decided about this action yet" and is a gap to close; this one means "someone
+    decided, and the answer was no." Collapsing them would make a settled security
+    decision indistinguishable from an oversight — and the next person to see the
+    refusal would close the "gap" by classifying the action, silently reversing it.
+    """
+
+    reason = "action_is_loopback_only"
 
 
 #: Actions executable on the outer signature alone. This set is the STATUS QUO at
@@ -472,6 +486,11 @@ class UnclassifiedAction(TaskRejected):
 BASE_EXEMPT_ACTIONS = frozenset({
     # Read-only / self-reporting.
     "ping", "status", "scan_status",
+    # Read-only, and discloses nothing the server does not already hold: the
+    # findings buffer is a bounded local COPY of behavioral events already sent
+    # up by heartbeat (`_drain_behavioral` feeds both). Classified 2026-08-25
+    # with the GUI-findings commit.
+    "findings",
     # Local-effect, already reachable unauthenticated on the loopback listener,
     # so a signed task grants nothing a local process did not already have.
     "checkin", "notify",
@@ -484,19 +503,44 @@ BASE_EXEMPT_ACTIONS = frozenset({
 })
 #
 # ⚠ THIS SET CREATES A REAL CROSS-CHANGE DEPENDENCY. Any commit that adds an
-# action to `_CommandHandler._dispatch` must add it here IN THE SAME COMMIT, or
-# the action works locally over the loopback listener and is silently refused when
-# the server sends it. `test_task_classification.py` fails in both directions --
-# a dispatcher action missing from this set, and a set entry with no handler -- so
-# the omission surfaces as a red suite rather than as a field report.
+# action to `_CommandHandler._dispatch` must classify it IN THE SAME COMMIT --
+# here, in BASE_LOOPBACK_ONLY_ACTIONS below, or in BASE_APPROVAL_REQUIRED_ACTIONS
+# -- or the action works locally over the loopback listener and is silently
+# refused when the server sends it. `test_task_classification.py` fails in both
+# directions -- a dispatcher action in no set, and a set entry with no handler --
+# so the omission surfaces as a red suite rather than as a field report.
 #
-# Concretely pending at the time this landed: the agent-GUI work (uncommitted in a
-# parallel window) adds `findings` and `report_error`. They are deliberately NOT
-# listed above, because they do not exist on `origin/main` and listing them would
-# be classifying a handler that isn't there. They are also GUI-to-loopback calls
-# rather than server-sent tasks, so they may well never need to be here at all --
-# that is a decision for the commit that introduces them, made with the suite
-# telling it which way is consistent.
+# It did exactly that on 2026-08-25: the agent-GUI commit added `findings` and
+# `report_error` without classifying either, and the suite caught it before the
+# commit landed. Both are now classified, in OPPOSITE directions -- see each set.
+
+
+#: Actions the dispatcher handles that a signed SERVER task may NEVER invoke.
+#:
+#: This set exists because "deliberately not remotely invocable" and "nobody has
+#: classified this yet" were previously the same state: absence. An absence cannot
+#: record a decision, so a future reader finding one could only guess whether it
+#: was intent or an oversight -- and the safe-looking repair (add it to the exempt
+#: set, make the suite green) silently reverses a security decision nobody knew
+#: had been made. Same failure shape this codebase already checks for elsewhere: a
+#: default that means something is indistinguishable from a real answer.
+#:
+#: Membership here is not a weaker EXEMPT. It is a refusal, and `assert_dispatchable`
+#: raises `LoopbackOnlyAction` for it, which the agent reports back to the server
+#: rather than dropping.
+BASE_LOOPBACK_ONLY_ACTIONS = frozenset({
+    # WRITES to this device's own error ledger, whitelisted to E-AGENT-090 --
+    # "the agent GUI is unavailable". Only the local GUI can truthfully assert
+    # that, so a server has no legitimate use for it and nothing is lost by
+    # refusing. What IS lost by allowing it: a compromised or confused server
+    # could inject false entries into the exact ledger an operator reads when
+    # diagnosing this device. No benefit against a real (if small) integrity
+    # cost -- so, denied. Classified 2026-08-25 with the GUI-findings commit.
+    "report_error",
+})
+
+_runtime_loopback_only = {}
+
 
 #: Actions contributed at runtime by OPTIONAL modules (see `register_exempt_action`).
 #: Separate from the frozen base set so the base set stays auditable as a literal.
@@ -539,6 +583,14 @@ def disposition(action) -> str:
         # approval" costs a refused task; resolved the other way it silently
         # drops the admin check entirely.
         return DISP_APPROVAL_REQUIRED
+    if isinstance(action, str) and (action in BASE_LOOPBACK_ONLY_ACTIONS
+                                    or action in _runtime_loopback_only):
+        # Checked BEFORE the exempt set, same reasoning as approval-required
+        # above: if an action were ever listed in both, the safe reading is the
+        # refusal. A wrongly-refused local-only action costs a failed task; a
+        # wrongly-allowed one hands the server a capability someone decided
+        # against.
+        return DISP_LOOPBACK_ONLY
     if isinstance(action, str) and (action in BASE_EXEMPT_ACTIONS
                                     or action in _runtime_exempt):
         return DISP_EXEMPT
@@ -554,6 +606,11 @@ def assert_dispatchable(action) -> str:
     replay to whoever read the claims directory afterwards.
     """
     disp = disposition(action)
+    if disp == DISP_LOOPBACK_ONLY:
+        raise LoopbackOnlyAction(
+            "action %r is handled locally over the loopback listener only and is "
+            "deliberately not remotely invocable; this is a recorded decision, not "
+            "a missing classification" % (action,))
     if disp == DISP_UNCLASSIFIED:
         raise UnclassifiedAction(
             "action %r is not classified for remote dispatch; a signed task may "
@@ -926,6 +983,26 @@ def classification_self_test() -> None:
     else:
         raise VerifierBroken(
             "assert_dispatchable did not raise for an unclassified action")
+
+    # Third canary, for the loopback-only tier. Uses a REAL member rather than a
+    # synthetic name, deliberately: the risk being guarded against is the set
+    # being emptied, reordered after the exempt check, or otherwise stopping
+    # refusing — none of which a synthetic never-legitimate name would detect if
+    # the set itself went unconsulted. If `report_error` is ever legitimately
+    # reclassified, this line must be changed deliberately, which is the point.
+    lb = "report_error"
+    if disposition(lb) != DISP_LOOPBACK_ONLY:
+        raise VerifierBroken(
+            "action classifier no longer treats %r as loopback-only — a recorded "
+            "decision that a signed server task may not invoke it has stopped "
+            "being enforced" % lb)
+    try:
+        assert_dispatchable(lb)
+    except LoopbackOnlyAction:
+        pass
+    else:
+        raise VerifierBroken(
+            "assert_dispatchable did not raise for a loopback-only action")
 
 
 def verify_rotation(envelope: dict, device_id: str):

@@ -630,6 +630,57 @@ def _detect_lan_macs(conf):
 _behavioral_monitor = None
 _behavioral_thread = None
 
+# A bounded local copy of what THIS device recently reported, so the agent's own
+# GUI can show a user their own device's findings. Those findings otherwise live
+# only in the appliance dashboard, invisible to a roaming user looking at their own
+# machine. This is a display convenience, not a second source of truth: the server's
+# malware_findings remains authoritative; this is "what my agent last sent up".
+import collections as _collections
+_FINDINGS_MAX = 100
+_recent_findings = _collections.deque(maxlen=_FINDINGS_MAX)
+_findings_lock = threading.Lock()
+#: Only codes the GUI is allowed to report over the UNAUTHENTICATED loopback
+#: control channel, so a local process cannot spoof arbitrary agent telemetry.
+_GUI_REPORTABLE_CODES = {"E-AGENT-090"}
+
+
+def _remember_findings(events):
+    """Keep a bounded local copy of drained behavioral findings for the GUI.
+    Best-effort; never raises (a display buffer must never cost a heartbeat)."""
+    try:
+        with _findings_lock:
+            for e in events or []:
+                if e.get("rule") == "__rate_suppressed__":
+                    continue                       # a suppression summary, not a finding
+                _recent_findings.append({
+                    "behavior": e.get("behavior"),
+                    "rule": e.get("rule"),
+                    "severity": e.get("severity"),
+                    "source": e.get("source"),
+                    "proc_name": e.get("proc_name"),
+                    "count": e.get("count", 1),
+                    "ts": e.get("ts"),
+                    "detail": e.get("detail"),
+                })
+    except Exception:                                # noqa: BLE001
+        pass
+
+
+def _findings_response():
+    """Build the local recent-findings response for the GUI 'findings' action.
+    Newest first, bounded. Records E-AGENT-091 if the buffer cannot be read."""
+    try:
+        with _findings_lock:
+            items = list(_recent_findings)
+        return {"ok": True,
+                "findings": items[::-1][:50],           # newest first
+                "count": len(items),
+                "behavioral_enabled":
+                    str(_conf.get("behavioral_enabled", "false")).strip().lower() == "true"}
+    except Exception as exc:                          # noqa: BLE001
+        agent_errors.record("E-AGENT-091", "findings query: %s" % exc)
+        return {"error": "findings unavailable"}
+
 
 def _start_behavioral_monitor(conf):
     """Start the behavioral monitor + its platform observer thread, IFF enabled +
@@ -784,11 +835,14 @@ def _behavioral_tail(path):
 
 
 def _drain_behavioral():
-    """Behavioral events for this heartbeat, or [] when the monitor is not running."""
+    """Behavioral events for this heartbeat, or [] when the monitor is not running.
+    Also keeps a bounded local copy for the agent's own GUI findings view."""
     if _behavioral_monitor is None:
         return []
     try:
-        return _behavioral_monitor.drain()
+        events = _behavioral_monitor.drain()
+        _remember_findings(events)
+        return events
     except Exception as exc:                                 # noqa: BLE001
         log.warning("behavioral drain failed: %s", exc)
         return []
@@ -1678,6 +1732,17 @@ def _handle_response_tasks(response, device_id):
                 # real appliance identity exists.
                 task_mod.verify_admin_approval(verified, device_id,
                                                appliance_id=None)
+        except task_mod.LoopbackOnlyAction as exc:
+            # Caught BEFORE UnclassifiedAction — it is a TaskRejected subclass too,
+            # and the generic handler below would otherwise swallow it under a
+            # reason that misdescribes what happened. "Nobody classified this" and
+            # "this was classified as local-only" send an operator to two different
+            # places, and only one of them is a gap to close.
+            log.error("task refused (%s): %s", exc.reason, exc)
+            agent_errors.record("E-AGENT-119", str(verified["action"])[:200])
+            task_mod.record_result(verified["task_id"], False, str(exc),
+                                   verified["action"])
+            continue
         except task_mod.UnclassifiedAction as exc:
             log.error("task refused (%s): %s", exc.reason, exc)
             agent_errors.record("E-AGENT-117", str(verified["action"])[:200])
@@ -2033,6 +2098,7 @@ _CAPABILITIES = {
     "checkin": True,
     "restart": True,
     "ram_recovery": False,
+    "findings": True,          # the GUI's local findings view (read-only)
 }
 
 
@@ -2137,6 +2203,22 @@ class _CommandHandler(BaseHTTPRequestHandler):
             due_now = request_early_beat(body.get("reason", "local_request"))
             return {"ok": True, "due_now": due_now,
                     "floor_seconds": POLL_INTERVAL_FLOOR}
+
+        if action == "findings":
+            # READ-ONLY. The local device's own recent behavioral findings, so the
+            # agent GUI can show a user what was detected on their own machine (those
+            # findings otherwise surface only in the appliance dashboard).
+            return _findings_response()
+
+        if action == "report_error":
+            # The GUI reports its OWN render failures here so they enter the same
+            # agent-error ledger as everything else. Restricted to a whitelist so a
+            # local process cannot spoof arbitrary telemetry over this unauth channel.
+            code = body.get("code")
+            if code in _GUI_REPORTABLE_CODES:
+                agent_errors.record(code, str(body.get("context", ""))[:200])
+                return {"ok": True}
+            return {"error": "code not reportable via this channel"}
 
         if action == "scan":
             scan_id = scanner.trigger_scan(body.get("path", "/"),
