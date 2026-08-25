@@ -227,6 +227,19 @@ def allow_port_on_interface(iface, port, proto="tcp",
                     username=username, session_id=session_id, password=password)
 
 
+def reassert_port_deny_on_interface(iface, port, proto="tcp",
+                                    username=None, session_id=None, password=None):
+    """Ask the helper to ensure the deny rule is present AND at position 1.
+
+    Not the same call as deny_port_on_interface: that one is idempotent on existence
+    and so cannot repair a rule that exists but is no longer reached. See
+    nemesis_fwd.op_reassert_port_deny_on_interface.
+    """
+    return _request("reassert_port_deny_on_interface",
+                    {"iface": iface, "port": int(port), "proto": proto},
+                    username=username, session_id=session_id, password=password)
+
+
 def list_blocked(username, session_id, password=None):
     """Password may be omitted if the helper still holds a live cached
     verification for this (peer, user, session). The helper decides — the

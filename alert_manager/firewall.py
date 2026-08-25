@@ -213,6 +213,26 @@ def deny_port_on_interface(iface, port, proto="tcp",
     return True
 
 
+def reassert_port_on_interface(iface, port, proto="tcp",
+                               username=None, session_id=None, password=None):
+    """Restore the deny rule to position 1. Routes through the chokepoint.
+
+    ADDED FOR ADR 0026 STEP 4. The self-healing check needs to REPAIR the guard, not
+    just re-request it: the failure mode is a rule that still exists while something
+    inserted above it terminates traversal first, and `deny_port_on_interface` returns
+    "already present" against exactly that state. This is the call that fixes it.
+
+    ⚠ Same allowlist as its siblings -- the helper refuses any interface or port
+    outside it. Do NOT generalise this wrapper without re-arguing the
+    PEER_POLICY["fw-healer"] grant behind it.
+    """
+    fw_client.reassert_port_deny_on_interface(iface, port, proto, username=username,
+                                              session_id=session_id, password=password)
+    log.info("firewall: reassert deny %s/%s on %s applied via nemesis-fwd",
+             port, proto, iface)
+    return True
+
+
 def allow_port_on_interface(iface, port, proto="tcp",
                             username=None, session_id=None, password=None):
     """Remove that rule. The REVERT half, deliberately a first-class operation

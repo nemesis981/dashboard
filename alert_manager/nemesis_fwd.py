@@ -85,6 +85,10 @@ ALERTW_USER = os.environ.get("NEMESIS_ALERTW_USER", "nemesis-alertw")
 #: with no human behind it, controlled by a structural op-allowlist rather than a
 #: credential. See PEER_POLICY["fail2ban"].
 FAIL2BAN_USER = os.environ.get("NEMESIS_FAIL2BAN_USER", "nemesis-f2b")
+#: nemesis-fw-watch runs as root (it needs CAP_NET_ADMIN to read the ruleset), so the
+#: healer peer resolves to uid 0. Overridable for testing; see PEER_POLICY["fw-healer"]
+#: for why registering root as a peer grants nothing it did not already have.
+HEALER_USER = os.environ.get("NEMESIS_FWD_HEALER_USER", "root")
 SOCKET_GROUP = os.environ.get("NEMESIS_FWD_GROUP", "nemesis-fw")
 UFW_BIN = "/usr/sbin/ufw"
 IPTABLES_BIN = "/usr/sbin/iptables"
@@ -221,6 +225,10 @@ AUDIT_ACTION = {
     "reap_zombie":       "mem_reap_zombie",
     "deny_port_on_interface":  "fw_deny_port_iface",
     "allow_port_on_interface": "fw_allow_port_iface",
+    # Distinct from fw_deny_port_iface deliberately: an unattended repair and an
+    # operator-initiated block are different events, and an audit trail that renders
+    # them identically cannot answer "did this rule keep getting knocked out?".
+    "reassert_port_deny_on_interface": "fw_reassert_port_iface",
 }
 
 
@@ -287,6 +295,34 @@ PEER_POLICY = {
         "ops": {"block_ip", "deny_ip"},
         "require_credential": False,
         "audit_actor": "fail2ban",
+    },
+    "fw-healer": {
+        # ADR 0026 step 4. The periodic reachability check runs inside
+        # nemesis-fw-watch, which needs CAP_NET_ADMIN to read the ruleset at all and
+        # therefore runs as root. Root is registered as a peer HERE so the repair goes
+        # through the chokepoint and lands in the audit trail like every other rule
+        # change, instead of being an ad-hoc iptables call that nothing records --
+        # which is the debt ADR 0005 exists to prevent.
+        #
+        # THIS GRANTS NO NEW CAPABILITY, AND THAT IS THE ARGUMENT FOR IT. A root
+        # process can already edit netfilter directly; nothing here widens what it can
+        # do. What the entry buys is an IDENTITY: the repair arrives as `fw-healer`
+        # rather than anonymously, so the audit log can distinguish an automated
+        # reassertion from an operator action.
+        #
+        # ONE OP, AND NOT THE OBVIOUS TWO. `allow_port_on_interface` is deliberately
+        # absent: a healer that can also LIFT the rule is a healer that can be turned
+        # into the exposure it exists to prevent. `deny_port_on_interface` is absent
+        # too -- it cannot repair the failure mode this peer exists for (see the op's
+        # docstring), so granting it would add reach without adding capability. Every
+        # path through the single granted op ends with the rule installed, which is
+        # what makes an unattended peer acceptable here at all.
+        #
+        # No credential, for the same reason as alert-watcher and fail2ban: there is no
+        # human in the loop, and the substituted control is the hard op allowlist.
+        "ops": {"reassert_port_deny_on_interface"},
+        "require_credential": False,
+        "audit_actor": "fw-healer",
     },
 }
 
@@ -975,6 +1011,86 @@ def op_allow_port_on_interface(params):
     return {"iface": iface, "port": port, "removed": removed, "already_absent": absent}
 
 
+def op_reassert_port_deny_on_interface(params):
+    """Ensure the deny rule is present AND AT POSITION 1. The self-healing op.
+
+    WHY THE EXISTING DENY OP CANNOT DO THIS. `op_deny_port_on_interface` is idempotent
+    on EXISTENCE: `-C` first, insert only if absent. The failure this op exists to
+    repair is a rule that exists and is never reached, because something above it now
+    terminates traversal first. Against that, an existence check is a no-op -- it finds
+    the rule, reports "already present", and repairs nothing. Position is the property
+    that was lost, so position is what this op restores.
+
+    INSERT FIRST, THEN DELETE THE OLD COPY. The obvious implementation -- delete, then
+    re-insert at 1 -- leaves a window with NO rule at all, on the exact interface and
+    port the rule exists to protect, during a repair prompted by the guard already
+    having failed. Inserting at position 1 first means a matching packet is dropped
+    throughout; the stale copy below is then redundant and removed. There is no instant
+    at which the port is open.
+
+    DELETION IS BY INDEX, NOT BY SPEC. `-D <chain> <spec>` removes the FIRST match,
+    which after the insert is the copy we just made -- it would undo the repair and
+    leave the stale rule in place, reporting success. Indices come from `-S` (see
+    raw_traversal.chain_rules) and are deleted highest-first so earlier deletions do
+    not shift the ones still to come.
+
+    STRUCTURALLY INCAPABLE OF OPENING THE PORT. Every path through this op ends with
+    the rule installed at position 1; there is no argument that makes it remove
+    protection. That is what makes it safe to grant to an unattended peer, which
+    `allow_port_on_interface` would not be -- see PEER_POLICY["fw-healer"].
+
+    THE RESULT IS PROVEN, NOT ASSUMED. The final state is read back and verified to be
+    exactly one occurrence at position 1 before returning. `iptables` exiting 0 says the
+    command parsed, not that the ruleset now looks the way the caller needs.
+    """
+    iface, port, proto = _require_iface_port(params)
+    import raw_traversal
+    spec = ["-i", iface, "-p", proto, "--dport", str(port), "-j", "DROP"]
+    out = {"iface": iface, "port": port, "proto": proto,
+           "already_correct": [], "repositioned": [], "installed": [],
+           "duplicates_removed": {}}
+
+    for binary in (IPTABLES_BIN, IP6TABLES_BIN):
+        rc, dump, err = _run_iptables(binary, "-t", "raw", "-S", "PREROUTING")
+        if rc != 0:
+            raise Denied("iptables_failed",
+                         "%s -S failed: %s" % (binary, (err or "").strip()[:120]))
+        hits = [i for i, toks in raw_traversal.chain_rules(dump, "PREROUTING")
+                if raw_traversal.rule_matches_spec(toks, iface, proto, port)]
+        if hits == [1]:
+            out["already_correct"].append(binary)
+            continue
+
+        rc, _o, err = _run_iptables(binary, "-t", "raw", "-I", "PREROUTING", "1", *spec)
+        if rc != 0:
+            raise Denied("iptables_failed",
+                         "%s insert failed: %s" % (binary, (err or "").strip()[:120]))
+        # Everything that was at index N is now at N+1.
+        removed = 0
+        for old in sorted(hits, reverse=True):
+            rc, _o, err = _run_iptables(binary, "-t", "raw", "-D", "PREROUTING", str(old + 1))
+            if rc != 0:
+                raise Denied("iptables_failed",
+                             "%s delete of duplicate at %d failed: %s"
+                             % (binary, old + 1, (err or "").strip()[:120]))
+            removed += 1
+        out["duplicates_removed"][binary] = removed
+        (out["repositioned"] if hits else out["installed"]).append(binary)
+
+        rc, dump, err = _run_iptables(binary, "-t", "raw", "-S", "PREROUTING")
+        if rc != 0:
+            raise Denied("iptables_failed",
+                         "%s could not be read back after repair: %s"
+                         % (binary, (err or "").strip()[:120]))
+        after = [i for i, toks in raw_traversal.chain_rules(dump, "PREROUTING")
+                 if raw_traversal.rule_matches_spec(toks, iface, proto, port)]
+        if after != [1]:
+            raise Denied("iptables_failed",
+                         "%s repair did not produce exactly one rule at position 1 "
+                         "(found at %r) -- refusing to report success" % (binary, after))
+    return out
+
+
 def op_deny_ip(params):
     ip = _require_ip(params)
     rc, out, err = _run_ufw("deny", "from", ip)
@@ -1302,6 +1418,7 @@ OPS = {
     "restart_dashboard": op_restart_dashboard,
     "deny_port_on_interface": op_deny_port_on_interface,
     "allow_port_on_interface": op_allow_port_on_interface,
+    "reassert_port_deny_on_interface": op_reassert_port_deny_on_interface,
 }
 
 
@@ -1524,7 +1641,7 @@ def main():
 
     peer_uids = {}
     for policy_name, user in (("dashboard", DASH_USER), ("alert-watcher", ALERTW_USER),
-                              ("fail2ban", FAIL2BAN_USER)):
+                              ("fail2ban", FAIL2BAN_USER), ("fw-healer", HEALER_USER)):
         try:
             peer_uids[pwd.getpwnam(user).pw_uid] = policy_name
         except KeyError:
