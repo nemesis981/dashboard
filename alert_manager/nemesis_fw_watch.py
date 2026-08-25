@@ -66,10 +66,46 @@ DEBOUNCE_SECONDS = float(os.environ.get("NEMESIS_FW_WATCH_DEBOUNCE", "2"))
 REVERIFY_SECONDS = float(os.environ.get("NEMESIS_FW_WATCH_REVERIFY", "60"))
 AUTORESTORE = os.environ.get("NEMESIS_FW_WATCH_AUTORESTORE", "0") == "1"
 
+#: ── ADR 0026 step 4: the tailnet plain-HTTP guard ───────────────────────────
+#:
+#: SHIPS INERT, AND THAT IS NOT THE SAME AS AUTORESTORE BEING OFF BY DEFAULT.
+#: AUTORESTORE governs whether a guard that ALREADY EXISTS gets repaired; leaving that
+#: off is what this file's header argues for, because a silent repair destroys the
+#: evidence of the tamper it exists to detect. This flag governs something else
+#: entirely: whether the raw-table DROP should exist AT ALL on this box. Enabling it on
+#: a machine where the operator has not yet made that decision would close plain HTTP
+#: over the tailnet unilaterally -- no state snapshot, no operator go-ahead, and any
+#: `http://<tailnet-ip>/...` link in use breaks -- which is a change to live network
+#: behaviour arriving as a side effect of a code deploy. So the code lands dormant and
+#: step 4's rollout turns it on, once the DROP has been deliberately applied.
+#:
+#: THERE IS DELIBERATELY NO SECOND "DETECT BUT DO NOT REPAIR" FLAG. Once enabled, the
+#: repair and the alert are both unconditional. A detect-only mode would be the failure
+#: this whole mechanism exists to prevent: something that reports healthy while the
+#: guard is defeated. The alert is what preserves the evidence, not the absence of a fix.
+GUARD_ENABLED = os.environ.get("NEMESIS_FW_GUARD", "0") == "1"
+GUARD_IFACE = os.environ.get("NEMESIS_FW_GUARD_IFACE", "tailscale0")
+GUARD_PORT = int(os.environ.get("NEMESIS_FW_GUARD_PORT", "80"))
+GUARD_PROTO = "tcp"
+IPTABLES_BIN = os.environ.get("NEMESIS_IPTABLES", "/usr/sbin/iptables")
+IP6TABLES_BIN = os.environ.get("NEMESIS_IP6TABLES", "/usr/sbin/ip6tables")
+
+#: A guard that is knocked out and repaired repeatedly is a DIFFERENT condition from one
+#: that was knocked out once: something on this box is actively fighting the rule (PIA
+#: rewriting its chains on every VPN state change is the known candidate). Repairing it
+#: quietly on a loop would look healthy in every individual check while the box is in
+#: fact contested, so a run of repairs escalates instead of being absorbed.
+GUARD_FLAP_WINDOW = float(os.environ.get("NEMESIS_FW_GUARD_FLAP_WINDOW", "3600"))
+GUARD_FLAP_THRESHOLD = int(os.environ.get("NEMESIS_FW_GUARD_FLAP_THRESHOLD", "3"))
+
 ERR_TAMPERED = "NEM-FWW-0001"
 ERR_DELETED = "NEM-FWW-0002"
 ERR_NO_BASELINE = "NEM-FWW-0003"
 ERR_RESTARTED = "NEM-FWW-0004"
+ERR_GUARD_DEFEATED = "NEM-FWW-0005"
+ERR_GUARD_UNDETERMINED = "NEM-FWW-0006"
+ERR_GUARD_HEAL_FAILED = "NEM-FWW-0007"
+ERR_GUARD_FLAPPING = "NEM-FWW-0008"
 
 #: ufw's rules live in these nftables compat tables. A change here is expected
 #: and means the derived table needs regenerating.
@@ -384,6 +420,233 @@ def verify(reason: str) -> None:
             _auto_restore(reason, expected)
 
 
+# ── ADR 0026 step 4: tailnet plain-HTTP guard ────────────────────────────────
+
+#: Separate from `_last_alert_key`. The guard and the enforcement table are different
+#: conditions and must not mask each other: a persisting table tamper must not swallow a
+#: NEW guard failure, and vice versa.
+_last_guard_alert_key: tuple | None = None
+#: monotonic timestamps of successful repairs, for flap detection.
+_guard_repairs: list[float] = []
+
+
+def _guard_alert(code: str, severity: str, message: str, **context) -> None:
+    """Raise on every channel, with a body written for THIS failure, not the table's."""
+    log.error("[%s] guard: %s | %s", code, message,
+              " ".join("%s=%s" % kv for kv in sorted(context.items())))
+    _degraded(code, severity, message, context)
+    sev = "CRITICAL" if severity == "critical" else "HIGH"
+    lines = ["The tailnet plain-HTTP guard (ADR 0026 step 4) raised an alert.", "",
+             "  Detected:  %s (server local time)" % time.strftime("%Y-%m-%d %H:%M:%S"),
+             "  Code:      %s" % code,
+             "  Message:   %s" % message,
+             "  Guard:     drop inbound %s/%s arriving on %s"
+             % (GUARD_PORT, GUARD_PROTO, GUARD_IFACE)]
+    for k in sorted(context):
+        lines.append("  %-10s %s" % (k + ":", context[k]))
+    lines += ["",
+              "What this protects: the dashboard is reachable over the tailnet on :443",
+              "with TLS. This guard is what stops it also answering in the clear on :80.",
+              "",
+              "Inspect the live state:",
+              "  sudo iptables -t raw -S PREROUTING",
+              "  sudo ip6tables -t raw -S PREROUTING"]
+    _email_async("[Nemesis] %s: tailnet HTTP guard %s" % (sev, message), "\n".join(lines))
+
+
+def _guard_alert_once(key: tuple, code: str, severity: str, message: str, **context) -> None:
+    """Same transition-only discipline as _alert_once, on its own condition space."""
+    global _last_guard_alert_key
+    if key == _last_guard_alert_key:
+        log.info("fwwatch: guard [%s] condition persists — already alerted, not repeating", code)
+        return
+    _last_guard_alert_key = key
+    _guard_alert(code, severity, message, **context)
+
+
+def _guard_clear() -> None:
+    global _last_guard_alert_key
+    if _last_guard_alert_key is not None:
+        log.info("fwwatch: guard healthy again — alert state cleared")
+    _last_guard_alert_key = None
+
+
+def _guard_note_repair() -> int:
+    """Record a repair and return how many happened inside the flap window."""
+    now = time.monotonic()
+    _guard_repairs.append(now)
+    del _guard_repairs[:max(0, len(_guard_repairs) - 100)]
+    recent = [t for t in _guard_repairs if now - t <= GUARD_FLAP_WINDOW]
+    _guard_repairs[:] = recent
+    return len(recent)
+
+
+def _guard_dump(binary: str):
+    """(text, None) or (None, reason). A failed read is an EXPLICIT failure, never ''.
+
+    An empty string would parse as a ruleset with no rules and classify as NOT_DROP --
+    a read failure would then be indistinguishable from a defeated guard, and would
+    trigger a repair on the strength of having learned nothing.
+    """
+    try:
+        r = subprocess.run([binary, "-t", "raw", "-S", "PREROUTING"],
+                           capture_output=True, text=True, timeout=10)
+    except Exception as exc:                                       # noqa: BLE001
+        return None, "%s could not be run (%s)" % (binary, exc)
+    if r.returncode != 0:
+        return None, "%s exited %d: %s" % (binary, r.returncode, (r.stderr or "").strip()[:120])
+    return r.stdout, None
+
+
+def _guard_heal(family: str, reason: str) -> bool:
+    """Repair through the chokepoint, never with a direct iptables call.
+
+    This process HAS CAP_NET_ADMIN and could edit the table itself in one line. It does
+    not, deliberately: routing through nemesis_fwd is what puts the repair in the audit
+    trail as `fw-healer`, and what keeps every rule change in this product going through
+    the single reviewed path (ADR 0005). A repair nothing recorded is the same blind
+    spot this watcher was built to close, reintroduced by the watcher itself.
+
+    Repairs BOTH families in one call -- the helper op does v4 and v6 together -- so it
+    runs once per check even when both are defeated.
+
+    Goes through `firewall.py` rather than `fw_client` directly: firewall.py IS the
+    chokepoint ADR 0005 names, and fw_client is only its transport. Verified safe to
+    import from this process -- it pulls nothing DB-related, which matters here for the
+    reason `_audit_row` records at length: this runs as root with CAP_NET_ADMIN and no
+    CAP_DAC_OVERRIDE, so touching the database would create root-owned WAL siblings and
+    silently lock the dashboard out of its own writes.
+    """
+    try:
+        import firewall
+    except Exception as exc:                                       # noqa: BLE001
+        _guard_alert(ERR_GUARD_HEAL_FAILED, "critical",
+                     "cannot repair: the firewall chokepoint is unavailable",
+                     detail=str(exc)[:120], reason=reason, family=family)
+        return False
+    try:
+        res = firewall.reassert_port_on_interface(GUARD_IFACE, GUARD_PORT, GUARD_PROTO)
+    except Exception as exc:                                       # noqa: BLE001
+        _guard_alert(ERR_GUARD_HEAL_FAILED, "critical",
+                     "repair was REFUSED or failed -- the guard is still down",
+                     detail=str(exc)[:160], reason=reason, family=family)
+        return False
+    log.warning("fwwatch: guard repaired via nemesis-fwd (%s): %s", reason, res)
+    return True
+
+
+def verify_tailnet_guard(reason: str) -> None:
+    """Is plain HTTP over the tailnet actually refused -- and by OUR rule?
+
+    Deliberately NOT `iptables -C`. Presence is not reachability: the failure mode this
+    exists for is a rule that is still there and no longer reached, because something
+    was inserted above it. `raw_traversal` answers reachability by walking the chain.
+
+    BOTH conditions are required. `status == DROP` alone means the packet is blocked,
+    which a chain policy of DROP or somebody else's rule can also produce while OUR
+    guard is absent -- traffic blocked today by something that may be gone tomorrow.
+    `by_our_rule` is what makes the check about the guard rather than about the weather.
+
+    One shared definition of the discrete unit of work, called from startup, the event
+    path and the periodic tick -- same reasoning as `verify()` above.
+    """
+    if not GUARD_ENABLED:
+        return
+    try:
+        import raw_traversal
+    except Exception as exc:                                       # noqa: BLE001
+        _guard_alert_once(("noparser",), ERR_GUARD_UNDETERMINED, "error",
+                          "cannot check: the traversal parser is unavailable",
+                          detail=str(exc)[:120], reason=reason)
+        return
+
+    verdicts, needs_repair, undetermined = {}, [], []
+    for family, binary in (("v4", IPTABLES_BIN), ("v6", IP6TABLES_BIN)):
+        dump, err = _guard_dump(binary)
+        if dump is None:
+            undetermined.append((family, err))
+            continue
+        try:
+            res = raw_traversal.classify(
+                dump, raw_traversal.Packet(GUARD_IFACE, GUARD_PROTO, GUARD_PORT))
+        except raw_traversal.SelfTestFailed as exc:
+            # The instrument failed its own canaries. It must not vouch for anything,
+            # and a repair on the strength of a broken check is worse than no check.
+            _guard_alert_once(("selftest",), ERR_GUARD_UNDETERMINED, "critical",
+                              "the guard checker FAILED ITS OWN SELF-TEST and will not "
+                              "vouch for the ruleset", detail=str(exc)[:200], reason=reason)
+            return
+        verdicts[family] = res
+        if res.status == raw_traversal.UNDETERMINED:
+            undetermined.append((family, res.reason))
+        elif not (res.status == raw_traversal.DROP and res.by_our_rule):
+            needs_repair.append((family, res))
+
+    if undetermined:
+        # Not "probably fine". Something above our rule cannot be modelled, so whether
+        # the packet reaches the DROP is genuinely unknown -- report it and do NOT
+        # repair, because the repair target itself may not be what is wrong.
+        _guard_alert_once(("undetermined", tuple(f for f, _ in undetermined)),
+                          ERR_GUARD_UNDETERMINED, "error",
+                          "guard state could NOT be determined",
+                          families=",".join(f for f, _ in undetermined),
+                          detail="; ".join(d for _, d in undetermined)[:300],
+                          reason=reason)
+        return
+
+    if not needs_repair:
+        _guard_clear()
+        return
+
+    fams = tuple(f for f, _ in needs_repair)
+    first = needs_repair[0][1]
+    # The key carries the REASON, not just the verdict. Two different defeats -- our
+    # rule shadowed by an ACCEPT, versus our rule gone entirely -- are both
+    # (NOT_DROP, by_our_rule=False), so a key built from the verdict alone would let a
+    # second, different attack be swallowed as "already alerted". Same argument
+    # _alert_once makes by keying on the observed hash rather than on "tampered".
+    _guard_alert_once(("defeated", fams, first.status, first.by_our_rule,
+                       (first.reason or "")[:120]),
+                      ERR_GUARD_DEFEATED, "critical",
+                      "plain HTTP over the tailnet is NOT being refused",
+                      families=",".join(fams),
+                      verdict=first.status,
+                      by_our_rule=first.by_our_rule,
+                      why=first.reason,
+                      trace=" | ".join(first.trace[-3:]) or "(no rule matched)",
+                      reason=reason)
+
+    if not _guard_heal(",".join(fams), reason):
+        return
+
+    # Prove the repair rather than trusting the helper's return -- the same standard
+    # _auto_restore applies to the enforcement table.
+    still_bad = []
+    for family, binary in (("v4", IPTABLES_BIN), ("v6", IP6TABLES_BIN)):
+        dump, err = _guard_dump(binary)
+        if dump is None:
+            still_bad.append("%s: %s" % (family, err))
+            continue
+        res = raw_traversal.classify(
+            dump, raw_traversal.Packet(GUARD_IFACE, GUARD_PROTO, GUARD_PORT))
+        if not (res.status == raw_traversal.DROP and res.by_our_rule):
+            still_bad.append("%s: %s/%s" % (family, res.status, res.by_our_rule))
+    if still_bad:
+        _guard_alert(ERR_GUARD_HEAL_FAILED, "critical",
+                     "repair reported success but the guard is STILL not effective",
+                     detail="; ".join(still_bad)[:200], reason=reason)
+        return
+
+    n = _guard_note_repair()
+    log.warning("fwwatch: guard restored and verified (%s); repairs in the last %ds: %d",
+                reason, int(GUARD_FLAP_WINDOW), n)
+    if n >= GUARD_FLAP_THRESHOLD:
+        _guard_alert(ERR_GUARD_FLAPPING, "critical",
+                     "the guard keeps being knocked out and repaired",
+                     repairs=n, window_seconds=int(GUARD_FLAP_WINDOW), reason=reason)
+    _guard_clear()
+
+
 def classify(evt: dict) -> str | None:
     """'ours' | 'ufw' | None — which table did this event touch?"""
     for _op, obj in evt.items():
@@ -434,11 +697,17 @@ def main() -> int:
     os.makedirs(LKG_DIR, exist_ok=True)
     log.info("fwwatch: starting (autorestore=%s debounce=%ss reverify=%ss)",
              AUTORESTORE, DEBOUNCE_SECONDS, REVERIFY_SECONDS)
+    log.info("fwwatch: tailnet guard %s (%s/%s on %s)",
+             "ENABLED" if GUARD_ENABLED else "disabled — set NEMESIS_FW_GUARD=1 to arm",
+             GUARD_PORT, GUARD_PROTO, GUARD_IFACE)
 
     # Re-verify BEFORE subscribing. Without this, "stop the watcher, tamper,
     # start it" is a free bypass — the watcher cannot see what happened while it
     # was down, so it must compare state rather than trust the event stream.
     verify("startup")
+    # The reboot case lands here: raw rules do not survive a restart, so on a box where
+    # the guard is armed this is what puts it back before anything else runs.
+    verify_tailnet_guard("startup")
 
     q: "queue.Queue[str]" = queue.Queue(maxsize=10000)
     stop = threading.Event()
@@ -470,10 +739,20 @@ def main() -> int:
                 if pending_ours:
                     verify("netlink event")
                     pending_ours = False
+                # Runs after EITHER kind of debounced change. PIA rewriting the raw
+                # table arrives classified as "ufw" (UFW_TABLES covers ("ip","raw")),
+                # so keying this off pending_ours alone would miss the exact event the
+                # guard exists for. Cheap enough to run on both: two -S reads and a
+                # pure-python walk.
+                verify_tailnet_guard("netlink event")
                 last_action = now
 
             if (now - last_reverify) >= REVERIFY_SECONDS:
                 verify("periodic")      # backstop for dropped netlink events
+                # The backstop that matters most here: a rule can be preempted with no
+                # netlink event this watcher will recognise, and case 3 changes nothing
+                # about our own rule at all.
+                verify_tailnet_guard("periodic")
                 last_reverify = now
 
             if (now - last_beat) >= 60:
