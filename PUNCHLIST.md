@@ -3,6 +3,40 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [LOW] `WATCHDOG_TO` is prompted, stored, and documented but never read (found 2026-08-24, ADR 0028 verification)
+Installer prompts for `WATCHDOG_TO` (`install.sh:237`), writes it to `/etc/nemesis.env`
+(`:454`) and documents it as the alert recipient. `alert_manager/email_utils.py:send_email()`
+never reads it — `to` defaults to the sender, so real alerts are self-addressed. Only the
+config-wizard test email (`dashboard.py:12111`) honours the env var. **Candidate fix:**
+`send_email()` should default `to` from `WATCHDOG_TO` when unset, matching what the installer
+already promises. One variable — own commit.
+
+### [LOW] Stale "not built" claims for Falco/Sysmon in `malware_detection` (found 2026-08-24, ADR 0028 verification)
+`modules/malware_detection/module.py:7,20-21` still asserts behavioral monitoring is
+unbuilt and that "there are no references to Falco or Sysmon anywhere in this codebase."
+Both false — Layer B shipped and is wired end-to-end (`e81cb41`, `c091ed5`, `a2d1546`;
+`core_module/hw_monitor/hw_monitor.py:1987` calls `ingest_behavioral()`).
+`manifest.json`'s description makes the same stale claim. **Candidate fix:** update both
+docstring and manifest to reflect shipped state.
+
+### [LOW] `LAYERS` list omits `"behavioral"` despite live findings at that layer (found 2026-08-24, ADR 0028 verification)
+`modules/malware_detection/module.py:115` — `LAYERS = ["clamav","yara","heuristic","canary","ai_verdict"]`
+does not include `"behavioral"`, even though `behavioral_ingest.py` writes findings with
+exactly `layer='behavioral'`. The docstring at the time instructed adding it "in the same
+commit as a working collector" — that collector shipped and the list was not updated. Not
+merely stale docs; whatever reads `LAYERS` to enumerate coverage undercounts a real,
+active layer. **Candidate fix:** add `"behavioral"` to `LAYERS`, verify nothing downstream
+assumed the old five-element list.
+
+### [LOW — doc only] `v2-gap-scan-2026-08-23.md`'s Windows-behavioral-coverage claim is stale (found 2026-08-24, ADR 0028 verification)
+The private audit at `~/work/nemesis-internal/audits/v2-gap-scan-2026-08-23.md` claims
+`agent.py:622 _start_behavioral_monitor()` is hard Falco-only, leaving Windows uncovered.
+Contradicted by live `origin/main` (`agent.py:649` branches Windows → Sysmon; closed by
+`a2d1546`, 2026-08-23). This is the **second** stale entry found in that document (the
+first was Layer-C verdict UI, flagged 2026-08-23) — worth a full re-audit pass before
+anyone treats it as current, rather than patching entries one at a time as they're
+noticed.
+
 ### [DONE] Git-history disclosure decision — scoped rewrite executed 2026-07-26
 A git-history exposure question (from the disclosure-audit carve-outs) was evaluated,
 decided, rehearsed, and executed. **Full writeup, deliberately NOT in this repo:**
