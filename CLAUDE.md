@@ -299,6 +299,38 @@ number.
   re-staging only the intended path is the clean fix — confirmed safe in the same incident,
   verified first that the bad commit had not been pushed and that no one else had pushed or
   pulled in the interim.
+- **Shared working trees — `/opt/nemesis` AND `~/work/nemesis-internal` are SINGLE checkouts
+  shared by every window, not per-window clones.** The private repo is the higher-risk of the
+  two: it has two git-writers by design (Window 1 authors private-module code, Window 2 is
+  backup) plus Window 3's handoff files, so three windows commit from one index. Everything
+  above for shared-index staging applies here identically — stage by exact path, `git add
+  <paths> && git commit` as one atomic step, never leave a file staged across a turn boundary.
+  **A third, distinct failure mode on top of that: an unpushed-commit listing is not a list of
+  YOUR commits.** It means "not yet on the remote" — another window's commits can sit below
+  yours in the same history, and push-coordination's existing wording invites reading the list
+  as solely your own work. Confirmed live 2026-08-25: Window 1's `~/work/nemesis-internal`
+  commit `f4fa0ee`'s parent was `5788347`, a Window 3 email-security commit Window 1 had never
+  pulled. That day's push happened to publish only Window 1's own commit — but only because
+  Window 3 had already pushed minutes earlier, putting its commits below the remote tip rather
+  than above it. Had Window 3 committed without pushing, Window 1's "one unpushed commit"
+  listing would have been wrong, and confirming it would have published Window 3's unfinished
+  work while telling the operator it was Window 1's. Before asking the operator to confirm a
+  push in a shared tree:
+  - Run `git log --format='%h %an %s' <remote>/<branch>..HEAD` and read every entry.
+    **`%an` will NOT distinguish windows here** — every window commits under the same shared
+    git identity (`Nemesis981`, confirmed identical `user.name`/`user.email` in both repos).
+    Author name cannot answer "whose commit is this"; do not let a check that reads it stand
+    in for verification it structurally cannot provide — same failure shape as the standing
+    "verification code must prove its own premise" practice below, applied to this specific
+    field.
+  - The real check is recognition, not automation: cross-reference each SHA against the
+    commits you yourself created THIS session. Any commit in the range you did not personally
+    just create is NOT confirmed yours by default, however plausible its subject line reads —
+    name it explicitly in the confirmation request rather than silently including it.
+  - `git reflog show <remote>/<branch>` distinguishes "already on the remote, pushed by
+    someone else moments ago" from "about to be published by me" — a genuinely useful timing
+    signal, unaffected by the shared-identity problem above since it reads ref history rather
+    than authorship.
 - **Data Manager (ADR 0006) — loader-enforced, not convention.** All module DB access goes
   through `get_data_manager()` / `data_manager.connect(module)`. This is not a style
   preference: `modules_loader.py` statically refuses to load a module that imports raw
