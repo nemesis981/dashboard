@@ -198,6 +198,16 @@ def _unit_active_seconds(unit: str):
         return None
 
 
+def _system_uptime_seconds():
+    """Seconds since boot, or None if unreadable. None must NOT read as 'ages ago'."""
+    try:
+        with open("/proc/uptime") as f:
+            return float(f.read().split()[0])
+    except Exception:                                            # noqa: BLE001
+        logging.exception("could not read /proc/uptime")
+        return None
+
+
 def _fw_heartbeat_alert(subject: str, body: str) -> None:
     """HIGH, with a stable family key so a long outage is one digest line, not hundreds.
 
@@ -241,6 +251,20 @@ def check_fw_watch_heartbeat() -> None:
             logging.info("fw-watch heartbeat absent but the unit has only been active "
                          "%.0fs (grace %ds) — treating as startup, not a fault",
                          active_for, FW_HEARTBEAT_START_GRACE_SECONDS)
+            return
+        # BOOT ORDERING, also not a fault. Nothing orders this service relative to
+        # nemesis-fw-watch, so on a cold boot the watchdog can reach its first check
+        # BEFORE that unit has gone active — and then `active_for` is None, which the
+        # code below would report as "stopped, disabled or masked". Observed live
+        # 2026-08-25: watchdog active 10:21:59, fw-watch active 10:22:01. No alert fired
+        # that boot only because six service checks and the hw sweep run first and used
+        # up the two seconds. That is timing luck, and an INTERMITTENT false alert is
+        # worse than a reliable one — it is unreproducible when someone finally chases it.
+        boot_age = _system_uptime_seconds()
+        if boot_age is not None and boot_age < FW_HEARTBEAT_START_GRACE_SECONDS:
+            logging.info("fw-watch heartbeat absent %.0fs into boot (grace %ds) — "
+                         "treating as boot ordering, not a fault",
+                         boot_age, FW_HEARTBEAT_START_GRACE_SECONDS)
             return
         # Past the grace, or the unit is not active at all: a missing file now means
         # stopped/disabled/masked, or active-but-never-wrote, and both deserve the alert.

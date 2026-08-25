@@ -49,7 +49,8 @@ def check(label, cond, detail=""):
         print("  [FAIL] %s%s" % (label, ("  " + detail) if detail else ""))
 
 
-def run(installed=True, mtime_offset=None, exists=True, raise_exc=None, active_for=None):
+def run(installed=True, mtime_offset=None, exists=True, raise_exc=None, active_for=None,
+        uptime=10_000.0):
     """Drive the check with a controlled heartbeat file; return the alerts it sent."""
     _sent.clear()
     d = tempfile.mkdtemp(prefix="hb-")
@@ -62,6 +63,7 @@ def run(installed=True, mtime_offset=None, exists=True, raise_exc=None, active_f
     W.FW_WATCH_HEARTBEAT = path
     W._unit_installed = lambda unit: installed
     W._unit_active_seconds = lambda unit: active_for
+    W._system_uptime_seconds = lambda: uptime
     if raise_exc is not None:
         real_stat = os.stat
 
@@ -138,6 +140,17 @@ check("missing file + unit NOT active => alert (stopped/disabled/masked)",
 
 check("CONTROL: the grace does not suppress a STALE file (only a missing one)",
       len(run(mtime_offset=-(W.FW_HEARTBEAT_MAX_AGE_SECONDS + 120), active_for=5)) == 1)
+
+# Boot ordering: nothing sequences watchdog after fw-watch, so the first check can land
+# while fw-watch has not gone active yet (active_for=None). Observed live: 2s apart.
+alerts = run(exists=False, active_for=None, uptime=8)
+check("not-yet-active 8s into BOOT => no alert (boot ordering)", alerts == [], repr(alerts))
+alerts = run(exists=False, active_for=None, uptime=W.FW_HEARTBEAT_START_GRACE_SECONDS + 60)
+check("  ...but the same state long after boot DOES alert", len(alerts) == 1, repr(alerts))
+check("  ...so the boot grace cannot hide a unit that never started",
+      alerts and "NOT running" in alerts[0]["subject"])
+check("CONTROL: an unreadable uptime does not silently suppress the alert",
+      len(run(exists=False, active_for=None, uptime=None)) == 1)
 
 
 print("\n== UNREADABLE: a broken CHECK must not read as a healthy WATCHER ==")
