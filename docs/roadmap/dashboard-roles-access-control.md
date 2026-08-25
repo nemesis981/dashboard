@@ -1,7 +1,15 @@
 # Roadmap — Dashboard roles / access-control levels (learning-gated)
 
-**Status:** capture (foundational design item; **post-trip**, build NOT started). Design of record
-for the dashboard permission model. Start simple, room to grow — do NOT over-engineer upfront.
+**Status:** SHIPPED, 2026-08-22 (commits `c84dcce`→`a0d971c`). Three roles (admin/user/
+viewonly) enforced at a `before_request` gate across all 149 live endpoints (45 module-
+registered, gate not decorator). Independently re-verified 2026-08-23:
+`test_roles.py` re-run directly, `assert_registry_complete()` re-run outside the test
+harness, all 45 module endpoints manually sampled, `dashboard.py` source read to confirm
+the six known GET-that-act routes are genuinely bare GETs. Header found stale by the
+2026-08-24 morning roadmap audit (still said "capture... build NOT started" two days after
+shipping) — corrected here. Six GET-that-act routes needing POST conversion remain a
+separate, already-tracked hardening item (PUNCHLIST), not a gap in whether RBAC exists.
+Design of record for the dashboard permission model below remains accurate background.
 
 **Rule 8:** placeholders only — no real IPs/hosts/accounts/keys.
 
