@@ -263,11 +263,24 @@ ROUTE_MINIMUMS = {
     # ── GETs that EXECUTE. Not viewonly, despite being GETs. ─────────────────
     # Each is a route where the method says "read" and the behaviour says "run".
     # Classifying by method alone would hand every one of these to viewonly.
-    "api_diag_run_all":               (_U, _A),   # executes diagnostic checks
-    "api_diag_run":                   (_U, _A),   # executes one check
-    "analyze_alert":                  (_U, _A),   # spends money on an AI call
-    "test_enrichment":                (_U, _A),   # outbound enrichment lookup
-    "report_abuse":                   (_A, _A),   # GET that POSTs to AbuseIPDB
+    # ⚠ THESE FOUR BECAME POST-ONLY ON 2026-08-25 (the GET-that-acts CSRF fix), AND
+    # THAT SILENTLY CHANGED WHICH HALF OF THE PAIR APPLIES. Each was (_U, _A): user for
+    # the safe method, admin for the unsafe one. While they were GET-only, `_U` was the
+    # effective minimum and `_A` was an unreachable placeholder for a POST that did not
+    # exist. Converting the method promoted them to admin-only and locked every plain
+    # user out of running a diagnostic -- caught by test_roles' "user CAN run
+    # diagnostics" control, which is exactly what that control is for.
+    #
+    # Set to (_U, _U) to PRESERVE the access these routes have always granted. The CSRF
+    # fix is about the method, not about who may call them; changing both at once would
+    # have been two variables in one pass, and the access change would have shipped as
+    # an invisible side effect of a security fix.
+    "api_diag_run_all":               (_U, _U),   # executes diagnostic checks (POST-only)
+    "api_diag_run":                   (_U, _U),   # executes one check (POST-only)
+    "analyze_alert":                  (_U, _U),   # spends money on an AI call (POST-only)
+    "test_enrichment":                (_U, _U),   # outbound enrichment lookup (POST-only)
+    # These two were admin on BOTH halves already, so the conversion changed nothing.
+    "report_abuse":                   (_A, _A),   # POSTs a permanent report to AbuseIPDB
     "api_filesystem_browse":          (_A, _A),   # reads the appliance filesystem
 
     # ── Admin: settings and configuration ────────────────────────────────────
@@ -892,18 +905,20 @@ _CASES = [
     _H.bad("an unrecognised method is treated as UNSAFE",
            lambda: (not may(ROLE_VIEWONLY, "dashboard", "FROB")) or None),
 
-    # The GETs that execute must not be readable by viewonly.
-    _H.bad("viewonly cannot run diagnostics (a GET that executes)",
-           lambda: (not may(ROLE_VIEWONLY, "api_diag_run_all", "GET")) or None),
-    _H.bad("viewonly cannot trigger an AI analysis (a GET that spends)",
-           lambda: (not may(ROLE_VIEWONLY, "analyze_alert", "GET")) or None),
-    _H.bad("viewonly cannot file an abuse report (a GET that POSTs outward)",
-           lambda: (not may(ROLE_VIEWONLY, "report_abuse", "GET")) or None),
+    # These execute/spend/report outward. POST-only since 2026-08-25 -- asserted on
+    # POST because that is now the only method they accept; asserting on GET would
+    # consult the safe half of the pair and no longer describe a reachable request.
+    _H.bad("viewonly cannot run diagnostics (executes)",
+           lambda: (not may(ROLE_VIEWONLY, "api_diag_run_all", "POST")) or None),
+    _H.bad("viewonly cannot trigger an AI analysis (spends)",
+           lambda: (not may(ROLE_VIEWONLY, "analyze_alert", "POST")) or None),
+    _H.bad("viewonly cannot file an abuse report (reports outward)",
+           lambda: (not may(ROLE_VIEWONLY, "report_abuse", "POST")) or None),
     _H.bad("...and neither can a plain user file one",
-           lambda: (not may(ROLE_USER, "report_abuse", "GET")) or None),
+           lambda: (not may(ROLE_USER, "report_abuse", "POST")) or None),
     _H.bad("CONTROL: a user CAN run diagnostics (so the denials above are "
            "discrimination, not blanket refusal)",
-           lambda: may(ROLE_USER, "api_diag_run_all", "GET") or None),
+           lambda: may(ROLE_USER, "api_diag_run_all", "POST") or None),
 
     # Active tooling is admin-only.
     _H.bad("user cannot ping (active, reaches another machine)",

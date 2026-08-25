@@ -294,6 +294,23 @@ if _live_ok:
         fn = getattr(c, method.lower())
         return fn(path, **kw).status_code
 
+    print("\n-- the six formerly-GET action routes REFUSE GET (2026-08-25 CSRF fix) --")
+    # Each of these performed a write, a spend or an outbound call while answering GET,
+    # so `<img src=...>` on any page the operator visited was enough to trigger it under
+    # default SameSite=Lax cookies. 405 (not 403) is the proof the method itself is gone:
+    # a 403 would mean the route still ACCEPTS GET and merely refused this role.
+    for _p in ("/api/report/1", "/api/analyze/1", "/api/diagnostics/run/dns",
+               "/api/diagnostics/run-all", "/api/test-enrichment/192.0.2.5",
+               "/api/filesystem/browse"):
+        check("GET %s is 405 Method Not Allowed" % _p,
+              status(A, "GET", _p) == 405, str(status(A, "GET", _p)))
+    # ...and POST without a JSON content-type is refused 415, which is the half that
+    # stops a cross-origin HTML form (a form cannot set application/json).
+    for _p in ("/api/report/1", "/api/analyze/1", "/api/diagnostics/run-all",
+               "/api/filesystem/browse"):
+        check("POST %s without JSON content-type is 415" % _p,
+              status(A, "POST", _p, data="x") == 415, str(status(A, "POST", _p, data="x")))
+
     print("\n-- viewonly is READ-ONLY, enforced server-side --")
     check("viewonly CAN read the dashboard", status(V, "GET", "/") == 200)
     check("viewonly CAN read stats", status(V, "GET", "/api/stats") == 200)
@@ -304,7 +321,7 @@ if _live_ok:
     check("viewonly is DENIED module disable (403)",
           status(V, "POST", "/api/modules/lookup/disable") == 403)
     check("viewonly is DENIED running diagnostics (403)",
-          status(V, "GET", "/api/diagnostics/run-all") == 403)
+          status(V, "POST", "/api/diagnostics/run-all", json={}) == 403)
     check("viewonly is DENIED the lookup tool (403)",
           status(V, "POST", "/api/lookup/domain", json={"target": "example.com"}) == 403)
     check("viewonly is DENIED ping (403)",
@@ -312,12 +329,12 @@ if _live_ok:
     check("viewonly is DENIED user management (403)",
           status(V, "GET", "/api/users") == 403)
     check("viewonly is DENIED the abuse report GET (403)",
-          status(V, "GET", "/api/report/1?ip=192.0.2.5") == 403)
+          status(V, "POST", "/api/report/1", json={"ip": "192.0.2.5"}) == 403)
 
     print("\n-- user: day-to-day yes, admin no --")
     check("user CAN read the dashboard", status(U, "GET", "/") == 200)
     check("user CAN run diagnostics (not 403)",
-          status(U, "GET", "/api/diagnostics/run-all") != 403)
+          status(U, "POST", "/api/diagnostics/run-all", json={}) != 403)
     check("user CAN use the lookup tool (not 403)",
           status(U, "POST", "/api/lookup/domain",
                  json={"target": "example.com"}) != 403)
@@ -332,7 +349,7 @@ if _live_ok:
     check("user is DENIED lifting a quarantine (403)",
           status(U, "POST", "/api/quarantine/1/lift") == 403)
     check("user is DENIED the abuse report GET (403)",
-          status(U, "GET", "/api/report/1?ip=192.0.2.5") == 403)
+          status(U, "POST", "/api/report/1", json={"ip": "192.0.2.5"}) == 403)
 
     print("\n-- admin: the CONTROL. If these 403 too, nothing above is meaningful --")
     check("admin CAN read the dashboard", status(A, "GET", "/") == 200)
@@ -345,7 +362,7 @@ if _live_ok:
     check("admin is NOT denied module disable",
           status(A, "POST", "/api/modules/lookup/disable") != 403)
     check("admin is NOT denied diagnostics",
-          status(A, "GET", "/api/diagnostics/run-all") != 403)
+          status(A, "POST", "/api/diagnostics/run-all", json={}) != 403)
 
     print("\n-- self-service works at EVERY role --")
     for role in (A, U, V):
@@ -568,12 +585,12 @@ MUTATIONS = [
     ("SECURITY: module disable drops to user (coverage becomes disableable)",
      '    "api_module_disable":             (_A, _A),',
      '    "api_module_disable":             (_U, _U),'),
-    ("the abuse-report GET becomes viewonly-readable",
-     '    "report_abuse":                   (_A, _A),   # GET that POSTs to AbuseIPDB',
-     '    "report_abuse":                   (_V, _A),'),
-    ("diagnostics execution becomes viewonly-readable",
-     '    "api_diag_run_all":               (_U, _A),   # executes diagnostic checks',
-     '    "api_diag_run_all":               (_V, _A),'),
+    ("the abuse-report route becomes viewonly-reachable",
+     '    "report_abuse":                   (_A, _A),   # POSTs a permanent report to AbuseIPDB',
+     '    "report_abuse":                   (_V, _V),'),
+    ("diagnostics execution becomes viewonly-reachable",
+     '    "api_diag_run_all":               (_U, _U),   # executes diagnostic checks (POST-only)',
+     '    "api_diag_run_all":               (_V, _V),'),
     ("self-service is gated by role (viewonly locked out of its own password)",
      'SELF_SERVICE = frozenset({\n    "change_password",',
      'SELF_SERVICE = frozenset({\n    "_change_password_disabled",'),

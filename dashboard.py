@@ -7052,10 +7052,20 @@ make another. All three describe the same conclusion; only the reader changes.
 }"""
 
 
-@app.route("/api/analyze/<rule_id>")
+@app.route("/api/analyze/<rule_id>", methods=["POST"])
 def analyze_alert(rule_id):
+    """POST + JSON content-type only -- this route SPENDS MONEY on an AI call.
+
+    Was a GET until 2026-08-25. A cross-site `<img>` could trigger a paid model call
+    per page load under default SameSite=Lax cookies; nothing about the request looked
+    unusual server-side, and the only symptom would have been the bill. Same two-layer
+    reasoning as api_ram_recovery_clean (form cannot set a JSON content-type; a fetch
+    that does is stopped by CORS preflight).
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     try:
-        raw_alert = request.args.get("raw", "")
+        raw_alert = str((request.get_json(force=True, silent=True) or {}).get("raw") or "")
         parsed = parse_alert(raw_alert) if raw_alert else None
         src_ip = parsed["src_ip"] if parsed else ""
         enrichment = None
@@ -7934,19 +7944,37 @@ def api_ai_chat_ask():
         return jsonify({"ok": False, "code": "server_error", "reason": str(e)}), 500
 
 
-@app.route("/api/report/<rule_id>")
+@app.route("/api/report/<rule_id>", methods=["POST"])
 def report_abuse(rule_id):
+    """File an AbuseIPDB report. POST + JSON content-type only.
+
+    WAS A GET UNTIL 2026-08-25, AND THAT WAS THE SHARPEST CSRF HOLE IN THE APP.
+    `<img src="/api/report/1?ip=1.2.3.4">` on any page the operator visited was enough
+    to file a permanent third-party report in their name, under default SameSite=Lax
+    cookies -- no interaction, no visible effect, and the report is not retractable.
+    The 2026-08-22 RBAC pass mitigated it to admin-only; it did not remove the shape.
+
+    Same two-layer reasoning as api_ram_recovery_clean: POST alone is insufficient
+    because a cross-origin form can POST, but a form cannot set a JSON content-type and
+    a cross-origin fetch that does is stopped by CORS preflight. With SameSite=Lax that
+    is two independent reasons a forged request fails.
+
+    Parameters moved from the query string into the JSON body. Leaving them in the
+    query string would have worked, but it keeps the GET-shaped call site alive and
+    invites the next person to "just make it a GET again" for convenience.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     try:
-        ip = request.args.get("ip", "").strip()
+        body = request.get_json(force=True, silent=True) or {}
+        ip = str(body.get("ip") or "").strip()
         if not ip:
             return jsonify({"error": "IP required"}), 400
         if not ABUSEIPDB_KEY:
             return jsonify({"error": "ABUSEIPDB_KEY not configured"}), 500
-        categories = request.args.get("categories", "14,15")
-        comment = request.args.get(
-            "comment",
-            f"Reported from Nemesis Firewall - Suricata rule {rule_id}"
-        )
+        categories = str(body.get("categories") or "14,15")
+        comment = str(body.get("comment")
+                      or f"Reported from Nemesis Firewall - Suricata rule {rule_id}")
         resp = requests.post(
             "https://api.abuseipdb.com/api/v2/report",
             data={"ip": ip, "categories": categories, "comment": comment},
@@ -7970,8 +7998,17 @@ def report_abuse(rule_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/test-enrichment/<ip>")
+@app.route("/api/test-enrichment/<ip>", methods=["POST"])
 def test_enrichment(ip):
+    """POST + JSON content-type only -- this makes an outbound third-party lookup.
+
+    Was a GET until 2026-08-25. No in-app caller exists (verified across templates,
+    JS and Python), so the conversion breaks nothing; it is closed because an
+    unauthenticated-looking GET that reaches out on demand is a request-forgery
+    primitive whether or not this product currently calls it.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     try:
         return jsonify(enrich_ip(ip))
     except Exception as e:
@@ -10284,7 +10321,7 @@ def settings_page():
             var browser = document.getElementById(browserId);
             if (!browser) return;
             browser.innerHTML = '<div style="color:#aaa;font-size:0.82em;padding:4px">Loading&hellip;</div>';
-            fetch('/api/filesystem/browse?path=' + encodeURIComponent(path))
+            fetch('/api/filesystem/browse', {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: JSON.stringify({{path: path}})}})
                 .then(function(r) {{ return r.json(); }})
                 .then(function(d) {{
                     var h = '<div class="fs-browser-path">&#x1F4C1; ' + d.path + '</div>';
@@ -10667,14 +10704,25 @@ def settings_page():
 </html>"""
 
 
-@app.route("/api/diagnostics/run/<check_id>")
+@app.route("/api/diagnostics/run/<check_id>", methods=["POST"])
 def api_diag_run(check_id):
+    """POST + JSON content-type only -- executing a diagnostic check is an action.
+
+    Was a GET until 2026-08-25. Checks shell out and probe the network, so a
+    cross-site trigger was a free remote "run this on the appliance" primitive.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     result = _diag.run_check(check_id)
     return jsonify(result)
 
 
-@app.route("/api/diagnostics/run-all")
+@app.route("/api/diagnostics/run-all", methods=["POST"])
 def api_diag_run_all():
+    """POST + JSON content-type only. Same reasoning as api_diag_run, amplified:
+    this one executes EVERY check in a single request."""
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
     results = [_diag.run_check(m.META["id"]) for m in _diag.CHECKS]
     return jsonify(results)
 
@@ -10997,7 +11045,7 @@ def diagnostics_page():
         out.classList.add('visible');
         pre.textContent = 'Running check…';
         sum.textContent = '';
-        fetch('/api/diagnostics/run/' + id, {{cache: 'no-store'}})
+        fetch('/api/diagnostics/run/' + id, {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: '{{}}', cache: 'no-store'}})
             .then(function(r) {{ return r.json(); }})
             .then(function(d) {{
                 _results[id] = d;
@@ -11042,7 +11090,7 @@ def diagnostics_page():
                 badge.textContent = '⌛ Running';
                 out.classList.add('visible');
                 pre.textContent = 'Running…';
-                fetch('/api/diagnostics/run/' + cid, {{cache: 'no-store'}})
+                fetch('/api/diagnostics/run/' + cid, {{method: 'POST', headers: {{'Content-Type': 'application/json'}}, body: '{{}}', cache: 'no-store'}})
                     .then(function(r) {{ return r.json(); }})
                     .then(function(d) {{
                         _results[cid] = d;
@@ -12065,9 +12113,21 @@ def _default_backup_dir():
     return os.environ.get("NEMESIS_BACKUP_DIR", "/var/lib/nemesis/backups")
 
 
-@app.route("/api/filesystem/browse")
+@app.route("/api/filesystem/browse", methods=["POST"])
 def api_filesystem_browse():
-    path_raw = request.args.get("path", "").strip()
+    """POST + JSON content-type only.
+
+    ⚠ HONEST NOTE ON WHY THIS ONE IS DIFFERENT. The other five converted with it are
+    genuine CSRF exposures: each performs a write, a spend, or an outbound call that a
+    forged request completes. This one only READS, and the same-origin policy already
+    stops an attacker reading the response -- so calling it a CSRF hole would overstate
+    it. It is converted for consistency of shape (an endpoint that walks the appliance
+    filesystem should not look like a cacheable document fetch) and so the whole class
+    is closed at once rather than leaving one member behind to be re-litigated.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
+    path_raw = str((request.get_json(force=True, silent=True) or {}).get("path") or "").strip()
     allowed_roots = _browse_roots()
     fallback = allowed_roots[0]
 
@@ -14321,7 +14381,7 @@ def _alert_modal_js() -> str:
             if (window.nemChatAttach) {
                 nemChatAttach(document.getElementById("_alertChatHost"), "alert", ruleId);
             }
-            fetch("/api/analyze/" + ruleId + "?raw=" + encodeURIComponent(rawAlert))
+            fetch("/api/analyze/" + ruleId, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({raw: rawAlert})})
                 .then(r => r.json())
                 .then(data => {
                     currentSrcIp = data.src_ip || "";
@@ -14490,7 +14550,7 @@ def _alert_modal_js() -> str:
         function reportAbuse() {
             if (!currentSrcIp) { alert("No source IP to report"); return; }
             if (!confirm("Report " + currentSrcIp + " to AbuseIPDB?")) return;
-            fetch("/api/report/" + currentRuleId + "?ip=" + encodeURIComponent(currentSrcIp))
+            fetch("/api/report/" + currentRuleId, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ip: currentSrcIp})})
                 .then(r => r.json())
                 .then(d => {
                     if (d.success) {
