@@ -1,6 +1,14 @@
 # Track C — connection-metadata tier: build plan
 
-- **Status:** **Approved to build** (operator decisions 2026-07-30). No code written yet.
+- **Status:** **IN PROGRESS** — Requirement 0 and steps 2, 4 and 5 have shipped; the
+  header said "No code written yet" until 2026-08-25, which was false for roughly three
+  weeks. Landed so far: the collection consent gate (`ccf02aa`), the connection-event
+  schema (`e14e5a4`), schema v2 with server-side ingest and resolved-name provenance
+  (`180514a`), ETW classification corrected against measured provider behaviour
+  (`9a94244`), the destination seen-set (`4a82785`), the consent module and its
+  `/api/consent/<device_id>` routes (`8a671f2`, `080c90a`), and five-valued coverage
+  state (`6f93588`). The 10-file schema-v2 tranche previously recorded as "held
+  uncommitted" is committed. Remaining scope is unchanged; only the status was wrong.
 - **Size:** 6–9 sessions
 - **Scope:** metadata tier only. The first-N-bytes tier and any inline action are separate,
   later work.
