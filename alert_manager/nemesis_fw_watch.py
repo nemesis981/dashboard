@@ -53,7 +53,22 @@ TABLE_NAME = "nemesis_enforce"
 LKG_DIR = os.environ.get("NEMESIS_FW_LKG_DIR", "/var/lib/nemesis/fw-lkg")
 EXPECTED_HASH = os.path.join(LKG_DIR, "expected.sha256")
 EXPECTED_META = os.path.join(LKG_DIR, "expected.meta")
-HEARTBEAT = os.path.join(LKG_DIR, "watch.heartbeat")
+#: MOVED OUT OF LKG_DIR, 2026-08-25, because the layer it exists for did not work.
+#: `/var/lib/nemesis/fw-lkg` is root:root 0700 (measured, not assumed), so the watchdog
+#: -- which runs as nemesis-watchdog -- could not stat a heartbeat written there. The
+#: unit file has claimed since 2026-08-01 that "the existing watchdog service alerts if
+#: it goes stale"; nothing read this file, and nothing COULD have.
+#:
+#: /run is the right home for it on the merits, not merely a permissions workaround:
+#: a heartbeat is ephemeral runtime state, and /run is tmpfs cleared at boot, so a
+#: timestamp written before a reboot cannot be mistaken afterwards for a live one. The
+#: directory comes from the unit's own RuntimeDirectory=, so it is not shared with any
+#: other service's lifecycle -- and systemd removes it when this service STOPS, which
+#: turns "stopped and told not to restart" into a MISSING file rather than a slowly
+#: ageing one. That is the clearest possible signal for the exact case this layer is
+#: meant to catch.
+HEARTBEAT = os.environ.get("NEMESIS_FW_HEARTBEAT",
+                           "/run/nemesis-fw-watch/heartbeat")
 DEGRADED_LOG = os.environ.get("NEMESIS_DEGRADED_LOG", "/var/lib/nemesis/degraded.jsonl")
 RENDER = "/opt/nemesis/scripts/nemesis-fw-render"
 
@@ -693,6 +708,17 @@ def reader(q: "queue.Queue[str]", stop: threading.Event) -> None:
             time.sleep(2)
 
 
+def _write_heartbeat() -> None:
+    """Stamp the liveness file. Shared by startup and the periodic tick so the two
+    cannot drift -- same reasoning as verify() having exactly one definition."""
+    try:
+        os.makedirs(os.path.dirname(HEARTBEAT), exist_ok=True)
+        with open(HEARTBEAT, "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+    except Exception:
+        log.exception("fwwatch: heartbeat write failed")
+
+
 def main() -> int:
     os.makedirs(LKG_DIR, exist_ok=True)
     log.info("fwwatch: starting (autorestore=%s debounce=%ss reverify=%ss)",
@@ -700,6 +726,16 @@ def main() -> int:
     log.info("fwwatch: tailnet guard %s (%s/%s on %s)",
              "ENABLED" if GUARD_ENABLED else "disabled — set NEMESIS_FW_GUARD=1 to arm",
              GUARD_PORT, GUARD_PROTO, GUARD_IFACE)
+
+    # Write the heartbeat IMMEDIATELY, before anything slow. Until 2026-08-25 the first
+    # write happened only when the loop reached its 60s interval, so for the first minute
+    # after every boot the file did not exist while the service was perfectly healthy --
+    # and the watchdog's consumer, which reads a missing file as "stopped, disabled or
+    # masked", raised a false alert on EVERY reboot. Measured live: watchdog started
+    # 10:17:15, alerted 10:17:22, fw-watch was running the whole time. A monitor that
+    # cries wolf once per boot is worse than no monitor, because it trains the operator
+    # to ignore the one alert that matters.
+    _write_heartbeat()
 
     # Re-verify BEFORE subscribing. Without this, "stop the watcher, tamper,
     # start it" is a free bypass — the watcher cannot see what happened while it
@@ -756,11 +792,7 @@ def main() -> int:
                 last_reverify = now
 
             if (now - last_beat) >= 60:
-                try:
-                    with open(HEARTBEAT, "w") as f:
-                        f.write(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
-                except Exception:
-                    log.exception("fwwatch: heartbeat write failed")
+                _write_heartbeat()
                 last_beat = now
     except KeyboardInterrupt:
         pass

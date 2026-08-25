@@ -30,10 +30,17 @@ EnvironmentFile=-/etc/nemesis.env
 #                      on startup, so anything done while it was down is caught.
 #   StartLimit*        repeated crash-looping trips a visible failed state
 #                      instead of hiding in a restart loop.
-#   heartbeat file     the watcher touches watch.heartbeat every 60s; the
-#                      existing watchdog service alerts if it goes stale. This
-#                      is the layer that catches "stopped AND told not to
-#                      restart", which the first two miss entirely.
+#   heartbeat file     the watcher touches /run/nemesis-fw-watch/heartbeat every
+#                      60s and the watchdog service alerts if it goes stale or
+#                      vanishes. This is the layer that catches "stopped AND told
+#                      not to restart", which the first two miss entirely.
+#                      ⚠ THIS CLAIM WAS FALSE FROM 2026-08-01 TO 2026-08-25. The
+#                      heartbeat was written into /var/lib/nemesis/fw-lkg, which is
+#                      root:root 0700, and the watchdog runs as nemesis-watchdog --
+#                      so nothing read it, and nothing could have. The file moved to
+#                      RuntimeDirectory below and watchdog.py gained the consumer.
+#                      A comment describing a layer that does not exist is worse
+#                      than no layer: it stops anyone looking for the gap.
 Restart=always
 RestartSec=5
 
@@ -54,6 +61,14 @@ AmbientCapabilities=CAP_NET_ADMIN
 # fw-lkg. Caught on the VM 2026-08-01: the watcher crashed on startup with
 # EACCES. The supplementary group is the narrow fix; restoring CAP_DAC_OVERRIDE
 # would hand back the ability to bypass every file permission on the system.
+
+# The heartbeat lives here, not in /var/lib/nemesis/fw-lkg (root:root 0700, which the
+# watchdog cannot read). 0755 so the unprivileged watchdog can stat it; systemd removes
+# the whole directory when this service stops, which is exactly the signal the watchdog
+# needs for "stopped and not coming back".
+RuntimeDirectory=nemesis-fw-watch
+RuntimeDirectoryMode=0755
+
 SupplementaryGroups=nemesis-db
 NoNewPrivileges=yes
 ProtectSystem=strict

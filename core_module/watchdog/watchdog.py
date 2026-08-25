@@ -21,6 +21,28 @@ SERVICES = [
 ]
 
 CHECK_INTERVAL_SECONDS = 120
+
+#: ── nemesis-fw-watch liveness (ADR 0019's third anti-disable layer) ──────────
+#:
+#: THIS LAYER WAS CLAIMED BUT NEVER BUILT. nemesis-fw-watch.service has asserted since
+#: 2026-08-01 that "the watcher touches watch.heartbeat every 60s; the existing watchdog
+#: service alerts if it goes stale". No such consumer existed -- the heartbeat had
+#: exactly one reference in the whole repo, the writer's own constant -- and it could not
+#: have worked if written, because the file lived in /var/lib/nemesis/fw-lkg (root:root
+#: 0700) and this process runs as nemesis-watchdog. Found 2026-08-25 while building
+#: ADR 0026 step 4, which hangs tailnet exposure off the same watcher.
+#:
+#: WHY THE OTHER TWO LAYERS DO NOT COVER THIS. `Restart=always` returns a KILLED watcher;
+#: `StartLimitBurst` catches one that CRASH-LOOPS. Neither sees `systemctl stop` followed
+#: by `systemctl disable` (or `mask`) -- systemd is then behaving exactly as instructed,
+#: reports no failure, and enforcement is simply unwatched. Only something OUTSIDE that
+#: unit can notice, which is what this is.
+FW_WATCH_UNIT = "nemesis-fw-watch.service"
+FW_WATCH_HEARTBEAT = os.environ.get("NEMESIS_FW_HEARTBEAT",
+                                    "/run/nemesis-fw-watch/heartbeat")
+#: The writer's interval is 60s. 300 leaves room for a restart, a slow tick and the
+#: throttle seam without crying wolf, while still catching a genuine stop within minutes.
+FW_HEARTBEAT_MAX_AGE_SECONDS = int(os.environ.get("NEMESIS_FW_HEARTBEAT_MAX_AGE", "300"))
 #: Throttle handle, set in main() once watchdog registers throttle-aware.
 #: None until then / if registration fails -> plain sleep.
 _throttle = None
@@ -121,6 +143,155 @@ def send_email_alert(service: str) -> None:
         logging.info("Sent alert for %s (%s)", service, result["delivery"])
     else:
         logging.error("Failed to send alert for %s: %s", service, result["error"])
+
+
+def _unit_installed(unit: str) -> bool:
+    """Is this unit present on the box at all?
+
+    Not "is it running" -- that is the condition being tested for. A box without the
+    enforcement watcher installed is a normal deployment, not a fault, and must not
+    alert forever; a box WITH it installed and not beating is exactly the fault.
+    """
+    try:
+        r = subprocess.run(["systemctl", "list-unit-files", unit, "--no-legend"],
+                           capture_output=True, text=True, timeout=15)
+    except Exception:                                            # noqa: BLE001
+        logging.exception("could not determine whether %s is installed", unit)
+        return False
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
+#: Grace after the unit goes active before a MISSING heartbeat counts as a fault. The
+#: writer now stamps the file within a second of starting, so this only has to cover that
+#: instant plus a slow boot -- not the old 60s write interval. Kept as a belt-and-braces
+#: second layer: relying on the writer alone would put the whole defence in one place.
+FW_HEARTBEAT_START_GRACE_SECONDS = int(
+    os.environ.get("NEMESIS_FW_HEARTBEAT_START_GRACE", "45"))
+
+
+def _unit_active_seconds(unit: str):
+    """Seconds since `unit` became active, or None if it is not active / unknown.
+
+    Uses the MONOTONIC timestamp deliberately. `ActiveEnterTimestamp` is rendered in the
+    local timezone and locale, so parsing it is a portability bug waiting for a machine
+    with different settings -- and it would fail in the direction of "cannot tell",
+    which this function's caller would then have to treat as a fault.
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", "-p", "ActiveState",
+             "-p", "ActiveEnterTimestampMonotonic", unit],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0:
+            return None
+        props = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+        if props.get("ActiveState") != "active":
+            return None
+        entered_us = int(props.get("ActiveEnterTimestampMonotonic", "0"))
+        if entered_us <= 0:
+            return None
+        with open("/proc/uptime") as f:
+            now_us = float(f.read().split()[0]) * 1_000_000
+        return max(0.0, (now_us - entered_us) / 1_000_000)
+    except Exception:                                            # noqa: BLE001
+        logging.exception("could not read %s activation time", unit)
+        return None
+
+
+def _fw_heartbeat_alert(subject: str, body: str) -> None:
+    """HIGH, with a stable family key so a long outage is one digest line, not hundreds.
+
+    Not CRITICAL: enforcement being unwatched is serious, but the rules themselves are
+    still in force -- this is the loss of the thing that would NOTICE them changing,
+    which is a different and slightly less immediate emergency than the rules being gone.
+    """
+    result = notify.notify("HIGH", subject, body,
+                           family_key="fw-watch-heartbeat",
+                           actor="system:watchdog")
+    if result["ok"]:
+        logging.info("Sent fw-watch heartbeat alert (%s)", result["delivery"])
+    else:
+        logging.error("Failed to send fw-watch heartbeat alert: %s", result["error"])
+
+
+def check_fw_watch_heartbeat() -> None:
+    """Alert if the enforcement watcher has stopped writing its heartbeat.
+
+    Every way of not knowing is reported as its own condition rather than folded into
+    "stale". A file this process cannot READ is a deployment fault; a file that is
+    MISSING while the unit is installed means the watcher is not running at all (systemd
+    removes its RuntimeDirectory on stop); a timestamp in the FUTURE is a clock problem,
+    not freshness. Collapsing any of those into "fresh" would mean this check reports
+    healthy in exactly the situations it exists to catch.
+    """
+    if not _unit_installed(FW_WATCH_UNIT):
+        return
+
+    host = os.uname().nodename
+    try:
+        age = time.time() - os.stat(FW_WATCH_HEARTBEAT).st_mtime
+    except FileNotFoundError:
+        # STARTUP RACE, NOT A FAULT -- but only for a moment. systemd creates the
+        # RuntimeDirectory the instant the unit starts, while the file inside it is
+        # written by the process itself. A check landing in that gap sees a missing file
+        # and would report a healthy, just-started watcher as stopped. Measured live
+        # 2026-08-25: a false alert on every reboot.
+        active_for = _unit_active_seconds(FW_WATCH_UNIT)
+        if active_for is not None and active_for < FW_HEARTBEAT_START_GRACE_SECONDS:
+            logging.info("fw-watch heartbeat absent but the unit has only been active "
+                         "%.0fs (grace %ds) — treating as startup, not a fault",
+                         active_for, FW_HEARTBEAT_START_GRACE_SECONDS)
+            return
+        # Past the grace, or the unit is not active at all: a missing file now means
+        # stopped/disabled/masked, or active-but-never-wrote, and both deserve the alert.
+        _fw_heartbeat_alert(
+            "[Watchdog] Firewall enforcement watcher is NOT running",
+            "%s is installed on %s but its heartbeat file does not exist:\n"
+            "  %s\n\n"
+            "systemd removes that directory when the service stops, so a missing file "
+            "means the watcher is stopped, disabled or masked -- not merely slow.\n\n"
+            "While it is down, out-of-band changes to the enforcement table (ADR 0019) "
+            "and to the tailnet plain-HTTP guard (ADR 0026 step 4) are unmonitored.\n\n"
+            "  systemctl status %s\n  systemctl start %s"
+            % (FW_WATCH_UNIT, host, FW_WATCH_HEARTBEAT, FW_WATCH_UNIT, FW_WATCH_UNIT))
+        return
+    except PermissionError as exc:
+        # A deployment fault in the CHECK, not in the watcher -- and it must never read
+        # as either healthy or stale. This is the exact failure that made the original
+        # heartbeat layer inert for three weeks.
+        _fw_heartbeat_alert(
+            "[Watchdog] Cannot read the firewall watcher heartbeat",
+            "The watchdog could not stat %s on %s:\n  %s\n\n"
+            "This is a PERMISSIONS problem with the check itself, not evidence about "
+            "whether the watcher is running -- so the watcher's liveness is currently "
+            "unknown rather than confirmed either way."
+            % (FW_WATCH_HEARTBEAT, host, exc))
+        return
+    except Exception as exc:                                     # noqa: BLE001
+        logging.exception("fw-watch heartbeat check failed unexpectedly: %s", exc)
+        return
+
+    if age < -FW_HEARTBEAT_MAX_AGE_SECONDS:
+        _fw_heartbeat_alert(
+            "[Watchdog] Firewall watcher heartbeat is in the FUTURE",
+            "%s on %s has an mtime %d seconds in the future.\n\n"
+            "A future timestamp always looks fresh, so this check cannot vouch for the "
+            "watcher until the clock is explained." % (FW_WATCH_HEARTBEAT, host, -age))
+        return
+
+    if age > FW_HEARTBEAT_MAX_AGE_SECONDS:
+        _fw_heartbeat_alert(
+            "[Watchdog] Firewall enforcement watcher heartbeat is STALE",
+            "%s on %s was last written %d seconds ago (threshold %d).\n\n"
+            "The unit may still report active while the loop that writes this file is "
+            "wedged -- which is why liveness is measured here rather than taken from "
+            "systemctl.\n\n  systemctl status %s\n  journalctl -u %s -n 50"
+            % (FW_WATCH_HEARTBEAT, host, age, FW_HEARTBEAT_MAX_AGE_SECONDS,
+               FW_WATCH_UNIT, FW_WATCH_UNIT))
+        return
+
+    logging.debug("fw-watch heartbeat is %ds old (threshold %d)",
+                  age, FW_HEARTBEAT_MAX_AGE_SECONDS)
 
 
 def _fetch_latest_hw_sample():
@@ -659,6 +830,8 @@ def _digest_tick() -> None:
 
 def main() -> None:
     logging.info("Watchdog started. Monitoring: %s", ", ".join(SERVICES))
+    logging.info("Also watching %s liveness via %s (max age %ds)",
+                 FW_WATCH_UNIT, FW_WATCH_HEARTBEAT, FW_HEARTBEAT_MAX_AGE_SECONDS)
     _init_cooldown_table()
     _load_cooldowns()
 
@@ -696,6 +869,12 @@ def main() -> None:
             check_hw_metrics()
         except Exception as exc:
             logging.exception("Unexpected error in check_hw_metrics: %s", exc)
+        try:
+            check_fw_watch_heartbeat()
+        except Exception as exc:                           # noqa: BLE001
+            # Never let this stop service monitoring: it is a check ABOUT another
+            # watchdog, strictly secondary to watching the services themselves.
+            logging.exception("Unexpected error in check_fw_watch_heartbeat: %s", exc)
         try:
             _digest_tick()
         except Exception as exc:                           # noqa: BLE001
