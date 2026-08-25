@@ -1755,6 +1755,59 @@ def init_email_security_tables():
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_quarantine "
                   "ON email_message_verdicts(quarantine_state)")
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_attachment_detonations (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                -- The message this attachment came from
+                -- (email_message_verdicts.id).
+                verdict_id    INTEGER NOT NULL,
+                -- Content hash of the attachment bytes. NULL when the part
+                -- carried no payload -- and SQLite treats NULLs as DISTINCT in a
+                -- UNIQUE index, so several payload-less rows per message are
+                -- allowed rather than collapsing onto one. That is correct: they
+                -- are different parts, not one part recorded twice.
+                attachment_sha256 TEXT,
+                -- Filename HASHED, extension in the clear -- same split
+                -- mime_parse makes, for the same reason: the extension is the
+                -- signal, the name can carry personal information.
+                name_hash     TEXT,
+                extension     TEXT,
+                detonated_at  TEXT    NOT NULL,
+                -- ⚠ READ THE VALUES CAREFULLY. 'completed' means the sample RAN
+                -- and a report was collected -- it does NOT mean clean; the
+                -- verdict lives in the report. The two failure states are
+                -- fundamentally different and must never be merged:
+                --   completed            -- ran, observation collected
+                --   isolation_unverified -- REFUSED, nothing ever executed
+                --   teardown_failed      -- RAN, could not confirm the VM was
+                --                           destroyed. DANGEROUS: a live VM may
+                --                           still hold a running sample
+                --   skipped_no_payload   -- metadata-only part, nothing to run
+                --   skipped_too_large    -- above the size ceiling
+                --   error                -- any other failure, detail in `error`
+                -- Collapsing 'isolation_unverified' into a clean-looking outcome
+                -- is precisely the "instrument that never ran, reporting an
+                -- answer" shape this repo checks for.
+                outcome       TEXT    NOT NULL,
+                -- The sandbox's report dict, verbatim. Verdict INPUTS, not a
+                -- verdict.
+                report_json   TEXT,
+                -- Explicit failure detail. NULL on success -- never an empty
+                -- string standing in for "no error".
+                error         TEXT,
+                -- Actor seam (multi-user-ready-by-default), same as the sibling
+                -- tables. Populated from the Data Manager's current_actor().
+                actor         TEXT,
+                UNIQUE(verdict_id, attachment_sha256)
+            )
+        """)
+        # Reconciliation and review both ask "which detonations ended badly",
+        # so the index carries the predicate column rather than being a scan.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_detonations_outcome "
+                  "ON email_attachment_detonations(outcome)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_detonations_verdict "
+                  "ON email_attachment_detonations(verdict_id)")
+
         # Guarded migrations. Both tables ship complete above, so these are no-ops
         # on a fresh install; they exist because CREATE TABLE IF NOT EXISTS will
         # NOT alter a table that already exists, and stage 2.6 may land on a DB
