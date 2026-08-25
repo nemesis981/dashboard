@@ -1083,13 +1083,36 @@ the first place.
   below. Each gets its reason for existing (role/purpose), not just its name — an unlabeled VM
   is exactly the state the 2026-08-02 cleanup had to untangle. Update it as VMs are
   created/retired; it is a living document, not a periodic re-audit.
-- **Fleet cleanup at every closeout.** Don't wait for another full audit — at each closeout,
-  identify any stray clone/snapshot and either delete it or make (and record) a deliberate
-  keep decision, the same per-test choice the fresh-clone-discipline bullet already asks for,
-  now applied as a standing closeout check so strays get caught immediately instead of
-  accumulating. **Check the name, not just the log, before deleting anything:** a VM with
-  `KEEP` in its name is protected regardless of how stale it looks (see the `KEEP`-naming
-  convention above) — never delete or destroy one without explicit operator confirmation.
+- **Fleet cleanup runs at EVERY session closeout — a routine, not a request (sharpened
+  2026-08-25).** Don't wait for another full audit — at each closeout, identify any stray
+  clone/snapshot and either delete it or make (and record) a deliberate keep decision, the
+  same per-test choice the fresh-clone-discipline bullet already asks for, now applied as a
+  standing closeout check so strays get caught immediately instead of accumulating. Look
+  specifically for VMs that are **powered off and clearly abandoned**, **named for a
+  since-completed task**, or **otherwise clearly stale**. Then either:
+  - **Clean up directly** — non-`KEEP` and obviously disposable. Record what was deleted and
+    why in `vm-fleet/VM-FLEET-LOG.md` (private mirror); a deletion with no recorded reason is
+    how the next person loses the ability to tell a decision from an accident.
+  - **Flag plainly in the handoff** — anything `KEEP`-protected or ambiguous, named
+    individually with its size and a recommendation, so the operator makes a *decision*
+    rather than a *rediscovery*.
+
+  **Check the name, not just the log, before deleting anything:** a VM with `KEEP` in its
+  name is protected regardless of how stale it looks (see the `KEEP`-naming convention
+  above) — a closeout sweep may delete non-`KEEP` strays on its own authority, but may
+  **never** delete or destroy a `KEEP` VM, however stale it looks, without explicit per-VM
+  operator confirmation. The whole point of the name is that a cleanup pass cannot reason its
+  way past it.
+
+  **Why a routine and not a reminder.** Confirmed live 2026-08-25: an "overnight" batch from
+  08-20 was still running five days later — 8 GB of RAM and 114 GB of disk — and was caught
+  only because Window 1 went looking for RAM. Its third member was already powered off and so
+  was **invisible to that sweep entirely**: costing nothing, it prompted no look, and it was
+  found only because the two running ones led back to it. **Accumulation here is silent by
+  construction — an idle VM produces no symptom until the disk is full.** By that point the
+  fleet was 923.5 GB, roughly 60% of a disk at 83% capacity. A check that depends on being
+  asked is a check that happens after the problem. Reference shape for the flag-it half:
+  `vm-fleet/fleet-inventory-2026-08-25.md` (private mirror).
 - **Keep-current generalizes past the gauge VM.** Any VM in the fleet running a server or
   agent install — not just the permanent gauge VM above — gets updated to match whenever
   production Nemesis updates. Same reasoning as the gauge VM's maintenance rule: a VM meant to
