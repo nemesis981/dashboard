@@ -316,17 +316,26 @@ number.
   listing would have been wrong, and confirming it would have published Window 3's unfinished
   work while telling the operator it was Window 1's. Before asking the operator to confirm a
   push in a shared tree:
-  - Run `git log --format='%h %an %s' <remote>/<branch>..HEAD` and read every entry.
-    **`%an` will NOT distinguish windows here** — every window commits under the same shared
-    git identity (`Nemesis981`, confirmed identical `user.name`/`user.email` in both repos).
-    Author name cannot answer "whose commit is this"; do not let a check that reads it stand
-    in for verification it structurally cannot provide — same failure shape as the standing
+  - Run `git log --format='%h %s' <remote>/<branch>..HEAD` and read every entry. **Do NOT
+    add `%an` to that format and read it as attribution** — every window commits under the
+    same shared git identity (`Nemesis981`, confirmed identical `user.name`/`user.email` in
+    both repos), so the author field cannot answer "whose commit is this" and a check that
+    reads it as if it could is worse than no check — same failure shape as the standing
     "verification code must prove its own premise" practice below, applied to this specific
     field.
-  - The real check is recognition, not automation: cross-reference each SHA against the
-    commits you yourself created THIS session. Any commit in the range you did not personally
-    just create is NOT confirmed yours by default, however plausible its subject line reads —
-    name it explicitly in the confirmation request rather than silently including it.
+  - Read the SUBJECT for this repo's actual naming conventions instead. `~/work/
+    nemesis-internal` commits are frequently self-identifying —
+    `handoff(window1): ...` / `handoff(window3): ...` name the window directly (confirmed
+    live in this repo's own history); a feature-area prefix with no window tag
+    (`fix(email-security): ...`, `stage0: ...`) still narrows it by matching against which
+    window is known to own that area. This is the primary signal, but it is a naming
+    convention, not a structural guarantee — a commit that doesn't name a window is not
+    proof it's yours, only a gap the next two checks must close.
+  - Cross-reference each SHA against the commits you yourself created THIS session as a
+    second, independent signal — you always know your own SHAs regardless of subject
+    wording. Any commit in the range that is neither self-identified by subject nor one you
+    personally just created is NOT confirmed yours by default — name it explicitly in the
+    confirmation request rather than silently including it.
   - `git reflog show <remote>/<branch>` distinguishes "already on the remote, pushed by
     someone else moments ago" from "about to be published by me" — a genuinely useful timing
     signal, unaffected by the shared-identity problem above since it reads ref history rather
