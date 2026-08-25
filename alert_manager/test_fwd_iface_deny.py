@@ -123,6 +123,18 @@ if v4:
 check("v6 insert present too (a v4-only rule leaves the same path open)",
       any(c[0] == F.IP6TABLES_BIN for c in inserts))
 
+# The PROBE carries the privilege too, and until 2026-08-25 nothing looked at it.
+# `inserts` above filters to `-I`, so a `-C` aimed at the wrong table sat here
+# unexamined for as long as the op existed. Count first: two binaries must produce
+# two checks -- a single check would mean one address family is never probed at all.
+checks = [c for c in _calls if "-C" in c]
+check("exactly two checks (v4 + v6) precede the inserts", len(checks) == 2,
+      repr(len(checks)))
+for _c in checks:
+    check("  the CHECK names the raw table too -- it is NOT inherited from -I",
+          "-t" in _c and _c[_c.index("-t") + 1] == "raw", repr(_c))
+    check("  the CHECK targets PREROUTING", "PREROUTING" in _c, repr(_c))
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n== IDEMPOTENT: re-applying does not stack duplicate rules ==")
@@ -137,6 +149,39 @@ reset()
 r = F.op_deny_port_on_interface({"iface": "tailscale0", "port": 80})
 check("a second apply inserts NOTHING", not [c for c in _calls if "-I" in c])
 check("  ...and reports it as already present", len(r["already_present"]) == 2, repr(r))
+F._run_iptables = fake_run
+
+
+# ════════════════════════════════════════════════════════════════════════════
+print("\n== IDEMPOTENCY IS ONLY REAL IF THE PROBE ASKS THE RIGHT TABLE ==")
+
+# The recorder above returns 0 for EVERY `-C`, so it cannot tell a probe aimed at
+# the raw table from one aimed at filter -- an instrument with one possible answer.
+# This one models what the kernel actually does: the filter table has no PREROUTING
+# chain, so a check that omits `-t raw` can only ever fail, which is
+# indistinguishable from "the rule is absent". Under the pre-2026-08-25 code both
+# assertions below fail and a duplicate rule is inserted on every call.
+
+
+def table_aware(binary, *args):
+    _calls.append((binary,) + args)
+    if "-C" in args:
+        asks_raw = "-t" in args and args[args.index("-t") + 1] == "raw"
+        if not asks_raw:
+            return 1, "", "iptables: No chain/target/match by that name."
+    return 0, "", ""
+
+
+F._run_iptables = table_aware
+reset()
+r = F.op_deny_port_on_interface({"iface": "tailscale0", "port": 80})
+check("the probe reaches the raw table, so the rule is SEEN as already present",
+      len(r["already_present"]) == 2, repr(r))
+check("  ...so NO duplicate is stacked on top of the live rule",
+      not [c for c in _calls if "-I" in c],
+      repr([c for c in _calls if "-I" in c]))
+check("  ...and nothing was reported as freshly applied",
+      r["applied"] == [], repr(r["applied"]))
 F._run_iptables = fake_run
 
 

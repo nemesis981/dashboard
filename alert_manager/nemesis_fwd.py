@@ -912,6 +912,18 @@ def op_deny_port_on_interface(params):
     IDEMPOTENT: `-C` first, insert only if absent. Re-applying on every boot must
     not stack duplicate rules.
 
+    ⚠ THE `-C` PROBE MUST CARRY `-t raw` — the table is NOT inherited from the
+    insert below it. Until 2026-08-25 the check was built by slicing `-t raw` off
+    the front of the rule spec, so it queried the FILTER table, which has no
+    PREROUTING chain at all. It therefore failed every time, reported the rule as
+    absent every time, and inserted a duplicate on every call — the exact
+    behaviour the paragraph above says it prevents. Nothing caught it because the
+    idempotency test stubbed the runner to return 0 unconditionally, so `-C`
+    "succeeded" whatever table it named. Both calls now build from ONE `rule`
+    list and both pass `-t raw` explicitly, matching `op_allow_port_on_interface`,
+    which had it right all along — the divergence between the two siblings was
+    itself the tell.
+
     INSERTED AT POSITION 1, ahead of any pre-existing jump. A rule placed after a
     jump can be silently bypassed by whatever that jump does -- which is exactly
     how the ufw attempt failed. On this appliance position 1 is currently held by
@@ -925,13 +937,13 @@ def op_deny_port_on_interface(params):
     iface, port, proto = _require_iface_port(params)
     applied, already = [], []
     for binary in (IPTABLES_BIN, IP6TABLES_BIN):
-        rule = ["-t", "raw", "-i", iface, "-p", proto, "--dport", str(port), "-j", "DROP"]
-        rc, _out, _err = _run_iptables(binary, "-C", "PREROUTING", *rule[2:])
+        rule = ["-i", iface, "-p", proto, "--dport", str(port), "-j", "DROP"]
+        rc, _out, _err = _run_iptables(binary, "-t", "raw", "-C", "PREROUTING", *rule)
         if rc == 0:
             already.append(binary)
             continue
         rc, _out, err = _run_iptables(binary, "-t", "raw", "-I", "PREROUTING", "1",
-                                      *rule[2:])
+                                      *rule)
         if rc != 0:
             raise Denied("iptables_failed",
                          "%s insert failed: %s" % (binary, (err or "").strip()[:120]))
