@@ -1,165 +1,212 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-24, closeout (Window 2)**. Overwritten each closeout (latest state
-> wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/accounts/
-> keys live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
+> Last updated **2026-08-25, pre-reboot closeout (Window 2)**. Overwritten each closeout
+> (latest state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
+> IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
+> placeholders here per Rule 8.
 >
-> Full detail behind today's session: `docs/handoff/supplements/2026-08-24-001.md` (curated)
-> and `docs/handoff/worklog/2026-08-24-001.md` (raw chronology, reconstructed at closeout —
-> not appended live; flagged there as a real process gap). 17 commits — this file summarizes
-> current state; the supplement has the full account.
+> **Written ahead of an operator-initiated system reboot, at explicit request.** Full detail:
+> `docs/handoff/supplements/2026-08-25-001.md` (curated) and
+> `docs/handoff/worklog/2026-08-25-001.md` (raw chronology, live-appended). Services are
+> untouched by this session's work — the reboot is a host action, not a deploy.
 
 ---
 
-## 1. Push status — all clear, `origin/main` == local HEAD
+## ⚠ ACT ON THIS BEFORE THE REBOOT PROCEEDS
 
-`git rev-parse HEAD` == `git rev-parse origin/main` == `33e3cfd848705c12ebf2fc4b7647bebe2257993d`.
+**`Nemesis Appliance Gateway` holds the ONLY copy of the `nemgw` gateway-test-zone config,
+and it is not yet backed up off-VM.** Window 1 flagged this to Window 3 as a priority task
+at 13:51 today (`~/work/nemesis-internal/handoff/2026-08-25-window1-to-window3-gateway-config-backup.md`)
+— explicit instruction: **do NOT shut down or otherwise touch that VM until the config is
+exported somewhere durable outside it.** No completion note from Window 3 has been found as
+of this write. A host reboot is exactly the kind of event that could shut down or disrupt a
+running VM depending on VirtualBox's own shutdown handling — **this is not this session's
+call to make, but it needs the operator's eyes before the reboot proceeds**, not discovered
+after. The existing `.bak-2026-08-20-w3` file does NOT cover this — it protects against a
+bad edit, not against losing the VM, and is stored on the same VM regardless.
 
-## 2. What landed today (17 commits, `950e0d3`..`33e3cfd`) — by theme
+---
 
-1. **Two ADR 0026 doc-precision fixes** (`950e0d3`, `31c76e1`) — the stale `keyprotect`
-   clause (satisfied-by-not-applying, per D3's actual decision) and the `attempts`
-   counts-passes-not-tries wording, the latter caught independently by two windows at once.
-2. **CLAUDE.md's fourth standing practice** (`af4183f`) — "does a new branch/default
-   actually have a test that exercises it, not just one that could," from a real
-   three-consecutive-day cross-window pattern.
-3. **Window 3's RBAC training-UI batch**, split into 3 dependency-ordered commits
-   (`d46a651`, `08fbef1`, `e00e158`) — role.js's missing `sub_admin` rank, a real bug in
-   `capabilities._conn()` (called a nonexistent function; zero production-path test
-   coverage), and the training UI itself.
-4. **ADR 0028** (email security gateway) — public ADR (`ac778e5`) + private build spec
-   (mirror repo `a9303ff`), Rule 10 already resolved in-document.
-5. **Window 1's four Stage-0 prerequisites**, chained (`c93e08c` Stage 5 first real
-   capability, `e6b6ccb` default-deny task dispatch, `dc06ef8` ADR 0026 D3 admin-approval
-   agent-side verification, `029b8e4` meminject sweep scheduler). Caught a real stale-claim
-   bug in `tasks.py` before it shipped (a handoff's "+147, safe to copy whole" had gone
-   stale at +507 merged lines); Window 1 fixed it properly and it was independently
-   re-verified. **Process failure on my side, not caught by my own process**: all four were
-   built in detached-HEAD worktrees with no branch ref created before removal, making them
-   unreachable dangling objects for a window — caught by Window 1's independent check, fixed
-   (`git branch`), now a standing process memory.
-6. **Brought `/opt/nemesis`'s shared checkout current to `029b8e4`** — not the clean
-   fast-forward assumed; two windows' genuine uncommitted work (Window 1's GUI-findings
-   buffer, Window 3's quiz revision) preserved via stash/pull/pop plus a manual
-   backup-restore, both verified rather than trusted.
-7. **Stage 0 step 1** (`462d664`) — session realms (`session_realm.py`, new),
-   `X-Forwarded-Proto` handling, nemesis-fwd's new interface-scoped deny/allow op. A
-   contradiction over whether `NEMESIS_DOOR_SECRET` belongs in `ENV_WRITE_ALLOWED_KEYS` was
-   flagged rather than guessed at, and resolved (it must NOT be added — traced to a stale,
-   never-retracted offhand remark from earlier in the day).
-8. **A live production gap closed same-day**: `scripts/nemesis-cert-renew` + its systemd
-   timer were running on the real box with zero source in any repository (`f03c7e2`).
-   Landed alongside `core/rp_identity.py` (`aa84d12`, WebAuthn RP identity, unwired) and
-   `alert_manager/local_port_watch.py` (`604ff19`, visibility only, unwired), plus a small
-   self-caught test fix (`a5826f0`).
-9. **Window 3's quiz revision** to `approve_enrollment.json` (`33e3cfd`) — protected on
-   request after being flagged as newly vulnerable to a clobber; verified genuine and
-   digest-safe (no earned unlocks invalidated) before committing.
+## 1. Push status — both repos, verified clean, nothing unpushed
 
-**Not deployed.** No auto-deploy in this repo — every commit above needs an operator-driven
-install/restart to take effect anywhere real, **except** the cert-renew timer and the
-interface-scoping op's underlying `nemesis-fwd` privileged daemon, which the operator
-installed live during today's session (see §4 below — do not assume "not deployed" covers
-those two).
+**`/opt/nemesis`:** `git rev-parse HEAD` == `git rev-parse origin/main` ==
+`e0cddb755ddbb5ebc90f88179ea7ff841af1f0bd`. Re-fetched and re-verified at write time, not
+carried forward from an earlier check this session.
 
-## 3. Open items, priority order
+**`~/work/nemesis-internal`:** HEAD == `local/main` == `usb/main` ==
+`66e7c52feecde29b33556761dfacdca4cd41baf9`. USB drive confirmed mounted at push time.
 
-1. **Stage 0 is holding at step 2.5** — operator-timed actions owed: generate the door
-   secret, a deliberate dashboard restart. Step 3 (nginx TLS server block) and step 4
-   (port-80 enforcement) are not started; step 4 needs the operator's call on Decision
-   Point 1 (build the `nemesis-fwd` op properly — done, this is now moot — vs. the other
-   two options considered in the Stage 0 plan) and has its own blocking sub-item: reading
-   `sudo iptables -t raw -L piavpn.PREROUTING -n -v` before touching PREROUTING position 1,
-   since this box's real PIA VPN chain was never covered by the VM proof.
-2. **`SESSION_COOKIE_SECURE` vs. "LAN HTTP stays working"** — Decision Point 2 in the Stage
-   0 plan, not yet resolved by the operator. Session realms (landed today) make cross-door
-   replay impossible regardless of which way this goes, so it's no longer the same severity
-   of open question, but the plan's three options are still live.
-3. **RBAC learning-gate**: only `approve_enrollment` is populated. `push_and_run` needs the
-   feature itself built first (confirmed: no push/run-command endpoint exists anywhere).
-   `firewall_change`'s endpoints exist and pass D2's rules but are held back deliberately —
-   least defensible capability to hand a newly-qualified sub-admin first.
-4. **V2.0 gap-scan items, unchanged**: Windows memory-injection periodic sweep (Linux-only
-   by design — `029b8e4` wired the scheduler, not detection), malware Layer D's missing
-   trained model, `agent-rebuild-config-driven`'s broader scope, Track-C metadata tier.
-5. **Retention/bounded-storage build** — unchanged, full spec in the private mirror.
-6. **Companion-app WebAuthn** stays private per Rule 10 until it ships end-to-end;
-   admin-approval has never been exercised by a real WebAuthn authenticator yet.
-7. **Four `core/admin_approval*.py` files cite a private-only spec path**
-   (`docs/protocol/admin-approval-v1.md`) that doesn't exist publicly — pre-existing
-   dangling reference, worth a one-line fix next time one of those files is touched.
+No commit in either repo is sitting local-only. A reboot right now loses no committed work
+in either repo.
 
-## 4. Do NOT touch — still uncommitted, other windows' live work
+## 2. `/opt/nemesis` working tree — not clean, and that is expected (shared tree, not this
+   session's files)
 
-`nemesis_agent/agent.py`, `nemesis_agent/agent_errors.py` still carry Window 1's held
-GUI-findings-buffer hunks (`_recent_findings`/`_findings_lock`/`_GUI_REPORTABLE_CODES`/
-`_remember_findings`/`_findings_response`, plus their `agent_errors` code). Confirmed still
-present after today's stash/pull/pop cycle — not lost, not yet ready to land. Known
-consequence: `test_task_classification` reports 63/2 in the shared tree (the `findings`/
-`report_error` actions this buffer adds aren't yet in `BASE_EXEMPT_ACTIONS`) — **this is now
-a live gate, not a hypothetical**, since commit 1's default-deny dispatch is on `origin/main`.
-Whoever commits the GUI-findings work must resolve that in the same commit.
+`git status --short`:
+```
+ M PUNCHLIST.md
+ M modules/malware_detection/module.py
+ M nemesis_agent/agent.py
+ M nemesis_agent/agent_errors.py
+?? alert_manager/hw_map.json
+?? modules/email_security/
+```
 
-`PUNCHLIST.md` and `docs/architecture/0028-email-security-gateway.md` carry an in-progress,
-uncommitted Gmail-vs-Outlook IMAP-scope revision (Window 3, matching the parallel private
-build-spec edit) — never touched today, left exactly as found.
+None of this is mine to commit; ownership, verified against source (not assumed):
 
-`alert_manager/hw_map.json` — untracked runtime artifact, regenerated by `hw_discover
---auto`, never committed, left alone (undecided: track or gitignore).
+- **`PUNCHLIST.md`** (+34, one hunk, lines 3-40) — Window 3's ADR-0028/D9-measurement
+  verification batch (four `[LOW]` entries dated 2026-08-24). Unchanged all session; Window
+  1's own PUNCHLIST hunk from earlier today already landed separately (`6f3ebe6`).
+- **`modules/malware_detection/module.py`** (+28/-7) — Window 1's Layer D docstring-honesty
+  fix, correcting the module header's "no model, no classifier, no entry point" claim (two
+  of those three have been false since `ac53b0c`/`719d93f`, 2026-08-21). Per Window 1's own
+  handoff (`2026-08-25-window1-handoff.md`, "LAYER D — READ-ONLY ANALYSIS" section): **"teed
+  up, not done"** — prepared but not yet formally handed off for commit. Do not commit
+  without an explicit ready-to-commit signal from Window 1.
+- **`nemesis_agent/agent.py`** (+75/-2, 5 hunks) and **`nemesis_agent/agent_errors.py`**
+  (+10, 2 hunks) — Window 1's held GUI-findings-buffer work
+  (`_recent_findings`/`_findings_lock`/`_GUI_REPORTABLE_CODES`/`_remember_findings`/
+  `_findings_response`). Unchanged since 2026-08-24's closeout note. Known consequence still
+  live: `test_task_classification` reports a gate mismatch in the shared tree until this
+  lands with a `BASE_EXEMPT_ACTIONS` fix in the same commit.
+- **`alert_manager/hw_map.json`** (untracked, mtime 2026-08-23) — runtime artifact from
+  `hw_discover --auto`. Still undecided: track or gitignore. Unchanged all session.
+- **`modules/email_security/`** (untracked directory: `fast_check.py`, `imap_idle.py`,
+  `mime_parse.py`, `module.py`, tests, `manifest.json`) — Window 3's email-security Stage
+  2.x build, in progress. **Heads-up carried forward from earlier today, not yet
+  materialized:** Window 3's Stage 2.6 is expected to touch `alert_manager/database.py`,
+  the same file Window 1's CSRF/schema batch modified and this session already committed
+  (`3ef5a1d`). Whichever window is ready first should land, then the other must re-check
+  the file's live state before editing — not assume a clear shot.
 
-`docs/roadmap/dashboard-roles-access-control.md` and `docs/audits/roadmap-state-audit-
-2026-08-24.md` are staged for THIS closeout commit (see §8) — not another window's work.
+**Model self-check note (Window 2, this session):** running Sonnet 5, matches expected —
+no mismatch flagged at any point today.
+
+## 3. This session's landed work — all six items requested, confirmed landed
+
+1. **ADR 0028 D3 revision** (`34a6bd7`, pushed) — bare-provider path narrowed to Gmail-only
+   for v1; Outlook.com deferred (OAuth/XOAUTH2 cost), not rejected.
+2. **ADR 0028 D10-D12 + ARCHITECTURE.md P1** (`f7d39bb`, pushed) — enrollment architecture
+   (no agent code required; attaches to a dashboard user, not a device; admin-initiated/
+   owner-authorized enrollment recommended, admin-on-behalf-of-others explicitly rejected)
+   plus the project-wide setup-friction principle, placed in `ARCHITECTURE.md` per Window
+   3's recommendation (already in the mandated read-order). Six sub-decisions correctly
+   left OPEN in §8, not silently picked — see that section for the list (who connects an
+   account, shared-mailbox ownership, capability-gating, macOS discovery scope).
+3. **ADR 0029 — child/teen safety monitoring** (`8bbdd31`, pushed) —
+   `docs/architecture/0029-child-safety-monitoring.md`, **public sections only** (§0
+   measurement discipline + positioning, §2 legal grounding + the metadata-only-capture core
+   decision), per the operator's explicit Rule 10 resolution. The full design — three
+   detection pipelines, severity tiers, retention, consent/attestation, crisis-response path,
+   full 29-item decision register — stays in the private mirror, held until built and
+   measured. Roadmap tracking entry landed alongside it
+   (`docs/roadmap/child-safety-monitoring.md`): PARKED until V2.0 completes, dual
+   module/standalone shape, standalone must be self-hosted (hard constraint, not a
+   preference — a hosted variant would collapse the published no-vendor-escrow legal
+   architecture).
+4. **Gap-scan entry #14 struck** (`66e7c52`, private repo, pushed to local+usb) —
+   `ARCHITECTURE.md` already documented the L0-L4 ladder and explicitly marked the old
+   Teaching Mode/Automated Mode vocabulary as superseded when the entry was written
+   (`c7ac0cc`, 2026-08-21, two days before the 2026-08-23 scan). Root cause: grepped for the
+   term, found it inside the sentence saying it's gone, concluded the doc still describes
+   it — string matched, meaning was the opposite. Independently confirmed by both Window 1
+   and Window 3 before being struck. **Second confirmed-stale entry in that document — a
+   full re-audit of the remaining entries is still owed, not done as part of this edit.**
+5. **Fleet-hygiene CLAUDE.md fold** (`e0cddb7`, pushed) — folded into the existing "Fleet
+   cleanup at every closeout" bullet rather than appended as a second one, per Window 3's
+   explicit recommendation. Adds: specific staleness signals (powered off + abandoned, named
+   for a finished task), the clean-up-directly-vs-flag-plainly split, and the
+   `VM-FLEET-LOG.md` recording requirement. Motivating incident: an "overnight" VM batch
+   from 08-20 still running five days later (8 GB RAM, 114 GB disk), with a third,
+   powered-off member invisible to the same sweep entirely.
+6. **CSRF batch** (`e116188` + `3ef5a1d` + `6f3ebe6`, pushed, landed earlier this session) —
+   six GET-that-acted routes converted to POST+JSON-only; `enrollment_tokens.auto_approve`
+   schema default corrected 1→0 for **new installs only** (SQLite cannot ALTER a column
+   default; the live `/var/lib/nemesis/alerts.db` keeps `DEFAULT 1` — production is
+   unchanged by this commit and the message says so explicitly, not implied as remediated).
+   Independently verified by Window 3 before commit; both suites re-run myself, not taken on
+   trust: `test_roles` 158/0, `test_enrollment_token_defaults` 10/0.
+
+Two other CLAUDE.md standing-rule additions also landed and pushed today, ahead of the items
+above: the shared-working-tree attribution rule (`2fcf77c` + correction `8ad5cd1`, dropping
+`%an` as an attribution signal after it was found to not actually distinguish windows —
+every window commits under the identical git identity) and the step-4 firewall self-healing
+feature itself (`f78b8f5`..`d8f4e80`, 9 commits, verified against a clean GitHub clone:
+281/0 across all six suites).
+
+## 4. Anything else queued, not yet actioned
+
+- **The gateway-config backup risk** — see the top of this file. Not this session's to fix;
+  flagged for the operator and for Window 3 to confirm before the reboot.
+- **`modules/malware_detection/module.py`** — Window 1's Layer D docstring fix, teed up but
+  not formally handed off (see §2). Will need an explicit ready-to-commit signal.
+- **`database.py` collision risk** — Window 3's Stage 2.6 vs. this session's already-landed
+  schema commit. Sequencing note carried forward (see §2); no actual conflict has occurred
+  yet since Stage 2.6 hasn't touched the file as of this write.
+- **Six ADR 0028 §8 open decisions** (who connects an account, shared-mailbox ownership,
+  `enroll_email_account` as a capability, macOS discovery scope, D5's hold-time budget,
+  D7's legal/compliance question) — flagged in the ADR itself, not blocking, not this
+  session's to resolve.
+- **ADR 0029's own open items** — 16 of 29 decision-register entries remain open in the
+  private build spec; not blocking since the whole project is parked until V2.0. Legal
+  review for ADR 0029 should be sequenced ahead of the existing PUNCHLIST legal items
+  (`PUNCHLIST.md` lines 478, 488, 3581) given it is a materially larger exposure.
+- **Gap-scan document itself** — now has two independently-confirmed-stale entries (item 4,
+  item 14). A full re-audit of the remaining entries is recommended before anything else is
+  scoped off that document; not started.
+- **Window 1's Layer D model-funding project** — active, unrelated to anything in this
+  repo's working tree. Corpus acquisition VM (`Nemesis Kali KEEP layerd-corpus 08-25`) is
+  mid-build as of this write (handoff file still growing, last touched minutes before this
+  closeout). Calibration gate locked (N_min 50,000 / N_target 150,000 held-out benign PEs,
+  detection floor ≥70%, zero-FP requirement at the malicious threshold). Entirely
+  VM/private-repo state — nothing here for `/opt/nemesis` to track, noted only because a
+  host reboot could interrupt VM work in progress the same way it could affect the gateway
+  VM above. Worth Window 1 confirming their own VM states are safe before a reboot, same
+  concern as the gateway backup, lower stakes since this VM isn't the sole copy of anything.
+- **`test_analyze_alert_body.py`** (34/35, stale assertion) — captured in PUNCHLIST
+  (`6f3ebe6`, landed), not fixed. Own commit when picked up.
+- **`_load_secret_key()` PermissionError gap** — captured in PUNCHLIST (`0482d1b`, landed
+  earlier today), not fixed.
 
 ## 5. Verified live this session, not just claimed (Rule 3 discipline)
 
-Every commit landed today carried independent verification against a fresh `origin/main`
-worktree or the live checkout — test numbers re-run, never trusted from a handoff's own
-account. This caught two real defects: the `tasks.py` stale-claim (§2 item 5) before it
-reached `origin/main`, and the unreachable-commits process gap (§2 item 5) before a `git gc`
-could destroy four commits' worth of work. A third contradiction — the `NEMESIS_DOOR_SECRET`
-question (§2 item 7) — was surfaced and correctly resolved rather than guessed at.
+Every commit above carried independent verification before landing: CSRF batch re-tested
+myself (158/0, 10/0) rather than trusting Window 3's report alone; commit-hash citations in
+the Track C roadmap fix checked against `git log` before writing; gap-scan #14's timeline
+checked against the actual `ARCHITECTURE.md` content and `c7ac0cc`'s commit date, not taken
+from either window's summary; step-4 firewall work re-verified in isolated `git worktree`
+checkouts at every intermediate commit, then a genuine fresh `git clone` from GitHub at
+final HEAD (281/0). One real correction was caught and fixed before landing: the
+shared-tree rule's first draft suggested `%an` as an attribution signal; verified false
+(identical git identity across all windows) and rewritten before commit.
 
-## 6. State snapshots
+## 6. Elevated grants
 
-None taken this session — every state-changing action was a code commit, not a direct
-production data/config change, **except** the operator personally installing the
-`nemesis-fwd` interface-scoping capability and the cert-renew timer live on the real box
-during the session (their own action, State-Snapshot discipline is theirs to have applied;
-not verified here).
+Not re-checked this specific session (no fresh Morning Status run since the reboot request
+came mid-session, after this morning's baseline). Last live check: 2026-08-25 morning
+Morning Status, matched HANDOFF's 2026-08-22 baseline exactly. Re-run at next session start.
 
-## 7. Elevated grants
+## 7. Cross-references
 
-Re-checked live this morning against the 2026-08-22 HANDOFF §9 baseline: sudo NOPASSWD set,
-`nemesis-db`/`nemesis-fw`/`pihole` group membership all matched exactly, polkit rules.d still
-unreadable (consistent). **Not re-checked since** (code-batch closeout, not a second Morning
-Status pass). New standing grant to be aware of going forward, not yet folded into a formal
-re-check: the operator ran `sudo` live during today's session to install
-`/usr/local/bin/nemesis-cert-renew` + its systemd timer and (per Window 1's Stage-0 work)
-the `nemesis-fwd` privileged interface-scoping capability — re-verify both are still the
-narrow, expected footprint at next Morning Status.
+- `docs/handoff/supplements/2026-08-25-001.md` — curated narrative, this session.
+- `docs/handoff/worklog/2026-08-25-001.md` — raw chronology (live-appended, not
+  reconstructed).
+- `docs/briefing/2026-08-25.md` — this morning's briefing (roadmap baseline, elevated
+  grants, working-tree audit at session start).
+- `~/work/nemesis-internal/handoff/2026-08-25-window1-handoff.md` — Window 1's full
+  cold-start doc, C0-C6 step-4 build, live VM verification, and the ongoing Layer D
+  model-funding project.
+- `~/work/nemesis-internal/handoff/2026-08-25-window3-handoff.md`,
+  `2026-08-25-window3-to-window2-*.md` (four files) — Window 3's ADR drafts, CSRF
+  verification, and the fleet-hygiene draft, all landed this session.
+- `~/work/nemesis-internal/handoff/2026-08-25-window1-to-window3-gateway-config-backup.md`
+  — the unresolved pre-reboot risk, §top of this file.
+- Prior session: `docs/handoff/supplements/2026-08-24-001.md`.
 
-## 8. Cross-references
+## Topology
 
-- `docs/handoff/supplements/2026-08-24-001.md` — curated narrative, this session.
-- `docs/handoff/worklog/2026-08-24-001.md` — chronology (reconstructed, flagged as such).
-- `docs/audits/roadmap-state-audit-2026-08-24.md` — refreshed roadmap baseline (11/12/60, 83
-  total), formalizing the `dashboard-roles-access-control.md` reclassification flagged this
-  morning.
-- `docs/roadmap/dashboard-roles-access-control.md` — status header corrected (PARKED →
-  SHIPPED) this closeout.
-- `docs/briefing/2026-08-24.md` — morning briefing.
-- `~/work/nemesis-internal/handoff/2026-08-24-window1-handoff.md` + its four
-  `window1-to-window2-*.md` companions — Window 1's Stage-0 prerequisite handoffs.
-- `~/work/nemesis-internal/handoff/2026-08-24-window3-handoff.md` — Window 3's RBAC UI batch.
-- `~/work/nemesis-internal/handoff/2026-08-24-stage0-real-box-plan.md` — Stage 0 plan, two
-  open decision points (§3 items 1–2 above).
-- `~/work/nemesis-internal/protocol/admin-approval-v1.md` — private spec (§3 item 7).
-- Prior session: `docs/handoff/supplements/2026-08-23-002.md`.
-
-## Topology (durable, unchanged from prior handoffs unless noted)
-
-**Changed today**: the appliance now has (or is mid-rollout of) a second front door —
-TLS over the tailnet, session-realm-separated from the existing plain-HTTP LAN door — per
-Stage 0. See `~/work/nemesis-internal/handoff/2026-08-24-stage0-real-box-plan.md` for the
-full topology-in-progress. No other topology changes. See
-`docs/handoff/supplements/2026-08-19-001.md` for the last full pre-Stage-0 topology summary.
+**Unchanged from prior handoffs.** No topology-affecting code shipped this session (all
+landed work is docs, a CSRF/schema fix, and the already-verified step-4 firewall feature,
+which ships inert — `NEMESIS_FW_GUARD` defaults off, not armed anywhere outside the
+disposable VM pair). See `docs/handoff/supplements/2026-08-19-001.md` for the last full
+topology summary, and the 2026-08-24 supplement for the Stage-0 tailnet-TLS addition.
