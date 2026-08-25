@@ -137,6 +137,30 @@ NAMESPACES = {
     # static-analysis output, so it needs no WARN grace period.
     "integrity_watch":    {"tables": ("integrity_observations",)},
 
+    # Inbound email security gateway (ADR 0028, build-spec stage 2.7). DICT form,
+    # exact-match — NOT an `email_` prefix tuple, for the reason the dhcp entry
+    # above spells out: a bare tuple falls through to `startswith()`, so
+    # `("email_",)` would silently pre-authorise every future `email_*` table this
+    # module ever grows. Two tables today, both named outright; adding a third is
+    # then a deliberate act rather than a side effect of naming a table.
+    #
+    # Worth stating plainly given what this module touches: it holds the verdicts
+    # for a person's PRIVATE MAIL. A grant that widens on its own is a poor fit
+    # for that, independent of the general argument.
+    #
+    # Reads across other tables per ADR 0001 read-any; writes only these two.
+    # The canonical DDL is database.init_email_security_tables(), called from the
+    # module's start() — the grant governs WRITES, not creation, and neither
+    # implies the other.
+    #
+    # ⚠ Per the dhcp warning above, this grant is NOT covered by the module's own
+    # suite: test_module.py stubs the Data Manager, so a missing entry here would
+    # pass all 27 checks and surface only in production as a WOULD DENY log line
+    # with the write silently not happening. test_email_writes.py therefore
+    # exercises the real allowed()/check_write() path directly.
+    "email_security":     {"tables": ("email_accounts",
+                                      "email_message_verdicts")},
+
     # An EMPTY table grant, and that is the whole point. The lookup tool owns no
     # tables: it shells out to dig/whois, returns the answer to the operator, and
     # persists nothing of its own. It is registered here ONLY so that
