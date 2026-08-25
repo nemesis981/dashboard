@@ -3904,3 +3904,28 @@ message naming the path, the expected owner, and the running uid — a permissio
 should say so. Deliberately NOT "fall back to a random key on read failure": that would
 silently invalidate every existing session on a transient permission fault, which is worse
 than a loud stop. Product-wide, not specific to any one feature — own commit.
+
+### [LOW — stale test] `test_analyze_alert_body` asserts a prompt shape the NPFA/1 migration replaced (found 2026-08-25)
+`alert_manager/test_analyze_alert_body.py` fails **34/35** on
+*"the prompt interpolates the rebuilt body"*. The assertion greps the source of
+`analyze_alert` for the literal `"Alert: {alert_body}"`, but the prompt no longer builds
+that string — it goes through the structured-field builder (`("Alert", _pf.LABEL,
+alert_body)`), so the f-string it looks for legitimately does not exist.
+
+**Pre-existing and unrelated to any current work — proven, not assumed.** Run against a
+clean `git worktree` checkout of HEAD with no local changes, the failure is identical
+(34/35, same assertion). It surfaced during the 2026-08-25 GET→POST conversion only
+because that pass re-ran the suite; the conversion did not cause it.
+
+Worth noting *what the test was protecting*: its own comment says the two checks above it
+"pass even if the PROMPT still interpolates the raw query-string value — which is the
+actual bug", so this assertion exists to stop a revert silently restoring raw
+interpolation. That intent is still valid; only its mechanism went stale. The paired
+control (`"Alert: {raw_alert}" not in fn_src`) still passes and still guards the defect,
+so there is no live exposure — the suite is simply red for a wrong reason, which is its
+own hazard: a permanently-failing suite stops being read.
+
+**Candidate fix:** re-point the assertion at the structured builder (assert `alert_body`
+is passed as the `Alert` field via `_pf.LABEL`, and that no raw-`raw_alert` field is
+constructed) rather than at a string literal that a future refactor will break again.
+One variable, own commit.
