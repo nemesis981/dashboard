@@ -48,7 +48,7 @@ UNDECIDABLE = ("-P PREROUTING ACCEPT\n"
 class Rig:
     """A throwaway tree: stub iptables binaries, and a stub firewall chokepoint."""
 
-    def __init__(self, before, after=None, heal="ok"):
+    def __init__(self, before, after=None, heal="ok", socket_exists=True):
         self.dir = tempfile.mkdtemp(prefix="nemfwguard-")
         self.after = after if after is not None else before
         am = os.path.join(self.dir, "alert_manager")
@@ -65,6 +65,13 @@ class Rig:
             with open(os.path.join(am, "firewall.py"), "w") as f:
                 f.write("def reassert_port_on_interface(iface, port, proto='tcp', **kw):\n"
                         "    %s\n    return True\n" % body)
+        # The script waits for nemesis-fwd's socket before calling the chokepoint,
+        # because After= does not guarantee a Type=simple helper has bound it yet.
+        self.sock = os.path.join(self.dir, "fwd.sock")
+        if socket_exists:
+            open(self.sock, "w").close()
+        with open(os.path.join(am, "fw_client.py"), "w") as f:
+            f.write("SOCKET_PATH = %r\n" % self.sock)
         self.bins = []
         for name in ("iptables", "ip6tables"):
             p = os.path.join(self.dir, name)
@@ -85,6 +92,8 @@ class Rig:
         env["NEMESIS_ROOT"] = self.dir
         env["NEMESIS_IPTABLES"], env["NEMESIS_IP6TABLES"] = self.bins
         env["PYTHONPATH"] = ""
+        # Short wait so the "socket never appears" case does not spend 30s per run.
+        env.setdefault("NEMESIS_FW_HELPER_WAIT", "2")
         if armed:
             env["NEMESIS_FW_GUARD"] = "1"
         else:
@@ -97,8 +106,8 @@ class Rig:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
-def scenario(label, before, after=None, heal="ok", armed=True):
-    rig = Rig(before, after, heal)
+def scenario(label, before, after=None, heal="ok", armed=True, socket_exists=True):
+    rig = Rig(before, after, heal, socket_exists=socket_exists)
     try:
         return rig.run(armed=armed)
     finally:
@@ -150,6 +159,23 @@ check("  ...and says the reassert was refused", "refused" in out, out.strip()[-1
 rc, out, healed = scenario("no chokepoint at all", CASE3, after=HEALTHY, heal="missing")
 check("an unavailable chokepoint exits NON-ZERO", rc != 0, "rc=%s" % rc)
 check("  ...and points at nemesis-fwd", "nemesis-fwd" in out, out.strip()[-160:])
+
+
+print("\n== THE HELPER SOCKET RACE: After= does NOT mean the socket exists ==")
+
+# nemesis-fwd is Type=simple, so systemd calls it active the moment it forks -- before it
+# binds /run/nemesis/fwd.sock. Observed live 2026-08-25: two reboots of the same VM,
+# identical config, one succeeded and one failed with [Errno 2] on the socket. An
+# intermittent failure is worse than a consistent one -- unreproducible when chased.
+rc, out, healed = scenario("socket present", CASE3, after=HEALTHY, socket_exists=True)
+check("socket already there => proceeds normally", rc == 0 and healed, out.strip()[-160:])
+check("  ...and does NOT log a wait it never performed", "waited for" not in out)
+
+rc, out, healed = scenario("socket never appears", CASE3, after=HEALTHY, socket_exists=False)
+check("socket absent => exits NON-ZERO after the bounded wait", rc != 0, "rc=%s" % rc)
+check("  ...never calls the chokepoint", not healed)
+check("  ...and says the helper is not running", "never created" in out, out.strip()[-200:])
+check("  ...naming the socket it waited on", "fwd.sock" in out, out.strip()[-200:])
 
 
 print("\n== A FAILED READ IS NOT 'NO RULES' ==")
