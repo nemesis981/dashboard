@@ -1415,7 +1415,22 @@ def init_enrollment_tokens_table():
                 expires_at       REAL NOT NULL,
                 max_uses         INTEGER DEFAULT 1,
                 uses             INTEGER DEFAULT 0,
-                auto_approve     INTEGER DEFAULT 1,
+                -- DEFAULT 0, NOT 1. Auto-approve is OPT-IN (ADR 0012): a token that does
+                -- not say otherwise must require MANUAL approval. The column default is the
+                -- last line of defence, not the live one -- the only writer (dashboard.py's
+                -- `INSERT INTO enrollment_tokens`) always supplies the value explicitly. But
+                -- a default of 1 means any future INSERT that merely OMITS the column grants
+                -- auto-approval to every device using that token, and a default that fails
+                -- OPEN on a security decision is the wrong way round regardless of who
+                -- currently relies on it. Corrected 2026-08-25.
+                --
+                -- NEW INSTALLS ONLY. SQLite cannot ALTER a column default (verified, not
+                -- assumed: ALTER TABLE ... ALTER COLUMN raises OperationalError) and this is
+                -- CREATE TABLE IF NOT EXISTS, so an EXISTING database keeps DEFAULT 1 in its
+                -- stored schema. Closing that means a table rebuild, not worth the risk while
+                -- every writer passes the value -- which is why the suite pins BOTH this
+                -- default AND the fact that the writer supplies the column.
+                auto_approve     INTEGER DEFAULT 0,
                 device_name_hint TEXT,
                 revoked          INTEGER DEFAULT 0,
                 preauth_key      TEXT,
