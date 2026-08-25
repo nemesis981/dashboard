@@ -282,6 +282,60 @@ number.
   (`git log --oneline @{u}..HEAD`) — a push publishes everything pending, not just what
   was just committed. Show the full list to the operator and get explicit confirmation
   before pushing.
+
+  **⚠ The listing goes STALE between confirmation and push, and in a shared tree that gap is
+  where another window commits (confirmed twice, 2026-08-25).** `git push <remote> <branch>`
+  publishes the branch ref *as it is at push time*, not as it was when it was read — so a
+  correct listing, correctly approved, can still publish commits nobody reviewed. The
+  approval window is the vulnerable window, and it is as long as the operator takes to
+  answer. This is a DIFFERENT hazard from the shared-index one below: that one is about
+  having more pending than realized, which the listing genuinely solves; this is about the
+  set *changing after* a correct listing was read and approved, which no amount of care at
+  listing time helps.
+
+  **Push the reviewed SHA, not the branch name.** A branch name is a moving target; a commit
+  SHA is immutable. Push the exact commit that was confirmed:
+
+  ```
+  git push local 2dea5f6:main && git push usb 2dea5f6:main
+  ```
+
+  A commit that lands after the confirmation is then simply not published — it stays local
+  for its own author to list and confirm. This needs no vigilance and cannot be forgotten
+  under time pressure, which is why it is the primary form rather than a check.
+
+  **⚠ IT ONLY PROTECTS AGAINST DESCENDANTS, NOT ANCESTORS — and that half is NOT optional.**
+  `git push <remote> <sha>:<branch>` publishes that commit *and its entire reachable
+  history*. It excludes commits stacked ABOVE yours; it cannot exclude commits already
+  BENEATH yours, which ride along whatever you do. **Confirmed the hard way 2026-08-25**:
+  a SHA push of one Window 3 commit also published two unpushed Window 1 commits, because
+  they were its ancestors — while using this very rule, which did not catch it and
+  structurally cannot.
+
+  **So the listing-and-confirmation step above is NOT superseded by the SHA form. It is the
+  only thing that covers ancestors.** Read every entry in
+  `git log --format='%h %s' <remote>/<branch>..HEAD` and name any commit that is not yours
+  in the confirmation request — the shared-tree attribution rule already requires exactly
+  this. The SHA form closes the race at the top of the range; only reading the list closes
+  the bottom.
+
+  **If a branch name must be pushed, GATE the push — do not merely re-print the listing.**
+  Re-read the unpushed set and *abort* when it differs from what was confirmed:
+
+  ```
+  EXPECTED="944c317 dc0e00f 2dea5f6"
+  ACTUAL=$(git log --format='%h' local/main..HEAD | sort | tr '\n' ' ')
+  [ "$(echo $EXPECTED | tr ' ' '\n' | sort | tr '\n' ' ')" = "$ACTUAL" ] \
+    || { echo "ABORT: unpushed set changed since confirmation"; exit 1; }
+  git push local main
+  ```
+
+  **This is a GATE, not a report — the distinction is the whole point.** Never chain the
+  listing to the push (`git log … && git push`): a check whose output arrives alongside the
+  action it was meant to guard gates nothing, since the push happens whether or not anyone
+  reads the line. The form above is different in kind — it *exits non-zero and does not
+  push*. A re-run listing that prints and then pushes anyway is the broken shape wearing
+  this rule's clothes, and is worse than no check, because it looks like diligence.
 - **Shared-index staging is a DIFFERENT hazard from the above — a distinct failure mode,
   not the same one under another name.** Push coordination is about publishing more commits
   than intended; this is about one `git commit` sweeping in more FILES than intended, because
