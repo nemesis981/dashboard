@@ -3,6 +3,18 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [LOW] `test_layer_c.py` crashes with an uncaught `TypeError`, pre-existing (found 2026-08-25)
+`python3 modules/malware_detection/test_layer_c.py` dies with an unhandled
+`TypeError: the JSON object must be str, bytes or bytearray, not NoneType` at
+`test_layer_c.py:129` (`json.loads(r["ai_verdict"])`) inside the "a real verdict is
+recorded" case — `_ai_verdict_for_finding()` left `ai_verdict` NULL in the row instead of
+writing a verdict. A `PromptFieldError: HASH 'hash1' is not a hex digest` prints just
+before it, from the same test's fake hash literal — plausible root cause, not confirmed.
+**Confirmed pre-existing and unrelated to current work**: reproduces identically on a
+clean `git stash` (unmodified `origin/main`). Not a regression from any batch landed
+2026-08-25. Own commit when picked up — needs root-causing, not just a hash-literal swap,
+since the failure mode (silent NULL write vs. loud rejection) is itself worth checking.
+
 ### [LOW] `WATCHDOG_TO` is prompted, stored, and documented but never read (found 2026-08-24, ADR 0028 verification)
 Installer prompts for `WATCHDOG_TO` (`install.sh:237`), writes it to `/etc/nemesis.env`
 (`:454`) and documents it as the alert recipient. `alert_manager/email_utils.py:send_email()`
