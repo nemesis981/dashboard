@@ -1,9 +1,11 @@
 # ADR 0028 — Email Security Gateway (inbound scanning, account monitoring, detonation)
 
-- **Status:** **Accepted, 2026-08-24.** D1–D3, D5–D9 resolved at proposal. D4 resolved by
-  operator decision the same day (customer-provided hosting, not a Nemesis-operated relay —
-  see D4). Two items remain genuinely open (§8): D5's hold-time budget (deferred to
-  measurement, not undecided) and D7's legal/compliance question. Build spec:
+- **Status:** **Accepted, 2026-08-24; extended 2026-08-25 (D10-D12, enrollment
+  architecture).** D1–D3, D5–D10 resolved at proposal. D4 resolved by operator decision
+  2026-08-24 (customer-provided hosting, not a Nemesis-operated relay — see D4). D11's core
+  shape (attaches to a dashboard user, not a device) and D12 (optional, convenience-only
+  agent-assisted discovery) are resolved; several sub-decisions inside D11 remain genuinely
+  open — see §8. Build spec:
   `~/work/nemesis-internal/scoping-and-estimates/email-security-gateway-build-spec-2026-08-24.md`
   (private per D8).
 - **Date:** 2026-08-24
@@ -399,6 +401,215 @@ This sequence gates D5's hold-time budget too (a slow, high-FP heuristic is wors
 fast check at all) and should run before committing to *any* specific inbound-scanning
 technique, not just before shipping a final model.
 
+### D10 — No agent-side code is required for email protection
+
+**Both delivery paths are inherently centralized.** D1 puts Nemesis in the mail path as an
+inbound MTA relay, clearing a message before it is delivered. D2 connects to the mailbox
+itself over IMAP IDLE. Neither observes anything on an endpoint, and neither needs to: mail
+is intercepted where it arrives, not where it is read. D6 link detonation runs in
+appliance-managed sandbox VMs, reusing the existing malware zero-day sandbox infrastructure —
+also server-side.
+
+**The contrast that makes this principled rather than incidental.** Memory-injection
+detection genuinely required agent code, because the thing it protects — process memory —
+exists only on a specific device and cannot be observed from anywhere else. Email does not
+have that property: an account's mail is reachable centrally by construction, from any
+device or none. Agent code is justified when the protected thing exists only on the device;
+email fails that test, so agent code here would be unjustified scope rather than a missing
+feature.
+
+**Post-compromise is already covered, and email security does not rebuild it.** If a
+phishing link slips through and a device is compromised, that is caught by the existing
+agent-side malware and behavioural detection already running on enrolled devices. Email
+security covers the delivery path; the agent covers what happens on the device afterwards;
+neither is expected to do the other's job.
+
+**D10.1 — the one carve-out.** D12 below adds an optional agent-assisted account-discovery
+convenience. That does not weaken this decision: no agent code is required for protection
+(scanning, verdicts, quarantine and detonation are unchanged whether an agent exists or
+not); D12's discovery is an enrollment UX convenience only, surfacing addresses a device
+already has configured to pre-fill a form field — it never carries mail, never carries
+credentials, and is never in the detection path; every D12 capability degrades to manual
+entry with zero loss of protection. If a future change makes agent presence necessary for an
+account to be protected, that change contradicts D10 and requires a new decision, not an
+implementation detail.
+
+### D11 — Email enrollment attaches to a dashboard USER identity, not a device
+
+**The gap this closes.** Every Nemesis protection to date attaches to a device or a network
+presence: the firewall protects traffic crossing the network, malware and memory-injection
+detection protect an enrolled device. Enrollment is therefore implicit — a device on the
+network is covered by being on the network. **Email breaks that model, because protection
+attaches to an ACCOUNT.** An account is read from a phone, a laptop and a shared desktop
+interchangeably, and a single device hosts several people's accounts; there is no
+device-shaped or network-shaped thing to attach to. Consequence for the product promise:
+"protect the whole network" does not extend to email by itself — an account nobody enrolled
+is not protected, no matter how many protected devices it is read from. That is a property
+of email the enrollment design and UI must both state honestly (D11.8), not a defect to hide.
+
+**D11.2 — only TERMINAL inboxes need enrollment.** A terminal inbox is where mail actually
+lands and is read; an address that forwards elsewhere is not one. Worked example: several
+personal addresses forwarding into one Proton inbox, plus two standalone Gmail accounts kept
+separate, is three connections, not one per address — mail sent to a forwarding address
+arrives at the Proton inbox, where Nemesis scans it, so coverage is complete without
+enrolling the forwarders. This is not merely an optimisation: a forwarding address is
+outside Nemesis's visibility by construction (there is no inbox there to connect to), so
+"enrolling" one would be meaningless as well as unnecessary. Enrollment UI must therefore
+ask "where does your mail actually land?", not "list your addresses" — those produce
+different answers and only one is actionable.
+
+**⚠ Detection caveat — forwarded mail arrives with degraded authentication.** SPF validates
+the connecting server against the envelope sender, and a forwarding hop breaks that
+alignment; DKIM survives forwarding only if the message is not modified in transit (many
+forwarders alter headers or append footers). Mail reaching a terminal inbox via forwarding
+will therefore show authentication failures that say nothing about the original sender's
+legitimacy. This directly affects the `auth_fail`/`auth_missing` signals in the D9
+measurement work — coverage is complete, signal quality on the forwarded subset is not.
+Whatever consumes authentication results must treat "arrived by forwarding" as a distinct
+case rather than scoring it as a suspicious original.
+
+**D11.3 — enrollment hangs off the dashboard user.** Each dashboard user gets a "My Email
+Accounts" section: the accounts they own, their connection health, and their protection
+status, independent of which devices they use. This falls out of the RBAC work already
+built (ADR 0026) rather than needing new identity machinery, and gives the multi-person
+household the right shape: three people with four accounts each are twelve enrollments
+across three identities, not twelve entries in one undifferentiated list.
+
+**D11.4 — the automation ceiling; design for it, not against it.** D1 (owned-domain MTA
+relay) is once-per-domain: connect the domain, every address under it is covered, no
+per-account step ever. D2 (bare-provider IMAP IDLE) is once-per-account, owner-authorized —
+no provider's security model permits silent connection to a mailbox; Gmail's minimum is an
+app password the owner generates. **Zero-touch is not achievable for D2 and should not be
+designed toward.** The correct target is the smoothest possible guided flow: clear
+instructions, provider-specific walkthroughs, immediate connection verification, an
+unmistakable success state. Treating the owner-authorization step as friction to be
+engineered away would mean fighting the provider's security model — and that model is
+correct.
+
+**D11.5 — who connects an account? Recommended: admin-initiated, owner-authorized.** Three
+options were weighed. Self-enrollment only (every member connects their own accounts) keeps
+credentials with their owner but requires every household member to have dashboard literacy,
+and the admin cannot help diagnose a broken connection. Admin-adds-on-behalf-of-others is
+convenient but requires the admin to handle another person's credential — exactly the
+practice security guidance exists to stop — and makes consent murky. **The recommended
+design decouples who starts enrollment from who authorizes it:** the admin creates the
+enrollment request and hands over a scoped, single-use, expiring link; the account owner
+opens it, follows the provider walkthrough, and enters their own app password. The
+credential is never seen, typed, or stored by the admin. Self-service remains available as
+the degenerate case (send the link to yourself). **Admin-adds-on-behalf-of-others should be
+explicitly rejected, not merely not chosen**, so it is not reintroduced later as a
+convenience feature. **This is the decision the operator asked not to be made silently — see
+§8.**
+
+**D11.6 — interaction with ADR 0026 (RBAC/capabilities).** "My Email Accounts" floor should
+be `user` (its only actions write, so `viewonly` would be a dead end). Admin-initiated
+enrollment is a strong candidate for an ADR 0026 capability rather than a raw admin-only
+route — `enroll_email_account` would let a household `sub_admin` invite enrollments after
+passing a quiz whose content writes itself: *why you send a link instead of asking for their
+password.* Two distinct fields are needed, not one: `owner_user_id` and
+`enrolled_by_user_id` — the recommended design makes these genuinely different, and ADR
+0006's Data Manager already stamps `current_actor()` on every logged write, so the actor
+seam exists and must not be bypassed here. Visibility needs its own explicit rule: an admin
+should see an account's existence and health (connected / broken / never completed), never
+its message content, subjects, or quarantine contents — "admin can see it's broken" and
+"admin can read your mail" are different powers and the difference will not stay obvious to
+a future implementer without being stated.
+
+**D11.7 — lifecycle.** Deleting a dashboard user must disconnect their enrolled accounts; an
+orphaned enrollment that keeps scanning a departed person's mailbox is the worst possible
+failure mode here. Shared mailboxes (`family@…` read by two people) are flagged as an open
+sub-question, not decided — single owner with explicit read-share, or true co-ownership —
+and need a call before the schema is written, since it determines whether ownership is a
+column or a join table. Revocation is two-sided: a user can revoke in Nemesis, but can also
+revoke the app password at the provider, invisibly to Nemesis, so the UI must show *health*,
+not just *configured status*, or a silently dead connection reads as protection.
+
+**D11.8 — coverage honesty is a hard UI requirement, not a preference.** An unenrolled
+account is unprotected, and the dashboard must say so. A household with three people and
+eight terminal inboxes, three of which are enrolled, must see "3 of 8 accounts protected"
+and the names of the five that are not — never a green tick. Absence of alerts for an
+unenrolled account is indistinguishable, on screen, from "no threats found"; only the
+enrollment state can tell them apart.
+
+**D11.9 — the unauthenticated route (Option C's link).** The scoped enrollment link is
+reachable without a dashboard login, which is a known, already-bitten failure mode: a public
+route whose endpoint name is missing from `_AUTH_EXEMPT` (`dashboard.py:686`) returns
+302-to-login and looks like a working route to every other check
+(`install_windows_start` shipped exactly this way on 2026-08-02). Requirements: add the
+endpoint to `_AUTH_EXEMPT` explicitly and verify the name resolves to a real `@app.route`
+function; the token must be single-use, expiring, and high-entropy; POST for the credential
+step, never GET; and the route must be covered by the standing route-level security audit
+before it ships.
+
+### D12 — Optional agent-assisted account discovery (convenience only, never required)
+
+Read D10.1 first — this is a UX convenience layered on manual entry, never required, never
+carrying credentials, never touching the detection path.
+
+**D12.1 — what it does.** Where a Nemesis agent is already installed, it can read local
+mail-client configuration to surface email addresses already configured on that device, and
+offer them as checkboxes so the user picks from a list instead of typing: Outlook profile
+configuration and the Windows Mail app on Windows; Thunderbird `prefs.js` and GNOME Online
+Accounts on Linux. **macOS is unverified — scope only after confirming a shipped macOS
+agent exists.** `build_installer.py` references `darwin` for packaging, but `memcap.py` is
+Linux-only and no shipped/tested macOS agent was confirmed; do not scope macOS detection on
+the assumption that an agent is there.
+
+**D12.2 — three hard constraints (operator-stated).** Never framed as exhaustive: detection
+finds only accounts with local client or OS-level configuration, and webmail-only users
+(very common for personal Gmail, precisely the D2 population) will not be found at all — the
+UI says "we found these on this device," never "your accounts" or anything implying a
+complete scan. Addresses only, never credentials: detection pre-fills *which* account; it
+does not skip, shorten, or weaken the per-account authorization step, and a detected address
+enters the identical app-password flow as a typed one. Explicit opt-in, disclosed clearly: a
+"scan this device for email accounts?" consent step, never silent — presenting someone's
+account list back to them is a real detection capability even without credentials, and it is
+disclosed as one.
+
+**D12.3 — manual add is first-class and permanent (operator-stated).** "Add another email
+account" is always visible, always available, and never buried behind a failed or empty
+detection. The manual action sits alongside the detected checkboxes with equal prominence in
+every state — detection off, detection found nothing, detection found ten — and is never
+worded as a fallback ("didn't find it? add manually"), because that frames the common case
+as an error.
+
+**D12.4 — additional constraints found in design.** Shared computers leak account existence
+across people: a family desktop's Thunderbird profile may hold a different household
+member's address. Mitigations, all required: scan the invoking OS user's profile only; never
+pre-check a detected checkbox; never auto-enroll; rely on the fact that enrolling a detected
+address still requires the owner's own authorization, so the worst case is disclosure that
+an address exists, never access to it. Credential stores are off limits — never read, not
+"read and discarded" (Windows Credential Manager, macOS Keychain, GNOME
+Keyring/libsecret) — stated as a hard boundary and made testable: assert the agent neither
+imports nor links those APIs. "Scanned, found nothing" and "could not scan" must be
+different results — Thunderbird not installed, a profile directory unreadable, and a profile
+with genuinely no accounts are three different facts, and an empty list must never silently
+read as "you have no email accounts." Detected config may be stale — a removed account can
+linger in client configuration; detection reports what is configured, the user confirms, and
+a detected address is never treated as verified-live.
+
+**D12.5 — each probe is a vendor-specific integration.** Per CLAUDE.md's standing rule, a
+vendor-specific probe ships a `CUSTOM_*.md` guide in the same commit — interface contract,
+skip-if-absent pattern, minimal working example, where to register it, Rule 8 constraints.
+Outlook, Thunderbird, GNOME Online Accounts and Mail.app are four such probes.
+Skip-if-absent is mandatory: Outlook not installed reports "not present," never an error.
+
+### SMB context — D1 is the real "full network protected" story for email
+
+For a business with an owned domain, D1 is the answer and it genuinely scales: connect the
+domain once and every address under it is covered, new hires included, automatically, with
+no per-account step. That is a true domain-wide protection claim and should be the headline
+for SMB customers. D2 does not scale to that promise, and this ADR states so plainly rather
+than implying otherwise: "50 employees on personal Gmail accounts" means 50 separate owner
+authorizations, 50 app passwords generated by 50 people, 50 support conversations when one
+breaks, and 50 revocations at offboarding — a property of the providers' security models,
+not an implementation gap Nemesis can close later. There is also a consent and ownership
+problem, not just a scaling one: a business does not own its employees' personal mailboxes,
+and scanning them raises consent questions that in many jurisdictions are not the employer's
+to give. D2-at-business-scale should not be presented as a roadmap item that merely needs
+work — it is outside what the product should promise, and stating that clearly is more
+honest than leaving it to be discovered during a sales conversation.
+
 ## 4. The critical boundary — what v1 actually promises, stated so it isn't oversold
 
 - **Owned-domain path:** genuine pre-delivery blocking, because the message never reaches
@@ -478,7 +689,7 @@ fixed here (Window 3, read-only/docs mode):
 
 ## 8. Open questions requiring the operator's input — not picked silently
 
-D4 and D8 were resolved 2026-08-24 (see above) and are removed from this list. Two remain:
+D4 and D8 were resolved 2026-08-24 (see above) and are removed from this list.
 
 1. **D5's hold-time budget** — deliberately left as "measure it," not guessed. Needs real
    detonation-duration data before a number goes into any design. Not blocking build start
@@ -489,3 +700,23 @@ D4 and D8 were resolved 2026-08-24 (see above) and are removed from this list. T
    mail carries disclosure or consent obligations beyond "the customer redirected their own
    MX"? Not a technical question — flagging rather than assuming an answer. Not blocking
    early build stages; blocking before the hard-block action ships to any customer.
+3. **D11.5 — who connects an account?** Recommended: admin-initiated, owner-authorized (a
+   scoped single-use link; the admin never sees the credential), with self-service as the
+   degenerate case, and admin-adds-on-behalf-of-others explicitly rejected rather than merely
+   not chosen. This is the decision the operator asked not to be made silently — flagged, not
+   picked, in this document. Blocks D11.9's route design.
+4. **D11.7 — shared mailbox ownership.** Single owner with an explicit read-share, or true
+   co-ownership? Needs a call before the enrollment schema is written — it determines whether
+   ownership is a column or a join table.
+5. **D11.6 — should `enroll_email_account` become an ADR 0026 capability?** Recommended yes —
+   the learning-gate quiz content maps directly onto the property Option C (item 3 above)
+   exists to preserve. Not blocking D11's core shape; blocks the sub_admin-delegation path
+   specifically.
+6. **D12.1 — macOS account-discovery scope.** Not to be scoped until a shipped, tested macOS
+   agent is confirmed to exist. Currently unconfirmed — `build_installer.py` references
+   `darwin` packaging, but no shipped macOS agent has been verified.
+7. **Where should the project-wide "minimize per-install/per-account manual setup friction"
+   principle (motivating D11.2's terminal-inbox rule and D12's discovery convenience, but not
+   specific to email) live?** Placed in `ARCHITECTURE.md` — see that document's "Product
+   principles" note — since it is already in the mandated session read-order and so is seen
+   before design work begins on any future feature it should inform.

@@ -2,6 +2,30 @@
 
 This document gives a high-level map of how Nemesis Firewall is put together, for anyone extending or auditing the project.
 
+## Product principle — minimize per-install / per-account manual setup
+
+**Minimize per-install and per-account manual setup friction wherever technically possible.
+The more Nemesis detects and configures for itself rather than asking a user to enter by
+hand, the stronger the product feels to a real person.** Named anti-pattern: legacy antivirus
+with a separate license key and a full setup ritual per machine — a household deploying
+Nemesis across several devices and accounts should not experience one setup ceremony per
+device or account. This directly motivated ADR 0028's D11.2 (enroll a terminal inbox once,
+not every forwarding address) and D12 (agent-assisted account discovery instead of typing).
+
+**"Wherever technically possible" is load-bearing — this principle must never be invoked to
+weaken a security boundary.** There are two kinds of friction and they are not
+interchangeable:
+
+| | example | verdict |
+|---|---|---|
+| **Artificial friction** | a license key per machine; re-entering an address the device already knows | Remove it — this is what the principle targets |
+| **Intrinsic friction** | an app-password step the account owner must complete; consent before scanning a device | Keep it — it exists because a security or consent model requires it |
+
+The principle is satisfied by making an unavoidable step smooth, guided and unmistakable —
+never by removing the step itself. Stated here, ahead of design work, because "reduce setup
+friction" is exactly the kind of principle a future reader could invoke, in good faith, to
+justify the wrong change.
+
 ## High-level Architecture
 
 ```mermaid
