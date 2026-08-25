@@ -1,0 +1,17 @@
+{
+  "name": "email_security",
+  "display_name": "Email Security",
+  "version": "0.1.0",
+  "description": "Inbound email security gateway (ADR 0028). v1 scope: the bare-provider path -- Gmail personal accounts over IMAP IDLE using app-password auth -- plus MIME parsing, SPF/DKIM/DMARC verification, and the measured static signals from the D9 measurement campaign. Attachment detonation reuses the existing malware_detection sandbox; link detonation is a separate network-enabled engine. The MTA-relay path for owned domains is a later stage and is NOT built here. Outlook.com personal accounts are deliberately deferred (no app-password equivalent; XOAUTH2 would require a registered OAuth app).",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": true,
+  "config_keys": [],
+  "enabled_by_default": false,
+  "confirmation_required": true,
+  "apt_deps": [],
+  "pip_deps": [
+    "dnspython"
+  ],
+  "required": false
+}
