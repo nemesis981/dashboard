@@ -278,6 +278,7 @@ def detonate_message_links(sandbox, fetcher, parsed) -> dict:
             "detonated": len(results),
             "complete": (not ex["truncated"]) and (not ex["upstream_truncated"])}
 
+
 def record_results(verdict_id, batch) -> int:
     """Persist one message's link-detonation results. Returns rows written.
 
