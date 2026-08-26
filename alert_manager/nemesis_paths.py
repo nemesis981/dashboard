@@ -60,3 +60,39 @@ def data_dir():
     SQLite in WAL mode creates -wal/-shm siblings here, so callers that check
     writability must check the DIRECTORY, not just the file."""
     return os.path.dirname(db_path())
+
+
+#: Environment variable that redirects where ransomware canary bait is planted.
+#: Deliberately alongside DB_PATH_ENV so a harness redirects BOTH from one place
+#: and they cannot drift apart — see canary_root().
+CANARY_ROOT_ENV = "NEMESIS_CANARY_ROOT"
+
+
+def canary_root():
+    """Root directory that ransomware canary bait is planted under.
+
+    ⚠ THIS EXISTS BECAUSE REDIRECTING THE DATABASE USED TO GIVE NO FILESYSTEM
+    ISOLATION AT ALL. The canary resolved the plant location with a bare
+    ``os.path.expanduser("~")``, so a harness that pointed NEMESIS_DB_PATH at a
+    throwaway database still planted and DELETED bait in the operator's real home
+    directory. On 2026-08-26 that fired a false ransomware alert against live user
+    files — the DB count said "zero canaries exist" because it read the throwaway
+    DB, while the plant wrote to the real home because the home resolver had never
+    heard of the override. **The asymmetry was the bug**, which is why this
+    resolver lives HERE, next to db_path(), rather than inside the canary module:
+    one place answers "where does Nemesis put things", so the two answers cannot
+    disagree.
+
+    Resolution order, mirroring db_path():
+      1. ``$NEMESIS_CANARY_ROOT`` — set explicitly by a harness or a unit.
+      2. the invoking user's home — the production default, since Pass 1 plants
+         as the dashboard user and the bait must be user-owned.
+
+    Note there is no "relocated" middle case as db_path() has: bait belongs in a
+    real user's documents, not in /var/lib. The whole point of the file is that it
+    looks like something worth encrypting.
+    """
+    explicit = os.environ.get(CANARY_ROOT_ENV, "").strip()
+    if explicit:
+        return explicit
+    return os.path.expanduser("~")

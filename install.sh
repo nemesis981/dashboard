@@ -1304,6 +1304,45 @@ deploy_services() {
     chmod 0660 "$_db"
     ok "alerts.db at $_db (owner $SUDO_USER, group nemesis-db, 0660)"
 
+    # ── Ransomware canary: ON for a real install, OFF everywhere else ─────────
+    #
+    # The module ships canary_autoplant=0 DELIBERATELY (2026-08-26). Planting
+    # writes real bait files into a real user's home, and a stray import — a
+    # test, a page render — must never be able to do that. A dashboard
+    # page-render test did exactly that: it pointed the DB at a throwaway file
+    # while the canary still resolved the operator's REAL home, planted and
+    # deleted bait among live user files, and fired a false ransomware alert.
+    #
+    # But a security product should ship PROTECTED, not unprotected. So a real
+    # install opts in explicitly, right here, and only here. Default-off plus
+    # installer-on gives both properties; neither alone does.
+    #
+    # ⚠ RUN AS "$SUDO_USER", NOT ROOT. SQLite creates -wal/-shm siblings owned by
+    # the writing process, so a root write here would leave root-owned sidecars
+    # and lock every de-privileged service out of the database — precisely the
+    # failure the setgid bit above exists to prevent.
+    #
+    # Uses the module's OWN _init_db()/_set_setting() rather than an inline
+    # CREATE+INSERT, so the canonical DDL stays in exactly one place (ADR 0001).
+    if sudo -u "$SUDO_USER" NEMESIS_DB_PATH="$_db" python3 - <<'PYEOF' 2>/dev/null
+import sys
+sys.path.insert(0, "/opt/nemesis")
+sys.path.insert(0, "/opt/nemesis/alert_manager")
+import modules
+import nemesis_paths
+modules.set_shared_db_path(nemesis_paths.db_path())
+from modules.malware_detection import module as _md
+_md._init_db()
+_md._set_setting("canary_autoplant", "1")
+assert _md._get_setting("canary_autoplant", "0") == "1", "setting did not persist"
+PYEOF
+    then
+        ok "canary auto-plant enabled for this install (canary_autoplant=1)"
+    else
+        warn "could not enable canary auto-plant — the canary layer will poll" \
+             "zero bait until you set canary_autoplant=1 in the dashboard"
+    fi
+
     for svc in "${svc_names[@]}"; do
         if [[ ! -f "/etc/systemd/system/${svc}.service" ]]; then
             continue
