@@ -41,6 +41,7 @@ TRUNCATION IS NEVER SILENT
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from urllib.parse import urlsplit
 
@@ -111,6 +112,56 @@ class Fetcher:
         None, and an engine that requires it would otherwise refuse every fetch.
         """
         raise NotImplementedError
+
+
+#: Matches a literal email address, INCLUDING the percent-encoded form
+#: (`x%40example.com`) that mail links routinely use. Both must be caught: a
+#: redactor that only handled the plain form would leave most of them, and would
+#: look like it was working.
+_ADDRESS_RE = re.compile(
+    r"[A-Za-z0-9._+-]+(?:@|%40|%40)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}",
+    re.IGNORECASE)
+
+#: What a redacted address is replaced with. Deliberately NOT an empty string:
+#: an absent value and a removed value must stay distinguishable.
+REDACTED = "<redacted-address>"
+
+
+def redact_addresses(url: str):
+    """Replace LITERAL email addresses in a url. Returns (url, count).
+
+    ⚠ SCOPE, decided 2026-08-26 and deliberately narrow: only values that ARE a
+    literal address. The opaque recipient identifiers that dominate real mail
+    (`e=`, `mail=`, `uid=`, `u=` -- 4,301 of them in the 1,020-message burner
+    corpus) are left INTACT. They are pseudonymous rather than directly
+    readable, and widening to them is a separate, larger decision.
+
+    WHERE THEY ACTUALLY ARE -- measured, not assumed. In that corpus: 37 URLs
+    carry a literal address in the PATH and 18 in the QUERY. An implementation
+    that redacted only identity-NAMED params (`email=` and friends) would have
+    caught 9 and missed the majority, while appearing to work.
+
+    WHY THE HOST AND PATH STRUCTURE SURVIVE: a URL's host, path and parameter
+    NAMES are the detection signal, and `link_classify` already reports stateful
+    params by name rather than value. The VALUE of an address adds nothing
+    analytically and is the recipient's personal data. This makes the link table
+    consistent with `mime_parse`, which already hashes address local parts and
+    keeps domains for exactly this reason.
+
+    A url containing no address is returned BYTE-IDENTICAL -- no parse/rebuild
+    round-trip, so nothing is silently re-encoded.
+    """
+    if not url or "@" not in url and "%40" not in url.lower():
+        return url, 0
+    n = 0
+
+    def _sub(m):
+        nonlocal n
+        n += 1
+        return REDACTED
+
+    out = _ADDRESS_RE.sub(_sub, url)
+    return (out, n) if n else (url, 0)
 
 
 def extract_candidates(parsed) -> dict:
@@ -255,9 +306,19 @@ def record_results(verdict_id, batch) -> int:
     for r in batch.get("results") or []:
         if r.get("outcome") not in OUTCOMES:
             raise ValueError("unknown outcome %r" % r.get("outcome"))
+        # PERSISTENCE TIME ONLY. The url was fetched with its REAL value; only
+        # the stored copy is redacted. Two consequences, both accepted and
+        # intended rather than defects:
+        #   * a stored url may not be re-detonatable as-is. Re-running should
+        #     re-extract from the source message, which is the real source of
+        #     truth anyway.
+        #   * UNIQUE(verdict_id, url) can now collapse two links that differed
+        #     ONLY by recipient address into one row. That is the correct
+        #     reading -- same endpoint, same message, different recipient token.
+        stored_url, _n_redacted = redact_addresses(r["url"])
         dm.upsert(
             MODULE_NAME, "email_link_detonations",
-            {"verdict_id": verdict_id, "url": r["url"], "host": r.get("host"),
+            {"verdict_id": verdict_id, "url": stored_url, "host": r.get("host"),
              "side_effect_risk": r.get("side_effect_risk"),
              "detonated_at": now, "outcome": r["outcome"],
              "report_json": json.dumps(r["report"]) if r.get("report") is not None else None,

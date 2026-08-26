@@ -152,5 +152,73 @@ check("MUTANT (grant removed) REFUSES the write -> the grant is load-bearing",
 check("CONTROL: grant restored, writes work again",
       le.record_results(12, BATCH) == 2)
 
+print("\n-- 8. ADDRESS REDACTION at persistence time --")
+RED = {"extraction": {"truncated": False, "upstream_truncated": False, "eligible": 3},
+       "detonated": 3,
+       "results": [
+           {"url": "https://e.example/unsub?u=abc123&email=x%40example.com",
+            "host": "e.example", "side_effect_risk": "high",
+            "outcome": "completed", "report": {"raw": "200"}, "error": None},
+           {"url": "https://e.example/u/alice.smith@example.org/confirm",
+            "host": "e.example", "side_effect_risk": "high",
+            "outcome": "completed", "report": {"raw": "200"}, "error": None},
+           {"url": "https://e.example/click?e=aG9sZDEyMw&t=99",
+            "host": "e.example", "side_effect_risk": "medium",
+            "outcome": "completed", "report": {"raw": "200"}, "error": None},
+       ]}
+le.record_results(21, RED)
+conn = DM.connect("email_security")
+stored = [r[0] for r in conn.execute(
+    "SELECT url FROM email_link_detonations WHERE verdict_id=21 ORDER BY id")]
+conn.close()
+joined = " ".join(stored)
+check("no literal address survives in ANY stored url",
+      "@example.com" not in joined and "@example.org" not in joined
+      and "%40example.com" not in joined, stored)
+check("query-param address redacted", any(le.REDACTED in s and "unsub" in s for s in stored), stored)
+check("PATH address redacted too (the majority case in real mail)",
+      any(le.REDACTED in s and "/confirm" in s for s in stored), stored)
+check("opaque identity token LEFT INTACT (out of scope, deliberately)",
+      any("e=aG9sZDEyMw" in s for s in stored), stored)
+check("host and path structure preserved -- still the detection signal",
+      all("e.example" in s for s in stored), stored)
+check("a url with no address is stored byte-identical",
+      "https://e.example/click?e=aG9sZDEyMw&t=99" in stored, stored)
+
+print("\n-- 9. UNIQUE collapse on redacted duplicates is INTENDED --")
+COLLAPSE = {"extraction": {"truncated": False, "upstream_truncated": False,
+                           "eligible": 2}, "detonated": 2,
+            "results": [
+                {"url": "https://e.example/p?email=a%40example.com",
+                 "host": "e.example", "outcome": "completed",
+                 "report": {"raw": "200"}, "error": None},
+                {"url": "https://e.example/p?email=b%40example.com",
+                 "host": "e.example", "outcome": "completed",
+                 "report": {"raw": "200"}, "error": None},
+            ]}
+le.record_results(22, COLLAPSE)
+conn = DM.connect("email_security")
+n22 = conn.execute("SELECT COUNT(*) FROM email_link_detonations "
+                   "WHERE verdict_id=22").fetchone()[0]
+conn.close()
+check("two links differing ONLY by recipient collapse to ONE row (intended)",
+      n22 == 1, n22)
+
+print("\n-- 10. MUTATION: prove §8 is not vacuous --")
+_real_re = le._ADDRESS_RE
+le._ADDRESS_RE = __import__("re").compile(r"(?!x)x")   # matches nothing
+try:
+    le.record_results(23, RED)
+    conn = DM.connect("email_security")
+    leaked = " ".join(r[0] for r in conn.execute(
+        "SELECT url FROM email_link_detonations WHERE verdict_id=23"))
+    conn.close()
+finally:
+    le._ADDRESS_RE = _real_re
+check("MUTANT (redactor disabled) LEAKS the address -> §8 is a real check",
+      "example.org" in leaked or "%40example.com" in leaked, leaked[:90])
+check("CONTROL: redactor restored, addresses removed again",
+      le.redact_addresses("https://x/?email=q%40example.com")[1] == 1)
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
