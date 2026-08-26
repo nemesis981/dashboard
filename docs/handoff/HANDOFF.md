@@ -186,6 +186,22 @@ Not re-checked this specific session (no fresh Morning Status run since the rebo
 came mid-session, after this morning's baseline). Last live check: 2026-08-25 morning
 Morning Status, matched HANDOFF's 2026-08-22 baseline exactly. Re-run at next session start.
 
+**New, found 2026-08-26 during Stage 4.2 work, not from a routine check — first entry sourced
+from a fleet VM rather than the build host.** `<gateway-vm>` (VM fleet, bridged to the
+production LAN): local test account holds full sudo plus a NOPASSWD set (`systemctl`,
+`journalctl`, `tail`, `ufw`, `nmap`), confirmed live via `sudo -n -l`. **Still needed** — the
+NOPASSWD set is the only working management route today; VirtualBox guest-control's execution
+service was found non-functional on this VM, so SSH plus these grants is what makes it
+administrable at all. **`nmap` is the outlier worth a second look**: this VM sits bridged on
+the production LAN, so passwordless root `nmap` means the shared lab test-account password
+grants root-privileged raw-socket scanning of the real LAN from a host already on it —
+defensible as a lab credential, but the one to drop first if the set is ever trimmed. Not a
+finding against the VM's purpose; the point is that it is now tracked rather than silently
+unknown. **Open scope question for the operator**: Morning Status item 7's standing check is
+host-oriented; whether it should extend to fleet VMs generally (a bridged VM with a shared lab
+credential is a real position on the production LAN) is a docs-scope decision this entry
+surfaces but does not resolve.
+
 ## 7. Cross-references
 
 - `docs/handoff/supplements/2026-08-25-001.md` — curated narrative, this session.
