@@ -353,6 +353,48 @@ number.
   re-staging only the intended path is the clean fix — confirmed safe in the same incident,
   verified first that the bad commit had not been pushed and that no one else had pushed or
   pulled in the interim.
+- **`git stash` operates on the WHOLE SHARED TREE and a SHARED STACK — never use it here
+  (confirmed live 2026-08-26).** A pathspec does not make it local to your slice, and the
+  stack is shared by every window, so `git stash pop` can apply a DIFFERENT window's stash
+  into your working tree. Push-coordination and shared-index staging are about your own work
+  escaping; this one pulls someone else's work IN.
+
+  **`stash push` + `stash pop` IS NOT A ROUND TRIP HERE.** `pop` applies the TOP of the
+  stack regardless of who pushed it, so in a shared tree the sequence is
+  *push-mine, pop-somebody-else's* (Window 1's framing, 2026-08-26 — sharper than the
+  original and kept in its words).
+
+  **What happened.** Window 3 ran `git stash push -q alert_manager/roles.py` then
+  `git stash pop -q`, to check whether a test failure predated its change. The pop applied
+  **Window 1's** stash ("ADR 0019 Phase 1 degraded-journal ingest, pre-deploy") and left
+  `dashboard.py` in a conflicted `UU` state with 12 conflict-marker lines, mixing a committed
+  fix with another window's unpushed work — in a file the stashing window had not stashed.
+
+  **Nothing was lost, and the reason is luck rather than design:** the fix was already
+  committed, and the failed pop happened to KEEP the stash entry. A clean pop would have
+  consumed Window 1's stash into Window 3's tree, and a later `git checkout` would then have
+  destroyed unpushed, pre-deploy work with no copy anywhere.
+
+  **Recovery, if it happens anyway:** do NOT `git stash drop`, and do not resolve the
+  conflict by hand. Confirm the other window's entry still lists (`git stash list`,
+  `git stash show --stat`), restore the conflicted file from its committed state
+  (`git checkout HEAD -- <file>`), verify zero conflict markers, then TELL THE OWNING WINDOW
+  and ask them to verify their own stash rather than accepting your assurance.
+
+  **⚠ AND THE STASH DID NOT EVEN REVERT WHAT IT CLAIMED TO.** The whole point of the
+  attempt was to measure a test result WITHOUT the change; because the push did not take,
+  the "before" run still contained it. **The change was compared against itself and
+  declared innocent.** It was not — it was a real bug (a module that could not load at
+  all), and reporting it as pre-existing sent another window chasing a non-existent shared
+  defect. A state-moving command that half-fails leaves you with a confident measurement of
+  nothing.
+
+  **What to do instead — the question is almost always answerable read-only.** Window 3
+  wanted to know whether it had caused a test failure. `git diff --stat -- <testfile>` answers
+  that in one command, with no writes: an empty diff means the file was never touched. Reach
+  for a read-only comparison before any command that MOVES state. If a stash is genuinely
+  unavoidable, use a **worktree** (`git worktree add`) so the experiment has its own checkout,
+  or copy the file aside and restore it by hand.
 - **Shared working trees — `/opt/nemesis` AND `~/work/nemesis-internal` are SINGLE checkouts
   shared by every window, not per-window clones.** The private repo is the higher-risk of the
   two: it has two git-writers by design (Window 1 authors private-module code, Window 2 is
