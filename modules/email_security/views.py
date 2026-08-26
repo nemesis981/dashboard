@@ -80,7 +80,7 @@ def api_quarantine_list():
                         "error": "could not read verdicts: %s"
                                  % type(exc).__name__}), 500
 
-    from . import notify_copy as nc
+    from modules.email_security import notify_copy as nc
     out = []
     for r in rows:
         tier = _tier_for(r)
@@ -108,7 +108,7 @@ def api_quarantine_list():
 
 def _tier_for(row) -> str:
     """Map a stored verdict onto D7's three tiers. Never guesses 'clean'."""
-    from . import notify_copy as nc
+    from modules.email_security import notify_copy as nc
     if (row.get("quarantine_state") or "none") != "none":
         return nc.QUARANTINE
     v = (row.get("verdict") or "").strip().lower()

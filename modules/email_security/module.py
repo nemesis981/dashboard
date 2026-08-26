@@ -277,5 +277,11 @@ class Module(NemesisModule):
         the authentication. Adding them would be the vulnerability. Verified
         against the hook itself, not inferred from a comment.
         """
-        from . import views                                     # noqa: PLC0415
+        # ABSOLUTE, not relative. `modules_loader` loads module.py via
+        # spec_from_file_location("nemesis_module_email_security"), so there is
+        # NO parent package and `from . import views` raises ImportError --
+        # which the loader's caller swallows, so the module simply never loads
+        # and its routes never register. Found 2026-08-26 by driving the real
+        # loader; every sibling module uses the absolute form for this reason.
+        from modules.email_security import views            # noqa: PLC0415
         return views.routes()

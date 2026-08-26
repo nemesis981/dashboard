@@ -323,8 +323,55 @@ def _load_module(name: str) -> None:
     # Register any Flask routes the module declares
     routes = instance.get_routes()
     if routes and _app:
+        # ── Load-time RBAC registration check (2026-08-26) ────────────────────
+        #
+        # A route absent from roles.ROUTE_MINIMUMS resolves to admin-only via the
+        # gate's fail-closed path -- SAFE, but the access level is a DEFAULT
+        # rather than a decision, and nothing forced anyone to make one. The
+        # runtime drift signal (E-RBAC-002) is supposed to say so; it recorded
+        # NOTHING AT ALL until the `connect("core")` bug was fixed the same day,
+        # and a ledger of zero rows read exactly like "no drift ever occurred".
+        #
+        # WHY THE ROUTE IS SKIPPED RATHER THAN THE MODULE REFUSED. `modules_loader`
+        # hard-refuses an ADR-0006 violation, and this deliberately does NOT match
+        # that: an ADR-0006 violation means a module BYPASSES access control, while
+        # an unregistered route is merely OVER-restricted. Killing an entire
+        # module -- its background work, its card, its other routes -- over a
+        # registry omission whose security posture is already safe would trade a
+        # safe route for a dead module. Skipping just the offending route fails
+        # closed at the exact granularity of the mistake.
+        #
+        # AND THE POINT IS THAT THE SIGNAL IS THE BEHAVIOUR, NOT THE LOG LINE. A
+        # warning can go unread for months -- that is precisely how the broken
+        # recorder survived. A route that visibly 404s cannot.
+        #
+        # Imported HERE, not at module top level: this file imports only stdlib +
+        # `modules`, and is imported by a dozen test files and two modules that do
+        # not necessarily have alert_manager/ on their path. Inside `if _app` we
+        # are in the dashboard process, where roles is importable by construction.
+        try:
+            import roles as _roles_reg                          # noqa: PLC0415
+        except ImportError:  # pragma: no cover
+            try:
+                from alert_manager import roles as _roles_reg   # noqa: PLC0415
+            except ImportError:
+                _roles_reg = None
+                log.warning("modules_loader: roles registry unavailable — "
+                            "registering %s routes WITHOUT the RBAC check", name)
+
         for rule, view_func, options in routes:
             endpoint = f"module_{name}_{view_func.__name__}"
+
+            if _roles_reg is not None and endpoint not in _roles_reg.ROUTE_MINIMUMS:
+                log.error(
+                    "modules_loader: REFUSING to register %s (%s) — endpoint %r "
+                    "is not in roles.ROUTE_MINIMUMS, so its required role was "
+                    "never decided. The route will 404 until it is registered. "
+                    "Fix: add \"%s\": (<get_role>, <post_role>) to ROUTE_MINIMUMS "
+                    "in alert_manager/roles.py.",
+                    rule, name, endpoint, endpoint)
+                continue
+
             try:
                 _app.add_url_rule(rule, endpoint,
                                   _guard_view(name, view_func), **options)

@@ -45,7 +45,7 @@ import re
 from datetime import datetime
 from urllib.parse import urlsplit
 
-from . import link_classify as lc
+from modules.email_security import link_classify as lc
 
 #: Must match the data_manager NAMESPACES key.
 MODULE_NAME = "email_security"
