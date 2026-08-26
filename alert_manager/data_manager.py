@@ -145,12 +145,15 @@ NAMESPACES = {
     # then a deliberate act rather than a side effect of naming a table.
     # `email_attachment_detonations` added 2026-08-25 for stage 3 -- named
     # individually, per the line above, NOT taken as licence to relax to a prefix.
+    # `email_link_detonations` added 2026-08-26 for stage 4's link results. Same
+    # treatment: named outright. Four tables is the point, not an argument for
+    # relaxing to `email_`.
     #
     # Worth stating plainly given what this module touches: it holds the verdicts
     # for a person's PRIVATE MAIL. A grant that widens on its own is a poor fit
     # for that, independent of the general argument.
     #
-    # Reads across other tables per ADR 0001 read-any; writes only these three.
+    # Reads across other tables per ADR 0001 read-any; writes only these four.
     # The canonical DDL is database.init_email_security_tables(), called from the
     # module's start() — the grant governs WRITES, not creation, and neither
     # implies the other.
@@ -162,7 +165,8 @@ NAMESPACES = {
     # exercises the real allowed()/check_write() path directly.
     "email_security":     {"tables": ("email_accounts",
                                       "email_message_verdicts",
-                                      "email_attachment_detonations")},
+                                      "email_attachment_detonations",
+                                      "email_link_detonations")},
 
     # An EMPTY table grant, and that is the whole point. The lookup tool owns no
     # tables: it shells out to dig/whois, returns the answer to the operator, and

@@ -40,9 +40,20 @@ TRUNCATION IS NEVER SILENT
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime
 from urllib.parse import urlsplit
 
 from . import link_classify as lc
+
+#: Must match the data_manager NAMESPACES key.
+MODULE_NAME = "email_security"
+
+
+def _now() -> str:
+    """Local ISO to seconds -- ADR 0004, matching the sibling modules."""
+    return datetime.now().isoformat(timespec="seconds")
+
 
 #: Only these are fetchable. Anything else is recorded as skipped, never dropped
 #: silently.
@@ -215,3 +226,49 @@ def detonate_message_links(sandbox, fetcher, parsed) -> dict:
     return {"extraction": ex, "results": results,
             "detonated": len(results),
             "complete": (not ex["truncated"]) and (not ex["upstream_truncated"])}
+
+def record_results(verdict_id, batch) -> int:
+    """Persist one message's link-detonation results. Returns rows written.
+
+    Routed through the Data Manager (ADR 0006). Upserts on (verdict_id, url) so a
+    re-detonation UPDATES rather than duplicating -- matching the table's UNIQUE
+    constraint.
+
+    ⚠ THE BATCH-LEVEL TRUNCATION FACTS ARE WRITTEN ONTO EVERY ROW, deliberately.
+    `link_extract` caps at 25 links/message and `mime_parse` at 500 URLs; a
+    persistence layer that drops those turns a PARTIAL run into an apparently
+    complete one. A reader must be able to ask "was this message fully covered?"
+    from the rows alone, without the caller having kept the batch dict.
+
+    Separate from `detonate_message_links` on purpose: detonation and persistence
+    fail for different reasons, and a DB error must not be mistaken for a
+    detonation failure.
+    """
+    from modules import get_data_manager                        # noqa: PLC0415
+
+    ex = batch.get("extraction") or {}
+    dm = get_data_manager()
+    actor = dm.current_actor()
+    now = _now()
+    truncated = 1 if (ex.get("truncated") or ex.get("upstream_truncated")) else 0
+    written = 0
+    for r in batch.get("results") or []:
+        if r.get("outcome") not in OUTCOMES:
+            raise ValueError("unknown outcome %r" % r.get("outcome"))
+        dm.upsert(
+            MODULE_NAME, "email_link_detonations",
+            {"verdict_id": verdict_id, "url": r["url"], "host": r.get("host"),
+             "side_effect_risk": r.get("side_effect_risk"),
+             "detonated_at": now, "outcome": r["outcome"],
+             "report_json": json.dumps(r["report"]) if r.get("report") is not None else None,
+             "error": r.get("error"),
+             "batch_truncated": truncated,
+             "batch_eligible": ex.get("eligible"),
+             "batch_detonated": batch.get("detonated"),
+             "actor": actor},
+            conflict_cols=("verdict_id", "url"),
+            update=["host", "side_effect_risk", "detonated_at", "outcome",
+                    "report_json", "error", "batch_truncated", "batch_eligible",
+                    "batch_detonated", "actor"])
+        written += 1
+    return written

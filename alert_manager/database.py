@@ -1808,6 +1808,69 @@ def init_email_security_tables():
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_detonations_verdict "
                   "ON email_attachment_detonations(verdict_id)")
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_link_detonations (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                -- The message this link came from (email_message_verdicts.id).
+                verdict_id    INTEGER NOT NULL,
+                -- The URL as it appeared. Stored in the CLEAR, unlike attachment
+                -- filenames which are hashed -- and the asymmetry is deliberate.
+                -- A filename can carry the owner's identity ("2026-tax-return-
+                -- <name>.pdf") and its only signal is the extension. A URL's
+                -- host, path and parameters ARE the signal, and hashing them
+                -- would destroy the very thing detonation exists to examine.
+                url           TEXT    NOT NULL,
+                -- Split out for querying without re-parsing every row.
+                host          TEXT,
+                -- link_classify.side_effect_risk() at detonation time.
+                -- ⚠ A RECORDED FACT, NEVER A GATE. 'low' means "nothing in the
+                -- URL's shape suggests server-side state" -- NOT "safe to
+                -- fetch": a 1x1 tracking pixel scores 'low' and still reports a
+                -- read. Anything that filters on this column has misread it.
+                side_effect_risk TEXT,
+                detonated_at  TEXT    NOT NULL,
+                -- ⚠ 'completed' means the URL WAS FETCHED and a report came
+                -- back. It does NOT mean benign -- the verdict lives in the
+                -- report, and a clean report has three indistinguishable causes
+                -- (genuinely benign / the page detected the sandbox / the fetch
+                -- never really happened). Only the third is eliminable, and the
+                -- must-reach canary is what eliminates it. See
+                -- known-limitations/link-detonation-sandbox-evasion-2026-08-26.
+                --   completed          -- fetched, report collected
+                --   egress_unverified  -- REFUSED, nothing was fetched
+                --   skipped_scheme     -- non-http(s) target, never attempted
+                --   skipped_unparseable-- no usable scheme/host
+                --   error              -- fetch attempted and failed; detail in
+                --                        `error`. Includes a fetcher CONTRACT
+                --                        VIOLATION (returned instead of raising)
+                outcome       TEXT    NOT NULL,
+                -- The engine's report verbatim. Verdict INPUTS, not a verdict.
+                report_json   TEXT,
+                -- Explicit failure detail. NULL on success -- never an empty
+                -- string standing in for "no error".
+                error         TEXT,
+                -- ⚠ TRUNCATION CARRIED PER ROW, deliberately. link_extract caps
+                -- at 25 links/message and mime_parse at 500 URLs. A persistence
+                -- layer that drops these turns a PARTIAL run into an apparently
+                -- complete one -- the "silently truncated set" failure this repo
+                -- checks for. A reader must be able to ask "was this message
+                -- fully covered" from the rows alone.
+                batch_truncated  INTEGER NOT NULL DEFAULT 0,
+                batch_eligible   INTEGER,
+                batch_detonated  INTEGER,
+                -- Actor seam, same as the sibling tables.
+                actor         TEXT,
+                -- The same URL twice in one message is one detonation's worth of
+                -- information; re-detonating UPDATES rather than duplicating.
+                UNIQUE(verdict_id, url)
+            )
+        """)
+        # Same predicate-carrying shape as the attachment indexes above.
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_link_det_outcome "
+                  "ON email_link_detonations(outcome)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_link_det_verdict "
+                  "ON email_link_detonations(verdict_id)")
+
         # Guarded migrations. Both tables ship complete above, so these are no-ops
         # on a fresh install; they exist because CREATE TABLE IF NOT EXISTS will
         # NOT alter a table that already exists, and stage 2.6 may land on a DB
