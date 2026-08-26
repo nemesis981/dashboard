@@ -1578,8 +1578,26 @@ def _errors_record_rbac(code, context):
         if _rbac_recorder is None:
             import nemesis_errors
             from modules import get_data_manager
+            # ⚠ "dashboard", NOT "core". `"core"` IS NOT A DATA MANAGER NAMESPACE,
+            # so connect("core") raised DataManagerError, the `except Exception`
+            # below swallowed it, and E-RBAC-001/002/003 RECORDED NOTHING, EVER.
+            #
+            # That silently disabled the drift detection this very module
+            # promises: `_enforce_role` says "Fail closed, and SAY SO ... silence
+            # would let the registry drift out of step with the routes forever"
+            # — it failed closed correctly and said so to nobody. The live ledger
+            # held zero E-RBAC rows, which reads identically to "no drift has
+            # ever occurred" and is why this survived. Found 2026-08-26; proven
+            # with a control pair rather than by reading:
+            #     connect("core")      -> returns None, 0 rows written
+            #     connect("dashboard") -> returns 1,    1 row written
+            #
+            # Every other recorder in the codebase passes its OWN real namespace
+            # (diagnostics, watchdog, netprobe...). This was the only caller
+            # naming one that does not exist. The name is also persisted via
+            # register_error_code(), so it must be a real owner, not a label.
             _rbac_recorder = nemesis_errors.make_recorder(
-                "core", lambda: get_data_manager().connect("core"),
+                "dashboard", lambda: get_data_manager().connect("dashboard"),
                 _RBAC_ERR_CODES, logger=auth_log)
         return _rbac_recorder(code, context=context)
     except Exception:

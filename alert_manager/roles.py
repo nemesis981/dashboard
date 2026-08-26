@@ -397,6 +397,21 @@ ROUTE_MINIMUMS = {
     "module_netprobe__api_trace":    (_A, _A),
     "module_netprobe__api_targets":  (_U, _A),
 
+    # email_security — BOTH admin, which is stricter than the dominant
+    # (viewonly, admin) shape here, deliberately:
+    #   * the quarantine LIST is not neutral metadata. It exposes who emails the
+    #     operator, what was blocked and why — private-mail detail. A viewonly
+    #     account reading lookup's RR-type constants is not comparable, so the
+    #     read side is admin too.
+    #   * RELEASE is a state change on quarantined mail, matching the
+    #     malware_detection quarantine precedent below, which is admin on both.
+    # This makes the CURRENT behaviour deliberate rather than changing it: both
+    # endpoints already resolved to admin via the unclassified fail-closed path.
+    # ADR 0028 D7's reasoning applies — collapsing distinct cases into one policy
+    # over- or under-serves, and that holds for the roles reaching them too.
+    "module_email_security_api_quarantine_list": (_A, _A),
+    "module_email_security_api_release":         (_A, _A),
+
     # malware_detection — quarantine and scan reach a device, hence admin;
     # setting a finding's status is triage, hence user.
     "module_malware_detection__api_findings":           (_V, _A),
