@@ -86,12 +86,18 @@ class LinkDetonationHalted(RuntimeError):
 class Fetcher:
     """What this driver needs from the (not yet built) detonation engine."""
 
-    def fetch(self, url: str) -> dict:
+    def fetch(self, url: str, egress_evidence=None) -> dict:
         """Detonate ONE url in the sandbox; return the observation report.
 
         Must RAISE on failure rather than returning an empty report: an empty
         observation and a failed fetch are the two states that must never be
         conflated, because a failed fetch reads as 'benign page' downstream.
+
+        `egress_evidence` is the dict this driver got from
+        `verify_egress_constrained()`, passed through so the engine can REFUSE
+        when the caller skipped the check -- without duplicating the check
+        itself. Found necessary by wiring the real engine in: it defaults to
+        None, and an engine that requires it would otherwise refuse every fetch.
         """
         raise NotImplementedError
 
@@ -167,13 +173,27 @@ def detonate_link(sandbox, fetcher, candidate) -> dict:
             outcome="egress_unverified") from exc
 
     try:
-        report = fetcher.fetch(url)
+        report = fetcher.fetch(url, egress_evidence=egress)
     except Exception as exc:                                    # noqa: BLE001
         # A failed fetch is per-URL and recoverable. It is NOT an empty
         # observation, and must never be recorded as one.
         return dict(base, outcome="error",
                     error="%s: %s" % (type(exc).__name__, exc), report=None)
 
+    # CONTRACT ENFORCEMENT (added 2026-08-26, on Window 2's review finding).
+    # `Fetcher.fetch` is documented as "raise on failure, never return an empty
+    # report". A fetcher that violates that by returning None would otherwise be
+    # recorded as outcome='completed' with report=None -- an anomalous shape that
+    # nothing guarded, and the closest thing to the "empty report reads as
+    # benign" failure this whole stage exists to prevent. Turn the contract
+    # violation into a loud error rather than a weird-but-"completed" result.
+    # Window 2 raised this while no real Fetcher existed; link_fetch.LinkFetcher
+    # now does, so the guard is no longer hypothetical.
+    if report is None:
+        return dict(base, outcome="error", report=None,
+                    error="fetcher CONTRACT VIOLATION: returned None instead of "
+                          "raising. A missing report must never be recorded as a "
+                          "completed detonation -- see Fetcher.fetch's docstring.")
     return dict(base, outcome="completed", report=report,
                 # Carried so a report can never be read as proving more than it
                 # does -- the engine's own not-proven list travels with it.

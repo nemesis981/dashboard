@@ -61,7 +61,11 @@ class Fetch(le.Fetcher):
     def __init__(self, mode="ok"):
         self.mode, self.calls = mode, []
 
-    def fetch(self, url):
+    def fetch(self, url, egress_evidence=None):
+        # Recorded so a test can prove the driver PASSES it, not just that a
+        # fetch happened -- the integration bug found 2026-08-26 was exactly
+        # this argument going unpassed.
+        self.evidence_seen = egress_evidence
         self.calls.append(url)
         if self.mode == "boom":
             raise RuntimeError("connection reset")
@@ -95,6 +99,9 @@ check("fetcher actually called with the urls", len(f.calls) == 2, f.calls)
 check("marked complete (nothing truncated)", out["complete"] is True)
 check("carries the engine's not-proven list",
       out["results"][0]["egress_not_proven"], out["results"][0])
+check("driver PASSES the egress evidence through to the fetcher",
+      isinstance(f.evidence_seen, dict)
+      and f.evidence_seen.get("egress_verified") is True, f.evidence_seen)
 
 print("\n-- 2. EGRESS IS VERIFIED PER-FETCH, not once per batch --")
 class CountingEv(Ev):
@@ -209,6 +216,24 @@ except lsb.EgressUnverified:
     pass
 check("MUTANT (verify AFTER fetch) DOES fetch -> §3 is a real check",
       fm.calls == ["https://x.test/"], fm.calls)
+
+print("\n-- 10. A fetcher that VIOLATES its contract is caught, not trusted --")
+class BadFetcher(le.Fetcher):
+    """Returns None instead of raising -- the documented contract violation."""
+    def fetch(self, url, egress_evidence=None):
+        return None
+
+
+outb = le.detonate_message_links(sb, BadFetcher(), p)
+check("contract-violating None is NOT recorded as completed",
+      all(r["outcome"] == "error" for r in outb["results"]),
+      [r["outcome"] for r in outb["results"]])
+check("...and the error NAMES it as a contract violation",
+      "CONTRACT VIOLATION" in outb["results"][0]["error"],
+      outb["results"][0]["error"][:80])
+check("...report stays None, never an empty-looking dict",
+      outb["results"][0]["report"] is None)
+
 
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)
