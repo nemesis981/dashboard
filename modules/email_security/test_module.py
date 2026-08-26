@@ -248,5 +248,55 @@ check("manifest: NOT enabled by default", mf["enabled_by_default"] is False,
 check("manifest: confirmation required", mf["confirmation_required"] is True)
 check("manifest: not marked required", mf["required"] is False)
 
+print("\n-- 7. Dashboard card: honest, escaped, genuinely tiered --")
+mod7, m7 = load_module("zero_accounts")
+check("None when the module has never run (no honest card exists)",
+      m7.get_dashboard_card() is None)
+
+m7.start()
+card = m7.get_dashboard_card()
+check("a started module DOES render a card", card and "Email Security" in card, card)
+check("...and it carries status()'s own wording, not a cheerful summary",
+      "no mailbox configured" in card, card)
+
+mod8, m8 = load_module("two_accounts")
+m8.start()
+card8 = m8.get_dashboard_card()
+check("⚠ 'configured but NOT connected' is stated on the card, not hidden",
+      "not connected" in card8, card8)
+
+# tier.js contract: all three attrs, and they must be DISTINCT -- three
+# identical strings satisfy a naive presence check while defeating the feature.
+import re as _re
+attrs = dict(_re.findall(r'data-(beginner|intermediate|pro)="([^"]*)"', card8))
+check("all three tier variants present", len(attrs) == 3, sorted(attrs))
+check("...and genuinely DISTINCT (not the same string three times)",
+      len(set(attrs.values())) == 3, attrs)
+check("...element carries class=tier-text so tier.js finds it",
+      'class="tier-text"' in card8)
+
+print("\n-- 7b. HTML ESCAPING -- detail can carry server-influenced text --")
+# `_last_error` only reaches `detail` when accounts > 0 AND client is None --
+# verified against status() after a zero_accounts fixture silently failed to
+# deliver the payload at all. A fixture that cannot deliver its own input is
+# testing nothing, and it PASSED two of the three assertions while doing so.
+mod9, m9 = load_module("two_accounts")
+m9.start()
+m9._client = None
+m9._last_error = '"><script>alert(1)</script>'
+card9 = m9.get_dashboard_card()
+check("raw <script> never reaches the card", "<script>" not in card9, card9[:120])
+check("the quote that would break out of an attribute is escaped",
+      '"><script' not in card9, card9[:120])
+check("...and the text is still PRESENT, escaped rather than dropped",
+      "&lt;script&gt;" in card9 or "&quot;" in card9, card9[:160])
+
+print("\n-- 7c. MUTATION: prove the escaping check is not vacuous --")
+from html import escape as _esc
+check("MUTANT (unescaped) WOULD contain raw <script> -> 7b is a real check",
+      "<script>" in ('<p data-x="%s">' % '"><script>alert(1)</script>'))
+check("CONTROL: escaping the same string removes it",
+      "<script>" not in ('<p data-x="%s">' % _esc('"><script>alert(1)</script>', quote=True)))
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

@@ -200,16 +200,74 @@ class Module(NemesisModule):
 
     # --- Dashboard ---------------------------------------------------------
 
-    def get_dashboard_card(self) -> str | None:
-        """Dashboard card. Returns None until there is something honest to show.
+    #: state -> (dot, colour, label). Mirrors the four states `status()` keeps
+    #: distinct; collapsing any two here would undo that distinction at exactly
+    #: the layer a person actually looks at.
+    _CARD_STYLE = {
+        "stopped": ("\u26aa", "#888888", "Stopped"),
+        "running": ("\U0001f7e2", "#33cc66", "Running"),
+        "error":   ("\u26a0\ufe0f", "#ff5555", "Error"),
+    }
 
-        Deliberately None at this stage rather than a placeholder card: a card
-        implying the feature is watching mail, before any mail is being read,
-        is precisely the false-assurance shape this feature's own measurement
-        work exists to avoid.
+    def get_dashboard_card(self) -> str | None:
+        """Dashboard card, or None when there is genuinely nothing honest to show.
+
+        ⚠ THE CARD MUST NOT IMPLY COVERAGE THE MODULE DOES NOT HAVE. It renders
+        `status()`'s own wording rather than a cheerful summary, because the four
+        states that function keeps apart -- stopped / no mailbox / configured but
+        NOT connected / connected -- are different facts about whether mail is
+        actually being examined. A card that showed green for "configured but not
+        connected" would be reassuring about a module examining nothing, which is
+        the false-assurance shape this feature's measurement work exists to avoid.
+
+        Still returns None when the module has never been started: there is no
+        honest card for a feature that is off.
+
+        HTML is built with %-formatting and single-quoted literals, NOT an
+        f-string. That is deliberate -- f-string-rendered markup is this
+        codebase's #1 recurring defect (a stray quote or apostrophe is a SILENT
+        SyntaxError). Every interpolated value is escaped; `detail` can carry an
+        exception string, which is attacker-influenced in the sense that it may
+        quote a mailbox or server response.
         """
-        return None
+        if not self._running and not self._last_error:
+            return None
+
+        from html import escape                                 # noqa: PLC0415
+        s = self.status()
+        dot, colour, label = self._CARD_STYLE.get(
+            s["state"], ("\u26a0\ufe0f", "#ffcc00", "Unknown"))
+        detail = escape(str(s.get("detail") or ""), quote=True)
+
+        # All three tier variants, genuinely distinct, per tier.js's contract --
+        # and the initial content matches the intermediate one so the card reads
+        # correctly if JS has not run yet.
+        beginner = escape(
+            "Nemesis checks incoming email for scams and dangerous "
+            "attachments. Current status: %s." % detail, quote=True)
+        intermediate = detail
+        pro = escape("email_security: state=%s; %s"
+                     % (s.get("state"), s.get("detail") or ""), quote=True)
+
+        return (
+            '<div class="card">'
+            '<h2>\U0001f4e7 Email Security</h2>'
+            '<p style="margin:4px 0">%s <span style="color:%s">%s</span></p>'
+            '<p class="tier-text" style="color:#888;font-size:0.82em;margin:4px 0"'
+            ' data-beginner="%s" data-intermediate="%s" data-pro="%s">%s</p>'
+            '</div>'
+            % (dot, colour, escape(label), beginner, intermediate, pro,
+               intermediate)
+        )
 
     def get_routes(self) -> list | None:
-        """No routes yet. Enrollment and verdict UI are later stages."""
-        return None
+        """Quarantine list (GET) + release (POST). Build spec 5.1.
+
+        NEITHER is added to `_AUTH_EXEMPT`, and that is deliberate rather than an
+        omission: `_enforce_setup_and_auth` is an `@app.before_request` hook that
+        sees every request including module routes, so absence from that set IS
+        the authentication. Adding them would be the vulnerability. Verified
+        against the hook itself, not inferred from a comment.
+        """
+        from . import views                                     # noqa: PLC0415
+        return views.routes()
