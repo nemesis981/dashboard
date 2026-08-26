@@ -1029,6 +1029,31 @@ is only visible in aggregate — individually each looked like an ordinary slip:
 - **Prefer a neutral cwd** for any path/import test; the repo root silently rescues imports
   that would fail in a service.
 
+**⚠ THIS RULE APPLIES TO YOUR DIAGNOSTICS, NOT ONLY TO PRODUCTION CODE (added 2026-08-26).**
+Every example above is production code. On 2026-08-26 three windows hit this shape in one
+day, and **all three were in the instruments used to INVESTIGATE**, not in the thing being
+investigated:
+
+| the diagnostic | why it looked fine |
+|---|---|
+| `git stash push` + `pop` to measure a test result "before" a change | the push silently did not take, so the "before" run still contained the change — **it was compared against itself and declared innocent** |
+| grepping for symbols, expecting zero, reading hits as damage | the hits were already-committed work; the grep was correct, the **expectation attached to it** was not |
+| counting install-directory entries as setup progress | all of them were OS built-ins |
+
+**The first is the most instructive: it LOOKED like a controlled before/after and had no
+"before".** It then produced a confident, wrong conclusion that was reported to the operator
+and sent another window investigating a defect that did not exist.
+
+**What to do:**
+- **Prove the "before" is actually different before trusting a before/after.** A
+  state-moving command that half-fails leaves you measuring the same thing twice. This is the
+  known-good/known-bad discipline `scripts/nemesis-fw-neverblock` already applies in
+  production — turned on your own diagnostic.
+- **Separate the query from the expectation.** A grep that returns what you did not expect has
+  not necessarily found a problem; check what the hits ARE before naming them.
+- **Prefer a read-only comparison to a state-moving one.** "Did I cause this?" is usually
+  answerable with `git diff --stat -- <file>` — no writes, and it cannot half-fail.
+
 **Grep for this shape in every retro/review pass**, alongside the checks above and below.
 Four standing checks now, one failure class each: a bug that hides in rendering (#1 recurring
 bug), an instrument that cannot fail, an instrument that answered from the wrong place (this
