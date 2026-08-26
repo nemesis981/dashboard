@@ -237,14 +237,22 @@ class Module(NemesisModule):
         s = self.status()
         dot, colour, label = self._CARD_STYLE.get(
             s["state"], ("\u26a0\ufe0f", "#ffcc00", "Unknown"))
-        detail = escape(str(s.get("detail") or ""), quote=True)
+        # ⚠ KEEP THE RAW AND ESCAPED FORMS SEPARATE, and escape exactly ONCE at
+        # the point of use. Building a variant from the ALREADY-escaped `detail`
+        # and escaping the result again produced `&amp;quot;` in the beginner
+        # tier -- safe (over-escaping never renders markup) but visibly broken
+        # text. Found by Window 2's review, 2026-08-26; my own test missed it
+        # because it asserted on the WHOLE CARD with an `or`, so the two correct
+        # variants satisfied it while the third was wrong.
+        raw_detail = str(s.get("detail") or "")
+        detail = escape(raw_detail, quote=True)
 
         # All three tier variants, genuinely distinct, per tier.js's contract --
         # and the initial content matches the intermediate one so the card reads
         # correctly if JS has not run yet.
         beginner = escape(
             "Nemesis checks incoming email for scams and dangerous "
-            "attachments. Current status: %s." % detail, quote=True)
+            "attachments. Current status: %s." % raw_detail, quote=True)
         intermediate = detail
         pro = escape("email_security: state=%s; %s"
                      % (s.get("state"), s.get("detail") or ""), quote=True)

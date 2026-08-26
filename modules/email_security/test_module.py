@@ -291,6 +291,26 @@ check("the quote that would break out of an attribute is escaped",
 check("...and the text is still PRESENT, escaped rather than dropped",
       "&lt;script&gt;" in card9 or "&quot;" in card9, card9[:160])
 
+# ⚠ PER-VARIANT, NOT AGGREGATE. The check above uses `or` across the whole card,
+# so two correct variants satisfy it while a third is broken -- which is exactly
+# what happened: `beginner` double-escaped and this suite passed anyway (found by
+# Window 2's review, 2026-08-26). Assert each variant separately, and assert the
+# ABSENCE of double-escaping rather than only the presence of escaping.
+import re as _re2
+mod10, m10 = load_module("two_accounts")
+m10.start()
+m10._client = None
+m10._last_error = 'Tom & Jerry said "hi"'
+card10 = m10.get_dashboard_card()
+_vars = dict(_re2.findall(r'data-(beginner|intermediate|pro)="([^"]*)"', card10))
+check("all three variants extracted for per-variant checks", len(_vars) == 3, _vars)
+for _name, _val in sorted(_vars.items()):
+    check("%s: escaped exactly ONCE (no &amp;quot; / &amp;amp;)" % _name,
+          "&amp;quot;" not in _val and "&amp;amp;" not in _val, _val[:90])
+    check("%s: still contains the real text" % _name, "Jerry" in _val, _val[:90])
+check("CONTROL: the payload really does contain HTML-special chars",
+      '&' in m10._last_error and '"' in m10._last_error)
+
 print("\n-- 7c. MUTATION: prove the escaping check is not vacuous --")
 from html import escape as _esc
 check("MUTANT (unescaped) WOULD contain raw <script> -> 7b is a real check",
