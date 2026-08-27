@@ -230,6 +230,107 @@ def _init_db() -> None:
             actor            TEXT
         )
     """)
+
+    # ── L4 accumulating context (DESIGN-L4-full-ai-mode-2026-08-27 §4) ────────
+    # executescript, not execute: three related statements, same pattern the top
+    # of this function already uses. `execute` takes exactly one.
+    conn.executescript("""
+        -- ── L4 accumulating context (DESIGN-L4-full-ai-mode-2026-08-27 §4) ──
+        --
+        -- TWO TABLES, DELIBERATELY SEPARATE. The separation is what makes §4.4's
+        -- "vendor baseline and learned context are never merged" a STRUCTURAL
+        -- property rather than a convention someone has to remember.
+        --
+        -- Vendor-authored. Replaced WHOLESALE on update (new `version`), never
+        -- written by the AI or the admin -- so a baseline update has nothing to
+        -- clobber, by construction rather than by merge logic.
+        CREATE TABLE IF NOT EXISTS ai_policy_baseline (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            version      TEXT NOT NULL,
+            action_class TEXT NOT NULL,
+            trigger_type TEXT NOT NULL,
+            trigger_key  TEXT NOT NULL,
+            guidance     TEXT NOT NULL,
+            installed_at TEXT NOT NULL,
+            -- Per install TIER (§6): commercial/SMB ships more cautious than
+            -- home. NULL means "applies to every tier".
+            tier         TEXT
+        );
+
+        -- This install's accumulated calibration. APPEND-ONLY.
+        --
+        -- ⚠ NOTHING IS EVER DELETED FROM THIS TABLE. Expiry and revocation are
+        -- COLUMNS, not removals (§4.4). "No longer applied" and "no longer
+        -- recorded" are different states, and collapsing them would make the
+        -- system's own history unauditable exactly where it matters most.
+        CREATE TABLE IF NOT EXISTS ai_learned_context (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at      TEXT NOT NULL,
+            -- REQUIRED. Retrieval never crosses action classes (§4.2).
+            action_class    TEXT NOT NULL,
+            trigger_type    TEXT NOT NULL,
+            trigger_key     TEXT NOT NULL,
+            direction       TEXT NOT NULL,
+            scope           TEXT NOT NULL,
+            -- Verbatim, required, non-empty. This is the artefact a human reads.
+            admin_reasoning TEXT NOT NULL,
+            source_event_id INTEGER,
+            -- §4.7 SUSPENDED PENDING REVIEW. A THIRD state, deliberately not
+            -- reusing revoked_at: revocation is the DISCARD path, and §4.7 says
+            -- a baseline conflict must NOT discard customer calibration. A
+            -- suspended row stops influencing decisions and waits for a human.
+            suspended_at        TEXT,
+            suspended_by_version TEXT,
+            suspension_resolved_at TEXT,
+            suspension_resolution  TEXT,
+            -- NULL for restrictive (persists); set for permissive (§4.3).
+            expires_at      TEXT,
+            revoked_at      TEXT,
+            revoked_by      TEXT,
+            use_count       INTEGER NOT NULL DEFAULT 0,
+            last_used_at    TEXT,
+            actor           TEXT,
+
+            -- ⭐ THE PAWL IS IN THE SCHEMA, WHERE IT CANNOT BE FORGOTTEN (§4.3).
+            --
+            -- Erosion is ASYMMETRIC: fifty individually-reasonable permissive
+            -- overrides compose into a system markedly less cautious than the one
+            -- approved, with no single wrong decision behind it. A restrictive
+            -- entry may generalise to a category; a permissive one may NEVER --
+            -- it binds to this address, this signature, this process, and nothing
+            -- wider. Enforced by the DATABASE so no write path can bypass it,
+            -- including one written later by someone who has not read §4.3.
+            CHECK (direction IN ('restrictive', 'permissive')),
+            CHECK (scope IN ('trigger', 'category')),
+            CHECK (NOT (direction = 'permissive' AND scope = 'category')),
+            -- A permissive entry that never expires is a category grant wearing a
+            -- narrow label: it accumulates the same way, just slower.
+            CHECK (direction = 'restrictive' OR expires_at IS NOT NULL),
+            CHECK (length(trim(admin_reasoning)) > 0)
+        );
+
+        -- ⚠ RETRIEVAL IS ITSELF RECORDED (§4.4). Without this, "why did it decide
+        -- that?" is unanswerable after the fact, and `use_count` would be a number
+        -- nobody could audit. Also carries the TRUNCATION flag: a bounded
+        -- retrieval that presents as complete is the "never head -n a set you draw
+        -- a conclusion from" rule applied to the AI's own inputs.
+        CREATE TABLE IF NOT EXISTS ai_context_retrieval (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            retrieved_at   TEXT NOT NULL,
+            trace_id       TEXT,
+            action_class   TEXT NOT NULL,
+            trigger_type   TEXT NOT NULL,
+            trigger_key    TEXT NOT NULL,
+            -- Which learned rows were fed in, as a JSON id list. Empty is a
+            -- VALID, SAFE outcome (baseline only) -- never an error, never
+            -- filled in with a loosened match.
+            learned_ids    TEXT NOT NULL,
+            baseline_ids   TEXT NOT NULL,
+            matched_total  INTEGER NOT NULL,
+            returned_count INTEGER NOT NULL,
+            truncated      INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS ix_adl_trace "
                  "ON ai_decision_log(trace_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_adl_ts ON ai_decision_log(ts)")
@@ -4684,6 +4785,376 @@ def _route_upsell_restore():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# §4.5 review surface — THE PAGE
+#
+# ⚠ THIS IS A PLAIN STRING, NOT AN f-STRING, AND THAT IS DELIBERATE.
+# The #1 recurring defect in this codebase is a JS string or an English
+# contraction inside a rendered f-string causing a SILENT SyntaxError at import.
+# The page below interpolates NOTHING: it is a static shell that populates from
+# /api/ai/context/learned (the admin-only JSON route above). No braces need
+# escaping because there is no f-string, so the entire bug class is absent by
+# construction rather than avoided by care.
+#
+# ⚠ EVERY VALUE IS INSERTED WITH textContent, NEVER innerHTML.
+# `admin_reasoning` is the one free-text field in the schema — operator-authored
+# prose, stored verbatim, and displayed here. innerHTML would make the review
+# surface an XSS sink fed by its own database. textContent cannot execute.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CONTEXT_PAGE = """<!DOCTYPE html>
+<html>
+<head>
+    <title>What Your AI Has Learned — Nemesis</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <style>
+        body { font-family: Arial; background: #1a1a2e; color: #eee;
+               padding: 20px; margin: 0; }
+        h1 { color: #00d4ff; margin-bottom: 4px; }
+        a { color: #00d4ff; }
+        .back { color: #bbb; text-decoration: none; font-size: 0.9em; }
+        .back:hover { color: #00d4ff; }
+        .sub { color: #999; font-size: 0.9em; margin: 0 0 18px 0; max-width: 70em; }
+        .card { background: #16213e; padding: 18px; border-radius: 10px;
+                border: 1px solid #00d4ff; margin-bottom: 18px; }
+        .stats-bar { display: flex; gap: 22px; flex-wrap: wrap; margin-bottom: 16px; }
+        .stat-item { color: #ccc; font-size: 0.88em; }
+        .stat-item b { color: #00d4ff; font-size: 1.15em; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+        th { padding: 6px 10px; text-align: left; color: #00d4ff;
+             font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.05em;
+             border-bottom: 1px solid #1e2d4e; }
+        td { padding: 8px 10px; border-bottom: 1px solid #1e2d4e;
+             vertical-align: top; }
+        tr.inactive td { opacity: 0.55; }
+        .why { color: #ddd; font-style: italic; max-width: 34em;
+               white-space: pre-wrap; word-break: break-word; }
+        .pill { display: inline-block; padding: 2px 8px; border-radius: 10px;
+                font-size: 0.78em; font-weight: bold; }
+        .restrictive { background: #1e3a2e; color: #7fdba0; }
+        .permissive  { background: #3a2e1e; color: #dbb87f; }
+        .state { font-size: 0.78em; }
+        .st-active    { color: #7fdba0; }
+        .st-suspended { color: #ffb454; font-weight: bold; }
+        .st-expired   { color: #999; }
+        .st-revoked   { color: #ff6b6b; }
+        .used { color: #ccc; }
+        .used.never { color: #777; }
+        button { background: #16213e; color: #00d4ff; border: 1px solid #00d4ff;
+                 border-radius: 6px; padding: 4px 10px; cursor: pointer;
+                 font-size: 0.8em; }
+        button:hover { background: #1e2d4e; }
+        button.danger { color: #ff6b6b; border-color: #ff6b6b; }
+        button.armed  { background: #4a1e1e; color: #fff; border-color: #ff6b6b; }
+        button:disabled { opacity: 0.4; cursor: default; }
+        .banner { background: #3a2e1e; border: 1px solid #ffb454; color: #ffd9a0;
+                  padding: 12px 16px; border-radius: 8px; margin-bottom: 18px; }
+        .empty { color: #888; padding: 18px 4px; }
+        .err { color: #ff6b6b; }
+    </style>
+</head>
+<body>
+    <a class="back" href="/">&larr; Back to dashboard</a>
+    <h1>What Your AI Has Learned</h1>
+    <p class="sub">Every calibration entry that shapes your AI&#39;s judgment.
+    These change WHICH choice it makes within an action it is already allowed to
+    take &mdash; they never grant it authority it does not have. Entries that
+    have expired or been revoked stay listed: &ldquo;no longer applied&rdquo; and
+    &ldquo;no longer recorded&rdquo; are different things.</p>
+
+    <div id="suspended-banner"></div>
+
+    <div class="card">
+        <div class="stats-bar" id="stats"></div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Added</th><th>Applies to</th><th>Direction</th>
+                    <th>Admin&#39;s reasoning</th><th>Used</th>
+                    <th>State</th><th></th>
+                </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+        </table>
+        <div class="empty" id="empty" style="display:none">
+            Nothing learned yet. Entries appear here as you correct the AI&#39;s
+            decisions &mdash; this page stays empty on a fresh install, which is
+            the honest starting state.
+        </div>
+    </div>
+
+<script>
+function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    // textContent, never innerHTML: admin_reasoning is free text from the DB.
+    if (text !== undefined && text !== null) e.textContent = String(text);
+    return e;
+}
+
+function stateOf(r) {
+    if (r.revoked_at) return ['revoked', 'st-revoked'];
+    if (r.suspended) return ['suspended \\u2014 awaiting review', 'st-suspended'];
+    if (!r.active) return ['expired', 'st-expired'];
+    return ['active', 'st-active'];
+}
+
+function post(url, body, done) {
+    fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(body)
+    }).then(function(r) { return r.json().then(function(j) {
+        done(r.ok && j.ok, j.error || '');
+    }); }).catch(function() { done(false, 'request failed'); });
+}
+
+function render(data) {
+    var tbody = document.getElementById('rows');
+    tbody.textContent = '';
+    var rows = data.entries || [];
+    document.getElementById('empty').style.display = rows.length ? 'none' : '';
+
+    var c = data.counts || {};
+    var stats = document.getElementById('stats');
+    stats.textContent = '';
+    [['Total', c.total], ['Active', c.active],
+     ['Awaiting review', c.awaiting_review]].forEach(function(pair) {
+        var d = el('div', 'stat-item');
+        d.appendChild(el('b', null, pair[1] === undefined ? 0 : pair[1]));
+        d.appendChild(document.createTextNode(' ' + pair[0]));
+        stats.appendChild(d);
+    });
+
+    var banner = document.getElementById('suspended-banner');
+    banner.textContent = '';
+    if (c.awaiting_review) {
+        var b = el('div', 'banner');
+        b.textContent = c.awaiting_review + ' entr' +
+            (c.awaiting_review === 1 ? 'y is' : 'ies are') +
+            ' suspended by a vendor policy update and awaiting your review. ' +
+            'They are not influencing decisions until you decide. Keeping one ' +
+            'restores it; revoking retires it. Neither happens on its own.';
+        banner.appendChild(b);
+    }
+
+    rows.forEach(function(r) {
+        var st = stateOf(r);
+        var tr = el('tr', r.active ? '' : 'inactive');
+        tr.appendChild(el('td', null, (r.created_at || '').replace('T', ' ')));
+
+        var applies = el('td');
+        applies.appendChild(el('div', null, r.trigger_key));
+        applies.appendChild(el('div', 'state',
+            r.trigger_type + ' \\u00b7 ' + r.scope + '-scoped'));
+        tr.appendChild(applies);
+
+        var dir = el('td');
+        dir.appendChild(el('span', 'pill ' + r.direction, r.direction));
+        tr.appendChild(dir);
+
+        tr.appendChild(el('td', 'why', r.admin_reasoning));
+
+        var used = el('td', 'used' + (r.use_count ? '' : ' never'));
+        used.textContent = r.use_count
+            ? (r.use_count + (r.use_count === 1 ? ' time' : ' times'))
+            : 'never';
+        tr.appendChild(used);
+
+        var state = el('td');
+        state.appendChild(el('div', 'state ' + st[1], st[0]));
+        if (r.expires_at && !r.revoked_at) {
+            state.appendChild(el('div', 'state st-expired',
+                'expires ' + r.expires_at.replace('T', ' ')));
+        }
+        if (r.suspended_by_version) {
+            state.appendChild(el('div', 'state',
+                'by baseline ' + r.suspended_by_version));
+        }
+        tr.appendChild(state);
+
+        tr.appendChild(actionCell(r));
+        tbody.appendChild(tr);
+    });
+}
+
+function actionCell(r) {
+    var td = el('td');
+    if (r.revoked_at) return td;
+
+    if (r.suspended) {
+        var keep = el('button', null, 'Keep');
+        keep.onclick = function() {
+            keep.disabled = true;
+            post('/api/ai/context/suspension',
+                 {id: r.id, resolution: 'kept'}, after(td));
+        };
+        var drop = el('button', 'danger', 'Retire');
+        drop.onclick = function() {
+            drop.disabled = true;
+            post('/api/ai/context/suspension',
+                 {id: r.id, resolution: 'revoked'}, after(td));
+        };
+        td.appendChild(keep);
+        td.appendChild(document.createTextNode(' '));
+        td.appendChild(drop);
+        return td;
+    }
+
+    // Two-step confirm, deliberately in-page: a window.confirm() blocks every
+    // subsequent browser event, and revoking a restrictive entry LOOSENS the
+    // system, so it deserves a deliberate second click rather than a reflex.
+    var btn = el('button', 'danger', 'Revoke');
+    btn.onclick = function() {
+        if (btn.className.indexOf('armed') === -1) {
+            btn.className = 'danger armed';
+            btn.textContent = 'Confirm revoke?';
+            setTimeout(function() {
+                if (btn.className.indexOf('armed') !== -1) {
+                    btn.className = 'danger';
+                    btn.textContent = 'Revoke';
+                }
+            }, 4000);
+            return;
+        }
+        btn.disabled = true;
+        post('/api/ai/context/revoke', {id: r.id}, after(td));
+    };
+    td.appendChild(btn);
+    return td;
+}
+
+function after(td) {
+    return function(ok, err) {
+        if (ok) { load(); return; }
+        td.appendChild(el('div', 'err', err || 'failed'));
+    };
+}
+
+function load() {
+    fetch('/api/ai/context/learned')
+        .then(function(r) { return r.json(); })
+        .then(render)
+        .catch(function() {
+            document.getElementById('empty').style.display = '';
+            document.getElementById('empty').textContent =
+                'Could not load learned context.';
+        });
+}
+load();
+</script>
+</body>
+</html>"""
+
+
+def _route_context_page():
+    """GET /ai/context — the §4.5 review surface page.
+
+    Admin-only, same as the JSON routes beneath it. The page ships no data of
+    its own: it fetches from /api/ai/context/learned, so there is exactly one
+    read path to secure and one to audit, not two.
+    """
+    from flask import Response
+    return Response(_CONTEXT_PAGE, mimetype="text/html")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# §4.5 review surface — "what your AI has learned"
+#
+# ⚠ ALL THREE ARE ADMIN ON BOTH VERBS (operator decision, 2026-08-27), and the
+# read side being admin is deliberate rather than an oversight. Revoking a
+# RESTRICTIVE entry LOOSENS the system — it is the same class of act as granting
+# authority, so it sits at the same bar as the grant itself. Splitting view down
+# to sub_admin was considered and declined: the page's whole content is the
+# reasoning behind security decisions, which is not viewer-grade material.
+#
+# ⚠ These routes are NOT in `_AUTH_EXEMPT`, and that ABSENCE IS the
+# authentication for module routes — inverted from dashboard.py's routes. Adding
+# an entry here would BE the vulnerability, not a fix for one.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _route_context_learned():
+    """GET /api/ai/context/learned — the review surface (§4.5).
+
+    Returns inactive rows too, by design: an expired or revoked entry that
+    vanished from the page would make "no longer applied" indistinguishable
+    from "never happened" (§4.4).
+    """
+    from flask import request, jsonify
+    from modules.ai_engine import context_store
+    cls = request.args.get("action_class") or None
+    rows = context_store.review_rows(cls)
+    return jsonify({
+        "ok": True,
+        "entries": rows,
+        "counts": {
+            "total": len(rows),
+            "active": sum(1 for r in rows if r["active"]),
+            "suspended": sum(1 for r in rows if r["suspended"]),
+            # Surfaced separately because a suspension is the one state that is
+            # WAITING ON A HUMAN. It should read as a queue, not a status.
+            "awaiting_review": sum(1 for r in rows if r["suspended"]),
+        },
+    })
+
+
+def _route_context_revoke():
+    """POST /api/ai/context/revoke — retire one entry. Soft, logged, permanent."""
+    from flask import request, jsonify
+    from modules.ai_engine import context_store
+    if not request.is_json:
+        # Explicit, matching the email_security precedent. A form-encoded POST
+        # already fails (get_json returns None, so `id` is absent and this 400s)
+        # -- but that is an IMPLICIT defence resting on a detail a later edit
+        # could remove without noticing. A cross-origin form post is the CSRF
+        # vector here; state it as a gate rather than inheriting it as luck.
+        return jsonify({"ok": False, "error": "JSON content-type required"}), 415
+    data = request.get_json(silent=True) or {}
+    entry_id = data.get("id")
+    if entry_id is None:
+        return jsonify({"ok": False, "error": "id is required"}), 400
+    actor = _current_actor() or "unknown"
+    try:
+        n = context_store.revoke_learned(entry_id, actor)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "id must be an integer"}), 400
+    if not n:
+        # Explicit: already revoked, or no such row. NOT reported as success —
+        # a no-op that returns ok:True is a failed read wearing a result's face.
+        return jsonify({"ok": False,
+                        "error": "no active entry with that id"}), 404
+    return jsonify({"ok": True, "revoked": entry_id})
+
+
+def _route_context_resolve():
+    """POST /api/ai/context/suspension — decide a suspended entry's fate (§4.7).
+
+    `resolution` is 'kept' or 'revoked'. There is deliberately no automatic
+    resolution and no default: §4.7's whole point is that neither the vendor
+    baseline nor the customer's calibration silently wins.
+    """
+    from flask import request, jsonify
+    from modules.ai_engine import context_store
+    if not request.is_json:                       # see _route_context_revoke
+        return jsonify({"ok": False, "error": "JSON content-type required"}), 415
+    data = request.get_json(silent=True) or {}
+    entry_id, resolution = data.get("id"), data.get("resolution")
+    if entry_id is None or resolution is None:
+        return jsonify({"ok": False,
+                        "error": "id and resolution are required"}), 400
+    actor = _current_actor() or "unknown"
+    try:
+        n = context_store.resolve_suspension(entry_id, resolution, actor)
+    except context_store.ContextWriteRejected as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "id must be an integer"}), 400
+    if not n:
+        return jsonify({"ok": False,
+                        "error": "no suspended entry with that id"}), 404
+    return jsonify({"ok": True, "id": entry_id, "resolution": resolution})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Module class
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -4722,4 +5193,10 @@ class Module(NemesisModule):
             ("/api/ai/upsell_restore",     _route_upsell_restore,    {"methods": ["POST"]}),
             ("/api/ai/incident",           _route_incident,          {"methods": ["GET"]}),
             ("/api/ai/incident/simulate",  _route_incident_simulate, {"methods": ["POST"]}),
+            # §4.5 review surface. Admin on every verb — see the block above
+            # these handlers for why the READ side is admin too.
+            ("/ai/context",                _route_context_page,      {"methods": ["GET"]}),
+            ("/api/ai/context/learned",    _route_context_learned,   {"methods": ["GET"]}),
+            ("/api/ai/context/revoke",     _route_context_revoke,    {"methods": ["POST"]}),
+            ("/api/ai/context/suspension", _route_context_resolve,   {"methods": ["POST"]}),
         ]

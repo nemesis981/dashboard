@@ -202,9 +202,22 @@ check("  ...and it is the chat surface in ai_engine",
       bool(callers) and "ai_engine/module.py" in callers[0], str(callers[:1]))
 
 # No machine-generated builder may still hand analyze() an f-string.
+#
+# ⚠ THIS LIST IS THE CLOSED SET OF BUILDERS. `prompt_fields.build()`'s own
+# docstring says the caller set is closed and that this conformance list is what
+# keeps it that way — so a new builder is added HERE, deliberately, or the set
+# is closed in name only and grows silently.
+#
+# ADDED 2026-08-27: `modules/ai_engine/failsafe_decision.py`, the engine side of
+# ADR 0019 Amendment 03 §10.3. It is the SIXTH builder and the first one that
+# lives inside ai_engine itself — worth noting, because it makes ai_engine both
+# a builder and the enforcer of the rule. That is acceptable only because
+# `analyze()` checks the TYPE it receives and does not care who built it: the
+# guarantee is carried by BuiltPrompt, not by the caller's identity.
 for mod in ("modules/anomaly_detection/module.py",
             "modules/community_queue/module.py",
             "modules/malware_detection/module.py",
+            "modules/ai_engine/failsafe_decision.py",
             "dashboard.py",
             "alert_manager/hw_discover.py"):
     src = open(os.path.join("/opt/nemesis", mod), encoding="utf-8").read()

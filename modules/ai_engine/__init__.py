@@ -59,8 +59,22 @@ from .module import (
     #     `except Exception: pass`, so the operator never saw a pricing change.
     raise_authority, get_pricing_drift_banner_html,
 )
+# ADDED 2026-08-27 — the L4 accumulating context store (DESIGN-L4 §4). Caught by
+# test_package_exports.py on the very first run after the file was created: the
+# FIFTH instance of this exact defect. Imported as a SUBMODULE rather than
+# individual names because consumers want `context_store.retrieve(...)`, and the
+# store's own `_conn()` defers `from modules import get_data_manager` to call
+# time, so binding it here creates no import cycle.
+from . import context_store  # noqa: E402,F401
+# ADDED 2026-08-27 alongside context_store, for the same reason and pre-emptively
+# this time: the engine side of the ADR 0019 failsafe decision request. Exported
+# as a submodule so a consumer reaches `failsafe_decision.decide(...)` through
+# the package, the way every other consumer here reaches ai_engine.
+from . import failsafe_decision  # noqa: E402,F401
 
 __all__ = [
+    "context_store",
+    "failsafe_decision",
     "is_enabled", "get_status", "analyze", "get_usage_stats", "get_pricing",
     "get_settings",
     "get_upsell_prompt_html", "get_upsell_js",

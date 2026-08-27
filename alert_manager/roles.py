@@ -412,6 +412,24 @@ ROUTE_MINIMUMS = {
     "module_email_security_api_quarantine_list": (_A, _A),
     "module_email_security_api_release":         (_A, _A),
 
+    # ai_engine §4.5 review surface — "what your AI has learned" (DESIGN-L4 §4).
+    # ADMIN ON BOTH VERBS, INCLUDING READ, and that is deliberate:
+    #   * REVOKE is not merely a delete. Revoking a RESTRICTIVE entry LOOSENS
+    #     the system, which is the same class of act as granting authority — so
+    #     it belongs at the same bar as the grant itself, not a tier below.
+    #   * RESOLVE-SUSPENSION decides a vendor-baseline conflict (§4.7). Neither
+    #     side silently wins, so the deciding role must be the accountable one.
+    #   * The READ side stays admin because the page's entire content is the
+    #     verbatim reasoning behind security decisions. Splitting view down to
+    #     a lower role was considered and declined (operator, 2026-08-27).
+    # Same ADR 0028 D7 reasoning the email_security block above cites: collapsing
+    # distinct cases into one policy over- or under-serves. Here they genuinely
+    # agree, so one policy is the right answer rather than the lazy one.
+    "module_ai_engine__route_context_page":      (_A, _A),
+    "module_ai_engine__route_context_learned":   (_A, _A),
+    "module_ai_engine__route_context_revoke":    (_A, _A),
+    "module_ai_engine__route_context_resolve":   (_A, _A),
+
     # malware_detection — quarantine and scan reach a device, hence admin;
     # setting a finding's status is triage, hence user.
     "module_malware_detection__api_findings":           (_V, _A),
