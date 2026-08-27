@@ -1510,6 +1510,59 @@ def init_enrollment_tokens_table():
     finally:
         conn.close()
 
+
+def init_fw_revert_tokens_table():
+    """Canonical DDL for `fw_revert_tokens` — the ADR 0019 lockout-failsafe revert
+    credential (Amendment 03 §4). Core-owned (unprefixed-module) per ADR 0001.
+
+    SPLIT TOKEN, and the split is the security design, not a convenience. The
+    emailed credential is `<selector>.<verifier>`. The selector is stored in the
+    clear ONLY so a single row can be looked up by index; the verifier is stored
+    as a SHA-256 hash and compared with `hmac.compare_digest`. Storing the whole
+    token in the clear — the way `enrollment_tokens` still does, see PUNCHLIST —
+    would mean anything that reads the DB (a backup, a support bundle, a copy on
+    removable media) yields live, usable credentials. Hashing the verifier makes
+    a stolen database useless for minting a revert.
+
+    A plain "hash the whole token and SELECT on the hash" scheme would also work
+    at rest, but it forces either a full-table scan to keep the comparison
+    constant-time, or an indexed lookup on the hash that reintroduces the timing
+    signal the hash was meant to remove. The selector/verifier split gives an
+    indexed lookup AND a constant-time comparison at once.
+
+    SCOPED TO ONE CHANGE. `change_id` is what makes a leaked token uninteresting:
+    it can revert exactly the pending change it was minted for and nothing else,
+    so it is not a general firewall-control capability that happens to be
+    time-limited.
+
+    SINGLE-USE is recorded as `used_at`/`used_from` rather than by deleting the
+    row. A consumed token must stay auditable — "this token was used, at this
+    time, from this address" is the record an operator needs after a lockout, and
+    a deleted row cannot distinguish a spent token from one that never existed.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS fw_revert_tokens (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                selector      TEXT NOT NULL UNIQUE,
+                verifier_hash TEXT NOT NULL,
+                change_id     TEXT NOT NULL,
+                created_at    REAL NOT NULL,
+                expires_at    REAL NOT NULL,
+                used_at       REAL,
+                used_from     TEXT,
+                created_by    TEXT NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_fw_revert_tokens_selector "
+                  "ON fw_revert_tokens(selector)")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_alert(rule_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
