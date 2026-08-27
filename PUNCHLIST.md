@@ -3,6 +3,36 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [HIGH] `NEMESIS_DB_PATH` redirects the DB but NOT canary filesystem side-effects (found 2026-08-26)
+`modules/malware_detection/module.py:1883` — `_canary_user_home()` is `os.path.expanduser("~")`
+and is unaffected by `NEMESIS_DB_PATH`. `Module.start()` (`:4427`) calls
+`_autoplant_if_needed()` (`:2116`), which counts rows via `_conn()` (DB-path-aware) and then
+plants via the home resolver (not DB-path-aware). **A test pointed at a throwaway DB counts 0
+canaries and plants real bait into the operator's real `$HOME`.**
+**This caused a live CRITICAL false-ransomware alert on 2026-08-25** (findings 37064-37067):
+a dashboard render test with `NEMESIS_DB_PATH=/tmp/nemrender/alerts.db` planted four decoys
+into `$HOME`, then correctly cleaned up what its own test had planted — tripping the
+production canary service, which tracked those same paths in the real DB. Root cause fully
+established 2026-08-26; benign, no compromise.
+**Candidate fix:** make the plant ROOT injectable from the same config as the DB so a harness
+redirects both together, and/or make auto-plant opt-in rather than a side-effect of
+`Module.start()`. A page-render test should not be able to write to the operator's home at
+all. Security-default behaviour — hold for operator review before committing.
+
+### [HIGH] A deleted canary can NEVER be re-planted — permanent silent no-op (found 2026-08-26)
+`modules/malware_detection/module.py:1983` — `_plant_one()` skips on the DB ROW existing
+(`SELECT id FROM malware_canary_files WHERE path=?` → `{"status":"skipped"}`) and **never
+stat()s the file**. Once a canary is deleted its row survives with `last_state='deleted'`, so
+`plant_canaries()` returns `planted=0 skipped=4` forever and the bait is never restored.
+**The detection layer stays degraded indefinitely with no error** — Layer B silently protects
+nothing at those paths. Confirmed live 2026-08-26: restoring the four decoys required manually
+deleting the stale rows first (snapshot taken to
+`nemesis-state-backups/2026-08-26-1534-pre-canary-replant/` beforehand).
+**Candidate fix:** treat the FILESYSTEM as authoritative for presence — skip only when the row
+exists AND the file is present with a matching hash; re-plant when the row exists but the file
+is gone. **Needs a mutation test that actually deletes a bait file and proves re-plant restores
+it** — a test asserting the skip path alone would have passed against this bug.
+
 ### [LOW] `test_layer_c.py` crashes with an uncaught `TypeError`, pre-existing (found 2026-08-25)
 `python3 modules/malware_detection/test_layer_c.py` dies with an unhandled
 `TypeError: the JSON object must be str, bytes or bytearray, not NoneType` at
@@ -3998,3 +4028,61 @@ own hazard: a permanently-failing suite stops being read.
 is passed as the `Alert` field via `_pf.LABEL`, and that no raw-`raw_alert` field is
 constructed) rather than at a string literal that a future refactor will break again.
 One variable, own commit.
+
+### [MEDIUM] `enrollment_tokens` stores installer tokens in PLAINTEXT at rest (found 2026-08-27)
+`alert_manager/database.py:1410-1412` declares `token TEXT NOT NULL UNIQUE`, and
+`dashboard.py:4968-4982` (`_valid_installer_token`) looks it up with `WHERE token=?` — so the
+credential is stored and compared as cleartext. Generation is `dashboard.py:5314`,
+`secrets.token_hex(16)`.
+
+**Verified, not assumed:** entropy is 128 bits, TTL is 2 hours (`now + 2*3600`, ADR 0011), and
+`max_uses` is 1. Those three mitigations are why this is MEDIUM and not HIGH — the window is
+short and each token dies on first use. The defect is storage, not entropy.
+
+**Why it still matters:** anything that reads the DB gets *live, usable* enrollment credentials
+for up to two hours — a backup, a support bundle, a snapshot, or a copy on removable media.
+This connects directly to the 2026-08-27 exFAT secrets pass, where the WAL DB backup was
+deliberately accepted as an open item: that accepted risk is larger than it looked, because the
+DB carries usable credentials and not only records.
+
+**Candidate fix:** the split-token pattern being built for the ADR 0019 failsafe revert endpoint
+(Amendment 03 §4) — `selector.verifier`, index on the selector, store only a hash of the
+verifier, compare with `hmac.compare_digest`. Same shape, already designed; this would reuse it
+rather than invent a second scheme.
+
+**Not a drop-in change:** existing unexpired tokens cannot be migrated (a hash of a value you
+no longer hold is unrecoverable), so the migration has to accept invalidating live installer
+links or run both paths for one TTL. Security-default behaviour — hold for operator review.
+
+### [MEDIUM] `NO_CREDENTIAL_OPS` was declared but never enforced for 30 days (found 2026-08-27)
+`alert_manager/nemesis_fwd.py:194` has declared `NO_CREDENTIAL_OPS = {"ping",
+"drop_credential"}` since `3cf0e4d` (2026-07-28, the commit that relocated ufw privilege into
+the helper). **It was never read anywhere.** `git log -S NO_CREDENTIAL_OPS` returns exactly
+one commit — the one that introduced it — and a grep found a single line: the definition.
+
+**Verified, not assumed:** both named ops return from explicit early branches in
+`handle_request` *before* dispatch ever reaches the credential logic, so the set could not
+have had an effect even in principle.
+
+**No live exposure resulted**, and that is worth stating plainly so this is not read as an
+incident: the two ops it named were already exempt by those early returns, so behaviour was
+correct throughout. The defect is that the file **documented a control that did not exist**.
+
+**Why it still matters enough to log.** This is the exact failure the same file's `WRITE_OPS`
+comment already records for `add_rule`/`remove_rule` — *"a declared-but-absent op in a
+security allowlist reads as capability that is not there, and invites designing against it."*
+That is not hypothetical here: during the ADR 0019 Stage 4 build the set was very nearly
+relied on as the mechanism for exempting a new op, which would have shipped an op believing
+it was governed by an allowlist that governed nothing.
+
+**Review implication (the reason this is not just a tidy-up):** any design, review, audit or
+handoff written between 2026-07-28 and 2026-08-27 that reasoned about `nemesis_fwd`'s
+credential enforcement from the FILE rather than from the dispatch path may have credited a
+control that was not in force. Worth a pass over anything in that window that cites this
+helper's credential model — the conclusions are probably still right, but they were reached
+from a source that was wrong on this point.
+
+**Now wired** as part of the Stage 4 `failsafe_revert` work (uncommitted, Window 1) — the
+set is consulted after the per-peer op allowlist, so credential exemption is never
+authorisation exemption. Fixed rather than worked around, deliberately: leaving a second
+inert allowlist in place would preserve the trap.
