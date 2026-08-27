@@ -259,13 +259,17 @@ Defined in `modules/ai_engine/module.py` (`L0_OBSERVE`–`L4_GOVERN`):
 | 1 | `L1_RECOMMEND` | Recommend a specific action with reasoning. Cannot execute — every recommendation is a proposal a human approves. |
 | 2 | `L2_ACT_REVERSIBLE` | May offer to carry out a **reversible** action, through the system's gated action path, after explicit confirmation. |
 | 3 | `L3_ACT_DISRUPTIVE` | As above, for actions with real disruption potential. |
-| 4 | `L4_GOVERN` | Reserved. Nothing is granted this today. |
+| 4 | `L4_GOVERN` | **Ceilinged, not granted.** May act **unattended**, on its own judgment, where the action is disclosed and reversible. One class may reach L4 (see below); nothing holds it today, because a hard ceiling permits a level without conferring one. |
 
 **Authority is per action class, not global** (`ACTION_CLASS_CEILINGS`): e.g.
 `ip_quarantine_external` ceilings at L3, `ip_block_permanent` at L2, and both
 `ip_action_internal` and `malware_file_quarantine` are pinned at L1 — the AI may recommend
 quarantining a file, never do it. Setting an alert's disposition (`alert_disposition`)
-ceilings at L2, because a disposition is reversible.
+ceilings at L2, because a disposition is reversible. The firewall lockout failsafe's
+override (`firewall_failsafe_override`) ceilings at L4, the only class that does — reachable
+at no lower earned level and narrowable further by a standing rule. ADR 0019 records the
+disclosure guarantee that makes it safe: the override does not take effect unless a log entry,
+a ticket and an email have all been created first, and fails closed if any of them cannot be.
 
 **The effective level is `min()` of three terms** (`effective_ceiling()`): what has been
 *earned* (`ai_authority.current_level`), the *hard* code-level ceiling for that class, and

@@ -429,6 +429,23 @@ ACTION_CLASS_CEILINGS = {
     # `pending` and a human decides; at L1 the engine may PROPOSE a disposition
     # (recorded in ai_proposals for approval); only at L2 may it set one itself.
     "alert_disposition":       L2_ACT_REVERSIBLE,
+    # ADR 0019 Amendment 03 §10.3 — the AI declining ONE scheduled revert of a
+    # firewall change it believes is correct. Consumed by
+    # `failsafe_decision.decide()`; until this entry existed every request
+    # resolved to allow_revert, which was the correct behaviour rather than a gap.
+    #
+    # L4 is the ceiling because this action is DEFINED as L4-only: below it the
+    # class is simply not executable, and the failsafe independently refuses any
+    # assertion that is not exactly L4. A lower hard ceiling here would not make
+    # the design safer, it would make the capability unreachable while leaving
+    # every other part of it in place — a mechanism that looks armed and cannot
+    # fire.
+    #
+    # This is NOT the ladder granting the AI L4. `effective_ceiling()` is still
+    # min(earned, hard, standing rule): the class is now PERMITTED to reach L4,
+    # and reaching it still requires earned authority at L4 and no standing rule
+    # narrowing it. Registering a ceiling opens a door; it does not walk through.
+    "firewall_failsafe_override": L4_GOVERN,
 }
 
 
@@ -459,6 +476,21 @@ CEILING_KIND = {
     # an undo handler exist, and not one moment before.
     "malware_file_quarantine": "capability",
     "alert_disposition":       "threshold",
+    # THRESHOLD, and the reasoning matters because at L4 the label looks vacuous.
+    #
+    # It is a threshold in the exact sense this map means: a judgment about how
+    # much authority is appropriate, not a limit on what the code can do. The
+    # code CAN take this action and CAN undo it — the revert timer is still
+    # armed, the change is still reversible, and §10.6 bounds the override to a
+    # single event. Labelling it "capability" would assert the code cannot do it
+    # safely, which is simply false, and false entries here are worse than
+    # missing ones because `ceiling_kind()` treats missing as restrictive.
+    #
+    # Being overridable is vacuous at L4 anyway: the ceiling is already the top
+    # of the ladder and min() cannot exceed any input, so there is nothing a
+    # master password could raise it to. The honest label costs nothing and the
+    # dishonest one would mislead the next reader.
+    "firewall_failsafe_override": "threshold",
 }
 
 
