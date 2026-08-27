@@ -55,9 +55,28 @@ mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
     | awk '{print $4}')
 
 # ── enforcement switch (ADR 0019 Increment 4) ────────────────────────────────
-# OFF unless explicitly enabled. Cutover is a separate, deliberate commit that
-# flips this default — so "is this box enforcing?" is answerable from `git log`
-# rather than from invisible runtime state, and rollback is one revert.
+# ON unless explicitly disabled. THE CUTOVER HAS HAPPENED: `1bedbb3` (2026-08-01)
+# flipped this default from 0 to 1, 34 minutes after `df24480` introduced it gated
+# off. Set NEMESIS_FW_ENFORCE=0 to force observe-only.
+#
+# This comment previously read "OFF unless explicitly enabled" and described the
+# cutover as still pending — it had been contradicting the line directly beneath it
+# since 1bedbb3. Corrected 2026-08-27. That is precisely the defect Amendment 02
+# exists to prevent ("the system's own description of its enforcement posture
+# disagreed with its actual enforcement"), recurring one line above the code it
+# describes, so it is worth stating plainly rather than quietly fixing.
+#
+# "Is this box enforcing?" remains answerable from `git log` rather than from
+# invisible runtime state, and rollback is still one revert — the answer is just
+# `1bedbb3`, not "no".
+#
+# ⚠ THREE DOCUMENTS STILL DISAGREE WITH THIS LINE and are the next thing to fix:
+#   - the public ADR 0019 status table says Increment 4 is "Not started";
+#   - Amendment 02 §6.1 says observe-only is "live today" (written 2026-08-08,
+#     a week AFTER the cutover);
+#   - Amendment 02's rollout step 3 says a mode detector should "confirm it reports
+#     OBSERVE today". That detector (`nemesis-fw-mode`) is designed but UNBUILT, so
+#     nothing currently cross-checks declared mode against the live table at all.
 #
 # A refused address NEVER receives a verdict regardless of this switch.
 ENFORCE="${NEMESIS_FW_ENFORCE:-1}"
