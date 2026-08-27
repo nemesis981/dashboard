@@ -200,6 +200,36 @@ def _init_db() -> None:
             reason       TEXT
         )
     """)
+    # APPEND-ONLY history of changes to the table above. That table is
+    # INSERT OR REPLACE keyed by action_class, so it holds only the CURRENT
+    # grant -- raising L2 to L4 and back leaves no trace that L4 was ever held,
+    # and a cleared grant leaves nothing at all. For the ladder that governs
+    # UNATTENDED action, "what authority did this system hold on Tuesday" has to
+    # be answerable after the fact.
+    #
+    # ⚠ WHY THIS EXISTS ALONGSIDE THE DASHBOARD'S audit_log ROW, NOT INSTEAD OF
+    # IT. `audit_log` is a CORE unprefixed table and -- verified against the tree
+    # -- no module under modules/ writes it; only dashboard.py, manage.py,
+    # nemesis_fwd.py and degraded_ingest.py do. ADR 0001 is write-own / read-any,
+    # so ai_engine must not write it. The dashboard routes write the central
+    # trail; THIS table is the module-side guarantee that holds when the caller
+    # is not the dashboard -- a script, a migration, or a future service calling
+    # set_authority_override() directly still leaves a record. Neither alone
+    # covers both cases, which is why both exist.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ai_authority_events (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           TEXT NOT NULL,
+            action_class TEXT NOT NULL,
+            event        TEXT NOT NULL,
+            level        INTEGER,
+            prior_level  INTEGER,
+            actor        TEXT NOT NULL,
+            reason       TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_auth_events_class "
+                 "ON ai_authority_events(action_class, id)")
     # Requirement 1: one row per DECISION POINT, not per API call. Includes the
     # decisions where nothing happened -- an absent row would be a default value
     # that reads as "nothing to report", and the single most useful question
@@ -492,6 +522,37 @@ CEILING_KIND = {
     # dishonest one would mislead the next reader.
     "firewall_failsafe_override": "threshold",
 }
+
+
+#: Classes whose action is carried out OUTSIDE `execute_proposal`.
+#:
+#: `automation_readiness` and the warning text both model one execution path --
+#: propose, approve, execute_proposal -- and that model is correct for every class
+#: that uses it. `firewall_failsafe_override` does not: the engine returns a
+#: decision and a separate privileged component acts on it, so the undo-handler
+#: gate in execute_proposal is never reached.
+#:
+#: ⚠ WITHOUT THIS SET THE READINESS MODEL IS WRONG IN THE DANGEROUS DIRECTION.
+#: It reported will_act=False and the warning said the engine "will REFUSE to act
+#: on it even at this level" -- for a class that DOES act. An operator granting L4
+#: and reading that could reasonably conclude nothing can happen, which is the
+#: exact inversion of the mistake automation_readiness was built to prevent
+#: (someone believing automation is live when it is inert). Found by Window 3's
+#: §5 A/B run, 2026-08-27.
+#:
+#: MEMBERSHIP IS NOT AN EXEMPTION FROM REVERSIBILITY. These classes must still be
+#: reversible; they simply prove it somewhere other than an undo handler. For
+#: firewall_failsafe_override the change stays provisional -- `nemesis-fw-apply
+#: revert-now`, the standalone revert endpoint, and the console command all undo
+#: it -- and its safety gate is disclosure-as-precondition, not undo registration.
+#:
+#: ⛔ DO NOT "FIX" THIS BY REGISTERING AN UNDO HANDLER. Registering one would make
+#: the class eligible for execute_proposal, which has NO disclosure precondition --
+#: creating a second route to an override that bypasses the guarantee the whole
+#: mechanism rests on. The handler would also need a privileged revert path the
+#: engine deliberately does not have (the dashboard runs as nemesis-dash with zero
+#: sudo, and the one privileged revert is token-scoped and single-use by design).
+EXTERNALLY_EXECUTED = {"firewall_failsafe_override"}
 
 
 def ceiling_kind(action_class: str) -> str:
@@ -3855,7 +3916,7 @@ def refusal_ticket_text(action_class: str, subject: str, proposed: str) -> str:
              "Subject:         %s" % subject,
              "Proposed action: %s" % proposed,
              "Action class:    %s" % action_class, ""]
-    if undo_handler_for(action_class) is None:
+    if undo_handler_for(action_class) is None and action_class not in EXTERNALLY_EXECUTED:
         lines += [
             "WHY IT DID NOT ACT: insufficient reversal support to act on this yet.",
             "",
@@ -4006,11 +4067,24 @@ def raise_authority(action_class: str, level: int, master_pw: str,
                  "raise it until that capability exists." % (action_class, hard))}
     try:
         conn = _conn()
+        # ONE TRANSACTION. The grant and its history entry commit together or not
+        # at all -- a best-effort event write could leave authority raised with no
+        # record of who raised it, which is the single state this table exists to
+        # make impossible.
+        prior = conn.execute(
+            "SELECT level FROM ai_authority_override WHERE action_class=?",
+            (action_class,)).fetchone()
+        now_iso = datetime.now().isoformat(timespec="seconds")
         conn.execute(
             "INSERT OR REPLACE INTO ai_authority_override"
             "(action_class, level, granted_by, granted_at, reason) VALUES(?,?,?,?,?)",
-            (action_class, level, granted_by,
-             datetime.now().isoformat(timespec="seconds"), reason or ""))
+            (action_class, level, granted_by, now_iso, reason or ""))
+        conn.execute(
+            "INSERT INTO ai_authority_events"
+            "(ts, action_class, event, level, prior_level, actor, reason) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (now_iso, action_class, "granted", level,
+             prior[0] if prior else None, granted_by, reason or ""))
         conn.commit()
         conn.close()
     except Exception as exc:                                 # noqa: BLE001
@@ -4079,7 +4153,11 @@ def automation_readiness(action_classes=None, surface_key=None, level=None) -> l
                         "reason": "unknown", "level": None,
                         "detail": "could not determine authority: %s" % str(exc)[:120]})
             continue
-        undo_ok = eff["undo_available"]
+        # An externally-executed class never reaches execute_proposal's undo gate,
+        # so undo_available describes machinery it does not use. Treating it as
+        # available here is not a fiction -- see EXTERNALLY_EXECUTED for what
+        # actually guarantees reversal for these classes.
+        undo_ok = eff["undo_available"] or ac in EXTERNALLY_EXECUTED
         hard = ACTION_CLASS_CEILINGS[ac]
         requested = eff["level"] if level is None else int(level)
         # `level` is the authority being GRANTED, not a cap on current state.
@@ -4137,7 +4215,16 @@ def authority_raise_warnings(action_class: str, level: int) -> list:
     Collapsing them into one scary paragraph teaches people to click through.
     """
     out = []
-    if level >= L2_ACT_REVERSIBLE and undo_handler_for(action_class) is None:
+    if action_class in EXTERNALLY_EXECUTED:
+        # Accurate warning for this shape, instead of the generic "cannot be
+        # undone / the engine will refuse" -- which is false here and would be a
+        # false REASSURANCE, not a false alarm.
+        out.append("This action is carried out by a component outside the "
+                   "engine's propose/approve path, so granting this level makes "
+                   "it LIVE rather than merely permitted. It remains reversible: "
+                   "the change it declines to revert stays provisional and can be "
+                   "undone from the dashboard or the console at any time.")
+    elif level >= L2_ACT_REVERSIBLE and undo_handler_for(action_class) is None:
         out.append("THIS ACTION CANNOT BE UNDONE IF IT IS WRONG. No reversal is "
                    "registered for %s, so the engine will REFUSE to act on it "
                    "even at this level -- and if a reversal is added later, "
@@ -4168,10 +4255,24 @@ def clear_authority_override(action_class: str, cleared_by: str,
     always allowed, by anyone. Only raising needs the second credential."""
     try:
         conn = _conn()
+        # Read the level BEFORE deleting: afterwards it is unrecoverable, and
+        # "L4 was withdrawn" is a materially different record from "something
+        # was withdrawn".
+        prior = conn.execute(
+            "SELECT level FROM ai_authority_override WHERE action_class=?",
+            (action_class,)).fetchone()
         cur = conn.execute("DELETE FROM ai_authority_override WHERE action_class=?",
                            (action_class,))
-        conn.commit()
         n = cur.rowcount
+        if n:
+            conn.execute(
+                "INSERT INTO ai_authority_events"
+                "(ts, action_class, event, level, prior_level, actor, reason) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"), action_class,
+                 "cleared", None, prior[0] if prior else None,
+                 cleared_by, reason or ""))
+        conn.commit()
         conn.close()
     except Exception as exc:                                 # noqa: BLE001
         log.exception("ai_engine: could not clear override")

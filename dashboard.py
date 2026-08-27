@@ -8072,6 +8072,32 @@ def api_ai_authority():
     return jsonify({"success": True, "classes": out})
 
 
+def _audit_authority(action, action_class, level):
+    """Record an authority change in the CORE audit_log.
+
+    Written HERE and not in ai_engine on purpose: `audit_log` is a core unprefixed
+    table and ADR 0001 is write-own / read-any, so a module must not write it —
+    verified against the tree, no module under modules/ does. The module keeps its
+    own `ai_authority_events` history for callers that never reach this route.
+    Two records, two different guarantees; neither is redundant.
+
+    Best-effort by design: the authority change has ALREADY been committed by the
+    time this runs, so raising here would report failure for something that
+    succeeded. The module-side row is the one with the transactional guarantee.
+    """
+    try:
+        conn = _dm_conn()
+        conn.execute(
+            "INSERT INTO audit_log(ts, request_id, ip, action, user) VALUES(?,?,?,?,?)",
+            (datetime.now().isoformat(timespec="seconds"),
+             "%s%s" % (action_class, "" if level is None else ":L%d" % level),
+             request.remote_addr or "unknown", action, _actor()))
+        conn.commit()
+        conn.close()
+    except Exception:                                            # noqa: BLE001
+        log.exception("dashboard: could not write authority audit row for %s", action_class)
+
+
 @app.route("/api/ai/authority/raise", methods=["POST"])
 def api_ai_authority_raise():
     """Master-password-gated manual authority raise. POST + login-gated (absent from
@@ -8103,6 +8129,53 @@ def api_ai_authority_raise():
         return jsonify(res), code
     log.warning("dashboard: authority raise %s->L%s by %s via /api/ai/authority/raise",
                 action_class, level, _actor())
+    _audit_authority("ai_authority_raise", action_class, level)
+    return jsonify(res)
+
+
+@app.route("/api/ai/authority/clear", methods=["POST"])
+def api_ai_authority_clear():
+    """Withdraw a manual authority grant. The OFF half of the standing toggle.
+
+    NO MASTER PASSWORD, deliberately, and it is the asymmetry that is the point:
+    raising authority needs a second credential because it ADDS risk; lowering it
+    removes risk, and a revocation that is harder than the grant is the wrong way
+    round. `clear_authority_override`'s own docstring has said "LOWERING authority
+    is always allowed, by anyone" since it was written — this route is the first
+    thing to implement it.
+
+    Still POST and still login-gated (absent from _AUTH_EXEMPT): it changes state,
+    so a GET would be CSRF-triggerable — the `db_action` bug class this codebase
+    has already shipped once.
+
+    WHY IT EXISTS AT ALL: /api/ai/authority/raise shipped 2026-08-23 with no
+    counterpart, so a grant made through the UI could only be withdrawn by editing
+    the database by hand. At L4 — the level that governs UNATTENDED action — a
+    grant you cannot withdraw through the same surface you made it on is the
+    wrong failure mode to leave lying around.
+    """
+    try:
+        from modules.ai_engine import clear_authority_override   # noqa: PLC0415
+    except Exception as e:                                       # noqa: BLE001
+        return jsonify({"error": "ai_engine unavailable: %s" % e}), 503
+    data = request.get_json(silent=True) or {}
+    action_class = data.get("action_class")
+    reason = str(data.get("reason", ""))[:200]
+    if not action_class:
+        return jsonify({"error": "action_class is required"}), 400
+    try:
+        res = clear_authority_override(action_class, cleared_by=_actor(), reason=reason)
+    except Exception as e:                                       # noqa: BLE001
+        return jsonify({"error": str(e)[:200]}), 400
+    if not res.get("ok"):
+        return jsonify(res), 400
+    log.warning("dashboard: authority CLEARED for %s by %s via /api/ai/authority/clear",
+                action_class, _actor())
+    # Only audit an actual state change. `cleared: false` means there was no grant
+    # to withdraw, and recording that as an authority event would put a row in the
+    # trail for something that did not happen.
+    if res.get("cleared"):
+        _audit_authority("ai_authority_clear", action_class, None)
     return jsonify(res)
 
 

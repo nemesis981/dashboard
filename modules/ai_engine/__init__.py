@@ -58,6 +58,13 @@ from .module import (
     #   get_pricing_drift_banner_html — the drift banner was swallowed by a bare
     #     `except Exception: pass`, so the operator never saw a pricing change.
     raise_authority, get_pricing_drift_banner_html,
+    #   clear_authority_override — backs /api/ai/authority/clear, the OFF half of
+    #     the standing toggle. Added 2026-08-27: `raise` shipped 2026-08-23 with no
+    #     counterpart, so an authority grant could be made through the UI and then
+    #     only withdrawn by editing the database. The module's own docstring says
+    #     "LOWERING authority is always allowed, by anyone" -- nothing implemented
+    #     it. That asymmetry matters most at L4, which governs unattended action.
+    clear_authority_override,
 )
 # ADDED 2026-08-27 — the L4 accumulating context store (DESIGN-L4 §4). Caught by
 # test_package_exports.py on the very first run after the file was created: the
@@ -88,4 +95,5 @@ __all__ = [
     "get_chat_widget_html", "get_chat_js",
     "register_undo_handler", "undo_handler_for",
     "raise_authority", "get_pricing_drift_banner_html",
+    "clear_authority_override",
 ]

@@ -342,6 +342,15 @@ ROUTE_MINIMUMS = {
 
     # ── Admin: AI authority (ALSO master-password gated — see below) ─────────
     "api_ai_authority_raise":         (_A, _A),
+    # ADMIN, same as its sibling above — and the reasoning is worth stating
+    # because the two routes are deliberately asymmetric elsewhere. Clearing
+    # needs no MASTER PASSWORD (lowering authority removes risk, so demanding a
+    # second credential to undo a grant would be backwards), but it is still a
+    # change to authority configuration on the same object, and two routes
+    # configuring one thing at different ROLE minimums is the divergence shape
+    # the route-audit practice looks for. The credential asymmetry already
+    # carries the risk difference; the role gate need not carry it twice.
+    "api_ai_authority_clear":         (_A, _A),
     "api_ai_chat_ask":                (_U, _U),
 
     # ── Module routes ────────────────────────────────────────────────────────
