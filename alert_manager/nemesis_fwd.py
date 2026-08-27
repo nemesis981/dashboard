@@ -38,6 +38,8 @@ See ~/work/DESIGN-ufw-helper-2026-07-28.md for the full design record.
 
 import errno
 import grp
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -191,7 +193,20 @@ READ_OPS = {"list_blocked", "list_rules"}
 # of every ufw chain), so there is no route op for these names to become.
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
              "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie"}
-NO_CREDENTIAL_OPS = {"ping", "drop_credential"}
+# `failsafe_revert` carries no session credential BECAUSE the admin may be unable
+# to log in -- the firewall change under test can be what broke their path to the
+# dashboard. The revert TOKEN is the credential, validated inside
+# op_failsafe_revert against a hashed, single-use, TTL-bounded row. See ADR 0019
+# Amendment 03 §4.
+#
+# ⚠ THIS SET WAS DECLARED IN 2026-07 AND NEVER CONSULTED ANYWHERE -- it is wired
+# into the dispatch below as of 2026-08-27. `ping` and `drop_credential` return
+# before reaching that point, so the set governed nothing and silently described
+# a control that did not exist. That is precisely the defect WRITE_OPS' comment
+# above records for `add_rule`/`remove_rule`: an allowlist naming capability that
+# is not actually enforced invites designing against it. Fixed rather than worked
+# around, so the set means what it says.
+NO_CREDENTIAL_OPS = {"ping", "drop_credential", "failsafe_revert"}
 
 #: audit_log action name per op. Introduced 2026-07-31, replacing a hardcoded
 #: `"fw_%s" % op` at both audit call sites.
@@ -209,6 +224,7 @@ AUDIT_ACTION = {
     "deny_ip":           "fw_deny_ip",
     "unblock_ip":        "fw_unblock_ip",
     "expire_quarantine": "fw_expire_quarantine",
+    "failsafe_revert":   "fw_failsafe_revert",
     # svc_ rather than fw_: these are not firewall operations, and a service
     # restart filed under fw_* would mislead anyone reading the audit trail.
     "write_env":         "svc_write_env",
@@ -263,7 +279,13 @@ PEER_POLICY = {
         # widened, THIS grant must be re-argued, not inherited.
         "ops": {"list_blocked", "list_rules", "block_ip", "deny_ip", "unblock_ip",
                 "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
-                "deny_port_on_interface", "allow_port_on_interface"},
+                "deny_port_on_interface", "allow_port_on_interface",
+                # Granted to the dashboard alone. It is the only peer with an
+                # HTTP surface, and this op exists to be reachable from one.
+                # It is NOT a general revert capability: the token names a
+                # single change, is single-use and expires in 30 minutes, and
+                # the helper -- not the dashboard -- decides all three.
+                "failsafe_revert"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -1405,6 +1427,93 @@ def op_reap_zombie(params):
             "regenerated_pid": info.get("regenerated_pid")}
 
 
+REVERT_SCRIPT = "/opt/nemesis/scripts/nemesis-fw-apply"
+
+
+def op_failsafe_revert(params):
+    """Revert the ONE pending firewall change a revert token was minted for.
+
+    ADR 0019 Amendment 03 §4. THE ONLY OP REACHABLE FROM AN UNAUTHENTICATED
+    REQUEST, so its authority is re-derived here from the database rather than
+    taken from the caller — the same discipline as `op_expire_quarantine`, which
+    exists so an unattended caller is not handed a general unblock.
+
+    Why no session credential: this endpoint is for the case where the admin
+    CANNOT log in, because the change under test may have broken their path to
+    the dashboard. A credential check would make it useless in the only
+    situation it exists for. The token replaces it, and validating the token
+    HERE rather than in the web process is what keeps that safe — a compromised
+    dashboard forwards bytes it cannot forge, so it still cannot revert.
+
+    SPLIT TOKEN: `<selector>.<verifier>`. The selector indexes the row; the
+    verifier is compared against a stored SHA-256 with `hmac.compare_digest`, so
+    a stolen database yields nothing usable and the comparison leaks no timing.
+
+    CONSUME BEFORE ACTING, deliberately. The row is marked used in a single
+    conditional UPDATE (`WHERE used_at IS NULL`) and the affected-row count is
+    what authorises the revert — two simultaneous requests cannot both win,
+    because SQLite serialises the writes and only one UPDATE reports a change.
+    Acting first and consuming after would leave a replay window exactly as long
+    as the revert takes. The cost of this ordering is that a token is spent even
+    if the revert then fails; that is acceptable because §5's manual path
+    (`sudo nemesis-fw-apply revert-now`) is the actual guarantee and shares no
+    failure domain with this one.
+    """
+    token = params.get("token")
+    if not isinstance(token, str) or "." not in token:
+        raise Denied("bad_request", "malformed revert token")
+    selector, _, verifier = token.partition(".")
+    if not selector or not verifier:
+        raise Denied("bad_request", "malformed revert token")
+
+    now = time.time()
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT verifier_hash, change_id, expires_at, used_at "
+                "FROM fw_revert_tokens WHERE selector = ?", (selector,)).fetchone()
+    except Exception as exc:
+        # A DB read failure is NOT "no such token". Reporting it as a bad token
+        # would be a failed read wearing the costume of a real answer.
+        raise Denied("internal", "could not read revert token state: %s" % exc)
+
+    if row is None:
+        raise Denied("peer_denied", "unknown revert token")
+
+    verifier_hash, change_id, expires_at, used_at = row[0], row[1], row[2], row[3]
+    presented = hashlib.sha256(verifier.encode()).hexdigest()
+    # Compare BEFORE reporting used/expired. Answering "already used" to an
+    # unauthenticated caller who did not present the right verifier would turn
+    # this into an oracle for which selectors exist.
+    if not hmac.compare_digest(presented, str(verifier_hash)):
+        raise Denied("peer_denied", "invalid revert token")
+    if used_at is not None:
+        raise Denied("peer_denied", "revert token already used")
+    if now > float(expires_at):
+        raise Denied("peer_denied", "revert token expired")
+
+    try:
+        with _db() as conn:
+            cur = conn.execute(
+                "UPDATE fw_revert_tokens SET used_at = ?, used_from = ? "
+                "WHERE selector = ? AND used_at IS NULL",
+                (now, str(params.get("source_ip") or "unknown"), selector))
+            claimed = cur.rowcount
+    except Exception as exc:
+        raise Denied("internal", "could not consume revert token: %s" % exc)
+    if claimed != 1:
+        # Lost the race against a concurrent request. Refuse rather than revert
+        # twice: the other caller is already doing it.
+        raise Denied("peer_denied", "revert token already used")
+
+    proc = subprocess.run([REVERT_SCRIPT, "revert-now"], capture_output=True,
+                          text=True, timeout=120)
+    if proc.returncode != 0:
+        raise Denied("internal", "revert failed: %s"
+                     % (proc.stderr or proc.stdout or "no output").strip()[:300])
+    return {"reverted": True, "change_id": change_id}
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
     "reclaim_shm": op_reclaim_shm,
@@ -1419,6 +1528,7 @@ OPS = {
     "deny_port_on_interface": op_deny_port_on_interface,
     "allow_port_on_interface": op_allow_port_on_interface,
     "reassert_port_deny_on_interface": op_reassert_port_deny_on_interface,
+    "failsafe_revert": op_failsafe_revert,
 }
 
 
@@ -1496,6 +1606,22 @@ class Helper:
         if op not in policy["ops"]:
             raise Denied("peer_denied",
                          "peer %r may not invoke %r" % (peer_name, op))
+
+        # ---- credential-exempt ops -----------------------------------------
+        # Reached only AFTER the peer allowlist above, so exemption from a
+        # credential is never exemption from authorisation. The op carries its
+        # own credential internally (see op_failsafe_revert).
+        if op in NO_CREDENTIAL_OPS:
+            params = req.get("params") or {}
+            result = OPS[op](params)
+            # Logged on SUCCESS here; refusals are audited by the Denied path,
+            # so every attempt appears either way -- §4 requires that, and an
+            # endpoint reachable without login must not have a quiet failure.
+            audit(audit_action_for(op), "token:failsafe-revert",
+                  ip=params.get("source_ip"), detail=req.get("request_id"))
+            log.info("fwd: %s ok for peer=%s (pid=%d, token-credentialled)",
+                     op, peer_name, pid)
+            return result
 
         if not policy["require_credential"]:
             # Unattended path. Layer 1 + the narrow allowlist ARE the control.

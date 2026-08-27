@@ -129,6 +129,34 @@ def block_ip(ip, username=None, session_id=None, password=None, jail=None):
     return _request("block_ip", params, username, session_id, password)
 
 
+def failsafe_revert(token, source_ip=None):
+    """Revert the ONE pending firewall change a revert token was minted for.
+
+    ADR 0019 Amendment 03 §4. Same shape as `expire_quarantine` above and for the
+    same reason: the helper validates independently rather than trusting the
+    caller. Here that matters more, because this is the one op reachable from an
+    UNAUTHENTICATED request.
+
+    THE TOKEN IS THE CREDENTIAL, AND THE HELPER — NOT THE DASHBOARD — CHECKS IT.
+    Every other write op takes a username/session/password because a logged-in
+    human is behind it. This endpoint exists precisely for the case where the
+    admin CANNOT log in (the firewall change may have broken their path to the
+    dashboard), so a session credential would make it useless exactly when it is
+    needed. Moving validation helper-side is what keeps that safe: the dashboard
+    forwards what the caller presented and learns nothing from the outcome it
+    could not already see, so a COMPROMISED DASHBOARD STILL CANNOT REVERT without
+    a valid, unspent token. That is strictly stronger than validating in the web
+    process, not a relaxation of it.
+
+    `source_ip` is recorded by the helper for the audit row. It is caller-supplied
+    and therefore NOT trusted as identity — it is a log field, never a check.
+    """
+    params = {"token": token}
+    if source_ip:
+        params["source_ip"] = source_ip
+    return _request("failsafe_revert", params)
+
+
 def expire_quarantine(ip):
     """Release a quarantine the helper independently confirms has expired.
 
