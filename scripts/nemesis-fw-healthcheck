@@ -1,0 +1,285 @@
+#!/usr/bin/env python3
+"""ADR 0019 Amendment 03 — post-apply health check for the nemesis_enforce table.
+
+Six independent checks. Each is separately pass/fail and separately reported, because
+"something is wrong" and "the admin's session died" need different responses.
+
+TWO RULES THIS TOOL EXISTS TO ENFORCE, both learned the hard way in this project:
+
+  1. UNKNOWN IS A FAILURE, NEVER A PASS. A check that could not run has not passed.
+     Amendment 01 §6.1 recorded "we are still in OBSERVE-ONLY" as settled fact from a
+     read that could not actually observe the mode; the box had been enforcing for a
+     week. An unobservable answer recorded as an observed one is the defect this
+     project keeps hitting, so every check here returns PASS / FAIL / UNKNOWN and
+     UNKNOWN is counted with the failures.
+
+  2. THE INSTRUMENT PROVES ITSELF FIRST. Before reporting on anything real, each probe
+     type is run against a known-good and a known-bad input. A TCP prober that always
+     says "unreachable" would fail every check and look like a catastrophic outage; one
+     that always says "reachable" would pass everything and protect nothing. Both are
+     indistinguishable from working correctly by their output alone.
+     Same pattern as nemesis-fw-neverblock's CANARIES.
+
+Read-only. Changes nothing. Exit 0 = all six passed, 1 = at least one did not,
+2 = the tool could not prove itself and therefore refuses to report at all.
+
+  snapshot            capture pre-apply state (needed by check 6)
+  run [--pre FILE]    run all six checks
+"""
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+
+PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
+DASH_PORT = int(os.environ.get("NEMESIS_DASH_PORT", "5000"))
+RENDERED = os.environ.get("NEMESIS_ENFORCE_FILE", "/run/nemesis-enforce.nft")
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "587") or 587)
+TABLE = ("inet", "nemesis_enforce")
+
+
+def _tcp(host, port, timeout=5.0):
+    """True/False/None — None means the attempt itself could not be made."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _resolves(name):
+    try:
+        socket.getaddrinfo(name, None)
+        return True
+    except socket.gaierror:
+        return False
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
+def _run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        return r.returncode, r.stdout.decode(errors="replace"), r.stderr.decode(errors="replace")
+    except Exception as exc:                              # noqa: BLE001
+        return None, "", str(exc)
+
+
+# ─────────────────────────── self-test ───────────────────────────
+def selftest():
+    """Prove each probe type can return BOTH answers. Refuse to report if not."""
+    problems = []
+
+    # TCP prober: a port nothing listens on must be unreachable. Port 1 on loopback is
+    # the safest known-closed target available without binding anything ourselves.
+    if _tcp("127.0.0.1", 1, timeout=2.0) is not False:
+        problems.append("TCP prober did not report a known-closed port as unreachable")
+    # ...and a port we open ourselves must be reachable, proving it is not stuck on False.
+    srv = socket.socket()
+    try:
+        srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        if _tcp("127.0.0.1", srv.getsockname()[1], timeout=2.0) is not True:
+            problems.append("TCP prober did not report a port we are listening on as reachable")
+    finally:
+        srv.close()
+
+    # DNS prober: an invalid TLD must not resolve; localhost must.
+    if _resolves("nemesis-selftest-invalid.invalid") is not False:
+        problems.append("DNS prober resolved a guaranteed-invalid name")
+    if _resolves("localhost") is not True:
+        problems.append("DNS prober could not resolve localhost")
+
+    return problems
+
+
+# ─────────────────────────── the six checks ───────────────────────────
+def check1_dashboard():
+    """Loopback deliberately: over a LAN address this would conflate 'app broken' with
+    'network broken', and those need different responses."""
+    r = _tcp("127.0.0.1", DASH_PORT)
+    if r is True:
+        return PASS, "dashboard answering on 127.0.0.1:%d" % DASH_PORT
+    if r is False:
+        return FAIL, "dashboard NOT answering on 127.0.0.1:%d" % DASH_PORT
+    return UNKNOWN, "could not probe the dashboard port"
+
+
+def check2_gateway():
+    rc, out, _ = _run(["ip", "route", "show", "default"])
+    if rc != 0 or not out.strip():
+        return UNKNOWN, "could not read the default route"
+    gw = None
+    for tok in out.split():
+        if tok.count(".") == 3:
+            gw = tok
+            break
+    if not gw:
+        return UNKNOWN, "default route present but no gateway address parsed: %r" % out.strip()[:60]
+    rc, _, _ = _run(["ping", "-c", "1", "-W", "3", gw], timeout=10)
+    if rc is None:
+        return UNKNOWN, "ping could not be executed"
+    return (PASS, "gateway %s reachable" % gw) if rc == 0 else (FAIL, "gateway %s UNREACHABLE" % gw)
+
+
+def check3_dns():
+    r = _resolves(SMTP_HOST)
+    if r is True:
+        return PASS, "resolved %s" % SMTP_HOST
+    if r is False:
+        return FAIL, "could NOT resolve %s" % SMTP_HOST
+    return UNKNOWN, "DNS probe could not run"
+
+
+def check4_smtp():
+    """Tests the NOTIFICATION PATH before anything relies on it. A design that
+    discovers its notification channel is dead by failing to notify is not a design."""
+    r = _tcp(SMTP_HOST, SMTP_PORT, timeout=8.0)
+    if r is True:
+        return PASS, "SMTP relay %s:%d reachable" % (SMTP_HOST, SMTP_PORT)
+    if r is False:
+        return FAIL, "SMTP relay %s:%d UNREACHABLE — cannot warn the admin" % (SMTP_HOST, SMTP_PORT)
+    return UNKNOWN, "could not probe the SMTP relay"
+
+
+def check5_table_matches_intent():
+    """The loaded table must match what we asked for. Comparing counters would fail
+    constantly (they move), so this compares the RULE STRUCTURE only."""
+    if not os.path.exists(RENDERED):
+        return UNKNOWN, "rendered file %s absent — nothing to compare against" % RENDERED
+    rc, out, err = _run(["nft", "list", "table", TABLE[0], TABLE[1]])
+    if rc is None:
+        return UNKNOWN, "nft could not be executed"
+    if rc != 0:
+        # PERMISSION IS NOT ABSENCE. `nft list` exits non-zero both when the table does
+        # not exist and when we simply may not read it, and reporting the second as the
+        # first is precisely the defect this tool exists to catch — it is Amendment 01
+        # §6.1 in miniature ("could not observe" recorded as "observed absent").
+        # Caught by this tool's own first run, 2026-08-27, against an unprivileged host.
+        low = (err or "").lower()
+        if "permitted" in low or "permission" in low or "must be root" in low:
+            return UNKNOWN, "cannot READ the table without privilege — not evidence of absence"
+        return FAIL, "table %s %s NOT LOADED (%s)" % (TABLE[0], TABLE[1], err.strip()[:60])
+
+    # COMPARE THE DERIVED BLOCK RULES, NOT THE WHOLE FILE. Two things made a
+    # whole-file diff wrong, both found on this tool's first VM run (2026-08-27):
+    #
+    #   * the rendered file carries `table ...` / `delete table ...` preamble that is a
+    #     LOADER DIRECTIVE, not a rule, and never appears in `nft list` output;
+    #   * nft normalises priorities on output — the file says `priority -300`, the kernel
+    #     prints `priority raw`, and they are the SAME VALUE (nft(8) Table 6).
+    #
+    # Comparing intent to reality means comparing the blocks we asked to be enforced
+    # against the blocks that are enforced. Chain structure is implicit: a rule cannot be
+    # live without its chain.
+    def blocks(text):
+        """{(address, verdict)} from rule comments, which are stable across both forms."""
+        found = set()
+        for line in text.splitlines():
+            m = re.search(r'comment\s+"(enforce|observe|never-block6?|enforce6?):(log6?|block6?|refused):([^"]+)"', line)
+            if not m:
+                continue
+            kind, what, addr = m.group(1), m.group(2), m.group(3)
+            verdict = "drop" if " drop " in (" " + line + " ") else "log-only"
+            found.add((addr, kind, what, verdict))
+        return found
+
+    want, got = blocks(open(RENDERED, encoding="utf-8", errors="replace").read()), blocks(out)
+    missing = sorted(want - got)
+    extra = sorted(got - want)
+    if missing:
+        return FAIL, "%d intended block-rule(s) MISSING from the live table, first: %s" % (
+            len(missing), missing[0])
+    if extra:
+        # Rules present that we never asked for is a different and worse problem than
+        # rules missing — it means something else is writing our table.
+        return FAIL, "%d UNEXPECTED rule(s) in the live table, first: %s" % (len(extra), extra[0])
+    return PASS, "live table matches intent exactly (%d derived block-rule(s))" % len(want)
+
+
+def _established():
+    """Established TCP peers via `ss` — conntrack is not guaranteed present, ss is."""
+    rc, out, _ = _run(["ss", "-tnH", "state", "established"])
+    if rc is None or rc != 0:
+        return None
+    peers = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            peers.add(parts[-1].rsplit(":", 1)[0])
+    return peers
+
+
+def check6_sessions(pre):
+    """THE CHECK THAT CATCHES THE PRIORITY -300 HAZARD. The table sits ahead of ufw's
+    conntrack RELATED,ESTABLISHED accept, so it can kill a live session ufw would have
+    spared. Nothing else in this set detects that."""
+    if pre is None:
+        return UNKNOWN, "no pre-apply snapshot supplied — cannot compare sessions"
+    now = _established()
+    if now is None:
+        return UNKNOWN, "could not read established sessions"
+    lost = sorted(set(pre) - now)
+    if lost:
+        return FAIL, "%d established peer(s) LOST: %s" % (len(lost), ", ".join(lost[:4]))
+    return PASS, "all %d pre-existing established peer(s) still present" % len(pre)
+
+
+# ─────────────────────────── driver ───────────────────────────
+def main():
+    argv = sys.argv[1:]
+    mode = argv[0] if argv else "run"
+
+    if mode == "snapshot":
+        peers = _established()
+        if peers is None:
+            print("ABORT: could not read established sessions for the pre-snapshot", file=sys.stderr)
+            return 2
+        json.dump({"established": sorted(peers), "at": time.time()}, sys.stdout)
+        return 0
+
+    problems = selftest()
+    if problems:
+        for p in problems:
+            print("  SELFTEST FAILED: %s" % p, file=sys.stderr)
+        print("REFUSING to report on real state — the instrument cannot prove itself.", file=sys.stderr)
+        return 2
+
+    pre = None
+    if "--pre" in argv:
+        try:
+            pre = set(json.load(open(argv[argv.index("--pre") + 1], encoding="utf-8"))["established"])
+        except Exception as exc:                          # noqa: BLE001
+            print("  pre-snapshot unreadable (%s) — check 6 will be UNKNOWN" % exc, file=sys.stderr)
+
+    results = [("1 dashboard-loopback", check1_dashboard()),
+               ("2 gateway-reachable",  check2_gateway()),
+               ("3 dns-resolution",     check3_dns()),
+               ("4 smtp-relay",         check4_smtp()),
+               ("5 table-matches",      check5_table_matches_intent()),
+               ("6 sessions-preserved", check6_sessions(pre))]
+
+    failed = [n for n, (v, _) in results if v != PASS]
+    for name, (verdict, detail) in results:
+        print("  %-22s %-8s %s" % (name, verdict, detail))
+
+    # Amendment 03 §8.2: when check 6 is the ONLY failure, say so in those words. An
+    # admin who cannot tell "one session died, everything else healthy" from "the box is
+    # unreachable" starts reflexively overriding, and the check's value dies with its
+    # credibility.
+    if failed == ["6 sessions-preserved"]:
+        print("VERDICT: FAIL — established-session check FAILED. All five other checks PASSED.")
+    elif failed:
+        print("VERDICT: FAIL — %d of 6 checks did not pass: %s" % (len(failed), ", ".join(failed)))
+    else:
+        print("VERDICT: PASS — all 6 checks passed.")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

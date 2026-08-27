@@ -45,3 +45,17 @@ nemesis_install.conf
 
 # Local security-test reports & artifacts — not committed for now (2026-07-29)
 docs/testing/
+
+# ── ADR 0019 Amendment 03 §10.4 — PRIVATE MECHANISM, deliberately not public ──
+# Rule 10 decision (operator, 2026-08-27): the public ADR states the guarantee
+# ("the override does not take effect until log, ticket and email all exist; if
+# any fails it fails closed and the revert proceeds"); the mechanism itself lives
+# in ~/work/nemesis-internal/firewall-enforcement-engine/scripts/.
+#
+# These files are DEPLOYED to /opt/nemesis/scripts at install time, so they exist
+# in this working tree while not belonging to this repository. Ignoring them is
+# what stops a `git add -A` from publishing a carve-out by accident — the
+# carve-out is only real if the tree cannot casually undo it.
+scripts/nemesis-fw-disclose
+scripts/nemesis-fw-flapcheck
+scripts/nemesis-fw-ai-override

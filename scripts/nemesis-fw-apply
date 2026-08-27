@@ -88,13 +88,61 @@ EOF
 }
 
 cmd_apply() {
-    local WINDOW="${NEMESIS_FW_WINDOW:-60}"
-    local NEW="${1:-}"
-    [ -n "$NEW" ] && [ -r "$NEW" ] || die "usage: $0 apply <ruleset-file>"
+    # ADR 0019 Amendment 03 §8.1 — TWO WINDOWS, and they answer different questions.
+    # This is deliberately not one value tuned twice:
+    #
+    #   manual (60s)      an operator is demonstrably present and watching. A long
+    #                     window buys nothing here: if the change broke their access
+    #                     they know in seconds. The cost of a short window is one
+    #                     re-apply; the cost of a long one is a live break persisting
+    #                     while someone stares at it.
+    #   unattended (900s) nobody is present. The window must cover an email being
+    #                     delivered, noticed and acted on -- minutes, not seconds --
+    #                     while still not letting a break persist through a working day.
+    #
+    # Do not "simplify" these into a single number.
+    local MODE="manual" NEW="" a
+    for a in "$@"; do
+        case "$a" in
+            --mode=*)     MODE="${a#--mode=}" ;;
+            --unattended) MODE="unattended" ;;
+            --manual)     MODE="manual" ;;
+            *)            [ -z "$NEW" ] && NEW="$a" ;;
+        esac
+    done
+    case "$MODE" in
+        manual)     local MODE_WINDOW=60  ;;
+        unattended) local MODE_WINDOW=900 ;;
+        *) die "unknown --mode '$MODE' (expected: manual | unattended)" ;;
+    esac
+    # An explicit NEMESIS_FW_WINDOW still wins, for tests that need a short window.
+    local WINDOW="${NEMESIS_FW_WINDOW:-$MODE_WINDOW}"
+    # Report the resolved mode BEFORE validating the file: an operator who mistyped a
+    # path still needs to see which window they were about to arm.
+    echo "  mode: $MODE (window ${WINDOW}s)"
+    [ -n "$NEW" ] && [ -r "$NEW" ] || die "usage: $0 apply <ruleset-file> [--mode manual|unattended]"
 
     echo "── 1. snapshot last-known-good ──"
     snapshot
     write_revert_script
+
+    # Health check 6 compares established sessions BEFORE and after. The "before"
+    # must be captured before anything is applied -- taken afterwards it would
+    # record the post-change world and could never detect a session the change
+    # killed, which is the one hazard the table's -300 priority creates.
+    HC=/opt/nemesis/scripts/nemesis-fw-healthcheck
+    HC_PRE=""
+    if [ -x "$HC" ]; then
+        HC_PRE=$(mktemp)
+        if "$HC" snapshot > "$HC_PRE" 2>/dev/null; then
+            echo "  ✓ pre-apply session snapshot captured"
+        else
+            rm -f "$HC_PRE"; HC_PRE=""
+            echo "  ! pre-apply session snapshot FAILED — check 6 will report UNKNOWN"
+        fi
+    else
+        echo "  ! $HC not present — post-apply health check will be skipped"
+    fi
 
     echo "── 2. dry-run the proposed ruleset ──"
     local DRY; DRY=$(mktemp) || die "cannot create temp file — environment problem, not a ruleset problem"
@@ -129,6 +177,26 @@ cmd_apply() {
         die "apply failed, state restored"
     fi
     echo "  ✓ applied"
+    echo
+    echo
+    echo "── 6. post-apply health check ──"
+    HC_VERDICT="SKIPPED"
+    if [ -x "$HC" ]; then
+        if [ -n "$HC_PRE" ]; then "$HC" run --pre "$HC_PRE"; else "$HC" run; fi
+        # Exit status is read directly, NOT through a pipeline -- $? after a pipe is
+        # the LAST command's status, which has silently masked real failures in this
+        # project more than once.
+        if [ $? -eq 0 ]; then HC_VERDICT="PASS"; else HC_VERDICT="FAIL"; fi
+        [ -n "$HC_PRE" ] && rm -f "$HC_PRE"
+    fi
+    echo "  health check: $HC_VERDICT"
+    if [ "$HC_VERDICT" = "FAIL" ]; then
+        echo
+        echo "  ⚠ HEALTH CHECK FAILED. The revert is ALREADY ARMED and will fire in"
+        echo "    ${WINDOW}s unless you confirm. Silence reverts -- that is the safe default,"
+        echo "    and it needs no action from you."
+        logger -t nemesis-fw "post-apply health check FAILED; auto-revert armed (${WINDOW}s, mode=$MODE)"
+    fi
     echo
     echo "  ╔══════════════════════════════════════════════════════════════╗"
     echo "  ║  TEST YOUR ACCESS NOW. Reverts automatically in ${WINDOW}s.        ║"
@@ -229,5 +297,10 @@ case "${1:-}" in
     status)     cmd_status ;;
     revert-now) cmd_revert_now ;;
     selftest)   cmd_selftest ;;
+    # `ai-override` is deliberately NOT a subcommand here. The AI-override
+    # mechanism (ADR 0019 Amendment 03 §10.4) is a private module -- see the
+    # public ADR for the guarantee it provides. This tool stays public and
+    # unaware of it; the private script calls back into `confirm` above rather
+    # than reimplementing the cancel-and-baseline path.
     *) echo "usage: $0 {apply <file>|confirm|status|revert-now|selftest}"; exit 1 ;;
 esac
