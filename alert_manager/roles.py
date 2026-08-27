@@ -516,6 +516,24 @@ UNAUTHENTICATED = frozenset({
     "setup", "login", "login_recovery", "api_passphrase_generate", "static",
     "install_windows_download", "install_windows_exe", "install_windows_zip",
     "install_windows_start", "api_health",
+    # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert endpoint.
+    #
+    # NO SESSION BY DESIGN, and this is the one entry where that is the POINT
+    # rather than a concession. The endpoint exists for an admin who CANNOT log
+    # in, because the firewall change under test can be exactly what broke their
+    # route to the dashboard. A role minimum would make it useless in the only
+    # circumstance it is for.
+    #
+    # It is NOT unprotected, and it is deliberately absent from ROUTE_MINIMUMS
+    # (which must not overlap this set): the credential is a single-use,
+    # 30-minute, hashed-at-rest token scoped to one change_id, and it is
+    # validated by `nemesis_fwd` — a privileged helper — NOT by the dashboard.
+    # So the check does not depend on the web process being trustworthy, which
+    # is a stronger position than a session check, not a weaker one.
+    #
+    # `fw_revert_landing` is a GET that renders a form and changes nothing;
+    # `fw_revert_action` is POST-only and performs the revert.
+    "fw_revert_landing", "fw_revert_action",
 })
 
 

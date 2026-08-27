@@ -5,6 +5,7 @@ import sqlite3
 import json
 import shlex
 import html
+from collections import OrderedDict
 import os
 import re
 import sys
@@ -99,7 +100,8 @@ sys.path.insert(0, os.path.join(_HERE, "alert_manager"))
 import database          # module handle: canonical DDL owner (init_audit_log_table)
 from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_devices_table, init_users_table, init_login_events_table,
-                      init_enrollment_tokens_table, init_recovery_codes_table,
+                      init_enrollment_tokens_table, init_fw_revert_tokens_table,
+                      init_recovery_codes_table,
                       init_licensing_tables, init_capability_tables,
                       init_settings_table, init_error_tables,
                       init_conn_events_tables, init_tier2_gate_tables)
@@ -135,6 +137,7 @@ init_users_table()
 init_login_events_table()
 init_recovery_codes_table()
 init_enrollment_tokens_table()
+init_fw_revert_tokens_table()
 # Licensing state + licence backup codes (ADR 0001 canonical DDL in
 # alert_manager/database.py). Created HERE because the dashboard is the only
 # writer: it activates keys, issues backup codes, and reads the entitlement.
@@ -692,6 +695,17 @@ _AUTH_EXEMPT   = {"setup", "login", "login_recovery", "logout", "api_passphrase_
                   # token remains the credential: install_windows_start() still calls
                   # _valid_installer_token() and 410s without a good one.
                   "install_windows_start",
+                  # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert link.
+                  # These MUST be exempt: the whole point is that the admin may be
+                  # unable to log in, because the firewall change under test can be
+                  # what broke their path to the dashboard. Gated behind auth, the
+                  # route 302s to a login page they cannot reach and the failsafe
+                  # silently does nothing — which is how install_windows_start
+                  # shipped broken on 2026-08-02, passing compile, template render
+                  # and a route audit before failing in production on exactly this.
+                  # The token remains the credential, and nemesis_fwd — not this
+                  # process — is what validates it.
+                  "fw_revert_landing", "fw_revert_action",
                   "api_health"}
 
 
@@ -5432,6 +5446,190 @@ def install_windows_start(token):
                         status=410, mimetype="text/plain")
     return render_template("install_prewarn.html", token=token,
                            support_contact="your administrator")
+
+
+# ── ADR 0019 failsafe: standalone revert endpoint (Amendment 03 §4) ──────────
+#
+# PLAIN HTML, NO JAVASCRIPT, ON PURPOSE. This page is reached by an admin whose
+# access may already be degraded, quite possibly from a phone mail client. It
+# must work with nothing but a form POST. Avoiding JS also sidesteps this
+# codebase's #1 recurring defect (JS string literals inside Python f-strings)
+# in the one page that most needs to render correctly the first time.
+#
+# ⚠ THIS LINK IS BEST-EFFORT AND MAY SIMPLY NOT WORK. If the change under test
+# broke the admin's path to the dashboard, it broke this page too. That is why
+# every failure email also carries the literal terminal command (§5), which
+# shares no failure domain with this route.
+
+#: source-address -> [attempt epochs]. NOISE CONTROL, NOT A SECURITY BOUNDARY.
+#: Guessing a 256-bit verifier is not a threat model; §4 asks for a limit so the
+#: log stays readable. Stated plainly so nobody later mistakes it for the
+#: control that makes this endpoint safe -- that is the hashed, single-use,
+#: TTL-bounded token, checked by nemesis_fwd and not here.
+_FW_REVERT_HITS = OrderedDict()
+_FW_REVERT_MAX = 10
+_FW_REVERT_WINDOW = 300
+
+
+#: Hard cap on distinct tracked addresses. The dict pruned timestamps WITHIN a
+#: key but never removed keys, so it only ever grew — an unauthenticated caller
+#: could grow it without limit. Found by the route audit, 2026-08-27.
+_FW_REVERT_MAX_KEYS = 1024
+
+
+def _fw_revert_throttled(addr):
+    """True if `addr` has exceeded the attempt budget. Bounded memory, and it can
+    never deny a caller it has not actually metered.
+
+    LRU EVICTION RATHER THAN A FAIL-OPEN/FAIL-CLOSED CHOICE AT THE CAP.
+
+    The first fix for the unbounded-growth defect capped the table and then had
+    to answer "what happens to a new address once it is full?" -- and both
+    answers were bad. Fail CLOSED and any unauthenticated caller can fill the
+    table to deny the admin the recovery path this endpoint exists to provide,
+    turning a log-noise control into a denial of the capability it guards. Fail
+    OPEN and the cap silently stops metering, which works but needs a special
+    branch documented as a deliberate exception to this codebase's usual
+    default.
+
+    Evicting the least-recently-seen entry instead means the question never
+    arises. The current caller is always inserted and always the most recent, so
+    it is never the one evicted -- an abusive caller is therefore always metered
+    correctly, and memory is bounded by construction rather than by a rule.
+
+    What eviction costs is the same thing fail-open cost: under table pressure an
+    address's history can be dropped and its count restarts. That is inherent to
+    bounded state and is acceptable here for the reason the cap was ever
+    acceptable -- §4 asks this control for log-noise reduction, not security.
+    Brute force is not the threat model at 256 bits; the credential is the token,
+    validated by nemesis_fwd.
+    """
+    now = time.time()
+    # Drop entries whose most recent attempt has aged out entirely.
+    for k in [k for k, v in _FW_REVERT_HITS.items()
+              if not v or now - v[-1] >= _FW_REVERT_WINDOW]:
+        _FW_REVERT_HITS.pop(k, None)
+
+    hits = [t for t in _FW_REVERT_HITS.get(addr, []) if now - t < _FW_REVERT_WINDOW]
+    hits.append(now)
+    _FW_REVERT_HITS[addr] = hits
+    _FW_REVERT_HITS.move_to_end(addr)          # this caller is now most-recent
+    while len(_FW_REVERT_HITS) > _FW_REVERT_MAX_KEYS:
+        _FW_REVERT_HITS.popitem(last=False)    # evict least-recently-seen, never this one
+    return len(hits) > _FW_REVERT_MAX
+
+
+def _fw_revert_page(title, body, status=200):
+    return Response(
+        "<!doctype html><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>" + html.escape(title) + "</title>"
+        "<body style='font-family:system-ui,sans-serif;max-width:34rem;"
+        "margin:3rem auto;padding:0 1rem;line-height:1.5'>" + body + "</body>",
+        status=status, mimetype="text/html")
+
+
+@app.route("/fw/revert", methods=["GET"])
+def fw_revert_landing():
+    """PUBLIC (the token is the credential): confirmation page for a one-use revert.
+
+    ⚠ THE TOKEN IS DELIBERATELY *NOT* IN THIS URL. It was, until the route audit
+    of 2026-08-27 found the consequence: werkzeug's access logging is active
+    (see the root handler at the top of this file), so a token in the path was
+    written to the system journal verbatim — verified byte-identical to the
+    minted token. `init_fw_revert_tokens_table` hashes the verifier precisely so
+    that reading the database yields nothing usable; putting it in the URL moved
+    the credential straight out of the hardened store and into a persistent log.
+
+    Two fixes were possible: suppress the access-log line for this path, or take
+    the token out of the URL. Suppression was rejected — it is a control that can
+    silently regress with nobody noticing, and it leaves the credential in a URL
+    that also reaches browser history and any future proxy. The token now travels
+    in the POST body, which the same journal does NOT record (measured: POST
+    lines appear without bodies).
+
+    COST, STATED PLAINLY: this is no longer one click. The admin pastes a code
+    from the email. A fragment-based scheme (`/fw/revert#token`) would preserve
+    one click and still keep the token off the server, but it makes a RECOVERY
+    path depend on JavaScript, and its no-JS fallback would go untested — the
+    same silent-regression objection that ruled out log suppression. This page
+    is reached when things are already broken, so it has no JavaScript at all
+    and works with nothing but a form POST.
+
+    GET is safe here BECAUSE it changes nothing: it renders a form. The state
+    change is POST-only, so an `<img src=...>` cannot trigger a revert — the
+    GET-as-write shape `db_action` shipped with and this codebase treats as a
+    known bug class.
+    """
+    return _fw_revert_page(
+        "Undo firewall change",
+        "<h2>Undo the pending firewall change?</h2>"
+        "<p>Nemesis applied a firewall change and its own health check flagged a "
+        "problem. Paste the code from your alert email to restore the previous "
+        "ruleset immediately.</p>"
+        "<form method=POST action='/fw/revert'>"
+        "<input name=token autocomplete=off autocapitalize=off spellcheck=false "
+        "style='width:100%;padding:.6rem;font-family:monospace;font-size:1rem' "
+        "placeholder='paste the code from the email'>"
+        "<button type=submit style='margin-top:1rem;padding:.7rem 1.2rem;"
+        "font-size:1rem'>Undo the change now</button></form>"
+        "<p style='margin-top:2rem;color:#555'>If this page does not work, the "
+        "change may have broken your route to it. From a terminal on the "
+        "appliance:</p><pre style='background:#f4f4f4;padding:.8rem;"
+        "overflow-x:auto'>sudo /opt/nemesis/scripts/nemesis-fw-apply revert-now</pre>")
+
+
+@app.route("/fw/revert", methods=["POST"])
+def fw_revert_action():
+    """PUBLIC (the token is the credential): perform the revert. POST only.
+
+    The dashboard has no privilege to revert anything and deliberately does not
+    validate the token -- it forwards it to nemesis_fwd, which owns both. So a
+    compromised dashboard cannot revert without a valid, unspent token.
+    """
+    token = (request.form.get("token") or "").strip()
+    # `remote_addr`, NEVER X-Forwarded-For. This route is unauthenticated, so the
+    # header is entirely caller-supplied: trusting it let any caller pick their
+    # own throttle bucket AND forge the source address recorded in
+    # `fw_revert_tokens.used_from` and the audit row. §4 asks for the source
+    # address precisely so this endpoint is auditable, and a forgeable value
+    # there is worse than none because it reads as fact. Every other address
+    # derivation in this file uses remote_addr (see _actor_label at ~:1164 and
+    # the login/recovery paths); this route was the sole divergence, which is
+    # the exact shape the route-audit practice exists to catch. Found by that
+    # audit, 2026-08-27.
+    #
+    # If this ever runs behind a real reverse proxy, the fix is a trusted-proxy
+    # config (ProxyFix with an explicit hop count), NOT reading the raw header.
+    addr = request.remote_addr or "unknown"
+
+    if _fw_revert_throttled(addr):
+        log.warning("fw revert: throttled %s", addr)
+        return _fw_revert_page("Too many attempts",
+                               "<h2>Too many attempts</h2><p>Try again shortly, or "
+                               "use the terminal command from the email.</p>", 429)
+    try:
+        import fw_client                                     # noqa: PLC0415
+        res = fw_client.failsafe_revert(token, source_ip=addr)
+    except Exception as exc:                                 # noqa: BLE001
+        # Refusal and unavailability are reported the same way ON PURPOSE: an
+        # unauthenticated caller learns only "it did not happen", never whether
+        # a selector exists, is spent, or is merely expired.
+        log.warning("fw revert: refused/unavailable from %s: %s", addr, exc)
+        return _fw_revert_page(
+            "Could not undo",
+            "<h2>That link did not work</h2><p>It may have expired, already been "
+            "used, or the change may have broken this server's own path. Use the "
+            "guaranteed route from a terminal on the appliance:</p>"
+            "<pre style='background:#f4f4f4;padding:.8rem;overflow-x:auto'>"
+            "sudo /opt/nemesis/scripts/nemesis-fw-apply revert-now</pre>", 403)
+
+    log.warning("fw revert: SUCCEEDED from %s (change %s)", addr, res.get("change_id"))
+    return _fw_revert_page(
+        "Change undone",
+        "<h2>The firewall change has been undone</h2>"
+        "<p>The previous ruleset is restored. This link is now spent and will "
+        "not work again.</p>")
 
 
 @app.route("/install/windows/<token>/exe")
