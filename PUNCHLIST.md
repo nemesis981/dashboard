@@ -49,6 +49,29 @@ first was Layer-C verdict UI, flagged 2026-08-23) — worth a full re-audit pass
 anyone treats it as current, rather than patching entries one at a time as they're
 noticed.
 
+### [LOW] No `X-Content-Type-Options: nosniff` anywhere in the app (found 2026-08-27, L4 §4.5 route-security note)
+`dashboard.py` sets no `nosniff` header on any response — its only `@app.after_request` is
+`_no_store` (`:1327`). Every JSON endpoint in the product therefore relies solely on
+`Content-Type` to stop a browser sniffing a response as markup. Surfaced while checking the
+new `/api/ai/context/learned` route, but it is **repo-wide and long pre-existing**, not
+specific to those routes.
+
+**Severity is LOW on evidence, not on assumption.** The classic sniffing attack needs a route
+that serves attacker-controlled bytes from the same origin. Verified there is none: no
+`send_file`, no `send_from_directory`, no `application/octet-stream` response anywhere in the
+tree — the app serves HTML and JSON only. Modern browsers do not sniff `application/json`
+regardless. So this is defence-in-depth against a vector this app does not currently expose.
+
+**Why it still belongs here:** the moment anything *does* serve stored bytes — a quarantined
+malware sample, a mail attachment from the email_security module, an exported report — the
+missing header stops being theoretical, and that is exactly the kind of change that would not
+think to add it. Cheap to fix now (one `after_request`, alongside `_no_store`); it becomes a
+real hole later if forgotten.
+
+**Not fixed inline, deliberately** — repo-wide, touches `dashboard.py`, and Rule 1 says an
+audit reports rather than repairs. Full context:
+`~/work/nemesis-internal/audits/route-security-note-ai-context-2026-08-27.md`.
+
 ### [DONE] Git-history disclosure decision — scoped rewrite executed 2026-07-26
 A git-history exposure question (from the disclosure-audit carve-outs) was evaluated,
 decided, rehearsed, and executed. **Full writeup, deliberately NOT in this repo:**
