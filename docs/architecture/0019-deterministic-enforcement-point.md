@@ -4,16 +4,17 @@
   derived observe-only ruleset) **all built and PROVEN live** — Increment 3's
   counter-agreement proof, unproven through three inconclusive attempts and one
   invalid one, **PASSED on 2026-08-01** on a correctly-isolated, real-traffic
-  measurement (see "Status / next" for the full attempt history). **Both of
-  Increment 4's prerequisites are now met**: this measurement, and the netlink
-  out-of-band-change watcher (built and VM-verified, 2026-08-01). **Increment 4
-  itself (cutover to real enforcement authority) has not started**, and remains
-  justified by two independent reasons: closing the loop on Increment 3's now-proven
-  observe-only design, and a separately-confirmed gap in the current interim block
-  mechanism (full detail kept private per Rule 10 — see the private mirror, not
-  named here). Design decided 2026-07-29 from measured evidence; code landed
-  2026-07-30 (`19d9b5c`, `nemesis-fw-apply` + `nemesis-fw-render`, pushed to
-  `origin/main`). See "Status / next" below for the full breakdown.
+  measurement (see "Status / next" for the full attempt history). **Increment 4
+  (cutover to real enforcement authority) is DONE, 2026-08-01** (`1bedbb3`,
+  landed the same day Increment 3's proof passed) — the derived table now carries
+  real enforcement authority rather than observing only. **Additive, not a
+  replacement:** the existing interim block mechanism continues operating
+  unchanged alongside it. **Corrected 2026-08-27** — this line previously said
+  Increment 4 "has not started," which stopped being true 26 days earlier; see
+  the per-increment table below for what remains. Design decided 2026-07-29 from
+  measured evidence; code landed 2026-07-30 (`19d9b5c`, `nemesis-fw-apply` +
+  `nemesis-fw-render`, pushed to `origin/main`). See "Status / next" below for
+  the full breakdown.
 - **Date:** 2026-07-29
 - **Affects:** `alert_manager/firewall.py` (the access-control chokepoint), `install.sh`,
   ADR 0005's "future firewall engine", the `CLAUDE.md` ad-hoc-`nft` prohibition, Fork B's
@@ -129,10 +130,9 @@ state, as of 2026-08-01:
 | 1 — priority placement | **Proven.** Table registers at the intended priority, ahead of every other chain observed on this host, verified live. |
 | 2 — lockout failsafe | **Proven.** Apply-then-confirm with auto-revert; the failsafe has been watched firing unattended, not just written. |
 | 3 — derived observe-only rules | **PROVEN 2026-08-01.** Counter agreement between the derived observe rules and ufw's own DROP counters measured exactly over two independent intervals, on traffic confirmed by direct packet capture to have actually arrived. Four earlier attempts the same day were each invalid for a distinct, separately-diagnosed reason (the table lost at a reboot, zero blocks in place, a real block with no traffic to compare, and synthetic traffic that could not exercise the same code path a genuine new connection does) before a correctly-isolated fifth run passed. A false FAIL from an intermediate run was traced to and retracted as a bug in the measurement harness itself, not a firewall defect. Full attempt history and mechanism detail: `docs/audits/adr0019-increment3-counter-agreement-2026-08-01.md` (public summary) and the private mirror (full evidence). |
-| 4 — cutover to real enforcement authority | **Not started. Both prerequisites now met, justified by two independent reasons.** (1) Increment 3's agreement comparison has now succeeded — cutover no longer means trusting the table's verdicts before anyone has checked them; it is now backed by a passed measurement. (2) A second, separately-confirmed gap in the current interim block mechanism (kept private per Rule 10 — see the addendum above; not detailed here) is also structurally closed by Increment 4's design, protocol-agnostically, once it lands. **The netlink out-of-band-change watcher — the hard-prerequisite half of this gate — is built and VM-verified** (all 7 test steps passing, including the "stop the watcher, tamper while down, restart" bypass test). It unifies two jobs on one `nft` monitor stream: distinguishing "ufw's own rules changed, so the derived table needs a re-render" from "the enforcement table itself changed unexpectedly" — the second case alerts rather than silently self-repairing, since a silent auto-repair on a table carrying real DROP authority would hide exactly the kind of tampering or drift an operator most needs to see. |
+| 4 — cutover to real enforcement authority | **DONE, 2026-08-01** (`1bedbb3`). The enforcement switch defaults ON; the derived table now carries real enforcement authority at its documented priority, ahead of ufw's own accept path — the same relative-ordering property Increment 1 established, now backed by live authority rather than observation only. **Additive, not a replacement:** `ufw` (and `alert_manager/firewall.py`, which shells out to it) continues enforcing unchanged alongside it and does not need cutting over. Verified live at cutover: a controlled test confirmed real drop authority, and the netlink out-of-band-change watcher rebaselined correctly with no false tamper alert. **Corrected 2026-08-27** — this row previously read "Not started," which stopped being true the same day it was written (this ADR's own status line was last updated hours before the cutover commit landed). **The netlink out-of-band-change watcher — the hard-prerequisite half of this gate — is built and VM-verified** (all 7 test steps passing, including the "stop the watcher, tamper while down, restart" bypass test). It unifies two jobs on one `nft` monitor stream: distinguishing "ufw's own rules changed, so the derived table needs a re-render" from "the enforcement table itself changed unexpectedly" — the second case alerts rather than silently self-repairing, since a silent auto-repair on a table carrying real DROP authority would hide exactly the kind of tampering or drift an operator most needs to see. |
 
-Sequence: both of Increment 4's prerequisites — the netlink watcher and a valid Increment 3
-measurement — are now met. Increment 4 (cutover) is next, and per the addendum above resolves
-both open justifications at once, not just the counter-agreement question. Then the relay
-core, then the inbound reverse relay. See the private mirror for the full evidence base, the
-specific design, and open questions.
+Sequence: Increment 4 (cutover) landed 2026-08-01, resolving both open justifications at
+once, not just the counter-agreement question — see the row above. Next: the relay core, then
+the inbound reverse relay. See the private mirror for the full evidence base, the specific
+design, and open questions.
