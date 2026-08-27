@@ -4086,3 +4086,37 @@ from a source that was wrong on this point.
 set is consulted after the per-peer op allowlist, so credential exemption is never
 authorisation exemption. Fixed rather than worked around, deliberately: leaving a second
 inert allowlist in place would preserve the trap.
+
+### [LOW] Login form has no CSRF token — flagged for a deliberate call, NOT a bug report (found 2026-08-27)
+`dashboard.py`'s `/login` form carries only `username`, `password` and `next` — verified by
+scraping the rendered form on a live instance, then confirmed in source: there is **no CSRF
+token machinery anywhere in the app**. Every `csrf` occurrence in `dashboard.py` is a COMMENT
+reasoning about GET-vs-POST, not an implementation.
+
+**This is a coherent strategy, not an omission — state that first.** The app's chosen defence
+is `SESSION_COOKIE_SAMESITE="Lax"` + `SESSION_COOKIE_HTTPONLY=True` (`dashboard.py:596-597`)
+plus POST-only for every state-changing route, and the code says so explicitly in several
+places ("Paired with SESSION_COOKIE_SAMESITE, that is two independent reasons a forged request
+fails"). For *session-authenticated* routes that reasoning holds: a forged cross-site request
+does not carry the session cookie under Lax.
+
+**The gap is specifically LOGIN CSRF, which that defence structurally cannot cover.** Login is
+the one POST that does not *need* an existing cookie — it SETS one. So SameSite has nothing to
+withhold, and an attacker can cause a victim's browser to log in **as the attacker**. The
+victim then operates inside an account the attacker controls, and anything they do or upload
+lands there.
+
+**Why LOW and not higher:** this is a self-hosted appliance with local accounts and no
+registration flow, so an attacker needs valid credentials of their own to plant, and the
+blast radius is one confused admin session rather than data exfiltration. There is no evidence
+this has ever been exercised.
+
+**Why log it anyway:** this codebase has already shipped the GET-as-write CSRF class once
+(`db_action`), and the standing route-audit practice exists partly because of it. A defence
+strategy that is right for 40 routes and structurally silent on one is exactly the shape worth
+an explicit decision rather than an inherited default.
+
+**Candidate fixes, in increasing cost:** a `SameSite=Strict` cookie on the pre-auth session
+only; a signed one-time token in the login form; or accepting it explicitly with the reasoning
+recorded here so the next auditor does not re-derive it. **Operator's call — do not fix
+unilaterally.**
