@@ -265,5 +265,58 @@ check("a malformed check entry -> allow_revert", got["decision"] == fd.ALLOW_REV
 
 ai.effective_ceiling = _ORIG_CEIL
 without_class()
+print("\n-- 9. \u2b50 THE REAL analyze() SHAPE: {ok, text}, NOT {decision} --")
+# ⚠ THIS SECTION EXISTS BECAUSE ITS ABSENCE SHIPPED A LIVE DEFECT. Every check
+# above injects a double returning {"decision": ...}; the REAL analyze() returns
+# {"ok": True, "text": str}. decide() read result["decision"], so every
+# production call fell through to allow_revert while 64 checks stayed green —
+# the MOCK defined a contract the real function never satisfied. Caught on the
+# first genuine §5 run, which it turned into an all-allow_revert table that read
+# exactly like "accumulated context does nothing".
+with_class(); stub_ceiling(ai.L4_GOVERN)
+
+
+def text_judge(body):
+    return lambda *a, **k: {"ok": True, "text": body}
+
+
+r = fd.decide(req(), _analyze=text_judge(
+    "DECISION: override\nREASONING: the failing check is a known false negative"))
+check("\u2b50 a TEXT response in the required form overrides",
+      r["decision"] == fd.OVERRIDE, r)
+check("...and the reasoning is extracted",
+      "false negative" in (r.get("reasoning") or ""), r)
+
+r = fd.decide(req(), _analyze=text_judge(
+    "DECISION: allow_revert\nREASONING: the loopback failure is real"))
+check("an explicit allow_revert in text is honoured",
+      r["decision"] == fd.ALLOW_REVERT, r)
+
+print("\n-- 10. \u26a0 the substring trap: prose ARGUING AGAINST an override --")
+# A response that says "I would not override" contains the word "override".
+# Substring matching would INVERT the answer on the one path where inverting it
+# suppresses a safety default.
+for label, body in [
+    ("'I would not override this' -> must NOT override",
+     "I would not override this change; the dashboard is genuinely unreachable."),
+    ("bare prose with no DECISION line",
+     "The health check failure looks genuine. Reverting seems wisest."),
+    ("DECISION line with an unknown value",
+     "DECISION: maybe\nREASONING: unsure"),
+    ("DECISION: override buried in prose, not at line start",
+     "In some cases DECISION: override would apply, but not here."),
+    ("empty text", ""),
+    ("override with NO reasoning line", "DECISION: override"),
+]:
+    got = fd.decide(req(), _analyze=text_judge(body))
+    check("%s" % label, got["decision"] == fd.ALLOW_REVERT, got)
+
+check("CONTROL: the parser CAN say override (so the six above are not vacuous)",
+      fd.decide(req(), _analyze=text_judge(
+          "DECISION: override\nREASONING: valid"))["decision"] == fd.OVERRIDE)
+
+ai.effective_ceiling = _ORIG_CEIL
+without_class()
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

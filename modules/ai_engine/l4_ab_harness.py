@@ -85,8 +85,47 @@ def _request(change_id, deadline_offset=900):
 # WORKER — one install. Runs in its own process, with its own database.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _load_env():
+    """Load /etc/nemesis.env into os.environ. Returns (ok, detail).
+
+    ⚠ WITHOUT THIS THE MODEL IS NEVER CONTACTED. The dashboard gets this file
+    via systemd's EnvironmentFile; a bare subprocess does not, so `analyze()`
+    returns {"ok": False, "reason": "ANTHROPIC_API_KEY not configured"} and
+    EVERY decision falls to allow_revert. The first two §5 runs produced a
+    complete all-allow_revert table for exactly that reason and it read as
+    "accumulated context does nothing" — a null measurement wearing a result's
+    face. The worker now REFUSES to run a model judge unless this succeeded.
+    """
+    path = "/etc/nemesis.env"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            body = fh.read()
+    except OSError as exc:
+        return False, "cannot read %s: %s" % (path, exc)
+    n = 0
+    for line in body.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
+        n += 1
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return False, "%s parsed (%d vars) but ANTHROPIC_API_KEY is absent" % (path, n)
+    return True, "%d vars" % n
+
+
 def worker(role, judge, stub):
     import datetime
+    if judge == "model":
+        ok, detail = _load_env()
+        if not ok:
+            print(json.dumps({"role": role, "fatal":
+                              "model judge requested but the environment is not "
+                              "loaded (%s) — refusing to measure, because every "
+                              "decision would be allow_revert for a reason "
+                              "unrelated to context" % detail}))
+            return 1
     db = os.path.join(tempfile.mkdtemp(prefix="l4ab-%s-" % role), "alerts.db")
     sys.path.insert(0, "/opt/nemesis")
     sys.path.insert(0, "/opt/nemesis/alert_manager")
@@ -98,15 +137,44 @@ def worker(role, judge, stub):
     ai._init_db()
 
     if stub:
-        # The SAME stub the unit suite uses. In real mode neither branch runs
-        # and the genuine ladder answers — so the only difference between a
-        # stub run and a real run is this block.
+        # INSTRUMENT MODE ONLY. Monkeypatches the ladder; never a §5 result.
         ai.ACTION_CLASS_CEILINGS[CLS] = ai.L4_GOVERN
         _orig = ai.effective_ceiling
         ai.effective_ceiling = lambda c: (
             {"level": ai.L4_GOVERN, "earned": ai.L4_GOVERN,
              "hard_ceiling": ai.L4_GOVERN, "reasons": ["stub"]}
             if c == CLS else _orig(c))
+    else:
+        # ⭐ REAL MODE: grant L4 through Window 1's ACTUAL mechanism, in this
+        # worker's OWN fresh database. Nothing is monkeypatched.
+        #
+        # ⚠ THIS IS WHY A FRESH DB IS NOT A PROBLEM BUT A REQUIREMENT. The grant
+        # lives in the DB, so A and B must each hold it — that is precisely §5's
+        # "two VMs FROM ONE IMAGE": identical authority, differing only in
+        # accumulated context. Granting only one side would make the comparison
+        # measure authority instead of context.
+        pw = "harness-throwaway-not-a-real-secret"
+        sp = ai.set_master_password(pw)
+        if not sp.get("ok", True):
+            print(json.dumps({"role": role, "fatal":
+                              "could not set master password: %s" % sp}))
+            return 1
+        g = ai.raise_authority(CLS, ai.L4_GOVERN, pw,
+                               granted_by="l4-ab-harness",
+                               reason="DESIGN-L4 §5 A/B run (test data %s)"
+                                      % datetime.date.today().isoformat())
+        if not g.get("ok", False):
+            print(json.dumps({"role": role, "fatal":
+                              "grant refused: %s" % g}))
+            return 1
+        # PROVE the grant took, in THIS process, before measuring anything.
+        lvl = ai.effective_ceiling(CLS).get("level")
+        if lvl != ai.L4_GOVERN:
+            print(json.dumps({"role": role, "fatal":
+                              "granted but effective level is L%s, not L4 —"
+                              " refusing to measure at the wrong authority"
+                              % lvl}))
+            return 1
 
     seeded = {}
     if role == "B":
@@ -294,25 +362,15 @@ def main(argv=None):
                   "  That entry is Window 1's (ADR 0019 Amendment 03 §10.3)."
                   % CLS, file=sys.stderr)
             return 2
-        try:
-            ceil = ai.effective_ceiling(CLS)
-        except Exception as exc:                               # noqa: BLE001
-            print("ABORT: cannot read the ceiling for %r: %s" % (CLS, exc),
-                  file=sys.stderr)
-            return 2
-        if ceil.get("level") != ai.L4_GOVERN:
-            print("ABORT: %r is registered (hard ceiling L%s) but its EFFECTIVE\n"
-                  "  level is L%s — %s.\n"
-                  "  `decide()` overrides only at L4, so BOTH sides would answer\n"
-                  "  allow_revert for an AUTHORITY reason having nothing to do\n"
-                  "  with accumulated context. That null result looks exactly\n"
-                  "  like §5 requirement 1's failure ('the mechanism is inert')\n"
-                  "  and would be reported as one.\n"
-                  "  The L4 grant is DESIGN-L4 §2, still held. Re-run with --stub\n"
-                  "  to exercise the INSTRUMENT — which is not a §5 result."
-                  % (CLS, ceil.get("hard_ceiling"), ceil.get("level"),
-                     ", ".join(ceil.get("reasons") or ["no reason given"])),
-                  file=sys.stderr)
+        # ⚠ DO NOT CHECK THE GRANT HERE. This probe DB is a fresh temp file, so
+        # it can NEVER hold a grant — an earlier version checked it anyway and
+        # would have aborted every real run for a reason that had nothing to do
+        # with the system under test. Each WORKER grants in its own DB and
+        # proves it took before measuring. Registration is the only thing
+        # meaningfully checkable from here.
+        if not hasattr(ai, "raise_authority"):
+            print("ABORT: raise_authority is not exported — the grant mechanism"
+                  " is unavailable.", file=sys.stderr)
             return 2
 
     a, err_a = run_side("A", args.judge, args.stub)
@@ -322,8 +380,22 @@ def main(argv=None):
               file=sys.stderr)
         return 2
 
-    mode = "STUB (instrument check only)" if args.stub else "REAL"
-    tag = "MODE=STUB " if args.stub else ""
+    # ⚠ THERE ARE TWO NON-§5 REGIMES, NOT ONE. `--stub` monkeypatches the
+    # ladder; `--judge deterministic` uses a judge that follows context BY
+    # CONSTRUCTION. Either one makes the run a MECHANISM check. An earlier
+    # version guarded only --stub and printed "§5 PASSED" for a real-authority
+    # run with the circular judge — a result that reads as the claim while
+    # being unable to support it. Both are labelled now.
+    is_s5 = (not args.stub) and args.judge == "model"
+    if args.stub:
+        mode = "STUB — ladder monkeypatched (instrument check only)"
+        tag = "MODE=STUB "
+    elif args.judge != "model":
+        mode = "REAL authority, CIRCULAR judge (mechanism check only)"
+        tag = "MECHANISM "
+    else:
+        mode = "REAL — genuine grant, real model. THIS IS §5."
+        tag = ""
     print("=" * 74)
     print("§5 A/B — fresh vs matured    judge=%s    mode=%s" % (args.judge, mode))
     print("=" * 74)
@@ -348,10 +420,29 @@ def main(argv=None):
               "  only that the instrument can DISTINGUISH A from B."
               % (len(rows) - len(failed), len(rows)))
         return 3 if failed else 3
+    if not is_s5:
+        print("  MECHANISM CHECK — %d/%d passed under REAL authority with the\n"
+              "  deterministic judge.\n"
+              "  ⛔ NOT A §5 RESULT. The judge follows context by construction,\n"
+              "  so 'B differs' is guaranteed by the judge, not discovered. Only\n"
+              "  --judge model can support the customer-facing claim."
+              % (len(rows) - len(failed), len(rows)))
+        return 3 if failed else 3
     if failed:
-        print("  §5 FAILED: %s" % ", ".join(failed))
+        # ⚠ "not met in this run" is NOT "§5 failed". One call per cell against a
+        # non-deterministic model cannot disprove the mechanism, and a verdict
+        # line asserting otherwise is a confident conclusion from an
+        # underpowered measurement. The tool reports what it observed and says
+        # what would be needed to conclude anything.
+        print("  §5 INCONCLUSIVE — requirement(s) NOT MET IN THIS RUN: %s"
+              % ", ".join(failed))
+        print("  This is not a failure verdict. n=1 per cell against a\n"
+              "  non-deterministic model; repeat with n>=5, and include at least\n"
+              "  one scenario where overriding is CLEARLY the safer action,\n"
+              "  before drawing any conclusion about the mechanism.")
         return 1
-    print("  §5 PASSED — all six requirements plus the null control.")
+    print("  §5 PASSED — all six requirements plus the null control,\n"
+          "  under a genuine L4 grant with the real model.")
     return 0
 
 

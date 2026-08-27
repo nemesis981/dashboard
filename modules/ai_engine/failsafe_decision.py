@@ -137,13 +137,25 @@ def decide(request, *, now=None, _analyze=None):
         if not isinstance(result, dict) or not result.get("ok"):
             return _safe(change_id, "analyze() declined or failed")
 
+        # ⚠ THE REAL `analyze()` RETURNS {"ok", "text", ...} — THERE IS NO
+        # "decision" KEY. An earlier version read result["decision"], which an
+        # injected test double supplied and the real function never does, so
+        # EVERY live call fell through to allow_revert. 64 unit checks were
+        # green against a contract only the mock satisfied. Found 2026-08-27 on
+        # the first real §5 run, which it turned into an all-allow_revert table
+        # that read exactly like "accumulated context does nothing".
+        # `decision`/`reasoning` are still honoured so an injected double keeps
+        # working, but TEXT is the path production actually takes.
         verdict = (result.get("decision") or "").strip().lower()
+        reasoning = (result.get("reasoning") or "").strip()
+        if not verdict:
+            verdict, reasoning = _parse_text(result.get("text") or "")
         if verdict != OVERRIDE:
-            # Includes the empty string, an unexpected value, and an explicit
-            # allow_revert. All the same answer, deliberately.
+            # Includes the empty string, an unparseable answer, an unexpected
+            # value, and an explicit allow_revert. All the same answer,
+            # deliberately — an answer we cannot read is not permission.
             return _safe(change_id, "verdict %r is not an override" % (verdict,))
 
-        reasoning = (result.get("reasoning") or "").strip()
         if not reasoning:
             # §10.4: an override whose reasoning exists only in the engine is
             # not disclosed, and an undisclosed override must not happen.
@@ -162,6 +174,30 @@ def decide(request, *, now=None, _analyze=None):
         return _response(change_id, ALLOW_REVERT)
 
 
+def _parse_text(text):
+    """(verdict, reasoning) from the model's free text. Fail-closed.
+
+    ⭐ REQUIRES AN EXACT, UNAMBIGUOUS TOKEN. Anything this cannot read with
+    certainty returns ("", "") and therefore allow_revert. Free-text parsing on
+    a safety-critical path is where a permissive reading does the most damage:
+    a response arguing AGAINST overriding contains the word "override", so
+    substring matching would invert the answer. The model is instructed to emit
+    one line in exactly this shape, and only that shape is honoured.
+    """
+    verdict, reasoning = "", ""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        low = line.lower()
+        if low.startswith("decision:"):
+            val = low.split(":", 1)[1].strip()
+            # Exact match only. Never `in`, never startswith.
+            if val in (OVERRIDE, ALLOW_REVERT):
+                verdict = val
+        elif low.startswith("reasoning:"):
+            reasoning = line.split(":", 1)[1].strip()
+    return verdict, reasoning
+
+
 def _build_prompt(request, checks):
     """Assemble the NPFA/1 prompt: request facts + engine-side context.
 
@@ -177,9 +213,12 @@ def _build_prompt(request, checks):
             "A pending firewall change failed its post-apply health check. "
             "A revert is ALREADY SCHEDULED and will fire at the deadline below. "
             "You are not being asked to approve the revert; you are being "
-            "offered a bounded window to prevent it. Answer with a decision of "
-            "'override' only if preventing the revert is clearly safer than "
-            "allowing it. Anything else allows the revert.",
+            "offered a bounded window to prevent it. Override only if "
+            "preventing the revert is clearly safer than allowing it.\n"
+            "Answer in EXACTLY this form, two lines, nothing else:\n"
+            "DECISION: override      (or)      DECISION: allow_revert\n"
+            "REASONING: <one sentence, required if you override>\n"
+            "Any other form is read as allow_revert.",
             ("Change id", pf.IDENTIFIER, request["change_id"]),
             ("Trigger", pf.ENUM, request.get("trigger"),
              {"allowed": {"healthcheck_failed", "guard_refusal"}}),
