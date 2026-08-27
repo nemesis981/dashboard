@@ -439,6 +439,13 @@ ROUTE_MINIMUMS = {
     "module_malware_detection__api_scan":               (_A, _A),
     "module_malware_detection__api_scan_status":        (_V, _A),
     "module_malware_detection__api_canary_check":       (_U, _U),
+    # ADMIN, deliberately a tier above its canary sibling above. `canary/check`
+    # POLLS existing bait — a read of the filesystem with alerting side effects,
+    # hence user. `canary/plant` WRITES FILES into a real user's home directory,
+    # which is the action that caused the 2026-08-25 false-ransomware incident
+    # when a test triggered it. Creating files on someone's disk is an admin act
+    # even though the two routes sit next to each other and sound alike.
+    "module_malware_detection__api_canary_plant":       (_A, _A),
     "module_malware_detection__api_settings":           (_V, _A),
     "module_malware_detection__api_yara_status":        (_V, _A),
     "module_malware_detection__api_yara_update":        (_A, _A),
