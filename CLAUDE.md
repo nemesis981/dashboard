@@ -1234,6 +1234,30 @@ the first place.
   fleet was 923.5 GB, roughly 60% of a disk at 83% capacity. A check that depends on being
   asked is a check that happens after the problem. Reference shape for the flag-it half:
   `vm-fleet/fleet-inventory-2026-08-25.md` (private mirror).
+- **`KEEP` now EXPIRES, and the closeout sweep RUNS THE CHECK (added 2026-08-27).** Every `KEEP`
+  VM carries a review date in its own VirtualBox extradata (`nemesis/keep-until`, ISO date or the
+  literal `permanent`; plus `nemesis/keep-reason` and `nemesis/keep-affirmed`). **Run
+  `~/work/nemesis-internal/vm-fleet/tools/nemesis-fleet-review` as part of every closeout sweep**
+  — it is read-only, exits **1** if any VM is past its date and **2** if it cannot trust its own
+  classifier, so it is a gate rather than a report. Default window is **60 days**; the companion
+  `nemesis-fleet-backfill` is a one-time bootstrap (dry-run by default, writes only `nemesis/*`
+  extradata, never overwrites an existing value) and has already been applied to all 45 VMs.
+  **⛔ THE NAME IS STILL THE FAIL-SAFE AND THIS CHANGES NOTHING ABOUT IT.** `KEEP` in the name
+  means protected, unconditionally. The date is advisory metadata layered on top: missing,
+  unparseable or unreadable metadata resolves to **protected and listed**, never to "expired" and
+  never to "deletable". The mechanism can only ever ADD A FLAG, never remove protection — the same
+  invariant shape as ADR 0019's failsafe response. **EXPIRED means a human is asked again; it
+  never means delete.** The outcomes are renew, retire (with the explicit per-VM confirmation the
+  `KEEP` rule already requires), promote to permanent, or leave it flagged. Nothing may be deleted
+  on the strength of the review list alone — the `srv-client` near-miss and the 2026-08-27
+  `win11-benign-src.vdi` case (every mechanical test said "orphan, reclaim 40 GB"; the correct
+  answer was **do not touch it** — it was another window's completed corpus clone) are exactly why.
+  **Why a human-set date and not "N days since last boot":** measured across all 45 VMs,
+  `VMStateChangeTime` had a **median age of 1 day**, so an N-day rule flagged **zero VMs at
+  N=30/45/60/90** — housekeeping resets it, and a sweep that boots a VM to inspect it resets that
+  VM's own aging clock. Full design and verification evidence:
+  `vm-fleet/PROPOSAL-keep-expiry-convention-2026-08-27.md` and `vm-fleet/VM-FLEET-LOG.md`
+  (private mirror).
 - **Keep-current generalizes past the gauge VM.** Any VM in the fleet running a server or
   agent install — not just the permanent gauge VM above — gets updated to match whenever
   production Nemesis updates. Same reasoning as the gauge VM's maintenance rule: a VM meant to
