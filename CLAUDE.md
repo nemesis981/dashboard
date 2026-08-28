@@ -1279,6 +1279,35 @@ the first place.
   This is the same failure class ADR 0019's `VM-TEST-PLAN.md` already names for its own rig
   ("identify by MAC via `VBoxManage`, never by inferring from open ports") — this bullet
   generalises it from that one target to the whole fleet.
+- **Fleet archive policy — non-active images move to USB, not deleted (operator-directed,
+  2026-08-28).**
+  1. Non-active VM images (not currently in use, but not confirmed deletable) live on the
+     Seagate One Touch USB drive rather than the NVMe. Move with `VBoxManage movevm`, never a
+     manual file copy — `movevm` re-registers the VM atomically at its new path and preserves
+     the snapshot chain; a manual copy does neither.
+  2. Master/template base images may live permanently on the USB drive. When a working clone
+     is needed, clone it onto the NVMe on demand. That clone is disposable — delete it after
+     use rather than archiving it back; the USB copy stays the source of truth.
+  3. **Known constraint, accepted:** the drive is a seek-bound HDD (~126 IOPS ceiling,
+     measured 2026-08-28) on USB 2.0/3.0. Pulling a large VM (tens of GB) back to NVMe is a
+     genuine wait, not an instant swap — plan accordingly.
+  4. **Known risk, accepted by the operator — do not re-litigate or propose a second
+     dedicated drive without being asked:** this same drive also holds
+     `nemesis-state-backups/` and the `usb` git remote. Routine archive/restore traffic shares
+     the physical device with the backup copy — no exFAT journaling, so an unplug mid-write
+     threatens everything on the drive, not just the VM in motion. The operator has weighed
+     this tradeoff and accepted it.
+  5. **Tracking requirement.** `nemesis-fleet-review` and the living fleet inventory only see
+     VMs currently registered with VirtualBox — an archived VM drops out of both, and without
+     a separate record an archived fleet becomes invisible, silently reintroducing the exact
+     "clean report is misleading" failure the 2026-08-25/2026-08-27 fleet-review work was
+     built to close. **Manifest: `vm-fleet/archive-manifest.md` (private mirror)** — same
+     placement as `VM-FLEET-LOG.md` and the fleet-inventory docs it sits beside, per this
+     section's established pattern of keeping fleet operational data (real VM names, disk
+     paths) out of the public repo. Logs, per archived VM: name, archived date, archived by
+     (window), reason, USB path, and the exact restore command. Whichever window archives or
+     restores a VM keeps this file current as part of that action, same discipline as the
+     living fleet inventory above — not a periodic audit deliverable.
 
 **Also present, outside the 7-Master set — do not fold into it without a deliberate decision:**
 - `Nemesis Appliance Spare ISOLATED` — a second appliance-installed isolated Ubuntu box
