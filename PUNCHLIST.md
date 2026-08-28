@@ -4120,3 +4120,25 @@ an explicit decision rather than an inherited default.
 only; a signed one-time token in the login form; or accepting it explicitly with the reasoning
 recorded here so the next auditor does not re-derive it. **Operator's call — do not fix
 unilaterally.**
+
+### [LOW] Every state-snapshot set made before 2026-08-28 may be missing WAL-only transactions (found 2026-08-28)
+Every `nemesis-state-backups/` set on record before 2026-08-28 took the DB half with `cp
+alerts.db`. The live DB runs `journal_mode=wal`, so committed transactions can sit in the
+`-wal` sidecar rather than the main file — a plain `cp` of `alerts.db` alone silently omits
+them. See CLAUDE.md's State Snapshots section (fixed 2026-08-28: use the sqlite3 backup API
+or `VACUUM INTO` instead) for the mechanism and the verification evidence for the fix.
+
+**Why this is unrepairable, not just unfixed:** the gap is in what was captured at snapshot
+time. A `cp`-made set still passes `PRAGMA integrity_check` and reports the correct table
+count, so there is no retroactive signal distinguishing a complete set from one missing
+recent WAL transactions. Nothing about re-inspecting an existing set today can tell you which
+case it is.
+
+**Practical effect:** every pre-2026-08-28 snapshot set should be treated as lower-confidence
+than it looks — a rollback built from one of these could be missing whatever committed
+transactions were sitting in the WAL at the moment `cp` ran, with no way to tell in advance
+whether that gap is empty or significant for that particular set. Not a security finding;
+logged so this doesn't get silently trusted as a complete rollback point later.
+
+**No fix possible for existing sets** — informational entry, not an action item beyond the
+mechanism fix already landed.
