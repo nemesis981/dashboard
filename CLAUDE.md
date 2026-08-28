@@ -585,6 +585,16 @@ Each set contains BOTH halves so a rollback is self-contained:
 Rolling back the DB without the matching code (or vice versa) is the subtle
 failure this pair prevents.
 
+**⛔ Take the DB half with the sqlite3 backup API (or `VACUUM INTO`) — never `cp` (found
+2026-08-28).** `alerts.db` runs `journal_mode=wal`; committed transactions can sit in the
+`-wal` sidecar rather than the main file. A `cp` of `alerts.db` alone silently omits them.
+**The failure is invisible after the fact:** a `cp`-made snapshot still passes `PRAGMA
+integrity_check` and still reports the right table count, so there is no way to tell
+retroactively how stale any past `cp`-made set actually is. Every set on record before
+2026-08-28 was made this way. Verification shape that proved the fix: 93/94 tables
+row-count-identical to live, the one difference (`dm_operation_log`, +4 rows) being the audit
+log advancing during the backup itself — expected drift, not loss.
+
 ### Behavior
 Take the snapshot, then PAUSE and report what is about to change + confirm the
 set was written. Wait for operator go-ahead before performing the
@@ -1279,24 +1289,34 @@ the first place.
   This is the same failure class ADR 0019's `VM-TEST-PLAN.md` already names for its own rig
   ("identify by MAC via `VBoxManage`, never by inferring from open ports") — this bullet
   generalises it from that one target to the whole fleet.
-- **Fleet archive policy — non-active images move to USB, not deleted (operator-directed,
-  2026-08-28).**
+- **Fleet archive policy — non-active images move to external storage, not deleted
+  (operator-directed, 2026-08-28; archive target corrected same day after measurement).**
   1. Non-active VM images (not currently in use, but not confirmed deletable) live on the
-     Seagate One Touch USB drive rather than the NVMe. Move with `VBoxManage movevm`, never a
-     manual file copy — `movevm` re-registers the VM atomically at its new path and preserves
-     the snapshot chain; a manual copy does neither.
-  2. Master/template base images may live permanently on the USB drive. When a working clone
-     is needed, clone it onto the NVMe on demand. That clone is disposable — delete it after
-     use rather than archiving it back; the USB copy stays the source of truth.
-  3. **Known constraint, accepted:** the drive is a seek-bound HDD (~126 IOPS ceiling,
-     measured 2026-08-28) on USB 2.0/3.0. Pulling a large VM (tens of GB) back to NVMe is a
-     genuine wait, not an instant swap — plan accordingly.
-  4. **Known risk, accepted by the operator — do not re-litigate or propose a second
-     dedicated drive without being asked:** this same drive also holds
-     `nemesis-state-backups/` and the `usb` git remote. Routine archive/restore traffic shares
-     the physical device with the backup copy — no exFAT journaling, so an unplug mid-write
-     threatens everything on the drive, not just the VM in motion. The operator has weighed
-     this tradeoff and accepted it.
+     **WD Blue SA510 4 TB SSD (ext4), mounted at `/mnt/nemesis-vmarchive/vm-archive`** —
+     **not** the Seagate USB drive named when this policy was first written hours earlier.
+     Move with `VBoxManage movevm --folder "/mnt/nemesis-vmarchive/vm-archive"` (note:
+     `--folder` takes the PARENT directory; `movevm` creates the per-VM subdirectory itself),
+     never a manual file copy — `movevm` re-registers the VM atomically at its new path and
+     preserves the snapshot chain; a manual copy does neither. The Seagate keeps its existing
+     job unchanged: `nemesis-state-backups/`, the `usb` git remotes, `nemesis-issuer.priv`,
+     the Layer D corpus VDI, and `os-images/` — none of that moves.
+  2. Master/template base images may live permanently on the archive drive. When a working
+     clone is needed, clone it onto the NVMe on demand. That clone is disposable — delete it
+     after use rather than archiving it back; the archived copy stays the source of truth.
+  3. **Superseded constraint, kept as history:** the Seagate (spinning, exFAT, USB 2.0) measured
+     a flat ~126 IOPS ceiling regardless of concurrency — seek-bound, disqualifying for a VM
+     fleet. **This does NOT apply to the WD SSD archive target**, which measured ~90 MB/s
+     end-to-end through `movevm` on a 5000 Mbps link and is not seek-bound. Kept here only
+     because it still describes the Seagate's own remaining content, not because it constrains
+     archiving today.
+  4. **Superseded risk, kept as history, plus a live one that replaces it:** exFAT's
+     no-journal risk (an unplug mid-write threatens everything on the drive) does not apply to
+     the WD's ext4. **A different shared-device risk takes its place:** the WD also holds the
+     Timeshift snapshot store, so routine archive/restore traffic shares the physical device
+     with those snapshots — Rule 6's independent-storage requirement still holds overall,
+     since backups and the `usb` git remote stayed on the Seagate; the two drives now split
+     the risk instead of one drive concentrating it. Do not "simplify" this back to the old
+     exFAT framing — the mechanism changed, the fact of a shared device did not.
   5. **Tracking requirement.** `nemesis-fleet-review` and the living fleet inventory only see
      VMs currently registered with VirtualBox — an archived VM drops out of both, and without
      a separate record an archived fleet becomes invisible, silently reintroducing the exact
@@ -1310,8 +1330,6 @@ the first place.
      living fleet inventory above — not a periodic audit deliverable.
 
 **Also present, outside the 7-Master set — do not fold into it without a deliberate decision:**
-- `Nemesis Appliance Spare ISOLATED` — a second appliance-installed isolated Ubuntu box
-  (former `ISOLATED-TESTBASE`), unslotted spare, fate undecided.
 - `Nemesis-firewall Utility CLEANBASE 07.31` — deliberately purged-bare Ubuntu base kept
   specifically for install-timing measurement. Not a Master; don't clone it expecting a
   generic Linux box.
@@ -1320,6 +1338,11 @@ enforcement-engine test rig, **deleted 2026-08-02** (full 5-snapshot chain inclu
 work was confirmed concluded. The permanent measurement record lives in
 `firewall-enforcement-engine/VM-TEST-PLAN.md` (private mirror) — not lost, just no longer a
 running VM. Full retirement reasoning: `vm-fleet/VM-FLEET-LOG.md` (private mirror).
+
+`Nemesis Appliance Spare ISOLATED` — the VM itself is gone (not registered); a stale,
+`inaccessible` VirtualBox medium registration for its old disk survives (0 MB, file and parent
+directory both gone from disk). Zero disk impact. Not yet cleaned up (`VBoxManage closemedium`
+on the dangling UUID); logged at `vm-fleet/VM-FLEET-LOG.md` (private mirror).
 
 Known caveats from the 2026-08-02 cleanup pass are tracked in `PUNCHLIST.md`, not duplicated
 here.
