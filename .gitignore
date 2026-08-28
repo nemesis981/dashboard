@@ -14,6 +14,17 @@ alert_manager/quarantine/
 *.state.json
 *.state.json.bak-*
 
+# Hardware sensor map — generated per-install by hw_discover.py from THIS box's
+# own lm-sensors output (adapter/label names like "dell_ddv-virtual-0" are
+# hardware-specific, not a portable template). Grouped with alerts.db/tickets.db/
+# /etc/nemesis.env in the Settings backup flow (dashboard.py _backup_candidates) —
+# same category as those: per-install runtime state, never shipped as source.
+# Decided 2026-08-28 after being carried unresolved across several sessions
+# (see docs/handoff/HANDOFF.md §6, "hw_map.json track-or-gitignore").
+alert_manager/hw_map.json
+core_module/hw_monitor/hw_map.json
+windows_agent/windows_hw_map.json
+
 # Flask session secret (generated at runtime — never commit)
 alert_manager/.flask_secret
 

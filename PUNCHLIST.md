@@ -4142,3 +4142,66 @@ logged so this doesn't get silently trusted as a complete rollback point later.
 
 **No fix possible for existing sets** — informational entry, not an action item beyond the
 mechanism fix already landed.
+
+### [MEDIUM] `hw_discover.py` writes `hw_map.json` to a path `hw_monitor.py` no longer reads (found 2026-08-28)
+`alert_manager/hw_discover.py:50` writes to `os.path.join(_HERE, "hw_map.json")` — i.e.
+`alert_manager/hw_map.json`. But `alert_manager/hw_monitor.py` doesn't exist any more; the live
+consumer is `core_module/hw_monitor/hw_monitor.py:33`, whose own `HW_MAP_PATH` resolves to
+`core_module/hw_monitor/hw_map.json` — a different directory. `core_module/hw_monitor/hw_map.json`
+does not exist on this box (confirmed by listing). **The file `hw_discover.py --auto` produces is
+never read by the running `hw_monitor` daemon** — every run silently falls back to
+vendor-agnostic auto-discovery, regardless of what the user chose during discovery.
+Likely a leftover from the `alert_manager` → `core_module` module-system migration that updated
+the consumer's location but not the generator's, or the generator's own target. `dashboard.py`'s
+`api_hw_rediscover` (`:12231`) and `_backup_candidates()` (`:12352`) both still reference the old
+`alert_manager/hw_map.json` path too, so the whole discover/rebuild/backup chain is internally
+consistent with itself — just pointed at a directory the reader abandoned.
+**Candidate fix:** point `hw_discover.py`'s `HW_MAP_PATH` (and `dashboard.py`'s two references)
+at `core_module/hw_monitor/hw_map.json` to match the live reader — one-line change in each of the
+three locations. Found while resolving the `hw_map.json` track-or-gitignore decision (this same
+investigation is why the file was untracked at all — nothing was writing where anything read).
+
+### [MEDIUM] No committed test exercises the `EXTERNALLY_EXECUTED` branches (found 2026-08-27, still open 2026-08-28)
+`modules/ai_engine/module.py` — `automation_readiness()` (`:4118`), `authority_raise_warnings()`
+(`:4210`), and `refusal_ticket_text()` (`:3907`) each branch on `action_class in
+EXTERNALLY_EXECUTED` (currently `{"firewall_failsafe_override"}`, `:555`). `test_master_authority.py`
+and `test_package_exports.py` are both green and call all three functions, but only ever with
+`ip_block_permanent`, `malware_file_quarantine`, or `alert_disposition` — none of which is a member
+of `EXTERNALLY_EXECUTED`. `test_failsafe_decision.py` exercises `firewall_failsafe_override`
+itself but against `modules/ai_engine/failsafe_decision.py`'s override-decision logic, not these
+three functions. **Verified by hand 2026-08-27** (per `docs/handoff/HANDOFF.md` §5) against a
+member class and a control class before landing that day's fix, but that verification was never
+committed as a test — the gap is real, not just theoretical.
+**Candidate fix:** a short test (follow `test_master_authority.py`'s throwaway-DB setup pattern)
+asserting, for `firewall_failsafe_override` specifically: `automation_readiness()` treats
+`undo_available` as true via the `EXTERNALLY_EXECUTED` membership check (`:4160`) rather than the
+real undo registry; `authority_raise_warnings()` emits the "carried out by a component outside the
+engine's propose/approve path" warning (`:4219`) instead of the generic undo-missing warning; and
+`refusal_ticket_text()` skips the "insufficient reversal support" branch (`:3919`) since the
+`or action_class not in EXTERNALLY_EXECUTED` clause is satisfied. Pair each assertion with a
+control run against a non-member class (e.g. `alert_disposition`) so the test can actually fail —
+same shape the standing "verification code must prove its own premise" practice already requires.
+
+### [DONE — 2026-08-28, pending commit] Dead NOPASSWD `nmap` grant trimmed from `install.sh`'s sudoers template
+`install.sh:2015` shipped `/usr/bin/nmap` in the `/etc/sudoers.d/nemesis` NOPASSWD list to
+**every** install, unconditionally. Product code stopped needing it on 2026-07-29 (commit
+`5849a3b`): `device_scanner` had run `sudo nmap`, but its unit sets `NoNewPrivileges=yes`, so
+the kernel ignores setuid and the sudo could never elevate — every scan silently returned
+nothing until that was found. Scanning is now unprivileged (`nmap -sn` + `/proc/net/arp`). The
+2026-07-31 audit flagged the leftover grant as "blast radius with zero function" (`sudo nmap`
+yields a root shell via GTFOBins `--script`) and removed it from a live host, **but never
+updated this installer template** — so every install built afterwards, including the
+2026-08-02 gauge VM, inherited it again.
+**Fixed:** `nmap` removed from the template; a `⛔ DO NOT ADD BACK` comment records the
+measurement history above it so it isn't re-added as a "fix" for a failing scan (the real cause
+of a failing scan is the missing package — entry above). `docs/SETUP_LINUX.md:66` updated in
+the same change, since it documents this exact grant list and would otherwise assert something
+false. Verified: `bash -n` clean; the generated sudoers content re-validated with `visudo -c -f`
+against a known-good/known-bad pair (good parses, bad fails — so the check discriminates).
+**Existing installs deliberately NOT revoked** (operator decision, 2026-08-28): the Gateway VM
+and whatever host the 2026-07-31 audit touched keep the grant until they are reinstalled. It is
+inert-but-present there; a manual revoke pass was judged not worth it. Recorded here so this is
+not re-discovered and re-litigated as a new finding — it was re-flagged three consecutive
+mornings before being decided. Related but distinct: the stale-path sudoers entry at
+PUNCHLIST §"Stale NOPASSWD sudoers rules reference the pre-relocation dashboard path" (that one
+is about wrong paths in installed rules; this one was about a dead command in the template).

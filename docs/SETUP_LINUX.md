@@ -63,7 +63,7 @@ Installation and configuration reference for native Linux installs.
 
 🔵 **Intermediate:** The install script auto-detects your network interface and IP address, installs Pi-hole/Suricata/ClamAV, creates the `nemesis` system group, writes `/etc/nemesis.env`, deploys systemd services, and configures UFW rules. Two modes: Guided (interactive Q&A) or Config-first (edit a config file then auto-install).
 
-🔴 **Pro:** Services: `dashboard.service` (User=$SUDO_USER), `watchdog.service`, `hw-monitor.service`, `alert-watcher.service`, `device-scanner.service` (last four run as root). `EnvironmentFile=/etc/nemesis.env` on all services. Permissions: `root:nemesis 640`. Sudoers rule at `/etc/sudoers.d/nemesis` grants passwordless `systemctl`, `journalctl`, `tail`, `ufw`, `nmap` for the installing user. Port 80 → 5000 via `nemesis-port-redirect.service` (iptables NAT, persisted).
+🔴 **Pro:** Services: `dashboard.service` (User=$SUDO_USER), `watchdog.service`, `hw-monitor.service`, `alert-watcher.service`, `device-scanner.service` (last four run as root). `EnvironmentFile=/etc/nemesis.env` on all services. Permissions: `root:nemesis 640`. Sudoers rule at `/etc/sudoers.d/nemesis` grants passwordless `systemctl`, `journalctl`, `tail`, `ufw` for the installing user. Port 80 → 5000 via `nemesis-port-redirect.service` (iptables NAT, persisted).
 
 ```bash
 # Step 1: Clone the repository (skip if you already have it)
