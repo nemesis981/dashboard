@@ -4205,3 +4205,36 @@ not re-discovered and re-litigated as a new finding — it was re-flagged three 
 mornings before being decided. Related but distinct: the stale-path sudoers entry at
 PUNCHLIST §"Stale NOPASSWD sudoers rules reference the pre-relocation dashboard path" (that one
 is about wrong paths in installed rules; this one was about a dead command in the template).
+
+### [FIXED — 2026-08-28] `install.sh` never installed the `nmap` package, but `device_scanner` requires it (found 2026-08-28)
+`core_module/device_scanner/device_scanner.py:131` shells out to `["nmap", "-sn", subnet]`, but
+**no install path anywhere in the repo installs the `nmap` package.** `install.sh:504`'s apt line
+is `git python3 python3-pip python3-venv curl wget lm-sensors ufw acl` — verified across that
+line's entire git history (`git log -p --follow`), `nmap` was never in it; nothing else in any
+`.sh` or `.py` installs it; `preflight_checks()` does not check for it. On this build host `nmap`
+is `apt-mark showmanual` → manually installed, which is why development never noticed.
+**Effect on a fresh install: LAN device discovery never works.** `scan_network()` hits the
+`except OSError` branch (`:137`) every cycle and logs `Scan error: could not execute nmap:
+[Errno 2] No such file or directory: 'nmap'`, returning `[]` — so the devices table stays empty
+and nothing surfaces the cause to the user in the UI.
+**Confirmed live on a real install, not just by reading code:** the `Nemesis Appliance Gateway`
+fleet VM (full production install, built 2026-08-02) has logged exactly that error every 5
+minutes continuously from creation through 2026-08-28. `/usr/bin/nmap` absent, `dpkg -l` shows
+no nmap package. Previously mis-attributed to that VM's package-pruning pass — wrong: the
+installer simply never installed it.
+**FIXED 2026-08-28:** `nmap` added to the core apt list (now `install.sh:517` after the
+comment block). Declared with a comment in the same style as `acl` above it, recording why it
+is needed, that it is used UNPRIVILEGED, and pointing at the sudoers block so nobody "fixes" a
+future scan failure by restoring the `sudo nmap` grant.
+**Verified:** `bash -n install.sh` clean; package list confirmed space-separated with no stray
+commas (correct for `apt-get`, unlike the comma-separated sudoers line); and the package list
+was **extracted programmatically from install.sh itself** (not retyped) and run through
+`apt-get install -s` — apt exit **0** for the real list, exit **100** for the same list plus a
+bogus package name, so the simulation genuinely discriminates rather than passing anything.
+`apt-cache policy nmap` confirms it as a real, available package (7.98+dfsg-1).
+**Still open, deliberately not done here (Rule 2, one variable at a time):** `preflight_checks()`
+still does not verify the binary, and `scan_network()`'s OSError remains log-only — a user whose
+scan silently finds nothing still cannot diagnose it from the UI. Worth its own entry if the
+operator wants it; the install-side defect is what this fixes.
+Found while trimming the dead `sudo nmap` grant (previous entry); the two were independent — the
+grant was unnecessary, the package is mandatory — and landed as separate commits accordingly.

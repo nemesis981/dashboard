@@ -501,7 +501,20 @@ install_system_deps() {
     # `acl` provides setfacl, used to grant nemesis-canary traverse-only access to
     # the install user's home so the ransomware canary can see its bait. Usually
     # present on Ubuntu, but the canary silently fails without it — declare it.
-    apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw acl
+    #
+    # `nmap` is a HARD dependency of device-scanner: scan_network()
+    # (core_module/device_scanner/device_scanner.py:131) shells out to
+    # `nmap -sn <subnet>` to sweep the LAN, then reads the MAC addresses the sweep
+    # left in /proc/net/arp. It is NOT installed by default on Ubuntu Server and was
+    # missing from this list until 2026-08-28 — same class of omission as flask-login
+    # below. Without it every scan cycle takes scan_network()'s `except OSError`
+    # branch, logs "could not execute nmap", and returns [] — so LAN device discovery
+    # silently finds nothing and the devices table stays empty, with no indication in
+    # the UI that a package is missing rather than the network being quiet. Confirmed
+    # live on a fleet VM that had run this installer: 26 days of 5-minute failures.
+    # NOTE: it is used UNPRIVILEGED and needs no sudo grant — see the sudoers block
+    # in main() for why `sudo nmap` must not come back.
+    apt-get install -y git python3 python3-pip python3-venv curl wget lm-sensors ufw acl nmap
 
     # HTTP/2 stack for the L3 Tier 2 delivery gate (2026-08-17). Declared here
     # rather than pip-installed for the same reason flask-login is (see below):
