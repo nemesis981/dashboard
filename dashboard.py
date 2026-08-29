@@ -5423,6 +5423,90 @@ def api_agent_installer_generate():
     })
 
 
+@app.route("/api/agent/installer/revoke", methods=["POST"])
+def api_agent_installer_revoke():
+    """Owner action (admin-gated): revoke an un-redeemed enrollment token.
+
+    WHY THIS EXISTS. Enforcement of `revoked` has worked since the column did —
+    hw_monitor's claim is a single atomic
+    `UPDATE … WHERE token=? AND revoked=0 AND auto_approve=1 AND uses < max_uses
+    AND expires_at > ?`, so a revoked token cannot be redeemed. What was missing
+    was any way for the PRODUCT to SET the flag: every other enrollment_tokens
+    statement in the tree is an INSERT, a SELECT, or an update of
+    `uses`/`preauth_key`. Revoking meant opening sqlite3 by hand, and an audit on
+    2026-08-29 found three tokens already revoked exactly that way — the need was
+    demonstrated before this was built, not assumed.
+
+    ⚠ SEPARATE, RELATED, DELIBERATELY NOT ADDRESSED HERE: `enrollment_tokens`
+    stores the token in PLAINTEXT at rest (its own PUNCHLIST item, whose fix is a
+    selector/verifier split with no migration path for existing tokens). That is
+    what makes leak-then-revoke a realistic sequence rather than a theoretical
+    one, so it sharpens the case for this route — but it is a schema change of a
+    different size and folding it in here would bundle two variables (Rule 2).
+
+    IDENTIFY BY `id`, OR BY `token` IF YOU MUST. The id is not secret; the token
+    is. Preferring the id keeps a live credential out of request bodies, logs and
+    shell history for the common case, which matters more than usual here because
+    the value being handled is the very thing being revoked.
+
+    THE THREE OUTCOMES ARE DISTINCT, and none of them is an error:
+      * revoked        — this call changed it.
+      * already_revoked — it was already off. Idempotent by design: re-revoking
+                          must not look like a failure, or a retry after a
+                          timeout reads as "revocation failed" when it worked.
+      * not_found      — no such token. Reported as its own state and NOT folded
+                          into success, because "I revoked something that does
+                          not exist" is the shape that hides a typo'd id.
+    """
+    if not request.is_json:
+        return jsonify({"error": "JSON content-type required"}), 415
+    data = request.get_json(silent=True) or {}
+    tok = (data.get("token") or "").strip()
+    tid = data.get("id")
+    if not tok and tid is None:
+        return jsonify({"error": "supply 'id' (preferred) or 'token'"}), 400
+
+    actor = current_user.username if current_user.is_authenticated else "unknown"
+    now = time.time()
+    conn = None
+    try:
+        conn = _dm_conn()
+        conn.row_factory = sqlite3.Row
+        if tid is not None:
+            sel = ("SELECT id, revoked FROM enrollment_tokens WHERE id=?", (tid,))
+        else:
+            sel = ("SELECT id, revoked FROM enrollment_tokens WHERE token=?", (tok,))
+        row = conn.execute(*sel).fetchone()
+        if row is None:
+            # Deliberately NOT 404-with-no-body: the caller needs to tell "wrong
+            # id" apart from "revoked fine", and a bare status code does not.
+            return jsonify({"status": "not_found",
+                            "detail": "no enrollment token matches that identifier"}), 404
+        if row["revoked"]:
+            return jsonify({"status": "already_revoked", "id": row["id"]})
+
+        cur = conn.execute(
+            "UPDATE enrollment_tokens SET revoked=1, revoked_at=?, revoked_by=? "
+            "WHERE id=? AND revoked=0",
+            (now, actor, row["id"]))
+        conn.commit()
+        if cur.rowcount != 1:
+            # Lost a race with a concurrent revoke. The end state is still
+            # correct, so report it as such rather than as a failure.
+            return jsonify({"status": "already_revoked", "id": row["id"]})
+        log.info("enrollment token id=%s revoked by %s", row["id"], actor)
+        return jsonify({"status": "revoked", "id": row["id"], "revoked_by": actor})
+    except Exception as e:                                   # noqa: BLE001
+        log.exception("api_agent_installer_revoke failed: %s", e)
+        return jsonify({"error": "revocation failed"}), 500
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:                                    # noqa: BLE001
+            pass
+
+
 @app.route("/api/health")
 def api_health():
     """PUBLIC (auth-exempt): lightweight reachability probe for the agent installer to

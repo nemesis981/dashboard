@@ -1482,6 +1482,30 @@ def init_enrollment_tokens_table():
         if "remote_enabled" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens "
                       "ADD COLUMN remote_enabled INTEGER NOT NULL DEFAULT 0")
+        # Migration (ADR 0001 guarded ALTER): WHO revoked a token and WHEN.
+        #
+        # The `revoked` flag has been enforced since the column existed —
+        # hw_monitor's claim is `WHERE token=? AND revoked=0 AND …`, so a revoked
+        # token genuinely cannot be redeemed. What did not exist was any way for
+        # the PRODUCT to set it: every enrollment_tokens statement in the tree was
+        # an INSERT, a SELECT, or an update of `uses`/`preauth_key`. Revocation
+        # therefore meant opening sqlite3 by hand, and an audit on 2026-08-29
+        # found three tokens already revoked exactly that way — so the need was
+        # demonstrated, not hypothetical.
+        #
+        # These two columns exist because the multi-user-ready rule says to leave
+        # a place to record WHO for anything that records what happened. Revoking
+        # an enrollment token is an admin action against a credential; "someone
+        # revoked this at some point" is not an acceptable audit trail for it, and
+        # retrofitting attribution later means touching every write.
+        #
+        # NULL on every pre-existing row, including the three revoked by hand.
+        # That is the honest value — their actor genuinely was not recorded — and
+        # it is deliberately distinguishable from a row this feature revoked.
+        if "revoked_at" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN revoked_at REAL")
+        if "revoked_by" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN revoked_by TEXT")
 
         # backup_media_status: last-known free space per backup destination.
         #

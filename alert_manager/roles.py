@@ -313,6 +313,12 @@ ROUTE_MINIMUMS = {
     "api_agent_reject":               (_A, _A),
     "api_agent_revoke":               (_A, _A),
     "api_agent_installer_generate":   (_A, _A),
+    # Revoking an enrollment token is the same class of action as minting one —
+    # it acts on a credential that grants a machine access — so it carries the
+    # same admin floor as its sibling above. Deliberately NOT looser on the
+    # reasoning that "revoking is safe": a caller who can revoke arbitrary tokens
+    # can deny enrollment to every pending install.
+    "api_agent_installer_revoke":     (_A, _A),
     "api_agent_notify":               (_A, _A),   # pushes to a remote agent
     "api_consent_status":             (_V, _A),
     "api_consent_grant":              (_A, _A),

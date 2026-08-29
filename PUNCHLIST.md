@@ -4809,3 +4809,33 @@ total to **8**.
   > value descriptively, where UNKNOWN is a legitimate thing to report; `:2161` already handles
   > the exception case explicitly). **Item is CLOSED — no work needed.**
 
+### [FIXED — 2026-08-29, pending commit] Installer tokens could not be revoked through the product
+`revoked` has been *enforced* since the column existed — hw_monitor's claim is one atomic
+`UPDATE … WHERE token=? AND revoked=0 AND auto_approve=1 AND uses < max_uses AND expires_at > ?`
+— but nothing in the product ever *set* it. Revoking meant sqlite3 by hand, and three live tokens
+had already been revoked exactly that way.
+**Built:** `POST /api/agent/installer/revoke` (`api_agent_installer_revoke`), admin-gated
+`(_A, _A)` in `ROUTE_MINIMUMS`, mirroring its sibling `api_agent_installer_generate` — deliberately
+not looser on the reasoning that "revoking is safe": a caller who can revoke arbitrary tokens can
+deny enrollment to every pending install.
+- **Identify by `id` (preferred) or `token`.** The id is not secret; the token is. Keeping a live
+  credential out of request bodies, logs and shell history matters more than usual when the value
+  being handled *is the thing being revoked*.
+- **Three distinct outcomes, none an error:** `revoked` / `already_revoked` / `not_found`. The
+  route SELECTs before UPDATEing precisely because `rowcount == 0` cannot tell "already revoked"
+  from "no such token" — folding those together is what hides a typo'd id.
+- **Attribution added** (`revoked_at`, `revoked_by`) via guarded ALTER in `database.py`, matching
+  the file's existing migration pattern. NULL on pre-existing rows — the honest value for the
+  three revoked by hand, and deliberately distinguishable from an attributed revoke.
+**Verified:** route registered on the live app, **POST-only**, admin-gated, **not** in
+`_AUTH_EXEMPT` (identical posture to its sibling). New `alert_manager/test_token_revocation.py`
+**18/0** — the property tested is the **round trip**, not the write: every revocation is followed
+by running hw_monitor's *real* claim statement and proving it no longer matches, each paired with
+a control proving the claim DOES match beforehand. **Mutation-proven:** removing `revoked=0` from
+the claim (i.e. breaking enforcement) fails the round-trip assertions. `test_roles.py` 158/0,
+`test_route_registration_gate.py` 9/0.
+**Related, deliberately NOT folded in (Rule 2):** `enrollment_tokens` stores tokens in **plaintext
+at rest** — its own open item, whose fix is a selector/verifier split with no migration path for
+existing tokens. It is what makes leak-then-revoke realistic rather than theoretical, so it
+strengthens the case for this route, but it is a schema change of a different size.
+
