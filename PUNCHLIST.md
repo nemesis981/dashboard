@@ -4866,3 +4866,143 @@ under WARN the expected `WOULD DENY` line appears for the control only.
 
 **⛔ AND THE REAL FINDING, which reframes the whole item — see the entry below.**
 
+### [FIXED — 2026-08-29, pending commit] The Tier 2 attestation challenge write passed an ALREADY-CLOSED connection (found 2026-08-29)
+`core_module/hw_monitor/hw_monitor.py`, inside `_tasks_for_response()`:
+`conn = _db_connect()` at **`:2942`**, `conn.close()` at **`:2949`** in a `finally`, and then
+`build_and_store_challenge(conn, device_id, …)` at **`:2992`** executes an INSERT on it. That
+raises `sqlite3.ProgrammingError: Cannot operate on a closed database.`
+**LATENT, not active — established by evidence, not assumed:**
+- `agent_attestation_challenges` holds **0 rows** — nothing has ever been written.
+- `scan_tasks` contains only `scan` actions (1 dispatched, 2 expired) — **no `attest_challenge`
+  task has ever been queued**, and that action is what gates the line.
+- This is also **why the namespace violation never appeared in hw_monitor's WARN log** for this
+  table: the violating write never runs.
+**Severity when it does run — CORRECTED 2026-08-29.** An earlier version of this entry (mine)
+said the `ProgrammingError` "propagates out of `_tasks_for_response()`". **It does not.** There
+IS an outer handler at `:3017` that logs `could not build tasks for device=…` and returns `[]`.
+The real shape is a **POISON PILL**, which is worse in one specific way: no tasks go out on that
+beat *including unrelated scan tasks*, the challenge task stays pending, and the next beat fails
+identically — so task dispatch to that device stalls indefinitely while logging every beat. It
+fails loudly rather than silently (the good half), but it fails on **first use of a security
+feature**, and it takes unrelated work down with it.
+**FIXED — the connection-lifecycle bug only.** `build_and_store_challenge()` now runs against a
+fresh connection opened, committed, and closed in its own `try/finally`, instead of the already-
+closed `conn` from the earlier SELECT block. This is the one part the decision record says "must
+be fixed either way, independently of the namespace question."
+**✅ OPTION B ALSO LANDED — operator decision taken 2026-08-29**, so the namespace question is
+no longer open for THIS write. The fresh connection is now `_dm().connect("attestation")`
+against a new `attestation` namespace, not the generic `_db_connect()`. Verified in both modes:
+under ENFORCE the challenges table is allowed for `attestation` and a control (`agent_devices`)
+is correctly `AccessDenied`, proving the grant is not too wide.
+
+**⚠ BUT A SECOND WRITER REMAINS, AND IT STILL BLOCKS A `hw_monitor` MODE_ENFORCE FLIP.**
+`ingest_challenge_response()` (`hw_monitor.py:1940`) DELETEs the consumed challenge row, and it
+runs **inside the heartbeat's transaction**, on the connection carrying the `agent_devices`
+writes that commits at `:2002`. Scoping that one would make challenge consumption commit
+independently of the attestation state it produces — logically paired operations. **This is the
+genuine version of the atomicity concern I originally raised; I had attached it to the wrong
+function** (the *write* at `:2992`, which turned out to be standalone). Left for its own
+decision; the `NAMESPACES` entry says so at the call site.
+
+**✅ AND THE TEST IS NO LONGER OWED — it exists and passes.**
+`alert_manager/test_attest_challenge_dispatch.py`, **14/0**. The "not exercisable on this box"
+conclusion was too pessimistic: Tier 2 being absent is a *stub-able* dependency, not a hard
+blocker. The test opens **both** gates deliberately — it queues a real `attest_challenge` row in
+`scan_tasks` and stubs the absent private module so `tier2_available()` is True — then drives the
+real `_tasks_for_response()`. It also reproduces the original defect directly (closed conn →
+`ProgrammingError`) and asserts the poison-pill shape is gone (a challenge queued alongside a
+scan no longer drops the whole batch). **Mutation-proven:** restoring the bug in a copied tree
+turns it red 6/6 on exactly the storage, envelope and poison-pill assertions, with a liveness
+control confirming the mutant module was the one actually loaded.
+
+**⚠ Three of my own stubs/fixtures were wrong before the test went green, each producing a
+failure that looked like a code defect:** a `_tier2` stub using key `python` instead of
+`code_digest_python`; a `build_task` stub omitting `expires_at`; and a **hand-rolled `scan_tasks`
+fixture schema missing `dispatch_count`**. The third has a standing rule already written for it —
+`test_layer_c.py` says to call the real init "so the test runs against the REAL schema and cannot
+drift from it", and `nemesis_agent/test_task_results.py` lifts this same inline DDL by index. The
+test now does the same. **A stub or fixture that does not honour the real contract tests itself,
+not the system.**
+
+### [MEDIUM — latent] `CHALLENGE_TTL_SECONDS` is written but never enforced — the documented freshness property does not exist (found 2026-08-29)
+`alert_manager/attestation.py:110`'s docstring states: *"How long an issued challenge stays
+verifiable. A stale nonce past this is not accepted (freshness); the issuer re-challenges on its
+cadence."* **Nothing implements the second half.**
+`expires_at` is stored at `:139`, and then never read for this table:
+- the ingest SELECT (`:151`) filters on **`device_id` only** — no freshness predicate;
+- `verify_and_record_tier2()` does not check it;
+- **no sweeper prunes expired challenge rows** — the only two DELETEs are the ones inside
+  `ingest_challenge_response()` itself, which run only when a response actually arrives.
+**Effect:** an issued Tier 2 challenge nonce stays verifiable **indefinitely**, not for the
+documented hour. It is only ever displaced when the next cadence issues a new challenge for that
+device (`ON CONFLICT(device_id) DO UPDATE`), default **24 h**.
+**Latent, like the rest of this path** — `agent_attestation_challenges` holds 0 rows, no
+`attest_challenge` task has ever been queued, and Tier 2 is not deployed on this host. But it is
+a real gap between a *stated security property* and the shipped logic, which is worse than an
+undocumented gap: a reader who checks the constant concludes freshness is handled.
+**Load-bearing for an open decision:** it directly changes the cost of Option B in
+`decisions/2026-08-29-challenge-consumption-atomicity-DECISION-REQUEST.md` (private mirror) —
+unenforced expiry makes that option's torn-write failure **unbounded** rather than one hour, so
+this should be fixed before that option can be defensible.
+**Candidate fix:** add `AND expires_at > ?` to the ingest SELECT, and delete rows that fail it so
+a stale challenge is consumed rather than left. **Not fixed here** — it is a distinct defect from
+the namespace decision it affects (Rule 2), and it wants a test, since like everything on this
+path it has never run.
+
+### [FIXED — 2026-08-29, pending commit] Challenge consumption atomicity — resolved by RESTRUCTURING, not by picking A/B/C
+The open decision (`decisions/2026-08-29-challenge-consumption-atomicity-DECISION-REQUEST.md`)
+offered three options, each requiring a trade. **Operator directed a fourth path that removes the
+trade instead of choosing one**, and it is now implemented.
+
+**The problem was ownership, not concurrency.** `ingest_challenge_response()` was one logical
+operation spanning two owners: read+delete the challenge (attestation's) while writing the verdict
+to `agent_devices` (hw_monitor's). Every way of scoping that correctly forced a torn write.
+
+**The fix:** move the Tier 2 verdict into an attestation-owned table
+(`attestation_tier2_state`). The whole operation now runs on **one connection, one transaction,
+one namespace** — there is no tear direction left to accept.
+
+**Why this was unusually safe, verified before building:** nothing in the product ever READ
+`agent_devices.tier2_state`/`tier2_detail`/`tier2_at` (checked across `.py`/`.html`/`.js` — the
+only references were the DDL, attestation.py and tests; the dashboard's `tier2_*` hits are the
+unrelated L3 delivery gate), and **every live value was the `absent` default** across all 13 rows.
+So the migration moved no meaningful data and broke no consumer.
+
+**Additive only — the old columns are deliberately NOT dropped.** They simply stop being written.
+Dropping them would make the migration destructive for no gain; they are superseded, and removing
+them is separate cleanup. A guarded carry-over copies any non-default verdict on other installs.
+
+**Snapshot taken first:** `nemesis-state-backups/2026-08-29-1240-pre-tier2-state-table-move/` —
+sqlite3 backup API (not `cp`), `integrity_check` = ok, 91 tables identical to live, `STATE.txt`
+with commit, services and rollback steps.
+
+**Verified:** migration carries a real verdict and correctly ignores `absent` defaults (tested
+both); `attestation` namespace grants BOTH its tables under ENFORCE with a control proving
+`agent_devices` is still denied; `test_attestation.py` updated to the new contract and passing
+21/21 — including a **new control asserting `agent_devices.tier2_state` retains its seeded value**,
+which is what proves the write MOVED rather than being duplicated. Also confirmed by instrumentation
+that the Tier 2 assertions actually execute rather than being skipped on a host without the private
+module. Regressions green: `test_attestation_e2e` 22/22, `test_data_manager`, `test_token_revocation`
+18/0, `test_mem_appliance`, `test_attest_challenge_dispatch` 14/0.
+
+### [RESOLVED — 2026-08-29] `test_attest_challenge_dispatch.py` "3/12 failing" was a mid-edit snapshot, not a regression
+Window 2 reported this test failing 3 of 12 while verifying change-1, and suspected later
+restructuring had destabilised it. **It had not.** The file passes 14/0 and does so from any cwd.
+**The numbers identify the cause exactly:** two assertions sat under `if envelopes:`, so when the
+run produced no envelopes the total silently dropped from 14 to **12 with 3 failures** — precisely
+the reported figure, and precisely the output this file produced at one intermediate point during
+its own authoring (after the `_tier2` stub fix, before the `expires_at` and DDL-lift fixes). The
+file was **untracked and being actively edited**, so another window reading it got a mid-edit
+snapshot.
+**Two real problems, both now fixed:**
+1. **A test whose assertion COUNT varies under failure cannot be compared between runs** — a run
+   with less coverage looks like a different, smaller suite rather than a failing one. Those two
+   assertions are now unconditional (`_env0` degrades to `{}`), and the file asserts its own
+   expected total, so drift reports itself loudly. Verified by reproducing the exact broken state:
+   it now reports **9 passed / 5 failed of 14 expected** instead of the old, quieter 12.
+2. **Coordination:** an untracked, actively-edited test file is not a stable artifact for another
+   window to verify against. Worth a handoff convention — either commit it before asking for
+   verification, or say plainly that it is in flight.
+**DB-path resolution traced, not assumed** (Window 2 flagged it): `NEMESIS_DB_PATH` is set before
+any import, `database.DB_PATH` and `nemesis_paths.db_path()` both resolve to the temp DB, and the
+schema init lands there. It was not the cause.

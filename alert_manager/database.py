@@ -694,6 +694,53 @@ def init_attestation_challenge_table():
                 expires_at    REAL    NOT NULL
             )
         """)
+        # ── Tier 2 verdict state, moved OFF agent_devices (2026-08-29) ───────
+        #
+        # WHY IT MOVED. `ingest_challenge_response()` was one logical operation
+        # spanning two owners: it read+deleted the challenge (attestation's) and
+        # wrote the verdict to `agent_devices` (hw_monitor's), atomically on
+        # hw_monitor's connection. That made the DELETE an out-of-namespace write
+        # under ADR 0006, and every way of scoping it correctly forced a torn
+        # write — record the verdict but fail to consume the challenge (leaving a
+        # used nonce answerable), or consume it and lose the verdict.
+        #
+        # Putting the verdict in a table attestation OWNS collapses the whole
+        # operation into one namespace, one connection and one transaction, so
+        # there is no tear to choose between. That is the only option here with
+        # no downside to trade.
+        #
+        # ⚠ THE OLD COLUMNS ON agent_devices ARE DELIBERATELY LEFT IN PLACE and
+        # simply stop being written. Dropping them would make this migration
+        # destructive for no gain: nothing in the product ever READ them
+        # (verified across .py/.html/.js — the only references were the DDL, this
+        # module, and tests), and every live value was the 'absent' default. They
+        # are superseded, not in use; removing them is separate cleanup.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS attestation_tier2_state (
+                device_id   TEXT PRIMARY KEY,
+                state       TEXT NOT NULL DEFAULT 'absent',
+                detail      TEXT,
+                recorded_at TEXT
+            )
+        """)
+        # One-time carry-over of any non-default verdict from the old columns, so
+        # an install that HAD recorded state does not silently lose it. Guarded on
+        # the source columns existing, since a fresh install has never had them.
+        # INSERT OR IGNORE: never overwrite a value the new table already holds.
+        try:
+            _ad_cols = {r[1] for r in c.execute("PRAGMA table_info(agent_devices)")}
+            if {"tier2_state", "tier2_detail", "tier2_at"} <= _ad_cols:
+                c.execute("""
+                    INSERT OR IGNORE INTO attestation_tier2_state
+                        (device_id, state, detail, recorded_at)
+                    SELECT device_id, tier2_state, tier2_detail, tier2_at
+                      FROM agent_devices
+                     WHERE tier2_state IS NOT NULL AND tier2_state != 'absent'
+                """)
+        except sqlite3.Error:
+            # agent_devices may not exist yet on a first-run ordering; the
+            # carry-over is best-effort and the table above is what matters.
+            pass
         conn.commit()
     finally:
         conn.close()

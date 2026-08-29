@@ -332,9 +332,23 @@ def verify_and_record_tier2(conn, device_id: str, manifest: dict, nonce_hex: str
     state = state_dict.get("state", ABSENT)
     detail = str(state_dict.get("detail") or "")[:500]
     stamp = now or datetime.datetime.now(datetime.timezone.utc).isoformat()
+    # Writes attestation's OWN table, not agent_devices (moved 2026-08-29).
+    #
+    # This is what makes ingest_challenge_response() a single-owner operation:
+    # read the challenge, record the verdict, delete the challenge — all on one
+    # connection, in one transaction, all attestation-owned. Previously the
+    # verdict landed in `agent_devices` (hw_monitor's table), so the caller had
+    # to choose between an out-of-namespace write and a torn write. Neither is
+    # necessary once the verdict lives here.
+    #
+    # UPSERT rather than UPDATE: there is no guarantee a row exists for this
+    # device yet, and an UPDATE that matches nothing would silently record no
+    # verdict at all — the failed-write-as-legal-value shape.
     conn.execute(
-        "UPDATE agent_devices SET tier2_state = ?, tier2_detail = ?, tier2_at = ? "
-        "WHERE device_id = ?", (state, detail, stamp, device_id))
+        "INSERT INTO attestation_tier2_state (device_id, state, detail, recorded_at) "
+        "VALUES (?,?,?,?) ON CONFLICT(device_id) DO UPDATE SET "
+        "state=excluded.state, detail=excluded.detail, recorded_at=excluded.recorded_at",
+        (device_id, state, detail, stamp))
     if state != ATTESTED:
         log.info("tier2: device=%s state=%s detail=%s (observe-only)",
                  device_id, state, detail)

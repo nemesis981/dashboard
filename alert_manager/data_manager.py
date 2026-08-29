@@ -365,6 +365,25 @@ NAMESPACES = {
         # case explicit table lists were added for.
         "tables": ("hw_alerts", "hw_alert_cooldowns"),
     },
+    "attestation": {
+        # Owned by alert_manager/attestation.py. BOTH writers are now in-namespace
+        # (completed 2026-08-29 — this entry previously covered only half):
+        #
+        #   * build_and_store_challenge()  — issues a challenge. Opens its own
+        #     connection under this namespace.
+        #   * ingest_challenge_response()  — reads the challenge, records the
+        #     verdict, deletes the challenge. ONE transaction, ONE connection,
+        #     entirely within this namespace.
+        #
+        # The second one only became possible by moving the Tier 2 verdict off
+        # `agent_devices` (hw_monitor's table) into `attestation_tier2_state`.
+        # While the verdict lived on agent_devices, that single logical operation
+        # spanned two owners, and every way of scoping it correctly forced a torn
+        # write. Moving the state is what removed the choice rather than making
+        # it. See `decisions/2026-08-29-challenge-consumption-atomicity-DECISION-REQUEST.md`
+        # (private mirror) for the options this superseded.
+        "tables": ("agent_attestation_challenges", "attestation_tier2_state"),
+    },
     "mem_appliance": {
         # The memory-ladder tables, owned by `alert_manager/mem_appliance.py`.
         #

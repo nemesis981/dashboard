@@ -1937,7 +1937,26 @@ def _update_agent_device(payload, remote_ip=None):
                 _cresp = payload.get("attest_challenge_response")
                 if _cresp:
                     from alert_manager import attestation as _att_c   # noqa: PLC0415
-                    _att_c.ingest_challenge_response(conn, device_id, _cresp)
+                    # ATTESTATION'S OWN CONNECTION, not the heartbeat's (2026-08-29).
+                    #
+                    # ingest_challenge_response() now touches only attestation's
+                    # tables — it reads the challenge, records the verdict to
+                    # `attestation_tier2_state`, and deletes the challenge. All
+                    # three land in ONE transaction on ONE connection owned by
+                    # ONE namespace, which is why there is no torn write to
+                    # reason about here any more.
+                    #
+                    # Passing `conn` (hw_monitor's) would put an
+                    # out-of-namespace DELETE back inside the heartbeat
+                    # transaction — the exact coupling this restructuring
+                    # removed. The verdict no longer lives on agent_devices, so
+                    # nothing here needs to share that transaction.
+                    _ich = _dm().connect("attestation")
+                    try:
+                        _att_c.ingest_challenge_response(_ich, device_id, _cresp)
+                        _ich.commit()
+                    finally:
+                        _ich.close()
             except Exception as _ae:                      # noqa: BLE001
                 log.warning("attestation record failed for %s: %s", device_id, _ae)
 
@@ -2989,7 +3008,45 @@ def _tasks_for_response(device_id):
                 # module is absent — a challenge with no verifiable state is worse
                 # than none.
                 from alert_manager import attestation as _attc
-                _ch = _attc.build_and_store_challenge(conn, device_id, now=None)
+                # ⛔ A FRESH CONNECTION, DELIBERATELY — do not pass `conn` here.
+                #
+                # `conn` (opened above for the pending-task SELECT) is CLOSED in
+                # that block's own `finally` before this loop begins. Passing it
+                # to a write raised `sqlite3.ProgrammingError: Cannot operate on
+                # a closed database` on every execution, which is why
+                # `agent_attestation_challenges` has 0 rows: this path has never
+                # completed once. It went unnoticed because it is gated on an
+                # `attest_challenge` task existing and none had ever been queued
+                # — and because the outer handler at the end of this function
+                # catches everything and returns [].
+                #
+                # THE FAILURE MODE IS A POISON PILL, not a crash: the raise is
+                # caught, `_tasks_for_response()` returns [], and NO tasks at all
+                # go out on that beat — including unrelated scan tasks. The task
+                # stays pending, so the next beat fails identically. One
+                # undeliverable challenge would stall ALL task dispatch to that
+                # device indefinitely, logging `could not build tasks for
+                # device=…` each time.
+                # Scoped to attestation's OWN namespace, not hw_monitor's:
+                # `agent_attestation_challenges` belongs to attestation.py; this
+                # process only drives delivery. Safe to scope correctly here
+                # precisely because this connection is created for the write and
+                # closed immediately — it shares a transaction with nothing.
+                #
+                # The sibling call at :1940 (`ingest_challenge_response`, which
+                # DELETEs the consumed row) is scoped the same way — see that
+                # call site. It only became possible once the Tier 2 verdict
+                # moved off `agent_devices` into attestation's own table
+                # (Shape 2, 2026-08-29): before that, the DELETE shared the
+                # heartbeat's transaction with an hw_monitor-owned write, and
+                # scoping it correctly would have torn that pair apart. See the
+                # attestation entry in data_manager.NAMESPACES.
+                _cch = _dm().connect("attestation")
+                try:
+                    _ch = _attc.build_and_store_challenge(_cch, device_id, now=None)
+                    _cch.commit()
+                finally:
+                    _cch.close()
                 if _ch is not None:
                     envelopes.append(server_keys.build_task(
                         device_id, action, {"nonce": _ch["nonce"],

@@ -206,6 +206,12 @@ def test_tier2_challenge_round_trip():
         c.execute("CREATE TABLE agent_devices (device_id TEXT PRIMARY KEY, attestation_state TEXT, tier2_state TEXT, tier2_detail TEXT, tier2_at TEXT)")
         c.execute("INSERT INTO agent_devices VALUES ('d','attested','absent',NULL,NULL)")
         c.execute("CREATE TABLE agent_attestation_challenges (device_id TEXT PRIMARY KEY, nonce TEXT, code_digests TEXT, code_python TEXT, issued_at REAL, expires_at REAL)")
+        # Tier 2 verdicts moved OFF agent_devices into attestation's own table
+        # (2026-08-29) so verify+record+consume are one namespace/transaction.
+        # agent_devices' tier2_* columns are left above deliberately: they are
+        # superseded, and asserting they STAY at their old value is what proves
+        # the write actually moved rather than merely being duplicated.
+        c.execute("CREATE TABLE attestation_tier2_state (device_id TEXT PRIMARY KEY, state TEXT, detail TEXT, recorded_at TEXT)")
 
         # ISSUE (default now=None path) -> RESPOND over live code -> INGEST
         ch=att.build_and_store_challenge(c,"d",agent_root=AGENT)
@@ -214,12 +220,19 @@ def test_tier2_challenge_round_trip():
         resp=tier2_agent.respond_to_challenge(ch["nonce"], ch["covered"])
         att.ingest_challenge_response(c,"d",resp)
         row=c.execute("SELECT attestation_state,tier2_state FROM agent_devices WHERE device_id='d'").fetchone()
+        t2=c.execute("SELECT state FROM attestation_tier2_state WHERE device_id='d'").fetchone()
         # OBSERVE-ONLY: Tier 2 must never touch Tier 1's attestation_state.
         assert row[0]=="attested", "attestation_state must be untouched (observe-only), got %r" % (row[0],)
+        # The verdict now lands in attestation's OWN table, not agent_devices.
+        assert t2 is not None, "verdict must be recorded in attestation_tier2_state"
         if loaded_all:
-            assert row[1]=="attested", "fully-loaded agent must attest, got %r" % (row[1],)
+            assert t2[0]=="attested", "fully-loaded agent must attest, got %r" % (t2[0],)
         else:
-            assert row[1]=="absent", "partially-loaded agent must be absent (unresolved), got %r" % (row[1],)
+            assert t2[0]=="absent", "partially-loaded agent must be absent (unresolved), got %r" % (t2[0],)
+        # CONTROL that the write really MOVED rather than being written to both:
+        # the superseded column must still hold its seeded value.
+        assert row[1]=="absent", ("agent_devices.tier2_state must no longer be written "
+                                  "(it is superseded), got %r" % (row[1],))
         assert c.execute("SELECT 1 FROM agent_attestation_challenges WHERE device_id='d'").fetchone() is None, "challenge cleared"
 
         # TAMPER control: replace a RESOLVED covered callable's code (tasks:verify_task
@@ -231,8 +244,10 @@ def test_tier2_challenge_round_trip():
         try:
             att.ingest_challenge_response(c,"d",tier2_agent.respond_to_challenge(n2,list(att.TIER2_COVERED)))
         finally: tasks.verify_task=_o
-        trow=c.execute("SELECT attestation_state,tier2_state FROM agent_devices WHERE device_id='d'").fetchone()
-        assert trow[1]=="failed", "tamper must be FAILED, got %r" % (trow[1],)
+        trow=c.execute("SELECT attestation_state FROM agent_devices WHERE device_id='d'").fetchone()
+        t2t=c.execute("SELECT state FROM attestation_tier2_state WHERE device_id='d'").fetchone()
+        assert t2t and t2t[0]=="failed", "tamper must be FAILED, got %r" % (t2t,)
+        assert trow[0]=="attested", "tamper must still leave attestation_state untouched"
         assert trow[0]=="attested", "tamper must not touch attestation_state (observe-only)"
         print("  PASS  tier2 challenge round trip (issue->respond->ingest -> %s, tamper->failed, observe-only)"
               % ("attested" if loaded_all else "absent"))
