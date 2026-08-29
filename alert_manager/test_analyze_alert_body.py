@@ -173,10 +173,17 @@ def main():
     # The two checks above pass even if the PROMPT still interpolates the raw
     # query-string value — which is the actual bug. Pin the interpolation too,
     # or reverting one identifier silently restores the defect with a green suite.
+    #
+    # UPDATED for NPFA/1 (ADR 0025, dashboard.py:7563+): the prompt is no longer
+    # an f-string ("Alert: {alert_body}") -- alert_body now enters as a declared
+    # LABEL field passed to prompt_fields.build(). The substring below is what
+    # that migration actually produces; the property being pinned (the REBUILT
+    # body reaches the prompt, not the raw query-string value) is unchanged.
     fn_src = ast.get_source_segment(src, fn) or ""
-    check("the prompt interpolates the rebuilt body", "Alert: {alert_body}" in fn_src, True)
-    check("CONTROL the prompt no longer interpolates raw directly",
-          "Alert: {raw_alert}" in fn_src, False)
+    check("the prompt interpolates the rebuilt body via NPFA/1",
+          '("Alert", _pf.LABEL, alert_body)' in fn_src, True)
+    check("CONTROL the prompt does not interpolate raw_alert directly",
+          '("Alert", _pf.LABEL, raw_alert)' in fn_src, False)
 
     # ── fence-tolerant JSON parse ────────────────────────────────────────────
     # Found live 2026-08-05: the model wrapped its (correct) answer in ```json
