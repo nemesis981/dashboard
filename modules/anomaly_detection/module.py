@@ -268,6 +268,14 @@ def _init_db() -> None:
         CREATE TABLE IF NOT EXISTS anomaly_baseline (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             metric_key   TEXT    NOT NULL,
+            -- ⚠ MISNOMER, KEPT DELIBERATELY. This holds HOUR OF DAY (0-23), not
+            -- hour of week (0-167) -- it is written from `_hour_of_day()`, which
+            -- was itself called `_hour_of_week` until 2026-08-29. The bucketing
+            -- narrowed to 24 in `e0c4c9a` for measured reasons; the column name
+            -- did not follow, and renaming it now would be a migration on a
+            -- ~9,700-row table for zero functional gain. See `_hour_of_day()`'s
+            -- docstring. Do NOT infer a 168-bucket model from this name -- a
+            -- design document already made that mistake once.
             hour_of_week INTEGER NOT NULL,
             total_count  INTEGER NOT NULL DEFAULT 0,
             obs_count    INTEGER NOT NULL DEFAULT 0,
@@ -419,16 +427,16 @@ def _build_initial_baseline() -> None:
 
                 key = f"domain:{domain}"
                 dt = datetime.fromtimestamp(ts)
-                how = _hour_of_week(dt)
+                hod = _hour_of_day(dt)
                 date_str = dt.strftime("%Y-%m-%d")
-                batch.setdefault(key, {}).setdefault(how, {}).setdefault(date_str, 0)
-                batch[key][how][date_str] += 1
+                batch.setdefault(key, {}).setdefault(hod, {}).setdefault(date_str, 0)
+                batch[key][hod][date_str] += 1
                 count += 1
 
         now = time.time()
         with _db() as conn:
             for key, hours in batch.items():
-                for how, days in hours.items():
+                for hod, days in hours.items():
                     total = sum(days.values())
                     obs   = len(days)
                     conn.execute("""
@@ -439,7 +447,7 @@ def _build_initial_baseline() -> None:
                             total_count  = total_count + excluded.total_count,
                             obs_count    = obs_count + excluded.obs_count,
                             last_updated = excluded.last_updated
-                    """, (key, how, total, obs, now))
+                    """, (key, hod, total, obs, now))
             conn.commit()
         log.info("anomaly_detection: baseline built from %d DNS events, "
                  "%d domain/hour pairs", count, sum(len(v) for v in batch.values()))
@@ -524,7 +532,7 @@ def _detection_cycle() -> None:
         return
 
     device_names = _load_device_names()
-    how = _hour_of_week(datetime.fromtimestamp(now))
+    hod = _hour_of_day(datetime.fromtimestamp(now))
 
     # Queues built during incident loop, consumed after commit
     ai_queue           = []   # (inc_id, domain, itype, score, sig_dict, dev_list)
@@ -533,9 +541,9 @@ def _detection_cycle() -> None:
     conn = _conn()
     try:
         for domain, data in by_domain.items():
-            _update_baseline(conn, f"domain:{domain}", how, data["count"], now)
+            _update_baseline(conn, f"domain:{domain}", hod, data["count"], now)
 
-            signals = _evaluate(conn, domain, data, how, now)
+            signals = _evaluate(conn, domain, data, hod, now)
             if signals["score"] >= SCORE_FLOOR:
                 inc_id, final_score = _create_or_update_incident(
                     conn, domain, data, signals, device_names, now
@@ -595,7 +603,7 @@ def _detection_cycle() -> None:
 # Baseline update
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _update_baseline(conn, key: str, how: int, count: int, now: float) -> None:
+def _update_baseline(conn, key: str, hod: int, count: int, now: float) -> None:
     conn.execute("""
         INSERT INTO anomaly_baseline(metric_key, hour_of_week,
             total_count, obs_count, last_updated)
@@ -608,14 +616,14 @@ def _update_baseline(conn, key: str, how: int, count: int, now: float) -> None:
                 ELSE obs_count
             END,
             last_updated = excluded.last_updated
-    """, (key, how, count, now))
+    """, (key, hod, count, now))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Signal evaluation + scoring
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
+def _evaluate(conn, domain: str, data: dict, hod: int, now: float) -> dict:
     """
     Pattern-based scoring.
 
@@ -628,7 +636,7 @@ def _evaluate(conn, domain: str, data: dict, how: int, now: float) -> dict:
     key = f"domain:{domain}"
     row = conn.execute(
         "SELECT total_count, obs_count FROM anomaly_baseline "
-        "WHERE metric_key=? AND hour_of_week=?", (key, how)
+        "WHERE metric_key=? AND hour_of_week=?", (key, hod)
     ).fetchone()
 
     is_ubiq   = domain in _UBIQUITOUS
@@ -1343,8 +1351,29 @@ def _root_domain(fqdn: str) -> str:
     return ".".join(parts[-2:])
 
 
-def _hour_of_week(dt: datetime) -> int:
-    """Return hour of day (0-23) for baseline bucketing."""
+def _hour_of_day(dt: datetime) -> int:
+    """Return hour of day (0-23) for baseline bucketing.
+
+    ⚠ RENAMED FROM `_hour_of_week` (2026-08-29). It genuinely was hour-of-week
+    (`dt.weekday() * 24 + dt.hour`, 168 buckets) until `e0c4c9a`, which narrowed
+    it to 24 deliberately and measured the payoff: 168 slots needed five weeks to
+    reach `MIN_BASELINE_OBS=5`, so the 7-day baseline never became useful. At 24
+    slots, 118 of 680 network domains were correctly classified as known after
+    baselining, versus effectively zero at 168. That commit kept the old name
+    "for the call sites" and the name outlived the reason.
+
+    **This is a rename, not a behaviour change** — the 24-bucket behaviour is
+    correct and evidence-backed, and is unchanged here.
+
+    **The cost of the stale name was real, which is why it was worth fixing:** it
+    misled the 2026-08-04 AI-autonomy scoping into designing a readiness gate
+    around "168 buckets covered" — a criterion that can never be met — and that
+    went into a design document before measurement caught it.
+
+    NOTE the `anomaly_baseline.hour_of_week` COLUMN deliberately keeps its old
+    name; see the comment on its DDL. Renaming it would be a migration on a
+    ~9,700-row table for zero functional gain.
+    """
     return dt.hour
 
 

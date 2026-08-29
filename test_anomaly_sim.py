@@ -30,7 +30,7 @@ from datetime import datetime
 # Pull the real internal functions directly from the module
 from modules.anomaly_detection.module import (
     _init_db, _conn, _evaluate, _create_or_update_incident,
-    _load_device_names, _hour_of_week, _set_state,
+    _load_device_names, _hour_of_day, _set_state,
     _get_abuseipdb_settings, _get_cisa_settings, _auto_report_abuseipdb,
     DB_PATH, SCORE_FLOOR, SCORE_MEDIUM, SCORE_HIGH, SCORE_CRITICAL,
     MIN_BASELINE_OBS, ABUSEIPDB_DEDUP_HOURS,
@@ -68,7 +68,7 @@ def main():
     print("    OK")
 
     now = time.time()
-    how = _hour_of_week(datetime.fromtimestamp(now))
+    hod = _hour_of_day(datetime.fromtimestamp(now))
 
     # 2. Build tight-spread client timestamps (28 s spread → triggers ≤30s bonus)
     t0 = now - 45   # start 45 s ago so all timestamps are in the past
@@ -115,7 +115,7 @@ def main():
 
     # 4. Run real scoring (no baseline entry exists for this domain → is_new=True)
     print(f"\n[4] Calling _evaluate() (real scoring logic) …")
-    signals = _evaluate(conn, TEST_DOMAIN, data, how, now)
+    signals = _evaluate(conn, TEST_DOMAIN, data, hod, now)
 
     print(f"\n    Signal breakdown:")
     print(f"      new_destination   : {signals['new_destination']}")

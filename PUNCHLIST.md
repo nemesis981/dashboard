@@ -2512,8 +2512,28 @@ this entry is the proposal, not the implementation.
       `parts[2]`/`parts[1]` split reproduced directly against `firewall.py`'s `parse_alert`;
       the email-rendering and truncation citations confirmed by grep).
 
-- [ ] **Rename `_hour_of_week()` to `_hour_of_day()` — the name has been wrong since
-  2026-06-20 and has now cost real time.** `modules/anomaly_detection/module.py:1268` returns
+- [x] **✅ DONE 2026-08-29 (pending commit).** Renamed in
+  `modules/anomaly_detection/module.py` (now `:1354`) and its one external caller
+  `test_anomaly_sim.py`. **Local/parameter `how` → `hod` renamed alongside it** — a small,
+  deliberate widening of the stated "function name + docstring only" scope, because `how`
+  (hour-of-week) carried the identical wrong concept at every call site, including as a
+  parameter of `_update_baseline()` and `_evaluate()`; leaving it would have half-fixed the
+  exact thing the entry exists to fix. Verified safe first: every caller passes positionally
+  (no `how=` keyword usage anywhere in the tree), so no signature contract breaks.
+  **The COLUMN `anomaly_baseline.hour_of_week` is untouched, as this entry directs** — all 10
+  occurrences preserved, and the DDL now carries a comment explaining that it holds hour-of-day
+  and warning against inferring a 168-bucket model from the name. Verified the inline SQL
+  comment does not break `executescript()` by parsing the DDL into an in-memory SQLite database
+  and confirming the column still exists.
+  **Verified:** both files `py_compile` clean; `_hour_of_day` present and `_hour_of_week` gone
+  from the module namespace; returns 0/14/23 for those hours, with two controls — a Sunday and a
+  Wednesday at 14:00 both bucket to 14 (proving the 24-bucket behaviour is unchanged, not
+  silently reverted to 168), and two different hours still differ (so the first control is not
+  vacuous). Line number in the original entry had drifted (`:1268` → `:1354`).
+  **Original entry retained below for its reasoning.**
+
+- [ ] ~~**Rename `_hour_of_week()` to `_hour_of_day()` — the name has been wrong since
+  2026-06-20 and has now cost real time.**~~ `modules/anomaly_detection/module.py:1268` returns
   `dt.hour` (24 buckets, 0-23). It genuinely was hour-of-week (`dt.weekday() * 24 + dt.hour`,
   168 buckets) until `e0c4c9a`, which narrowed it deliberately and said so: 168 slots needed
   five weeks to reach `MIN_BASELINE_OBS=5`, making the 7-day baseline useless. That commit
