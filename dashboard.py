@@ -707,6 +707,16 @@ _AUTH_EXEMPT   = {"setup", "login", "login_recovery", "logout", "api_passphrase_
                   # token remains the credential: install_windows_start() still calls
                   # _valid_installer_token() and 410s without a good one.
                   "install_windows_start",
+                  # ADR 0028 D11.5 Option C — owner-side email enrollment. These
+                  # MUST be exempt: the account owner is a household member with NO
+                  # dashboard account, holding a code someone sent them. Gated behind
+                  # auth the page 302s to a login they cannot pass and the whole
+                  # enrollment path silently does nothing — which is how
+                  # install_windows_start shipped broken on 2026-08-02. The CODE is
+                  # the credential, it is deliberately NOT in the URL (werkzeug logs
+                  # request paths to the journal), and it is consumed atomically by
+                  # the email_security module rather than by this process.
+                  "email_enroll_landing", "email_enroll_claim",
                   # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert link.
                   # These MUST be exempt: the whole point is that the admin may be
                   # unable to log in, because the firewall change under test can be
@@ -5653,6 +5663,122 @@ def _fw_revert_page(title, body, status=200):
         "<body style='font-family:system-ui,sans-serif;max-width:34rem;"
         "margin:3rem auto;padding:0 1rem;line-height:1.5'>" + body + "</body>",
         status=status, mimetype="text/html")
+
+
+# Guarded import: email_security is a MODULE and may be absent or disabled. The
+# routes below fail CLOSED when it is -- they reject rather than 500, and say
+# nothing about why, so a missing module is not distinguishable from a bad code.
+try:
+    from modules.email_security import enrollment as _es_enrollment   # noqa: E402
+    from modules.email_security import writes as _es_writes           # noqa: E402
+except Exception:                                                     # noqa: BLE001
+    _es_enrollment = None
+    _es_writes = None
+
+
+# ── ADR 0028 D11.5 Option C: owner-side email enrollment (PUBLIC) ────────────
+#
+# LIVES HERE, NOT IN modules/email_security/, AND THAT IS DELIBERATE. This route
+# is unauthenticated, and a MODULE route cannot be: modules_loader refuses to
+# register any endpoint absent from roles.ROUTE_MINIMUMS (it 404s), and that
+# registry has no public concept. Nemesis accepts third-party modules, so a
+# module-level "no auth required" declaration would hand outside authors an
+# unaudited way to publish public endpoints. The only path is a hand-placed
+# _AUTH_EXEMPT exception in this file, reviewed by someone who can weigh it.
+#
+# THE TOKEN IS NOT IN THE URL. werkzeug's access logging is active (root handler
+# installed above), and the journal holds full request paths -- confirmed live
+# 2026-08-29. A token in the path is written verbatim to disk, which is exactly
+# what the 2026-08-27 audit found on /fw/revert. It travels in the POST body.
+_ENROLL_RATE = _es_enrollment.RateLimiter() if _es_enrollment else None
+
+
+def _enroll_reject():
+    """The ONE rejection response. Identical for invalid, expired, already-used,
+    and rate-limited -- same status, same body, same work done.
+
+    A distinguishable response is an ORACLE: it confirms a code existed, which is
+    exactly what an attacker guessing codes wants to learn. The distinction is
+    logged internally and never returned.
+    """
+    return Response("This enrollment code is not valid, or has already been used, "
+                    "or has expired. Ask whoever sent it to you for a new one.\n",
+                    status=410, mimetype="text/plain")
+
+
+@app.route("/email/enroll", methods=["GET"])
+def email_enroll_landing():
+    """PUBLIC: paste-the-code form. Renders only; changes nothing.
+
+    GET is safe here BECAUSE it changes nothing -- it shows a form. The state
+    change is POST-only, so an <img src=...> cannot trigger an enrollment: the
+    GET-as-write shape db_action shipped with, and which this codebase treats as
+    a known bug class.
+
+    No token is read here, so there is nothing to leak and nothing to guess.
+    """
+    return _fw_revert_page(
+        "Connect your email to Nemesis",
+        "<h2>Connect your email account</h2>"
+        "<p>Nemesis can scan this mailbox for threats. Paste the code from the "
+        "same message that contained this link.</p>"
+        "<form method=POST action='/email/enroll'>"
+        "<input name=code autocomplete=off autocapitalize=off spellcheck=false "
+        "style='width:100%;padding:.6rem;font-family:monospace;font-size:1rem' "
+        "placeholder='paste the code from your message'>"
+        "<button type=submit style='margin-top:1rem;padding:.7rem 1.2rem;"
+        "font-size:1rem'>Continue</button></form>"
+        "<p style='margin-top:2rem;color:#555'>You will enter your own app "
+        "password on the next step. Nobody else sees it, and it is not shown to "
+        "whoever sent you this link.</p>")
+
+
+@app.route("/email/enroll", methods=["POST"])
+def email_enroll_claim():
+    """PUBLIC (the code is the credential): claim one enrollment request.
+
+    The code is consumed ATOMICALLY -- the used/expiry predicates live in the
+    UPDATE's WHERE clause, so two simultaneous posts cannot both succeed. See
+    modules/email_security/writes.consume_enrollment_request.
+    """
+    if _es_enrollment is None or _ENROLL_RATE is None:
+        # Module absent: fail closed and say nothing about why.
+        return _enroll_reject()
+
+    # remote_addr, NEVER X-Forwarded-For. This route is unauthenticated, so the
+    # header is entirely caller-supplied -- trusting it would let any caller pick
+    # their own throttle bucket and forge the address written to the audit row.
+    ip = request.remote_addr or "unknown"
+    if not _ENROLL_RATE.check_and_count(ip, int(time.time())):
+        _audit(action="email_enroll_rate_limited", ip=ip)
+        return _enroll_reject()
+
+    code = (request.form.get("code") or "").strip()
+    if not code:
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _enroll_reject()
+
+    now = datetime.now(timezone.utc)
+    try:
+        claimed = _es_writes.consume_enrollment_request(
+            _es_enrollment.token_hash(code), now.isoformat(timespec="seconds"))
+    except Exception:                                          # noqa: BLE001
+        # Fail CLOSED on ambiguity. An unreadable row is not permission.
+        log.exception("email enrollment: consume failed")
+        _audit(action="email_enroll_error", ip=ip)
+        return _enroll_reject()
+
+    if not claimed:
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _enroll_reject()
+
+    _audit(action="email_enroll_claimed", ip=ip)
+    return _fw_revert_page(
+        "Code accepted",
+        "<h2>Code accepted</h2>"
+        "<p>The next step is creating an app password with your email provider, "
+        "which you enter yourself. That walkthrough is not built yet &mdash; your "
+        "code has been used and does not need to be kept.</p>")
 
 
 @app.route("/fw/revert", methods=["GET"])
