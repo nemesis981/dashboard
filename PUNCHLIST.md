@@ -4606,3 +4606,27 @@ being remembered together" — which is exactly the situation the shared *name* 
 deliberately different, and spells out that changing agent FILES requires bumping the attestation
 one independently of any release number. Documentation only — **both values unchanged**;
 `test_attestation.py` 21/21.
+### [AUDIT COMPLETE — 2026-08-29] Vestigial tables: ⛔ ONE OF THE THREE IS NOT VESTIGIAL — DO NOT DROP IT
+Audit only, no changes made — dropping tables is a state-changing action needing a snapshot.
+Result differs per table, and the entry treated all three as equivalent:
+
+| Table | Rows | Code refs | Verdict |
+|---|---|---|---|
+| `anomaly_ai_usage` | 0 | none | **Safe to drop** |
+| `anomaly_ai_cache` | 0 | 1 real (`diagnostics/anomaly_state.py:112`) + 2 comments | Safe, **but drop the diagnostic's reference in the same change** |
+| `alert_notes` | **4** | none | **⛔ DO NOT DROP — contains real operator data** |
+
+**`alert_notes` is orphaned user data from an incomplete migration, not scaffolding.** Its 4 rows
+are human analyst notes written about real security alerts on 2026-06-21, and **all four still
+link to alerts that exist in the `alerts` table today**. The notes feature itself was migrated to
+the tickets module — `addNote()` in the UI now POSTs to `/api/tickets/notes/…`, and
+`modules/tickets/module.py:824` refers to "the old `/api/notes/search` response format" — but
+these four rows were left behind. The table is **write-dead and read-dead in code** (zero
+INSERT/UPDATE/SELECT anywhere), which is exactly why it looked disposable from a reference count
+alone.
+**Decision needed before any drop:** migrate the 4 notes into `tickets` (completes the
+migration), export them, or explicitly accept losing them. Leaving the table costs nothing.
+**`anomaly_ai_cache` detail:** `diagnostics/anomaly_state.py:112` does `SELECT COUNT(*)` on it
+inside a `try/except` that prints `(not found)`, so a drop degrades gracefully rather than
+crashing — but it would report `(not found)` forever unless the name is removed from that list at
+the same time.
