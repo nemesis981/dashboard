@@ -118,7 +118,8 @@ def record_verdict(account_id: int, uidvalidity: int, uid: int, *,
                    auth_spf: str | None = None, auth_dkim: str | None = None,
                    auth_dmarc: str | None = None,
                    dmarc_policy: str | None = None,
-                   auth_problems: str | None = None) -> None:
+                   auth_problems: str | None = None,
+                   sender_hash: str | None = None) -> None:
     """Persist the scan result for ONE message. Re-scanning updates in place.
 
     `verdict` stays None when the message was scanned but not judged -- that is a
@@ -140,14 +141,81 @@ def record_verdict(account_id: int, uidvalidity: int, uid: int, *,
          "scanned_at": _now(), "verdict": verdict, "confidence": confidence,
          "reason": reason, "signals_json": signals_json,
          "auth_spf": auth_spf, "auth_dkim": auth_dkim, "auth_dmarc": auth_dmarc,
-         "dmarc_policy": dmarc_policy, "auth_problems": auth_problems},
+         "dmarc_policy": dmarc_policy, "auth_problems": auth_problems,
+         # D4 recurrence token, NOT the address -- see sender_id.py. None is
+         # a legitimate value (no salt / no parseable From) = UNKNOWN.
+         "sender_hash": sender_hash},
         conflict_cols=("account_id", "uidvalidity", "uid"),
         # Explicit, and note what is ABSENT: quarantine_state, quarantine_at,
         # quarantine_actor. Omitting this list entirely would un-quarantine the
         # message on every re-scan.
         update=["message_id_hdr", "received_at", "scanned_at", "verdict",
                 "confidence", "reason", "signals_json", "auth_spf",
-                "auth_dkim", "auth_dmarc", "dmarc_policy", "auth_problems"])
+                "auth_dkim", "auth_dmarc", "dmarc_policy", "auth_problems",
+                "sender_hash"])
+
+
+def create_enrollment_request(token_hash: str, owner_user_id: int, *,
+                              created_by: int | None = None,
+                              address_hint: str | None = None,
+                              created_at: str | None = None,
+                              expires_at: str) -> None:
+    """Persist ONE enrollment request. ADR 0028 D11.5 Option C.
+
+    `token_hash` ONLY -- the plaintext exists solely in the code handed to the
+    owner. A readable token column would let anyone with DB access complete
+    someone else's enrollment, the exact power Option C withholds from the admin.
+
+    `created_by` is the ADMIN who initiated; `owner_user_id` is whose mailbox it
+    is. Deliberately separate (D11.6). NULL created_by is pure self-service --
+    a real state, not a missing value.
+    """
+    # The Data Manager exposes upsert / next_sequence / increment_counter as its
+    # atomic helpers -- there is NO insert(). `token_hash` is UNIQUE, so upsert on
+    # it is the correct primitive.
+    dm = get_data_manager()
+    dm.upsert(
+        MODULE_NAME, "email_enrollment_requests",
+        {"token_hash": token_hash, "owner_user_id": owner_user_id,
+         "created_by": created_by, "address_hint": address_hint,
+         "created_at": created_at or _now(), "expires_at": expires_at,
+         "used_at": None, "account_id": None, "actor": dm.current_actor()},
+        conflict_cols=("token_hash",),
+        # update=None is the DOCUMENTED "DO NOTHING". A token-hash collision must
+        # NEVER extend an existing request's expiry or reassign its owner -- that
+        # would turn a collision into a live privilege transfer.
+        update=None)
+
+
+def consume_enrollment_request(token_hash: str, now_iso: str) -> bool:
+    """ATOMICALLY consume one enrollment request. True only if THIS call won it.
+
+    ⚠ THE ATOMICITY IS THE SECURITY PROPERTY, NOT A PERFORMANCE DETAIL.
+    A read-then-write ("check says ok, so mark it used") has a window where two
+    simultaneous requests both read `used_at IS NULL` and BOTH proceed -- a
+    single-use token used twice, exactly what single-use exists to prevent. The
+    check and the consume must be ONE statement.
+
+    `rowcount == 1` means this caller consumed it; `0` means already used, expired
+    or never existed. The caller cannot distinguish those and MUST NOT try -- see
+    the identical-reject rule for unauthenticated routes.
+    """
+    dm = get_data_manager()
+    conn = dm.connect(MODULE_NAME)
+    try:
+        # `with conn:` is sqlite3's TRANSACTION manager -- commits on success,
+        # rolls back on exception. It does NOT close, hence the finally.
+        with conn:
+            cur = conn.execute(
+                "UPDATE email_enrollment_requests "
+                "   SET used_at = ?, actor = ? "
+                " WHERE token_hash = ? "
+                "   AND used_at IS NULL "
+                "   AND expires_at > ?",
+                (now_iso, dm.current_actor(), token_hash, now_iso))
+            return cur.rowcount == 1
+    finally:
+        conn.close()
 
 
 def set_quarantine_state(account_id: int, uidvalidity: int, uid: int,

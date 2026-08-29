@@ -37,10 +37,14 @@ from __future__ import annotations
 import html
 import json
 import logging
+import os
+from datetime import datetime, timezone
 
 from flask import jsonify, request
 
 from modules import get_data_manager
+
+from . import enrollment, writes
 
 log = logging.getLogger("nemesis.email_security.views")
 
@@ -197,6 +201,88 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _link_base() -> str:
+    """Base URL for owner-facing links. Config only -- NEVER a request header.
+
+    Mirrors dashboard.py's precedence but deliberately OMITS its `request.host_url`
+    fallback: a Host header is attacker-controllable and this link accompanies a
+    bearer code. An absent config yields an empty base -- a visibly broken link --
+    rather than a plausible one pointing at whatever host the request claimed.
+    """
+    return (os.environ.get("NEMESIS_PUBLIC_URL", "").strip().rstrip("/")
+            or (lambda a: "http://%s" % a if a else "")(
+                os.environ.get("NEMESIS_TAILNET_ADDR", "").strip()))
+
+
+def api_enroll_create():
+    """Create an enrollment request and return the owner link + code. POST ONLY.
+
+    ADR 0028 D11.5 Option C: the admin STARTS enrollment, the OWNER authorizes it.
+    This does the first half only -- it mints a scoped, single-use, expiring code.
+    **It never accepts, sees, or stores a credential.** Option B
+    (admin-adds-on-behalf-of-others) is explicitly rejected; do not add a
+    credential field here as a convenience.
+
+    Capability-gated via `enroll_email_account` (D11.6), so a household sub_admin
+    may hold it without being a full admin.
+
+    ⚠ THE OWNER-FACING HALF IS NOT HERE, AND MUST NOT BE. It is unauthenticated,
+    and module routes cannot be: `modules_loader` refuses any endpoint absent from
+    `roles.ROUTE_MINIMUMS`, and that registry has no public concept. It lives in
+    `dashboard.py` as a hand-placed `_AUTH_EXEMPT` exception -- see CLAUDE.md.
+    """
+    # ⚠ CSRF CONTROL, FIRST GATE. Same reasoning as api_release: POST alone is not
+    # sufficient (an HTML form can POST cross-origin), but a JSON content-type
+    # cannot be produced by form submission and a cross-origin fetch setting the
+    # header is blocked by CORS preflight.
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "JSON content-type required"}), 415
+
+    payload = request.get_json(silent=True) or {}
+    owner_user_id = payload.get("owner_user_id")
+    if not isinstance(owner_user_id, int) or owner_user_id <= 0:
+        return jsonify({"ok": False, "error": "owner_user_id (int) required"}), 400
+
+    hint = payload.get("address_hint")
+    if hint is not None and (not isinstance(hint, str) or len(hint) > 320):
+        return jsonify({"ok": False, "error": "address_hint must be a short string"}), 400
+
+    now = datetime.now(timezone.utc)
+    token = enrollment.new_token()
+    try:
+        # created_by is left NULL DELIBERATELY, not forgotten. D11.6 requires
+        # owner_user_id and enrolled_by_user_id to be distinct and both COLUMNS
+        # exist -- but there is no supported way for a MODULE route to resolve the
+        # acting user's integer id (dashboard's session holds only `sid`, and the
+        # tickets module documents why a module must not reach into web-session
+        # state). Attribution is not lost: ADR 0006 stamps current_actor() into
+        # this table's `actor` column.
+        writes.create_enrollment_request(
+            enrollment.token_hash(token), owner_user_id,
+            created_by=None, address_hint=hint,
+            created_at=now.isoformat(timespec="seconds"),
+            expires_at=enrollment.expiry_from(now).isoformat(timespec="seconds"))
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("email_security: enrollment request failed: %s", exc)
+        return jsonify({"ok": False, "error": "could not create request"}), 500
+
+    link = enrollment.build_link(_link_base())
+    return jsonify({
+        "ok": True,
+        "link": link,
+        # The code is returned SEPARATELY from the link, on purpose -- it must not
+        # be in the URL (werkzeug logs request paths to the journal). `message`
+        # pairs them so the admin sends ONE block of text and the owner is not left
+        # assembling two things.
+        "code": token,
+        "message": enrollment.delivery_message(link, token, hint),
+        "expires_at": enrollment.expiry_from(now).isoformat(timespec="seconds"),
+        "note": ("Send the whole message to the account owner. They enter their "
+                 "own app password; it is never shown to you and is not stored "
+                 "here. The code is single-use and expires."),
+    })
+
+
 def routes():
     """Route table for `Module.get_routes()`.
 
@@ -207,4 +293,6 @@ def routes():
         ("/api/email-security/quarantine", api_quarantine_list,
          {"methods": ["GET"]}),
         ("/api/email-security/release", api_release, {"methods": ["POST"]}),
+        ("/api/email-security/enroll/create", api_enroll_create,
+         {"methods": ["POST"]}),
     ]

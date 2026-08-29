@@ -426,6 +426,10 @@ ROUTE_MINIMUMS = {
     # over- or under-serves, and that holds for the roles reaching them too.
     "module_email_security_api_quarantine_list": (_A, _A),
     "module_email_security_api_release":         (_A, _A),
+    # ADR 0028 D11.5 Option C: the ADMIN-side half. Capability-gated (D11.6) so a
+    # sub_admin may hold it. GET is unused; both slots are admin so a stray GET
+    # cannot become a read side-channel.
+    "module_email_security_api_enroll_create":   (_A, _A),
 
     # ai_engine §4.5 review surface — "what your AI has learned" (DESIGN-L4 §4).
     # ADMIN ON BOTH VERBS, INCLUDING READ, and that is deliberate:
@@ -531,6 +535,15 @@ UNAUTHENTICATED = frozenset({
     "setup", "login", "login_recovery", "api_passphrase_generate", "static",
     "install_windows_download", "install_windows_exe", "install_windows_zip",
     "install_windows_start", "api_health",
+    # ADR 0028 D11.5 Option C -- owner-side email enrollment. The owner is a
+    # household member with NO dashboard account; the CODE is the credential and
+    # is deliberately not in the URL (werkzeug logs request paths).
+    #
+    # DELIBERATELY ABSENT FROM ROUTE_MINIMUMS -- the categories are MUTUALLY
+    # EXCLUSIVE and roles.py's import-time canary enforces it ("no endpoint is
+    # in two categories at once"). Listing them in both, as a first attempt did,
+    # fails at import. Same shape as the ADR 0019 failsafe endpoint above.
+    "email_enroll_landing", "email_enroll_claim",
     # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert endpoint.
     #
     # NO SESSION BY DESIGN, and this is the one entry where that is the POINT
@@ -632,6 +645,10 @@ CAPABILITY_ROUTES = {
     # reversible, both already route-audited, and both admin-only today. That
     # bounded blast radius is why this is the capability that goes first.
     "approve_enrollment": frozenset({"api_agent_approve", "api_agent_revoke"}),
+    # ADR 0028 D11.6, ruled 2026-08-29. Registered WITH its endpoint, never ahead
+    # of it: an empty frozenset yields CAP_DECLARED, and offering a quiz for a
+    # capability that unlocks nothing reads as a broken reward.
+    "enroll_email_account": frozenset({"module_email_security_api_enroll_create"}),
 }
 
 #: A capability that is declared but has no endpoints yet.

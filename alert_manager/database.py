@@ -1816,6 +1816,13 @@ def init_email_security_tables():
                 -- would read mail nobody consented to scan yet.
                 enabled        INTEGER NOT NULL DEFAULT 0,
                 created_at     TEXT    NOT NULL,
+                -- ADR 0028 D11.6/D11.7 (ruled 2026-08-29). TWO DISTINCT fields,
+                -- deliberately not one: under Option C the person who STARTS an
+                -- enrollment and the person who AUTHORIZES it are different, and
+                -- collapsing them would erase the distinction the design exists
+                -- to preserve. SINGLE OWNER (D11.7): a column, NOT a join table.
+                owner_user_id       INTEGER,
+                enrolled_by_user_id INTEGER,
                 -- Actor seam (multi-user-ready-by-default). Populated by the Data
                 -- Manager's current_actor(); present now so adding attribution
                 -- later is not a migration across every write path.
@@ -1856,6 +1863,14 @@ def init_email_security_tables():
                 auth_dmarc    TEXT,
                 dmarc_policy  TEXT,
                 auth_problems TEXT,
+                -- D4 personal-baseline: a SALTED, TRUNCATED hash of the
+                -- normalised sender. NOT the address -- see
+                -- modules/email_security/sender_id.py for why a hash is
+                -- sufficient (the baseline needs RECURRENCE, not identity)
+                -- and why this is salted where sibling `name_hash` is not.
+                -- NULL is normal: no salt configured, or no parseable From.
+                -- NULL means "unknown", NEVER "new sender".
+                sender_hash   TEXT,
                 -- Reachable states of the non-atomic Gmail sequence:
                 --   none        -- not quarantined, no action attempted
                 --   copied      -- COPY to the quarantine label succeeded only
@@ -1870,6 +1885,50 @@ def init_email_security_tables():
                 UNIQUE(account_id, uidvalidity, uid)
             )
         """)
+        # Guarded ADD COLUMNs so existing installs gain the new fields without a
+        # rebuild. Old rows keep NULL, which the baseline treats as "unknown" and
+        # never as a signal -- backfill is impossible anyway, because the sender
+        # was deliberately never stored.
+        _emv_cols = {row[1] for row in
+                     c.execute("PRAGMA table_info(email_message_verdicts)").fetchall()}
+        if "sender_hash" not in _emv_cols:
+            c.execute("ALTER TABLE email_message_verdicts ADD COLUMN sender_hash TEXT")
+        _acct_cols = {row[1] for row in
+                      c.execute("PRAGMA table_info(email_accounts)").fetchall()}
+        for _col in ("owner_user_id", "enrolled_by_user_id"):
+            if _col not in _acct_cols:
+                c.execute("ALTER TABLE email_accounts ADD COLUMN %s INTEGER" % _col)
+
+        # ── Enrollment requests (ADR 0028 D11.5 Option C, ruled 2026-08-29) ──
+        #
+        # THE TOKEN IS STORED AS A HASH, NEVER IN THE CLEAR. The plaintext exists
+        # only in the code handed to the owner. A readable token column would let
+        # anyone with DB access complete someone else's enrollment -- the exact
+        # power Option C withholds from the admin.
+        #
+        # `used_at` is what makes it SINGLE-USE and `expires_at` bounds it in time;
+        # both are ENFORCED in the UPDATE's WHERE clause (see
+        # writes.consume_enrollment_request), not merely recorded here.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_enrollment_requests (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                token_hash     TEXT    NOT NULL UNIQUE,
+                owner_user_id  INTEGER NOT NULL,
+                created_by     INTEGER,
+                address_hint   TEXT,
+                created_at     TEXT    NOT NULL,
+                expires_at     TEXT    NOT NULL,
+                used_at        TEXT,
+                account_id     INTEGER,
+                actor          TEXT
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_enroll_owner "
+                  "ON email_enrollment_requests(owner_user_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_sender "
+                  "ON email_message_verdicts(account_id, sender_hash)")
+
+
         # The hot read is "what has this mailbox already been judged on", asked
         # once per newly-arriving message before any scanning work is done.
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_account "
