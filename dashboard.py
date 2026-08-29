@@ -558,6 +558,18 @@ def _load_secret_key() -> str:
                 return data
     except FileNotFoundError:
         pass
+    except PermissionError as e:
+        # Fail loud and explicit rather than falling through to "generate a new
+        # key" — that would silently invalidate every existing session on a box
+        # where the real key is fine but unreadable (bad mode/ownership), which
+        # is a worse outcome than refusing to start. See CLAUDE.md's standing
+        # "a failed read must surface as an explicit failure state" rule.
+        auth_log.error(
+            "auth: %s exists but could not be read (%s) — refusing to start "
+            "rather than silently generating a replacement key. Fix the file's "
+            "permissions/ownership and restart.", _SECRET_KEY_PATH, e)
+        raise SystemExit(
+            f"Cannot read secret key at {_SECRET_KEY_PATH}: {e}") from e
     key = os.urandom(32).hex()
     try:
         with open(_SECRET_KEY_PATH, "w") as f:
@@ -1373,6 +1385,16 @@ def _no_store(resp):
             "no-store, no-cache, must-revalidate, private")
         resp.headers["Pragma"] = "no-cache"
         resp.headers["Expires"] = "0"
+    return resp
+
+
+@app.after_request
+def _nosniff(resp):
+    """Stop the browser from MIME-sniffing a response into a different content
+    type than the one it was served as. Applied unconditionally, including to
+    static assets — this is not a caching decision, it's a content-type trust
+    boundary, and it costs nothing to set on every response."""
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     return resp
 
 
