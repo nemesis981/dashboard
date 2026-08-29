@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Build and sign the file-integrity manifest. RELEASE-TIME, OFFLINE, NEVER ON AN APPLIANCE.
+
+Decision record: 2026-08-29-file-integrity-tamper-detection-RESOLVED.md
+
+⛔ THE PRIVATE KEY MUST NEVER EXIST ON A DEPLOYED APPLIANCE.
+    That is the entire security property of this design and it is a property of
+    WHERE this runs, not of what it does. This script is deliberately NOT wired
+    into any service, timer, installer or deploy path -- it is run by a core dev
+    on a build machine, and the signed manifest is what ships.
+
+    A convenience "sign it on the box" mode would hand an appliance-root attacker
+    the ability to forge a clean manifest, which is exactly the attack signing
+    exists to stop. Do not add one.
+
+USAGE
+    nemesis-sign-manifest --key <private.pem> --root <repo> --out <manifest.json>
+    nemesis-sign-manifest --verify <manifest.json> --pub <public.pem> --root <repo>
+    nemesis-sign-manifest --selftest
+
+REFUSES TO RUN ON A DEPLOYED APPLIANCE. If /etc/nemesis.env exists, the box looks
+like a live install and signing aborts unless --force-i-am-a-build-host is given.
+That is a guard rail, not a security boundary: anyone able to pass the flag could
+also edit this file. It exists to stop an ACCIDENT, and it says so rather than
+implying it stops an attacker.
+"""
+import argparse
+import base64
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                                "alert_manager"))
+import integrity                                              # noqa: E402
+
+APPLIANCE_MARKER = "/etc/nemesis.env"
+
+
+def _die(msg, code=2):
+    print("ABORT: %s" % msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def _load_private(path):
+    from cryptography.hazmat.primitives import serialization
+    with open(path, "rb") as fh:
+        return serialization.load_pem_private_key(fh.read(), password=None)
+
+
+def cmd_sign(args):
+    if os.path.exists(APPLIANCE_MARKER) and not args.force_i_am_a_build_host:
+        _die("%s exists, so this looks like a deployed appliance. The signing key "
+             "must never live here. If this really is a build host, pass "
+             "--force-i-am-a-build-host." % APPLIANCE_MARKER)
+
+    # SELF-TEST BEFORE SIGNING, not after. A signing tool whose verifier is broken
+    # produces manifests that cannot be trusted, and the failure would surface
+    # months later on an appliance rather than here.
+    ok, detail = integrity.selftest()
+    if not ok:
+        _die("integrity self-test FAILED, refusing to sign: %s" % detail)
+    print("selftest: %s" % detail)
+
+    key = _load_private(args.key)
+    man = integrity.build_manifest(args.root, released_at=args.released_at)
+
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    man["sig"] = base64.b64encode(
+        key.sign(integrity.canonical_bytes(man), padding.PKCS1v15(),
+                 hashes.SHA256())).decode()
+
+    # VERIFY WHAT WE JUST WROTE, with the public half derived from the same key.
+    # Writing a manifest without reading it back is how an unverifiable release
+    # ships: the signer's own success is not evidence the verifier accepts it.
+    from cryptography.hazmat.primitives import serialization
+    pub_pem = key.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo).decode()
+    if not integrity.verify_signature(man, pub_pem):
+        _die("signed a manifest that does not verify against its own public key")
+    clean, why = integrity.is_clean(man, pub_pem,
+                                    integrity.verify_files(args.root, man))
+    if not clean:
+        _die("manifest does not describe the tree it was built from: %s" % (why,))
+
+    with open(args.out, "w", encoding="utf-8") as fh:
+        json.dump(man, fh, sort_keys=True, indent=2)
+        fh.write("\n")
+    print("signed %d files -> %s" % (len(man["files"]), args.out))
+    for rel, digest in sorted(man["files"].items()):
+        print("  %s  %s" % (digest[:16], rel))
+
+
+def cmd_verify(args):
+    with open(args.verify, encoding="utf-8") as fh:
+        man = json.load(fh)
+    pub = open(args.pub, encoding="utf-8").read()
+    status = integrity.verify_files(args.root, man)
+    clean, why = integrity.is_clean(man, pub, status)
+    for rel, st in sorted(status.items()):
+        print("  %-9s %s" % (st, rel))
+    print("VERDICT: %s" % ("clean" if clean else "FAILED"))
+    for w in why:
+        print("  - %s" % w)
+    raise SystemExit(0 if clean else 1)
+
+
+def cmd_selftest(_args):
+    ok, detail = integrity.selftest()
+    print("selftest ok=%s: %s" % (ok, detail))
+    raise SystemExit(0 if ok else 1)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--key"), ap.add_argument("--root", default=".")
+    ap.add_argument("--out"), ap.add_argument("--released-at")
+    ap.add_argument("--verify"), ap.add_argument("--pub")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--force-i-am-a-build-host", action="store_true")
+    a = ap.parse_args()
+    if a.selftest:
+        return cmd_selftest(a)
+    if a.verify:
+        if not a.pub:
+            _die("--verify needs --pub")
+        return cmd_verify(a)
+    if not (a.key and a.out):
+        _die("signing needs --key and --out (or use --verify / --selftest)")
+    return cmd_sign(a)
+
+
+if __name__ == "__main__":
+    main()

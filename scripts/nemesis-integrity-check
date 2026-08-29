@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Verify the signed file-integrity manifest. RUNS AS ROOT, FROM OUTSIDE THE TREE IT WATCHES.
+
+Decision record: 2026-08-29-file-integrity-tamper-detection-RESOLVED.md
+
+⛔ THIS FILE IS DEPLOYED, NOT RUN FROM THE REPO.
+    `deploy_integrity_check.sh` installs this and its OWN COPY of `integrity.py`
+    into a root-owned 0500 directory outside /opt/nemesis. It imports that copy,
+    NEVER the repo's.
+
+    WHY THAT MATTERS AND IS NOT PEDANTRY. If the checker imported
+    /opt/nemesis/alert_manager/integrity.py, an attacker who can edit the tree
+    could edit the verifier's own logic -- and the verifier would then cheerfully
+    report the tampered tree as clean. A watcher that loads its rules from the
+    thing it watches is decoration. The repo copy is still covered BY the
+    manifest, so a repo-side edit is detected; it is simply not what runs here.
+
+WHAT THIS CANNOT DO, STATED PLAINLY
+    An attacker with persistent root can replace this file, its integrity.py, the
+    public key, or the unit -- and nothing here would notice. That is the
+    acknowledged floor of the regress (TPM attestation, out of scope for v1). This
+    raises the bar; it does not terminate it.
+
+    It is also why KILLING THIS PROCESS must not look like health. Silence is not
+    success. The dead-man's-switch heartbeat (next build step) is what makes
+    absence detectable, and until it exists this checker's own death is
+    undetectable -- said here so that gap is never mistaken for coverage.
+
+EXIT CODES -- this is a GATE, not a report
+    0  clean
+    1  tampering or verification failure (a REAL finding)
+    2  cannot verify (missing manifest/key, broken self-test) -- FAIL CLOSED
+"""
+import argparse
+import json
+import logging
+import os
+import sys
+
+#: The deployed location. `deploy_integrity_check.sh` puts integrity.py here
+#: beside this script; the repo path is deliberately NOT on sys.path.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+
+DEFAULT_ROOT = "/opt/nemesis"
+DEFAULT_MANIFEST = os.path.join(_HERE, "manifest.json")
+DEFAULT_PUBKEY = os.path.join(_HERE, "integrity_public.pem")
+
+log = logging.getLogger("nemesis.integrity.check")
+
+EXIT_CLEAN, EXIT_TAMPERED, EXIT_CANNOT_VERIFY = 0, 1, 2
+
+
+def _load(path, what):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError as exc:
+        # FAIL CLOSED. A missing manifest or key is "cannot verify", never "clean".
+        # Reporting clean here would make deleting one file a complete bypass.
+        log.error("integrity: cannot read %s (%s): %s", what, path, exc)
+        return None
+
+
+def run(root, manifest_path, pubkey_path):
+    """(exit_code, reasons). Never raises."""
+    try:
+        import integrity
+    except Exception as exc:                                   # noqa: BLE001
+        log.error("integrity: verifier library unavailable: %r", exc)
+        return EXIT_CANNOT_VERIFY, ["verifier library unavailable"]
+
+    # SELF-TEST FIRST, EVERY RUN, IN THE PRODUCTION PATH.
+    # On a healthy appliance this returns "clean" for years; a build that ALWAYS
+    # returns clean is observationally identical until the day it is not. Proving
+    # the checker can still FAIL is the only thing that separates them.
+    ok, detail = integrity.selftest()
+    if not ok:
+        log.error("integrity: SELF-TEST FAILED, refusing to vouch for anything: %s", detail)
+        return EXIT_CANNOT_VERIFY, ["self-test failed: %s" % detail]
+
+    raw = _load(manifest_path, "manifest")
+    pub = _load(pubkey_path, "public key")
+    if raw is None or pub is None:
+        return EXIT_CANNOT_VERIFY, ["manifest or public key unreadable"]
+    try:
+        manifest = json.loads(raw)
+    except ValueError as exc:
+        return EXIT_CANNOT_VERIFY, ["manifest is not valid JSON: %s" % exc]
+
+    status = integrity.verify_files(root, manifest)
+    clean, reasons = integrity.is_clean(manifest, pub, status)
+    if clean:
+        log.info("integrity: clean (%d files verified)", len(status))
+        return EXIT_CLEAN, []
+
+    # A REAL FINDING. Name the file and the state -- "integrity check failed" is
+    # not actionable, and an operator cannot triage a verdict with no subject.
+    for r in reasons:
+        log.error("integrity: %s", r)
+    return EXIT_TAMPERED, reasons
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--root", default=DEFAULT_ROOT)
+    ap.add_argument("--manifest", default=DEFAULT_MANIFEST)
+    ap.add_argument("--pubkey", default=DEFAULT_PUBKEY)
+    ap.add_argument("--quiet", action="store_true")
+    a = ap.parse_args()
+    if a.quiet:
+        logging.getLogger().setLevel(logging.ERROR)
+
+    code, reasons = run(a.root, a.manifest, a.pubkey)
+
+    # TICKETING IS THE NEXT BUILD STEP, DELIBERATELY NOT HERE YET.
+    # It routes through modules/tickets open_ticket(), which lives in the tree
+    # this process is verifying -- so how it is reached without re-introducing the
+    # import dependency this file exists to avoid is its own design question, not
+    # something to answer by reflex. Until then the exit code and the journal are
+    # the signal, and that limitation is stated rather than papered over.
+    if code == EXIT_TAMPERED:
+        print("TAMPERED: %d finding(s)" % len(reasons))
+    elif code == EXIT_CANNOT_VERIFY:
+        print("CANNOT VERIFY: %s" % ("; ".join(reasons) or "unknown"))
+    else:
+        print("clean")
+    raise SystemExit(code)
+
+
+if __name__ == "__main__":
+    main()
