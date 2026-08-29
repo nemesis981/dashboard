@@ -4173,7 +4173,7 @@ logged so this doesn't get silently trusted as a complete rollback point later.
 **No fix possible for existing sets** — informational entry, not an action item beyond the
 mechanism fix already landed.
 
-### [MEDIUM] `hw_discover.py` writes `hw_map.json` to a path `hw_monitor.py` no longer reads (found 2026-08-28)
+### [FIXED — 2026-08-29, pending commit] `hw_discover.py` wrote `hw_map.json` to a path `hw_monitor.py` never reads (found 2026-08-28)
 `alert_manager/hw_discover.py:50` writes to `os.path.join(_HERE, "hw_map.json")` — i.e.
 `alert_manager/hw_map.json`. But `alert_manager/hw_monitor.py` doesn't exist any more; the live
 consumer is `core_module/hw_monitor/hw_monitor.py:33`, whose own `HW_MAP_PATH` resolves to
@@ -4186,10 +4186,47 @@ the consumer's location but not the generator's, or the generator's own target. 
 `api_hw_rediscover` (`:12231`) and `_backup_candidates()` (`:12352`) both still reference the old
 `alert_manager/hw_map.json` path too, so the whole discover/rebuild/backup chain is internally
 consistent with itself — just pointed at a directory the reader abandoned.
-**Candidate fix:** point `hw_discover.py`'s `HW_MAP_PATH` (and `dashboard.py`'s two references)
-at `core_module/hw_monitor/hw_map.json` to match the live reader — one-line change in each of the
-three locations. Found while resolving the `hw_map.json` track-or-gitignore decision (this same
-investigation is why the file was untracked at all — nothing was writing where anything read).
+**Scope was FOUR locations, not three** (corrected 2026-08-29): the original entry missed
+`dashboard.py:9650`, a **user-facing** UI string in the backup panel naming
+`alert_manager/hw_map.json` to the operator.
+
+**FIXED 2026-08-29 — not by hand-syncing the constants, but by removing the ability to drift.**
+Two constants in two files that must agree, with nothing enforcing agreement, drift again by
+default. `alert_manager/nemesis_paths.py` already exists for exactly this — its `canary_root()`
+docstring describes the identical bug shape ("*the asymmetry was the bug*, which is why this
+resolver lives HERE... one place answers where Nemesis puts things, so the two answers cannot
+disagree"), from the 2026-08-26 canary incident. Same fix applied here:
+- **`nemesis_paths.hw_map_write_path()`** — always canonical (`core_module/hw_monitor/`).
+  Deliberately not legacy-aware: writing to a legacy file that happens to exist would preserve
+  the split.
+- **`nemesis_paths.hw_map_path()`** — read resolution mirroring `db_path()`:
+  `$NEMESIS_HW_MAP_PATH` → canonical-if-exists → **legacy-if-exists** → canonical.
+- The four call sites now use the resolver: `hw_discover.py:50`,
+  `core_module/hw_monitor/hw_monitor.py:33`, `dashboard.py:12352`, `dashboard.py:9650`.
+**The legacy fallback is the immediate win, and it is why this needs no data migration:** the
+live box's existing map (`alert_manager/hw_map.json`, written 2026-08-23) had *never once* been
+read by the daemon. It is now found on the next restart — verified by importing `hw_monitor` in
+the systemd unit's own `PYTHONPATH`, which resolved to that real file. After one
+`hw_discover --auto` the canonical file exists and both sides converge, with no flag day.
+**⚠ Nearly broke restore, caught before landing:** the archive member name in
+`_backup_candidates()` is **pinned** to the old `alert_manager/hw_map.json` string on purpose.
+`install.sh:1927` restores that member *by name* behind `if [[ -f ]]`, so renaming it would make
+every restore — old archives and new — silently skip the sensor map with no error. The comment
+at the call site says so. Changing it means changing install.sh's restore in the same commit and
+keeping it able to read pre-existing backups; **not done here** (Rule 2), worth its own entry.
+**Verified:** new `alert_manager/test_hw_map_path.py`, **19/0**, exercising all four resolution
+states (neither file, legacy-only = today's live box, both = converged, canonical-only) plus the
+env override, against throwaway trees — never the live map. The property asserted is
+*writer and reader agree*, not a literal path, because asserting a literal path would pass just
+as happily with the two resolvers disagreeing. **Mutation-proven:** restoring the old
+alert_manager-relative writer turns it red 10/9, killing exactly the agreement assertions.
+`test_hw_discover_governed.py` still 28/0.
+**Also spotted, NOT fixed (separate bug, needs its own decision):** the same UI list at
+`dashboard.py:9648-9651` has two more stale entries — it names `alert_manager/alerts.db` (the DB
+moved to `/var/lib/nemesis` in the 2026-07-27 relocation) and `modules/tickets/tickets.db` (a
+file `_backup_candidates()`'s own comment three lines away says was retired in ADR 0001 Stage 6).
+So the panel tells the operator it is backing up two paths that no longer exist. Left alone
+deliberately — different bug, same list.
 
 ### [FIXED — 2026-08-28, pending commit] No committed test exercised the `EXTERNALLY_EXECUTED` branches (found 2026-08-27)
 `modules/ai_engine/module.py` — `automation_readiness()` (`:4118`), `authority_raise_warnings()`

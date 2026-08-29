@@ -47,7 +47,13 @@ _HERE        = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in _sys_npfa.path:
     _sys_npfa.path.insert(0, _HERE)
 import prompt_fields as _pf                # NPFA/1 (ADR 0025)
-HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
+import nemesis_paths as _npaths             # lives in _HERE, inserted above
+# ⛔ DO NOT go back to os.path.join(_HERE, "hw_map.json") (fixed 2026-08-29).
+# That resolved against alert_manager/, while hw_monitor reads from
+# core_module/hw_monitor/ — the same expression in both files naming two
+# different files, so every map written here was silently never read. The
+# resolver is the single source of truth; see nemesis_paths.hw_map_path().
+HW_MAP_PATH  = _npaths.hw_map_write_path()
 NEMESIS_ENV  = "/etc/nemesis.env"
 SERVICE_NAME = "hw-monitor.service"
 #: Model for sensor classification. Passed to `ai_engine.analyze(model=...)`,

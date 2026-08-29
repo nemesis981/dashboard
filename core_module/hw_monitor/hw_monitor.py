@@ -30,7 +30,13 @@ DB_PATH      = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
 # systemd sets $LOGS_DIRECTORY when the unit declares LogsDirectory=. Falling
 # back to _HERE keeps the pre-migration unit working unchanged.
 LOG_FILE     = os.path.join(os.environ.get("LOGS_DIRECTORY", _HERE), "hw_monitor.log")
-HW_MAP_PATH  = os.path.join(_HERE, "hw_map.json")
+# ⛔ DO NOT go back to os.path.join(_HERE, "hw_map.json") (fixed 2026-08-29).
+# hw_discover.py writes the map from alert_manager/; this file reads from
+# core_module/hw_monitor/. Both used that identical expression against their own
+# directory, so the writer and reader named two different files and the user's
+# chosen sensor mapping was silently discarded on every run. Resolver keeps the
+# two in agreement — see nemesis_paths.hw_map_path().
+HW_MAP_PATH  = nemesis_paths.hw_map_path()
 NET_IFACE    = "enp131s0"
 SAMPLE_INTERVAL  = 300
 WA_LISTEN_PORT   = 5001   # port for Windows-agent POST receiver

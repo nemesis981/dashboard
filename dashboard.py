@@ -12349,7 +12349,19 @@ def _backup_candidates():
         # (tickets/tickets_seq/tickets_settings), captured by the alerts.db entry above.
         # The old per-module tickets.db has been retired, so it is no longer a candidate.
         (DB_PATH, "alerts.db"),   # resolver-derived; follows the /var/lib/nemesis move
-        (os.path.join(_HERE, "alert_manager", "hw_map.json"), "alert_manager/hw_map.json"),
+        # SOURCE is resolver-derived, like DB_PATH above: this used to hardcode
+        # alert_manager/hw_map.json, which is not necessarily where hw_monitor
+        # reads the map from — so the backup could capture a stale orphan while
+        # missing the file actually in use. See nemesis_paths.hw_map_path().
+        #
+        # ⛔ THE ARCHIVE NAME IS DELIBERATELY PINNED to the old string and must
+        # NOT be "tidied" to match the source path. install.sh:1927 restores this
+        # member BY NAME (`if [[ -f "$tmp_dir/alert_manager/hw_map.json" ]]`), and
+        # that guard fails SILENTLY: rename the member and every restore quietly
+        # skips the sensor map with no error, on old and new archives alike.
+        # Changing it means changing install.sh's restore in the same commit and
+        # keeping it able to read pre-existing backups.
+        (nemesis_paths.hw_map_path(), "alert_manager/hw_map.json"),
         ("/etc/nemesis.env", "etc_nemesis.env"),
     ]
     anomaly_dir = os.path.join(_HERE, "modules", "anomaly_detection")
