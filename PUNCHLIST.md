@@ -4161,7 +4161,7 @@ at `core_module/hw_monitor/hw_map.json` to match the live reader — one-line ch
 three locations. Found while resolving the `hw_map.json` track-or-gitignore decision (this same
 investigation is why the file was untracked at all — nothing was writing where anything read).
 
-### [MEDIUM] No committed test exercises the `EXTERNALLY_EXECUTED` branches (found 2026-08-27, still open 2026-08-28)
+### [FIXED — 2026-08-28, pending commit] No committed test exercised the `EXTERNALLY_EXECUTED` branches (found 2026-08-27)
 `modules/ai_engine/module.py` — `automation_readiness()` (`:4118`), `authority_raise_warnings()`
 (`:4210`), and `refusal_ticket_text()` (`:3907`) each branch on `action_class in
 EXTERNALLY_EXECUTED` (currently `{"firewall_failsafe_override"}`, `:555`). `test_master_authority.py`
@@ -4172,15 +4172,30 @@ itself but against `modules/ai_engine/failsafe_decision.py`'s override-decision 
 three functions. **Verified by hand 2026-08-27** (per `docs/handoff/HANDOFF.md` §5) against a
 member class and a control class before landing that day's fix, but that verification was never
 committed as a test — the gap is real, not just theoretical.
-**Candidate fix:** a short test (follow `test_master_authority.py`'s throwaway-DB setup pattern)
-asserting, for `firewall_failsafe_override` specifically: `automation_readiness()` treats
-`undo_available` as true via the `EXTERNALLY_EXECUTED` membership check (`:4160`) rather than the
-real undo registry; `authority_raise_warnings()` emits the "carried out by a component outside the
-engine's propose/approve path" warning (`:4219`) instead of the generic undo-missing warning; and
-`refusal_ticket_text()` skips the "insufficient reversal support" branch (`:3919`) since the
-`or action_class not in EXTERNALLY_EXECUTED` clause is satisfied. Pair each assertion with a
-control run against a non-member class (e.g. `alert_disposition`) so the test can actually fail —
-same shape the standing "verification code must prove its own premise" practice already requires.
+**FIXED 2026-08-28:** new `modules/ai_engine/test_externally_executed.py` — **24 assertions,
+24 passed, 0 failed.** Covers all three branches: `automation_readiness()` treating
+`undo_available` as satisfied via membership (`:4160`); `authority_raise_warnings()` emitting the
+externally-executed warning AND suppressing the "CANNOT BE UNDONE" one (`:4218`, an if/elif, so
+the suppression is the branch's real effect and is asserted separately); and
+`refusal_ticket_text()` skipping the "insufficient reversal support" clause (`:3919`). A fourth
+section asserts the three AGREE with each other — the production failure that matters is a dialog
+saying "it will act" beside a ticket saying "it cannot be reversed".
+**Control class is `ip_block_permanent`, and the pairing is load-bearing:** a probe confirmed
+**no** action class has an undo handler registered at import, so member and control differ ONLY in
+`EXTERNALLY_EXECUTED` membership — asserted explicitly in the test's section 0 rather than assumed,
+so the file cannot pass vacuously if that ever stops being true.
+**Proven able to fail (mutation test, per the standing practice):** re-running the identical suite
+against a copy with `EXTERNALLY_EXECUTED` emptied produced **15 passed, 9 failed** — the 9 failures
+being exactly the member-branch assertions, with every CONTROL assertion still passing (correct:
+controls do not depend on membership). The mutation was run against a **throwaway copy**, never
+`module.py` on disk — `git status`/`git diff` confirmed the real module untouched, deliberately,
+because another window was committing in this shared tree at the time.
+**No regression:** `test_master_authority` 89/0, `test_package_exports` 14/0,
+`test_failsafe_decision` 74/0, `test_authority` all-pass.
+**Not done, deliberately:** no undo handler was registered for the class — `module.py:550` forbids
+it explicitly (registering one would make it eligible for `execute_proposal`, which has no
+disclosure precondition, creating a second route to an override that bypasses the guarantee the
+mechanism rests on). The test asserts the current design, it does not work around it.
 
 ### [DONE — 2026-08-28, pending commit] Dead NOPASSWD `nmap` grant trimmed from `install.sh`'s sudoers template
 `install.sh:2015` shipped `/usr/bin/nmap` in the `/etc/sudoers.d/nemesis` NOPASSWD list to
