@@ -436,6 +436,44 @@ number.
     someone else moments ago" from "about to be published by me" — a genuinely useful timing
     signal, unaffected by the shared-identity problem above since it reads ref history rather
     than authorship.
+- **⛔ DO NOT CROSS-VERIFY ANOTHER WINDOW'S UNCOMMITTED FILE — commit it first, even locally
+  (added 2026-08-29 after it produced a false regression report).** A file that is untracked or
+  mid-edit has no stable content: the verifying window reads whatever happened to be on disk at
+  that instant, which may be a state the author never intended anyone to run. **The verifier
+  cannot tell a snapshot from a regression, because both look like "your code fails".**
+
+  **Confirmed live 2026-08-29.** Window 2 ran Window 3's untracked
+  `test_attest_challenge_dispatch.py` while verifying an unrelated fix and reported it "failing
+  3 of 12". The file passes 14/0 and always had, from any cwd. The 3-of-12 was a real output —
+  of an intermediate save made partway through authoring the file, before two stub fixes landed.
+  Real time then went into investigating a regression that did not exist, and the first
+  hypothesis (that later work had destabilised it) was wrong.
+
+  **The tell was the COUNT, and it is the generalisable part: 12 is not a number that file
+  produces when healthy.** A total that does not match any known-good run means the two sides
+  are not looking at the same artifact — check that before debugging the failures themselves.
+
+  **What to do:**
+  - **Author:** commit before asking for verification — a local commit is enough, it does not
+    need pushing. If you must hand over something in flight, say so explicitly and name the
+    SHA-less state as provisional.
+  - **Verifier:** check `git status` for the file first. If it is `??` or ` M`, stop and ask —
+    do not report results against it. A result from an uncommitted file is not evidence about
+    the author's work.
+  - **Related but NOT the same as the shared-index hazard above.** That one is about your work
+    escaping into someone else's commit. This one is about *reading* someone else's work before
+    they have declared it finished. Both come from one checkout; neither implies the other.
+
+- **A test whose ASSERTION COUNT changes under failure cannot be compared between runs
+  (same incident).** The file above dropped from 14 checks to 12 because two assertions sat
+  inside an `if` that only held on the success path — so a run with *less coverage* reported as
+  a smaller suite rather than a failing one, and the missing checks vanished silently instead of
+  failing. **Keep the count fixed:** make assertions unconditional (degrade the value, not the
+  check), and have the file assert its own expected total so drift reports itself. Same family as
+  the standing "a green suite and a suite that never ran the new code are indistinguishable"
+  check below — this is that failure applied to the run-to-run comparison rather than to a single
+  run.
+
 - **Data Manager (ADR 0006) — loader-enforced, not convention.** All module DB access goes
   through `get_data_manager()` / `data_manager.connect(module)`. This is not a style
   preference: `modules_loader.py` statically refuses to load a module that imports raw
