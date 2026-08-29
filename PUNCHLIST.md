@@ -4456,3 +4456,35 @@ note": searching for a term finds the prose saying the term is obsolete. It also
 against a comment-stripped view of the function — **assert against executable code, never
 string presence in source.**
 
+### [MEDIUM] `test_anomaly_sim.py` is named like a unit test but WRITES TO THE LIVE DATABASE (found 2026-08-29)
+`test_anomaly_sim.py` sits in the repo root, matches `test_*.py`, and is **not a test** — it is
+a live-data injection tool for manual UI validation. It sets **no** throwaway DB (no
+`NEMESIS_DB_PATH`, no `tempfile`), calls `_init_db()` and `_conn()` directly, and so resolves
+through `get_data_manager().connect("anomaly_detection")` to **whatever database is live**. Its
+own docstring confirms the intent: it injects a coordinated multi-device incident scoring 63
+(HIGH, "CISA button visible") and ends with *"Cleanup after UI validation: python3
+test_anomaly_cleanup.py."*
+**The hazard is the NAME, not the tool.** Running a suite with `for t in test_*.py` — the exact
+shape used repeatedly in this repo, including twice by me earlier the same day against
+`diagnostics/` and `modules/malware_detection/` — would fire it against production, creating a
+HIGH incident, writing unlabelled rows (Rule 11), and requiring a cleanup pass. It was caught
+only because the rename work made me check what `_conn()` resolved to before running it; nothing
+about the filename would have warned anyone.
+**Not a criticism of the tool** — a live simulator is legitimately useful and the cleanup script
+exists. The defect is that it is indistinguishable from a safe unit test at a glance and to a
+glob.
+**Candidate fixes, cheapest first:** rename to `sim_anomaly_incident.py` / `tools/` (removes it
+from every `test_*` glob at a stroke, no logic change); or add a refuse-to-run guard requiring an
+explicit `--i-know-this-writes-live` flag or `NEMESIS_DB_PATH` pointing away from
+`/var/lib/nemesis`; or both. Not fixed here: renaming a file and/or adding a guard is a judgment
+call about the tool's workflow, and this was found mid-way through an unrelated rename (Rule 2).
+**Scope checked, and it is exactly TWO files — a matched pair, not one.** Swept all six
+repo-root `test_*.py`: `test_anomaly_sim.py` **and `test_anomaly_cleanup.py`** both access a
+database with no throwaway redirect (the cleanup script deletes from the live DB by design — it
+is the sim's companion, and carries the identical naming hazard). `test_module_write_gate.py`
+and `test_route_registration_gate.py` correctly set a throwaway DB.
+`test_backup_modal_matches_candidates.py` and `test_required_detector_coverage.py` touch **no**
+database at all (0 access sites), so they need no redirect — they were false positives of the
+first, cruder sweep, which conflated "sets no throwaway DB" with "unsafe". Fix both files of the
+pair together or neither: renaming only the sim would leave a `test_`-named script that still
+deletes live rows.
