@@ -4511,6 +4511,8 @@ this prevents is not wasted time — it is a confusing no-op "fix" committed aga
 already-correct code**, which is worse than the original stale entry.
 **Not a criticism of the inventory** — it is a genuinely useful map and was the right artifact
 to compile. It just needs re-verification against code before it can be trusted as current, and
+that is true of any document derived from a hand-maintained list.
+
 ### [FIXED — 2026-08-29, pending commit] Rule 8: two shipped files carried a real home path — and both were BROKEN, not just leaky
 `git grep` found `/home/<realuser>/dashboard/...` in exactly two tracked files. **Both pointed at
 the pre-`/opt` layout retired on 2026-07-27, so neither could work for anyone** — the leak and a
@@ -4539,6 +4541,7 @@ supersession note" trap as twice earlier that day, this time inside the remediat
 Rewritten to cite the commit by SHA (`1630c36`) instead of by title.
 **Related, still open:** that 2026-06 sweep missed both of these files. Worth asking what else it
 missed — a full repo-wide hygiene sweep for other leaked paths/IPs/emails is a separate open item.
+
 ### [FIXED — 2026-08-29, pending commit] Alert LIST read 100 log lines while the severity CARDS read 200,000
 `dashboard.py` — `get_alert_counts()` was fixed to read `tail -n 200000` (its docstring records
 why: "a burst of P3 noise would push P1/P2 entries off the window"). **The same fix was never
@@ -4562,6 +4565,7 @@ with a known-bad control (cap of 3) confirming the comparison can actually fail.
 deep read is cheap in the common case, but a day with *no* matching alerts scans the full window
 every 5 s (~200k cheap `startswith`-class checks). Raising the TTL is a separate judgment call —
 one variable at a time.
+
 ### [FIXED — 2026-08-29, pending commit] `_load_exclusions()`: an unreadable config was indistinguishable from no config
 `modules/malware_detection/module.py` — two defects, one reported and one found alongside it:
 1. **Reported:** the conf file REPLACES the built-in defaults wholesale rather than extending
@@ -4582,6 +4586,7 @@ one variable at a time.
 **Verified:** all three branches exercised directly (no conf / conf readable / conf present but
 `chmod 000`), each producing a distinct and correct message. Full malware_detection suite green
 (11 files).
+
 ### [FIXED — 2026-08-29, pending commit] Two `AGENT_VERSION` constants that must NEVER be synchronised
 `nemesis_agent/attest.py:106` (`"1.0.2"`) and `nemesis_agent/installer_gui.py:46`
 (`"1.0.8"`, env-overridable) share a name and version **different things**:
@@ -4606,6 +4611,7 @@ being remembered together" — which is exactly the situation the shared *name* 
 deliberately different, and spells out that changing agent FILES requires bumping the attestation
 one independently of any release number. Documentation only — **both values unchanged**;
 `test_attestation.py` 21/21.
+
 ### [AUDIT COMPLETE — 2026-08-29] Vestigial tables: ⛔ ONE OF THE THREE IS NOT VESTIGIAL — DO NOT DROP IT
 Audit only, no changes made — dropping tables is a state-changing action needing a snapshot.
 Result differs per table, and the entry treated all three as equivalent:
@@ -4630,6 +4636,7 @@ migration), export them, or explicitly accept losing them. Leaving the table cos
 inside a `try/except` that prints `(not found)`, so a drop degrades gracefully rather than
 crashing — but it would report `(not found)` forever unless the name is removed from that list at
 the same time.
+
 ### [AUDIT — 2026-08-29] `login_events` test rows: the entry undercounts by ~9x, and the table cannot be labelled in-band
 Audit only; deleting rows is state-changing and needs a snapshot plus operator go-ahead.
 The entry flags **one** row (id 83, `harnesstest`). Reality: **at least 9 unlabelled test rows
@@ -4659,6 +4666,7 @@ since there is no in-band field. Otherwise this recurs every time anyone exercis
 failed logins exist under *mistyped* variants of the operator's own username. **Deleting the test
 rows themselves is still open** and needs its own snapshot; the rule change is what stops it
 recurring.
+
 ### [DONE — 2026-08-29] Vestigial tables dropped, with the one that wasn't vestigial exported first
 Operator-approved after the audit above. **A verified state snapshot was taken first**:
 `nemesis-state-backups/2026-08-29-1101-pre-vestigial-table-drop/` — DB half via the **sqlite3
