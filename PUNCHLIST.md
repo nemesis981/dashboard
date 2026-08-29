@@ -4562,3 +4562,23 @@ with a known-bad control (cap of 3) confirming the comparison can actually fail.
 deep read is cheap in the common case, but a day with *no* matching alerts scans the full window
 every 5 s (~200k cheap `startswith`-class checks). Raising the TTL is a separate judgment call —
 one variable at a time.
+### [FIXED — 2026-08-29, pending commit] `_load_exclusions()`: an unreadable config was indistinguishable from no config
+`modules/malware_detection/module.py` — two defects, one reported and one found alongside it:
+1. **Reported:** the conf file REPLACES the built-in defaults wholesale rather than extending
+   them, but the log said only `"%d exclusions loaded from %s"`. A reader could not see that a
+   short conf had *narrowed* coverage. Now stated: `"… these REPLACE (do not extend) the N
+   built-in defaults"`. In testing this made the real hazard obvious — a 2-line conf displacing
+   **25** defaults.
+2. **Found while fixing it, and more serious:** `except OSError: raw = []` fell through to the
+   defaults and logged `loaded from defaults` — **byte-identical to the message for "no conf
+   file exists."** A conf the admin had written but the service could not read (mode, ownership,
+   SELinux) looked exactly like an unconfigured box, and their exclusions silently were not in
+   effect. This is precisely CLAUDE.md's standing rule — *"a failed read must surface as an
+   explicit failure state, never as a default value"* — and it is the same class as the 6-week
+   silent config-shadowing incident already on record here.
+   Falling back to defaults remains correct fail-safe behaviour; doing it **silently** was the
+   defect. Now a `log.warning` naming the file, the errno, and stating plainly that the file's
+   exclusions are NOT in effect.
+**Verified:** all three branches exercised directly (no conf / conf readable / conf present but
+`chmod 000`), each producing a distinct and correct message. Full malware_detection suite green
+(11 files).
