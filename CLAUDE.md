@@ -1035,6 +1035,64 @@ commit," not on request.
   trip-critical/time-pressured and audit-first discipline calls for a separate pass rather
   than folding it into the same live session.
 
+### Unauthenticated routes: hand-placed exceptions only, never a module capability (standing practice, added 2026-08-29)
+**Unauthenticated routes may only be created as hand-placed, individually-audited exceptions in
+`dashboard.py`'s `_AUTH_EXEMPT` list. The module system has no mechanism for declaring a route
+public, and none should be added.** A third-party module needing an unauthenticated entry point
+must request a hand-placed `dashboard.py` exception from the core team — **the module system
+itself never grants this capability to third-party code.**
+
+**Why this is a security boundary and not an inconvenience.** Nemesis's module architecture is
+designed to accept third-party/community modules. A module-level "no auth required" declaration
+would hand the power to publish an unauthenticated endpoint to authors outside core-team review
+— the single most dangerous capability in the product, granted by a manifest key. Keeping the
+only path a hand edit in a core file means every public route is seen by someone who can weigh
+it.
+
+**The mechanism already enforces this, and the enforcement is worth knowing:**
+`modules_loader.py` refuses to register any endpoint absent from `roles.ROUTE_MINIMUMS`
+(the route then **404s**), and `ROUTE_MINIMUMS` has no public concept — every entry is a role
+tuple. So a module route is authenticated by construction. **Do not "fix" that by adding a
+public/None role.**
+
+**⚠ Two registries, two different silent failures.** `install_windows_start` (2026-08-02) is
+remembered for the `_AUTH_EXEMPT` **302-to-login** failure. There is a second one: a missing
+`ROUTE_MINIMUMS` entry **404s**, which reads as "route doesn't exist" rather than
+"misconfigured". Both look like a working route to every check that does not specifically test
+an unauthenticated request. **Verified live 2026-08-29:** `roles.py`'s own registry-completeness
+test caught a `CAPABILITY_ROUTES`/`ROUTE_MINIMUMS` entry naming an endpoint that did not exist
+yet, reporting *"a typo protects nothing while looking like coverage."*
+
+### `_AUTH_EXEMPT` hardening checklist — every entry, every time (standing practice, added 2026-08-29)
+Every `_AUTH_EXEMPT` entry MUST satisfy all of the following. **The list is a reviewed artifact,
+not a collection of isolated entries** — a new entry is a change to the whole surface.
+
+1. **Its own scoped, single-use token** — hashed at rest, **constant-time compared**, TTL-bound,
+   and **atomically consumed** (the consume must be the same operation that checks, or two
+   simultaneous uses both succeed).
+2. **Identical reject behaviour for invalid vs. expired vs. already-used.** Same status, same
+   body, same timing to the caller. A distinguishable response is an oracle: it confirms a token
+   *existed*. Log the distinction internally, never expose it.
+3. **Rate-limiting keyed on the real `remote_addr`**, with **bounded, evicting storage**. An
+   unbounded dict keyed on a client-controlled value is a memory-exhaustion vector reachable
+   without credentials.
+4. **Full audit logging of BOTH success and failure.** A route with no logged failures is
+   indistinguishable from a route nobody attacked.
+5. **Fail closed on ambiguous state.** An unparseable expiry, an unreadable row, a missing
+   config value → refuse. Never treat "cannot determine" as "permitted".
+6. **The standing route-level security audit is MANDATORY, not discretionary, on every
+   `_AUTH_EXEMPT` change** — including removals, since removing an entry can silently break a
+   flow that depended on it.
+7. **Verify the endpoint name resolves to a real `@app.route` function.** A typo fails closed
+   and is indistinguishable from omitting the entry entirely.
+8. **A test that proves the route is reachable WITHOUT a session** and does not 302. **A test
+   asserting the route works while authenticated proves nothing — the broken version passes it
+   too.** This is precisely how `install_windows_start` shipped.
+
+**Reviewing the list as a whole:** when adding an entry, re-read every existing one and confirm
+each still needs to be there and still satisfies 1–8. The set's risk is its union, not its
+newest member.
+
 ### Verification/derivation code must prove its own premise (standing practice, added 2026-08-01)
 **Nine instances in one day, all the same shape.** An empty comparison read as "agree." A
 failed counter lookup silently defaulting to zero and reported as a real measurement. An
