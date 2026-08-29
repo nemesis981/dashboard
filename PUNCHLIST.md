@@ -244,9 +244,25 @@ below.
   months while the code that would have collected it was long gone. The visible half is the
   half that outlives the cleanup — check it explicitly rather than assuming it followed.
 
-- [ ] **`PIHOLE_IP` hardcoded default (Rule 8 leak).** A personal LAN IP is shipped as a
-  default — replace with `127.0.0.1` / read from `/etc/nemesis.env` (defaults must be correct
-  for ANY user): `dashboard.py:65`, `diagnostics/pihole_health.py`, `modules/dhcp/module.py`.
+- [x] **`PIHOLE_IP` hardcoded default (Rule 8 leak).** ✅ **ALREADY FIXED — entry was STALE,
+  verified 2026-08-29.** Fixed in commit `d0be3d5` ("fix(rule8): remove hardcoded box IP/subnet
+  from shipped code defaults"). Every live default now reads `os.environ.get("PIHOLE_IP",
+  "127.0.0.1:8080")` — confirmed at `dashboard.py:202`, `diagnostics/pihole_health.py:18`,
+  `core/vpn_dns_guard.py:68`, and `scripts/vpn_dns_livetest.sh:66`.
+  **Two corrections to the original entry:** the line number had drifted (`dashboard.py:65` →
+  `:202`), and **`modules/dhcp/module.py` never contained `PIHOLE_IP` at all** — that third
+  location was wrong when written. Two real locations the entry never listed
+  (`core/vpn_dns_guard.py`, `scripts/vpn_dns_livetest.sh`) were nonetheless fixed by `d0be3d5`.
+  **A repo-wide re-scan found no private-LAN literal defaults remaining** (run with a control
+  proving the pattern matches — it found the `127.0.0.1` defaults). The one hit,
+  `device_scanner.py:118`'s `LAN_SUBNET="192.168.1.0/24"`, is a generic RFC 1918 example and
+  **not** this box's actual subnet (verified against `<box-subnet>`; they differ), so it is
+  correct-for-any-user as Rule 8 requires — not a leak.
+  **Why this is worth recording rather than just ticking:** the gap inventory carried this as
+  `[FIX-NOW]` on 2026-08-29, and acting on it without checking would have produced a confusing
+  no-op "fix" against already-correct code. This is the exact failure the inventory itself
+  names ("PUNCHLIST entries trusted at face value instead of code-verified — 4 stale entries
+  found in one day"). Verify before fixing, every time.
 
 - [ ] **Systemd unit files + one script ship a literal `/home/<user>/dashboard/...` path (Rule 8
   leak, found 2026-07-26 during a broader re-scan, NOT new today — pre-existing since
