@@ -19,18 +19,16 @@ immediately before this closeout's final commit.
 **`~/work/nemesis-internal`:** `local` and `usb` both confirmed at the same HEAD via
 `git ls-remote` (authoritative, not just push output).
 
-## 2. `/opt/nemesis` working tree — one item, intentionally uncommitted
+## 2. `CLAUDE.md`'s `--passwordfile` diff — RESOLVED 2026-08-29
 
-```
- M CLAUDE.md
-```
-
-- **`CLAUDE.md`'s `--passwordfile` diff** (added 2026-08-27, standing rule after a second
-  same-shape credential leak — a hung `VBoxManage` command's `subprocess.TimeoutExpired`
-  embedding the full argv, including the password, in a session transcript). **Still
-  unattributed — now SIX sessions running.** Coherent, complete, reads as finished. No
-  handoff document describes it and no window has claimed it. Do not sweep it into any
-  future commit without its author claiming it first.
+**No longer an open item — stop flagging it.** After six sessions unclaimed, the operator
+authorized it directly on 2026-08-29 (not attributed to any window's authorship). Committed
+`80a5985`, pushed, confirmed on `origin/main`. The working tree note below (§2 originally
+described this as the sole uncommitted item) is stale as of this edit — current working-tree
+state depends on whatever's in progress when this file is next refreshed at closeout;
+Window 3's `hw_map.json` path fix was mid-flight in the shared tree as of this edit, not
+described here since it's a different window's active work, not this file's job to narrate
+live.
 
 Everything else that was uncommitted at any point today (three worklog files, the nmap-grant
 batch, the ufw fix, `SETUP_LINUX.md`, the sudoers decision) landed and pushed during the day —
@@ -113,8 +111,7 @@ diagnostics-framework session-context change), Window 2's one item is done (§3 
 
 ## 6. Anything else queued, not yet actioned
 
-- **`CLAUDE.md`'s uncommitted `--passwordfile` diff** (§2) — sixth session flagging it,
-  still unclaimed.
+- ~~`CLAUDE.md`'s uncommitted `--passwordfile` diff~~ — **RESOLVED 2026-08-29**, see §2.
 - **GitHub GC request** for the pre-rewrite object — needs the operator to file via GitHub
   Support's web form.
 - Everything in the gap inventory's Tier 1/Tier 2 not covered by today's ownership split or
