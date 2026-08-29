@@ -4539,3 +4539,26 @@ supersession note" trap as twice earlier that day, this time inside the remediat
 Rewritten to cite the commit by SHA (`1630c36`) instead of by title.
 **Related, still open:** that 2026-06 sweep missed both of these files. Worth asking what else it
 missed — a full repo-wide hygiene sweep for other leaked paths/IPs/emails is a separate open item.
+### [FIXED — 2026-08-29, pending commit] Alert LIST read 100 log lines while the severity CARDS read 200,000
+`dashboard.py` — `get_alert_counts()` was fixed to read `tail -n 200000` (its docstring records
+why: "a burst of P3 noise would push P1/P2 entries off the window"). **The same fix was never
+applied to `get_suricata_alerts()`**, which still read `tail -n 100` and feeds
+`get_active_alerts()` — the alert LIST. So on a noisy network the list renders empty while the
+severity cards beside it show real non-zero counts: **one log, two depths, two answers on the
+same screen.**
+**Fixed as three coupled changes — raising the limit alone would have caused a regression:**
+1. `get_suricata_alerts()` now reads `200000`, matching its sibling.
+2. **`timeout=30` added.** That call had *none* while the sibling had one; `fast.log` is ~36 MB
+   on this box, and an unbounded `tail` in a request path is a hang waiting on a slow disk.
+3. **An early `break` at 10 in `get_active_alerts()`.** Required, not an optimisation: that loop
+   runs `parse_alert()` **and a `get_db_alert()` DB query per unique rule** across the whole
+   window, on a 5-second cache TTL (`_SURICATA_CACHE_TTL`, vs 60 s for the counts cache). At
+   200,000 lines without a break that is a real performance regression.
+**Behaviour-preservation proven, not asserted:** `alerts` is oldest-first, `reversed()` makes it
+newest-first, and the function already returned `active[:10]` — so the first 10 collected are
+exactly the 10 returned before. Simulated both loops over identical input: **identical output**,
+with a known-bad control (cap of 3) confirming the comparison can actually fail.
+**Not changed, flagged instead:** `_SURICATA_CACHE_TTL` stays at 5 s. With the early break the
+deep read is cheap in the common case, but a day with *no* matching alerts scans the full window
+every 5 s (~200k cheap `startswith`-class checks). Raising the TTL is a separate judgment call —
+one variable at a time.

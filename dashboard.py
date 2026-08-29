@@ -3533,9 +3533,20 @@ def get_suricata_alerts():
     if now - _suricata_cache["ts"] < _SURICATA_CACHE_TTL:
         return _suricata_cache["lines"]
     try:
+        # DEPTH MUST MATCH get_alert_counts() (200000). This read used to be
+        # `-n 100`, which is the same defect that function already fixed for the
+        # severity CARDS but which was never applied to the alert LIST fed from
+        # here. A burst of P3 noise pushes P1/P2 entries off a 100-line window,
+        # so the list renders EMPTY while the cards beside it show real non-zero
+        # counts — the two disagreeing on screen, from one log, because they
+        # sampled it at different depths.
+        #
+        # `timeout` added at the same time: this call had NONE, while its sibling
+        # has 30s. fast.log is ~36 MB here, and an unbounded `tail` in a request
+        # path is a hang waiting for a slow disk.
         result = subprocess.run(
-            ["tail", "-n", "100", "/var/log/suricata/fast.log"],
-            capture_output=True, text=True
+            ["tail", "-n", "200000", "/var/log/suricata/fast.log"],
+            capture_output=True, text=True, timeout=30,
         )
         lines = [l for l in result.stdout.strip().split("\n") if l]
         _suricata_cache["lines"] = lines
@@ -3746,6 +3757,15 @@ def get_active_alerts():
             if db_alert and db_alert[7] == "ignore":
                 continue
             active.append(parsed)
+            # STOP AT 10 — required, not an optimisation, now that the source
+            # reads 200000 lines instead of 100. Without it this loop runs
+            # parse_alert() AND a get_db_alert() DB query for every unique rule
+            # across the whole window, on a 5-second cache TTL. The break is
+            # behaviour-preserving: `alerts` is oldest-first, `reversed()` makes
+            # it newest-first, and the function returns at most 10 — so the first
+            # 10 collected are exactly the 10 that `active[:10]` returned before.
+            if len(active) >= 10:
+                break
         return active[:10]
     except Exception as e:
         log.exception("get_active_alerts failed: %s", e)
