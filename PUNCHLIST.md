@@ -4238,3 +4238,10 @@ scan silently finds nothing still cannot diagnose it from the UI. Worth its own 
 operator wants it; the install-side defect is what this fixes.
 Found while trimming the dead `sudo nmap` grant (previous entry); the two were independent — the
 grant was unnecessary, the package is mandatory — and landed as separate commits accordingly.
+
+### [DONE — 2026-08-28] Installer sudoers admin grants reviewed for staleness
+A routine review of `install.sh`'s NOPASSWD sudoers template (prompted by an unrelated dead-grant
+fix elsewhere in the same template) checked whether its remaining entries are still needed.
+**Reviewed and intentionally retained** — they support a documented admin workflow referenced
+elsewhere in `install.sh`'s own output. No code change made. Full reasoning kept in the private
+operational record, not duplicated here.
