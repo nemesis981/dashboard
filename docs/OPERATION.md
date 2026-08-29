@@ -228,7 +228,7 @@ Switch between modes in Settings → AI Engine. Your explanation tier (Beginner/
 
 🔵 **Intermediate:** When the watchdog sends a HIGH/CRITICAL email alert, it also automatically opens a ticket with the alert context pre-populated. When you open a ticket, Nemesis automatically searches existing notes and tickets for related history and surfaces the most relevant ones (scored by relevance — same rule, same IP, similar content).
 
-🔴 **Pro:** Relevance scoring: same rule_id/sensor_key (+40pts), same src/dst IP (+25pts), same sensor category (+15pts), keyword overlap (+10pts), recency within 30d (+5pts), same priority (+5pts). Default surface threshold: 70% (configurable in Settings → Tickets). Notes have no formal lifecycle — lightweight annotations. Tickets have NF-XXXX numbering and full status workflow. Both in the same `tickets.db` table, distinguished by `type` field.
+🔴 **Pro:** Relevance scoring: same rule_id/sensor_key (+40pts), same src/dst IP (+25pts), same sensor category (+15pts), keyword overlap (+10pts), recency within 30d (+5pts), same priority (+5pts). Default surface threshold: 70% (configurable in Settings → Tickets). Notes have no formal lifecycle — lightweight annotations. Tickets have NF-XXXX numbering and full status workflow. Both live in the same `tickets` table, distinguished by `type` field — that table is inside the shared `alerts.db`, not a separate `tickets.db` (the per-module `tickets.db` was retired in ADR 0001 Stage 6).
 
 **Ticket statuses:**
 - **Open** — newly created, not yet investigated

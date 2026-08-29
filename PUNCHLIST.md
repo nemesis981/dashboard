@@ -5006,3 +5006,74 @@ snapshot.
 **DB-path resolution traced, not assumed** (Window 2 flagged it): `NEMESIS_DB_PATH` is set before
 any import, `database.DB_PATH` and `nemesis_paths.db_path()` both resolve to the temp DB, and the
 schema init lands there. It was not the cause.
+
+### ⚠ [PROCESS] Backlog entries go stale FASTER than they are worked. Reconcile at BUILD time, not by re-auditing (found 2026-08-29; rebuilt after being lost)
+**Sibling of the "this file DRIFTS" entry above, one layer up.** That one says *verify an entry
+before acting on it*. This one says the drift is large enough that the backlog's own accounting
+of what is left is wrong, and no amount of careful reading fixes it.
+
+**Measured twice, on different days, by different methods — this is not impressionistic:**
+- **2026-08-29 (first pass):** six queued items and five gap-inventory items turned out already
+  built — eight distinct features across four work-items, shipped but never marked.
+- **2026-08-29 (second pass, three parallel read-only audits over 44 Tier-1 items):**
+  **20 of 44 already fixed (~45%).** Two entries were not merely stale but *factually wrong*:
+  "no agent self-integrity check exists at all" (attestation has run every heartbeat since
+  `12d58fe`, closing both named evasion paths for Tier 1) and "memory-injection Step 3c
+  acquisition unbuilt" (3c-2..3c-6 are all built and tested — the inventory looked in the private
+  module, but acquisition lives in `nemesis_agent/` by design, per that module's own README).
+- Staleness is dominated by **very recent** work, not long-tail rot: several items were fixed the
+  same day or within five days of being re-checked.
+
+**⛔ Do NOT solve this with another periodic audit. That was tried and it inherited the problem.**
+`audits/base-project-gap-inventory-2026-08-28.md` (private mirror) was compiled *from this file*,
+so it froze this file's stale entries into a second document that then also went stale — two
+sources of truth, both wrong, neither reconciling the other. A third audit would make three.
+
+**The fix is build-time reconciliation, and it costs almost nothing:** whoever ships a change
+marks the corresponding entry `[DONE — <date>, <commit//evidence>]` **in the same commit as the
+work**. The person who just built it is the only one who knows it is done, knows it while it is
+cheap to record, and is already editing files. Every other scheme pays someone later to
+rediscover it — which is precisely the cost being measured above.
+
+**Why this is worth a standing entry rather than a one-off cleanup:** the failure mode is not
+wasted time. It is a **confusing no-op "fix" committed against already-correct code**, which is
+worse than the stale entry that caused it — and worse still, a planning decision ("how far from
+complete are we?") made against a backlog that overstates remaining work by ~45%.
+
+### [LOW] `data_manager.py`'s `mem_appliance` comment contradicts its own sibling entry 15 lines above (found 2026-08-29)
+`alert_manager/data_manager.py:401-404` — the `mem_appliance` namespace entry carries a
+parenthetical stating the attestation tables *"are NOT in this position ... they are written
+inside the heartbeat's single transaction alongside `agent_devices`"*. The `attestation`
+namespace entry at `:368-386` (three lines above) says both attestation writers are **now
+in-namespace, completed 2026-08-29** — which is correct, and is what `5c19e0c` landed.
+So the file states both that the coupling exists and that it was removed.
+**Cosmetic, but it is exactly the hazard the surrounding comment block warns about:** the next
+reader of that list will believe it, and this is a list people consult specifically to answer
+"which namespace owns this table". One-line deletion of the stale parenthetical.
+*Found by read-only audit; not fixed in that pass (Rule 1).*
+
+### [MEDIUM] `scripts/wal_concurrent_smoketest.py` computes a `__file__`-relative DB path and then WRITES to it (found 2026-08-29)
+`scripts/wal_concurrent_smoketest.py:24`:
+```
+DB_PATH = os.path.join(_HERE, "..", "alert_manager", "alerts.db")
+```
+then creates a `_wal_smoketest` table at `:26`. **Two standing rules broken at once:** CLAUDE.md's
+*"Never compute `__file__`-relative DB paths"* (ADR 0001 — the accessor is
+`nemesis_paths.db_path()`, which honours `$NEMESIS_DB_PATH` first), and the "scripts must not
+write to production" shape already on record — a verification script previously wrote three real
+columns into production `agent_devices` before its own commit landed.
+**Currently latent rather than live**, and the reason is luck: the path it computes
+(`alert_manager/alerts.db`) is the *pre-2026-07-27* location, so today it creates a stray file
+rather than touching the real DB at `/var/lib/nemesis/alerts.db` (resolver output confirmed).
+**That is not a mitigation — it is a second bug masking the first.** Restoring the old path, or
+running this from a tree where that file exists, turns it into a production write with no
+further change.
+**Confirmed it has already fired, not merely theoretical:** a **0-byte `alert_manager/alerts.db`
+exists on this box, dated 2026-08-19** — the stray artifact this script creates. It is untracked
+and harmless in itself, but it is a `alerts.db` sitting at the exact path the codebase spent the
+2026-07-27 relocation moving *away* from, so anything that ever regresses to a `__file__`-relative
+resolve will find a real file there and silently use it instead of failing. Worth deleting as
+part of the fix, not left as a decoy.
+Fix is one line (resolve through `nemesis_paths.db_path()`), but it should be paired with a
+decision about whether a smoketest should refuse to run against a non-throwaway DB at all.
+*Found by read-only audit; not fixed in that pass (Rule 1).*

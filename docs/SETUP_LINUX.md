@@ -239,7 +239,7 @@ sudo ufw status  # verify rules
 ## Data Backup and Restore
 
 **Manual backup** (Settings → Danger Zone → "Back Up Nemesis Data"):
-Creates a timestamped `.tar.gz` archive containing: `alerts.db`, `tickets.db`, `hw_map.json`, anomaly detection data, and `/etc/nemesis.env`. The archive is encrypted with `chmod 600`. Recommended destination: cloud storage or removable drive.
+Creates a timestamped `.tar.gz` archive containing: `alerts.db` (tickets live inside it, not in a separate `tickets.db` — that file was retired in ADR 0001 Stage 6), anomaly detection databases, `hw_map.json`, and `/etc/nemesis.env`. The archive is written `chmod 600`. Recommended destination: cloud storage or removable drive.
 
 **Scheduled backups** (Settings → Danger Zone → Scheduled Backups):
 Enable automatic daily/weekly/monthly backups to a configured path. Implemented via crontab.
