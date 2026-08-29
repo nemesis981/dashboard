@@ -424,8 +424,13 @@ class ClientScene:
 
 
 def _run_call(scene, request=None):
-    orig = pc.sid_of_pid
-    pc.sid_of_pid = lambda pid: scene.server_sid
+    # The CLIENT authenticates the server by reading the PIPE's owner, not by
+    # opening the server process -- see privclient._call and the 2026-08-29
+    # ACCESS_DENIED finding. Patch what the client actually calls; patching
+    # sid_of_pid here would leave these tests driving a function the client no
+    # longer uses, i.e. green while proving nothing.
+    orig = pc.owner_sid_of_handle
+    pc.owner_sid_of_handle = lambda handle: scene.server_sid
     privclient._WIN32_FOR_TEST = scene.dll()
     try:
         with _Win32Shim(scene), _Recorder() as rec:
@@ -435,7 +440,7 @@ def _run_call(scene, request=None):
                 return None, exc, rec
     finally:
         privclient._WIN32_FOR_TEST = None
-        pc.sid_of_pid = orig
+        pc.owner_sid_of_handle = orig
 
 
 def test_call_round_trips_against_a_system_server():
@@ -478,6 +483,57 @@ def test_call_treats_an_unreadable_server_sid_as_a_failure():
     check("nothing written", scene.written, [])
 
 
+def test_call_authenticates_via_the_PIPE_OWNER_not_the_server_process():
+    """REGRESSION GUARD for the 2026-08-29 defect.
+
+    The client used to derive the server SID from pc.sid_of_pid(), which must
+    OpenProcess() the LocalSystem service. Measured on the rig: a NON-ELEVATED
+    caller gets ACCESS_DENIED(5) for PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_QUERY_INFORMATION and both -- so server_sid was always None, the
+    fail-closed check refused every request, and the channel was unusable in
+    exactly the context production runs in.
+
+    This asserts the WIRING, not just the outcome: sid_of_pid must NOT be consulted
+    on the client path. Without this, reverting privclient to the old call would
+    still pass every other client test here, because both routes are patched to
+    return the same SID.
+    """
+    print("\n[_call: the server is authenticated by the pipe's owner, not its pid]")
+    called = []
+    orig_pid_route = pc.sid_of_pid
+    pc.sid_of_pid = lambda pid: called.append(pid) or pc.SID_LOCAL_SYSTEM
+    try:
+        scene = ClientScene(pc.SID_LOCAL_SYSTEM)
+        resp, exc, _ = _run_call(scene)
+        check("no exception", exc, None)
+        check("got the pong", (resp or {}).get("pong"), True)
+        check("sid_of_pid was NOT used on the client path", called, [])
+    finally:
+        pc.sid_of_pid = orig_pid_route
+
+
+def test_getsecurityinfo_is_typed_as_an_ERROR_CODE_not_a_bool():
+    """GetSecurityInfo returns a DWORD error code (0 == ERROR_SUCCESS), NOT a BOOL.
+
+    The two conventions are inverted: for a BOOL, 0 means failure; for this call, 0
+    means SUCCESS. A BOOL restype plus the habitual `if not rc:` would therefore
+    treat every SUCCESS as a failure and every FAILURE as success -- returning None
+    on a good read (channel refuses forever) or, worse, proceeding on a bad one.
+    Pinned here because the surrounding module is full of BOOL-returning calls and
+    the wrong convention would look completely ordinary.
+    """
+    print("\n[GetSecurityInfo is bound as DWORD (error code), not BOOL]")
+    k32, a32 = pc._bind_win32(FakeDLL(), FakeDLL())
+    fn = a32._fns.get("GetSecurityInfo")
+    check("GetSecurityInfo is bound", fn is not None, True)
+    if fn is not None:
+        check("restype is DWORD (error code)", fn.restype is wintypes.DWORD, True)
+        check("restype is NOT BOOL", fn.restype is wintypes.BOOL, False)
+        check("declares argtypes", fn.argtypes is not None, True)
+        check("takes 8 args (handle, type, info, 4 out-ptrs, sd)",
+              len(fn.argtypes or []), 8)
+
+
 def test_call_reports_an_absent_service_as_unavailable_not_an_error():
     print("\n[_call: an absent service is 'unavailable' (normal), not an error]")
     scene = ClientScene(pc.SID_LOCAL_SYSTEM, pipe_missing=True)
@@ -488,20 +544,20 @@ def test_call_reports_an_absent_service_as_unavailable_not_an_error():
 def test_is_channel_healthy_never_raises():
     print("\n[is_channel_healthy: absence maps to 'absent', squatting to 'auth_failed']")
     scene = ClientScene(pc.SID_LOCAL_SYSTEM, pipe_missing=True)
-    orig = pc.sid_of_pid
-    pc.sid_of_pid = lambda pid: scene.server_sid
+    orig = pc.owner_sid_of_handle
+    pc.owner_sid_of_handle = lambda handle: scene.server_sid
     privclient._WIN32_FOR_TEST = scene.dll()
     try:
         with _Win32Shim(scene), _Recorder():
             check("absent", privclient.is_channel_healthy()["state"], "absent")
         scene2 = ClientScene(OTHER_SID)
         privclient._WIN32_FOR_TEST = scene2.dll()
-        pc.sid_of_pid = lambda pid: scene2.server_sid
+        pc.owner_sid_of_handle = lambda handle: scene2.server_sid
         with _Win32Shim(scene2), _Recorder():
             check("auth_failed", privclient.is_channel_healthy()["state"], "auth_failed")
     finally:
         privclient._WIN32_FOR_TEST = None
-        pc.sid_of_pid = orig
+        pc.owner_sid_of_handle = orig
 
 
 # ── 4. BEHAVIOUR — winsvc.run_service against a fake SCM ─────────────────────
@@ -690,6 +746,8 @@ if __name__ == "__main__":
     test_call_refuses_a_squatter_BEFORE_writing_anything()
     test_call_treats_an_unreadable_server_sid_as_a_failure()
     test_call_reports_an_absent_service_as_unavailable_not_an_error()
+    test_call_authenticates_via_the_PIPE_OWNER_not_the_server_process()
+    test_getsecurityinfo_is_typed_as_an_ERROR_CODE_not_a_bool()
     test_is_channel_healthy_never_raises()
     test_run_service_reports_the_full_lifecycle_to_the_scm()
     test_run_service_passes_an_untruncated_handle_to_every_status_report()

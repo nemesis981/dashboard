@@ -211,6 +211,12 @@ def _bind_win32(k32, a32):
     a32.GetTokenInformation.argtypes = [H, ctypes.c_int, P, D, P]
     a32.ConvertSidToStringSidW.restype = B
     a32.ConvertSidToStringSidW.argtypes = [P, P]
+    # GetSecurityInfo returns a DWORD *error code* (0 == ERROR_SUCCESS), NOT a handle
+    # and NOT a BOOL -- so it is deliberately absent from HANDLE_RETURNING, and a
+    # `if not rc` test on it would be exactly backwards. It DOES hand back a security
+    # descriptor that must be LocalFree'd; LocalFree is typed above.
+    a32.GetSecurityInfo.restype = D
+    a32.GetSecurityInfo.argtypes = [H, ctypes.c_int, D, P, P, P, P, P]
     return k32, a32
 
 
@@ -262,3 +268,64 @@ def sid_of_pid(pid: int):
             k32.CloseHandle(htok)
     finally:
         k32.CloseHandle(hproc)
+
+
+# ── the CLIENT's server check: read the PIPE's owner, not the server's token ──
+
+#: `SE_OBJECT_TYPE.SE_KERNEL_OBJECT` and `OWNER_SECURITY_INFORMATION`.
+SE_KERNEL_OBJECT = 6
+OWNER_SECURITY_INFORMATION = 0x00000001
+ERROR_SUCCESS = 0
+
+
+def owner_sid_of_handle(handle):
+    """The string SID of the OWNER of an already-open kernel object, or None.
+
+    Why this exists, and why `sid_of_pid` could not do the job (measured, not
+    theorised -- 2026-08-29 on the acceptance rig):
+
+        sid_of_pid() must OpenProcess() the LocalSystem service to read its token.
+        A NON-ELEVATED caller cannot open a SYSTEM process at all: OpenProcess
+        returns ACCESS_DENIED (5) for PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_QUERY_INFORMATION and both together. sid_of_pid therefore returned
+        None, verify_server(None) fail-closed, and the privileged channel was
+        unusable by the session agent -- which is exactly the non-elevated context
+        production runs in. An elevated run succeeded, which is why the defect
+        survived an ad-hoc check for a week.
+
+    Reading the PIPE's owner needs no process handle at all. The server already
+    stamps the pipe `O:SY` (see build_pipe_sddl), so the answer is present by
+    construction on a handle the client is already holding.
+
+    This is also the STRONGER check: it authenticates the kernel object itself
+    rather than a process that merely happens to be holding it.
+
+    A failed read returns None -- the caller treats None as 'unverified' and
+    refuses, never as a stand-in SID. Same fail-closed contract as sid_of_pid.
+    """
+    _require_windows("owner_sid_of_handle")
+    import ctypes
+
+    k32, a32 = _bind_win32(ctypes.WinDLL("kernel32", use_last_error=True),
+                           ctypes.WinDLL("advapi32", use_last_error=True))
+
+    psid = ctypes.c_void_p()
+    psd = ctypes.c_void_p()
+    rc = a32.GetSecurityInfo(handle, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION,
+                             ctypes.byref(psid), None, None, None,
+                             ctypes.byref(psd))
+    # NOTE the sense: this API returns an ERROR CODE, not a BOOL. Non-zero is failure.
+    if rc != ERROR_SUCCESS or not psid:
+        return None
+    try:
+        str_sid = ctypes.c_wchar_p()
+        if not a32.ConvertSidToStringSidW(psid, ctypes.byref(str_sid)):
+            return None
+        try:
+            return str_sid.value
+        finally:
+            k32.LocalFree(str_sid)
+    finally:
+        # psid points INTO the descriptor, so the descriptor is what gets freed,
+        # and only after the SID has been converted out of it.
+        k32.LocalFree(psd)

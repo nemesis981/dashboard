@@ -139,10 +139,20 @@ def _call(request: dict, timeout_ms: int = 4000) -> dict:
         k32.SetNamedPipeHandleState(hpipe, ctypes.byref(mode), None, None)
 
         # AUTH: the server must be LocalSystem, checked BEFORE we send anything.
-        srv_pid = wintypes.DWORD(0)
-        server_sid = None
-        if k32.GetNamedPipeServerProcessId(hpipe, ctypes.byref(srv_pid)):
-            server_sid = pc.sid_of_pid(srv_pid.value)
+        #
+        # Read the PIPE OBJECT's owner, NOT the server process's token. The old
+        # route (GetNamedPipeServerProcessId -> pc.sid_of_pid) required opening the
+        # LocalSystem service process, which a NON-ELEVATED caller cannot do:
+        # OpenProcess returns ACCESS_DENIED(5) even for
+        # PROCESS_QUERY_LIMITED_INFORMATION. server_sid was therefore always None,
+        # verify_server fail-closed, and the channel was unusable by the session
+        # agent -- i.e. in production. Measured on the rig 2026-08-29; an earlier
+        # ELEVATED run had masked it for a week.
+        #
+        # build_pipe_sddl stamps the pipe O:SY, so the owner is present by
+        # construction on a handle we already hold, readable unprivileged -- and it
+        # authenticates the kernel object itself rather than a process holding it.
+        server_sid = pc.owner_sid_of_handle(hpipe)
         verify_server(server_sid)                    # raises if not SYSTEM
 
         out = pc.pack_frame(request)
