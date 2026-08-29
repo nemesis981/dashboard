@@ -4740,3 +4740,59 @@ text is right there in the output. An always-warn check trains its reader to sto
 **Candidate fix:** `domain` → `offending_target` (one word), then confirm the section renders and
 the check returns to `info`. **Not fixed here** — unrelated to the authorized work, and it wants
 its own verification that the rendered section is correct (Rule 2).
+
+### [SWEEP — 2026-08-29] The six "not determined" inventory items, now determined — 3 stale, 3 real
+Read-only follow-up to the 2026-08-29 sweep. **Three more stale entries**, bringing the day's
+total to **8**.
+
+**✅ ALREADY FIXED — stale entries:**
+- **`dhcp` has no Data Manager grant for `error_codes`/`error_occurrences`.** Fixed **2026-08-08**
+  by making the error ledger **namespace-independent** in `check_write()` rather than adding
+  per-module grants — and the code comment there cites *this exact case*: "Confirmed live for
+  `dhcp` (PUNCHLIST) — every E-DHCP-* code it ever recorded was refused here." The rejected
+  alternative is recorded too: a facility every module must reach should not sit behind a list
+  someone has to remember to update. **Verified empirically** against a throwaway DB — a
+  `dhcp`-namespaced write to `error_occurrences` is allowed, with a granted-table control
+  proving the harness worked.
+- **`analyze_alert()`'s gate reads the wrong column.** Fixed **2026-08-05**; it now reads
+  `existing[5]` (`explanation`), not `[4]` (`priority`). The entry's "deliberately left wrong
+  pending a spend decision" is out of date — **the decision was made and approved that day**, with
+  the cost measured (~$0.004/analysis, ~$0.08–0.16 one-time across 20 un-analysed alerts) rather
+  than estimated.
+- **Connectivity watcher reports DEGRADED while an IPv6-blocking VPN is connected.** Fixed
+  **2026-08-22**. `ipv6_expectation()` is now three-valued and **never guesses on a failed probe**
+  (a failed read resolving to either real answer would suppress a genuine outage or restore the
+  permanent false positive); IPv6 has its own note vocabulary distinct from failures; `classify()`
+  returns DEGRADED only for IPv4-down. Live verdict on this box is `ALL_OK`, confirming it.
+
+**⚠ CONFIRMED OPEN — real, with refinements the entries lacked:**
+- **Installer tokens cannot be revoked through the product.** Accurate. Enforcement *does* read
+  the flag — `hw_monitor.py:3925`, `WHERE token=? AND revoked=0 AND auto_approve=1 AND uses <
+  max_uses AND expires_at > ?` — so a revoked token genuinely cannot be claimed, and the single
+  atomic UPDATE both validates and claims. **Nothing in the product writes `revoked`:** every
+  `enrollment_tokens` statement is INSERT, SELECT, or an update of `uses`/`preauth_key`.
+  **Refinement — the need is proven, not theoretical: 3 live tokens are already `revoked=1`, set
+  by hand via sqlite3.** So this is a missing *product capability*, not a security hole; an admin
+  killing a leaked token today must use the shell. Worth weighing against the separate open item
+  that this table stores tokens **in plaintext**, which makes a leaked token plausible.
+- **`mem_ladder_state` / `mem_shadow_records` / `agent_attestation_challenges` missing from
+  `hw_monitor`'s namespace grant.** Accurate, and the "harmless only because WARN-only" framing
+  is **still true** — but check the premise before relying on it: `namespace_mode()` *defaults* to
+  ENFORCE, and hw_monitor is WARN only because `hw_monitor.py:1471` sets it explicitly at
+  DataManager construction. **Refinement:** none of the three is written by `hw_monitor.py` at
+  all — the writers are `alert_manager/mem_appliance.py` and `alert_manager/attestation.py`, which
+  run under hw_monitor's namespace because hw_monitor passes *its own* connection in (e.g.
+  `hw_monitor.py:1927` → `attestation.record_attestation(conn, …)`). None of the three is granted
+  to **any** namespace. **Proven both ways** on a throwaway DB: WARN logs `WOULD DENY … add it or
+  fix the caller before enforcing` and allows the write; ENFORCE raises `AccessDenied`. **Still
+  blocking any MODE_ENFORCE flip, exactly as the entry says.**
+- **`_detect_connection_type()` sentinel work for its callers.** Confirmed open, and the evidence
+  is sharper than the entry: the function correctly returns three distinct values since 2026-08-20
+  (`CONN_LOCAL` / `CONN_REMOTE` / `CONN_UNKNOWN`), but **`_expected_suricata_profile:1543` collapses
+  them again** — `return "office" if conn_type == CONN_LOCAL else "roaming"` puts UNKNOWN in the
+  same branch as REMOTE. That is precisely what the function's own docstring warns against: *"a
+  failure that reads as a confident 'remote' stops being conservative and starts being wrong."*
+  **Refinement: 4 call sites, not 3** (`:879`, `:2161`, `:2348`, `:2540`); `:2161` already handles
+  the exception case by setting `None`, and the two that matter are `:2348`/`:2540`, which both
+  feed the collapsing function and so decide a device's **Suricata profile** from an admission of
+  ignorance.
