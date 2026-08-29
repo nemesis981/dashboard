@@ -4299,3 +4299,10 @@ fix elsewhere in the same template) checked whether its remaining entries are st
 **Reviewed and intentionally retained** — they support a documented admin workflow referenced
 elsewhere in `install.sh`'s own output. No code change made. Full reasoning kept in the private
 operational record, not duplicated here.
+
+### [DONE — 2026-08-28] `docs/SETUP_LINUX.md` documented `dashboard.service` as the wrong user
+Stale relative to the 2026-07-31 de-privileging effort — the live unit runs as `nemesis-dash`,
+not `$SUDO_USER`. Verified against the live unit file before fixing. Doc-only correction; no
+code change. Same doc/code-agreement shape as the nmap grant/`SETUP_LINUX.md` split earlier
+today — that fix already corrected this file's sudoers grant-list line (`eaff9ff`), this is a
+different stale line in the same file.
