@@ -19,12 +19,26 @@
 # Idempotent and safe to re-run. Whatever happens, the EXIT trap restores the
 # original Pi-hole upstreams, drops the VPN to its prior state, and confirms DNS.
 #
-# RUN AS ROOT:   sudo /home/paul/dashboard/scripts/vpn_dns_livetest.sh
+# RUN AS ROOT:   sudo <repo>/scripts/vpn_dns_livetest.sh
 # =============================================================================
+
+# Resolve the repo from THIS script's own location rather than hardcoding it —
+# same pattern as deploy-suricata-rules.sh and deploy-quic-block.sh.
+#
+# ⚠ THIS WAS NOT MERELY A COSMETIC LEAK. Both paths below pointed at
+# /home/<user>/dashboard/..., the PRE-/opt layout retired on 2026-07-27, so
+# GUARD referenced a file that no longer exists and this script was BROKEN AS
+# SHIPPED for any user, including the one whose path was baked in. The 2026-06
+# hardcoded-home-path cleanup sweep (commit 1630c36) missed this file and
+# install_pihole_pwd.sh (the latter deleted 2026-08-29 as dead one-shot
+# migration code). Fixed forward 2026-08-29; the string remains in published
+# history by explicit operator decision — a bare username did not warrant a
+# second history rewrite. Do NOT reintroduce an absolute path here.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 LOG=/tmp/vpn_dns_livetest.log
 BAK=/tmp/vpn_dns_livetest.upstreams.bak.json
-GUARD=/home/paul/dashboard/core/vpn_dns_guard.py
+GUARD="$REPO/core/vpn_dns_guard.py"
 ENVFILE=/etc/nemesis.env
 
 # --- never abort the script; we must always reach the cleanup trap -----------

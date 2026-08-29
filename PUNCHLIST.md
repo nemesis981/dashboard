@@ -4511,3 +4511,31 @@ this prevents is not wasted time — it is a confusing no-op "fix" committed aga
 already-correct code**, which is worse than the original stale entry.
 **Not a criticism of the inventory** — it is a genuinely useful map and was the right artifact
 to compile. It just needs re-verification against code before it can be trusted as current, and
+### [FIXED — 2026-08-29, pending commit] Rule 8: two shipped files carried a real home path — and both were BROKEN, not just leaky
+`git grep` found `/home/<realuser>/dashboard/...` in exactly two tracked files. **Both pointed at
+the pre-`/opt` layout retired on 2026-07-27, so neither could work for anyone** — the leak and a
+functional break in the same lines:
+- **`alert_manager/install_pihole_pwd.sh` — DELETED**, not repaired. It is a *completed one-shot
+  migration*: its replacement says so explicitly (`scripts/nemesis-pihole-password.sh:4`,
+  "REPLACES alert_manager/install_pihole_pwd.sh, which was a ONE-SHOT MIGRATION"), a 2026-08-07
+  session already recorded it as dead, and its `UNIT_SRC` target does not exist. Repairing a path
+  in a script that can never run would have been the wrong fix. Recoverable from git (`3851076`).
+- **`scripts/vpn_dns_livetest.sh` — parameterized.** `REPO="$(cd "$(dirname
+  "${BASH_SOURCE[0]}")/.." && pwd)"`, matching `deploy-suricata-rules.sh` and
+  `deploy-quic-block.sh`. Its `GUARD=` now resolves to a file that **exists**; verified it did
+  not before.
+**History deliberately NOT rewritten (operator decision, 2026-08-29).** The string is in **27
+commits, all reachable from `origin/main`** — early history, not one recent commit, so this was a
+scrub-or-not call rather than a simple forward fix. Declined because it is a bare given name
+(recon value ≈ 0, unlike the tailnet identifier that did justify a rewrite), a second full
+rewrite costs what the first did, and the first still has an **unresolved residual** (the
+pre-rewrite SHA remains fetchable from GitHub's object store pending a Support request) — so a
+second rewrite would compound an open problem rather than close one.
+**Verified:** `bash -n` clean; `REPO` resolves to `/opt/nemesis`; `git grep "/home/<realuser>"`
+returns **zero** across the tracked tree; added lines carry no new leak.
+**Caught during the fix:** the explanatory comment I first wrote quoted the old cleanup commit's
+title verbatim — **reintroducing the exact string being removed**. Same "grep matched the
+supersession note" trap as twice earlier that day, this time inside the remediation itself.
+Rewritten to cite the commit by SHA (`1630c36`) instead of by title.
+**Related, still open:** that 2026-06 sweep missed both of these files. Worth asking what else it
+missed — a full repo-wide hygiene sweep for other leaked paths/IPs/emails is a separate open item.
