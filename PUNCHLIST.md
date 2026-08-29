@@ -45,6 +45,36 @@ clean `git stash` (unmodified `origin/main`). Not a regression from any batch la
 2026-08-25. Own commit when picked up — needs root-causing, not just a hash-literal swap,
 since the failure mode (silent NULL write vs. loud rejection) is itself worth checking.
 
+**FIXED — 2026-08-29, pending commit. Root-caused first; this entry's open question is
+answered: it is a LOUD rejection, not a silent NULL write.**
+The `PromptFieldError` was not merely "plausible" — confirmed by instrumenting a throwaway
+copy. Every guard in `_ai_verdict_for_finding()` passes (`ai_verdict_enabled='1'`, score
+80 ≥ 40, import OK, `is_enabled()` True, the fake IS installed) and yet `analyze` was never
+called and no row was written. Cause: `_pf.build()` raises on the fixture's `"hash1"`,
+which ADR 0025's NPFA/1 migration made invalid by giving the SHA-256 field a HASH *kind*
+that validates at build time. Verified with a control — a real 64-hex digest is accepted,
+so NPFA is not rejecting everything.
+**Production behaviour is correct and was never at risk.** The function's outer handler
+runs `log.exception("malware: Layer C verdict failed for finding %s")` — verified on
+STDERR, pointing at `module.py:2868`. So this is a **stale test fixture**, not a product
+defect: a real scanner always supplies a real digest. Same class as this file's
+`test_analyze_alert_body.py` entry — a test still speaking the pre-NPFA/1 dialect.
+**Fixed in two parts, deliberately:**
+1. **The cause** — a `_hash(n)` helper returning `"%064x" % n`, replacing all nine invalid
+   literals (eight call sites plus `_mkfinding`'s DB write) and the two assertions that
+   embedded `hash1` as a substring. Its docstring records why a real digest is load-bearing
+   rather than cosmetic, so it is not "simplified" back to a short string.
+2. **The symptom** — a NULL `ai_verdict` now fails as a *named check* explaining the likely
+   cause, instead of reaching `json.loads(None)` and dying with a bare `TypeError` that
+   named neither the cause nor the responsible file. This matters beyond the hash: the
+   function's body is one large try/except, so **any** raise inside it (a rejected NPFA
+   field, a bad setting, an import failure) surfaces here only as an absent verdict.
+**Verified:** test now `RESULT: all checks passed`, exit 0. **Mutation-proven:** restoring
+the old `"hash%d"` fixture makes it fail cleanly — a `[FAIL]` with the diagnosis and
+`1 check(s) failed` on stdout, exit 1, reaching its own summary line rather than crashing.
+The traceback still visible in that run is the *module's own logger* on stderr, confirmed
+separately by splitting the streams — not an uncaught test crash.
+
 ### [LOW] `WATCHDOG_TO` is prompted, stored, and documented but never read (found 2026-08-24, ADR 0028 verification)
 Installer prompts for `WATCHDOG_TO` (`install.sh:237`), writes it to `/etc/nemesis.env`
 (`:454`) and documents it as the alert recipient. `alert_manager/email_utils.py:send_email()`
