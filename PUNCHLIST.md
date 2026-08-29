@@ -4796,3 +4796,16 @@ total to **8**.
   the exception case by setting `None`, and the two that matter are `:2348`/`:2540`, which both
   feed the collapsing function and so decide a device's **Suricata profile** from an admission of
   ignorance.
+  > **⚠ RETRACTED 2026-08-29 — this sub-finding was WRONG, and the correction matters more than
+  > the finding.** I read the `return` line and the call sites but **not the function's own
+  > docstring**, which states: *"UNKNOWN takes the ROAMING profile, deliberately and visibly:
+  > roaming is the broader ruleset, so a device we cannot place is inspected more, not less. That
+  > was already the behaviour via a bare `else`, but as an accident of the fallback rather than a
+  > decision — written out here so it survives the next edit."* Verified that docstring shipped in
+  > the **same commit** (`8101568`) that split UNKNOWN from REMOTE, and that the code matches it.
+  > So it is a considered, fail-safe decision, not a collapse: UNKNOWN yields MORE inspection.
+  > **"Fixing" it would have made unplaceable devices inspected LESS** — a real regression created
+  > by tidying something already correct. The other two callers are also fine (`:879` reports the
+  > value descriptively, where UNKNOWN is a legitimate thing to report; `:2161` already handles
+  > the exception case explicitly). **Item is CLOSED — no work needed.**
+
