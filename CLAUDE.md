@@ -149,8 +149,11 @@ number.
 - Owns all CODE changes (dashboard.py, database.py, agent files, installers, etc.).
 - Runs Rule-3 verification (real output: py_compile, isolated tests, live checks) on
   every code change.
-- **Does NOT commit or push — ever.** When a change is ready, STOP and report it as
-  ready-to-commit; hand off to Window 2, which performs the actual git write.
+- **Does NOT push — ever.** `git push` remains exclusively Window 2's. **Local commits ARE
+  permitted and expected** — see the "commit completed work locally, immediately" hard rule
+  under "Both windows (shared discipline)" below (added 2026-08-29). When a change is ready
+  to reach `origin/main`, STOP and report it as ready-to-land; hand off to Window 2, which
+  decides what actually lands, in what shape, and performs the push.
 - Does NOT author ADRs, roadmap entries, `docs/handoff/` artifacts, or build specs —
   that's Window 2. (Narrow exception: the code-window context handoff below — it is not
   a `docs/handoff/` artifact and lives outside the public repo entirely.)
@@ -249,8 +252,10 @@ number.
   the living fleet inventory current, fold cleanup into every closeout rather than waiting
   for another full audit, and keep any server/agent-carrying VM current with production.
   Full detail and rationale: "VM test fleet" further down this file.
-- **Never commits or pushes — ever.** Same restriction as Window 1: git-write privilege
-  stays exclusively with Window 2, no exceptions for Window 3 either.
+- **Never pushes — ever.** Same restriction as Window 1: push privilege stays exclusively
+  with Window 2, no exceptions for Window 3 either. **Local commits ARE permitted and
+  expected** — see the "commit completed work locally, immediately" hard rule under "Both
+  windows (shared discipline)" below (added 2026-08-29).
 - May pick up occasional audits and doc work as overflow **specifically when Window 2 is
   busy** — hand off findings/drafts to Window 2 for it to review and commit, the same
   handoff shape Window 1 uses for code.
@@ -276,6 +281,55 @@ number.
   off to Window 2" pattern instead, per the bullet above.
 
 ### Both windows (shared discipline)
+- **⛔ Commit completed work LOCALLY, immediately — hard rule, not a preference (added
+  2026-08-29, operator-directed).** The moment a change to a TRACKED file is complete and
+  verified, commit it locally. Not when the batch is finished, not when the handoff is
+  written, not when Window 2 is free — as soon as that individual change is stable. Never
+  leave finished work sitting as an uncommitted working-tree diff in a shared checkout.
+
+  **This applies to EVERY window, including Windows 1 and 3.** A local commit is **not** a
+  publication event and does not touch the sole-git-writer rule: it publishes nothing,
+  reaches no remote, and lands on no shared branch. **`git push` remains exclusively
+  Window 2's, unchanged.** Window 2 still decides what reaches `origin/main`, in what shape,
+  squashed or split, with what review — the only difference is that it now does so from a
+  recoverable commit instead of from a working-tree diff that dies the instant anyone
+  touches those files. (Window 1's and Window 3's role definitions above are worded
+  accordingly: "does not push," not "does not commit.")
+
+  **An uncommitted change to a tracked file has ZERO protection from another window.** Every
+  other shared-tree rule in this file protects commits and the index. **Nothing protects an
+  unstaged edit.** Any window running `git checkout -- <path>`, `git restore`, or
+  `git checkout .` — routine cleanup, done in good faith, usually to tidy the tree before its
+  own commit — destroys it instantly, with no conflict, no warning, and **no reflog entry.**
+  The loss is therefore invisible to the usual "what happened to HEAD?" check, and is
+  normally discovered only when someone later notices the fix is missing from `main`.
+
+  **Untracked files survive `checkout`; tracked-and-modified files do not.** That asymmetry
+  is the entire mechanism and it is backwards from intuition: **the more integrated your work
+  is, the less protected it is.**
+
+  **A structural guarantee, deliberately, rather than a process one.** The tempting
+  alternative — "the committing window should check the handoff's file list against reality
+  first" — only works while someone remembers, every time, under pressure, and fails
+  silently when they don't. Once a local commit exists, cleanup operations cannot reach the
+  work and nobody has to remember anything. **When both are available, take the mechanism
+  that does not depend on vigilance.**
+
+  **Verification is not a substitute for a commit.** Both losses below were of work already
+  verified and reported ready. **"Ready to hand off" is not a durable state.**
+
+  **Confirmed TWICE on 2026-08-29, both times destroying finished, verified work:**
+  1. **Window 1** lost work this way (the `ed6af88` email-enrollment companions) and had to
+     rebuild it.
+  2. **Window 3**'s five-file batch was reduced to a single survivor. Three tracked files
+     were reverted: `attestation.py`'s `CHALLENGE_TTL_SECONDS` freshness enforcement — a
+     real security fix, since `expires_at` was written and never read, leaving a stale nonce
+     answerable forever — plus two stale-doc corrections and a PUNCHLIST entry. The one
+     survivor, `test_challenge_freshness.py`, lived **solely because it was untracked**, and
+     then served as the spec for rebuilding the enforcement. **That the rebuild was cheap is
+     not evidence this is minor:** it was cheap only because an untracked test happened to
+     pin the exact contract. The same accident would have taken the test too, had it been
+     tracked.
 - Commit-first, then push (performed in Window 2). HOLD the push for operator review on
   anything non-trivial (ADRs, security-default code, schema changes).
 - **Push coordination.** Before ANY push, list ALL locally-unpushed commits
@@ -348,7 +402,23 @@ number.
   problem was that it stayed staged into a later, unrelated commit. **The actual fix: stage
   and commit as one atomic step (`git add <path> && git commit ...` back to back, nothing
   else staged in between), never leave a file staged across a turn boundary or between
-  unrelated commits.** If a mis-composed commit like this happens and is caught before
+  unrelated commits.**
+
+  **"Exact path" means an exact FILE path — never a directory.** `git add <dir>/` behaves
+  like `-A` scoped to that subtree: it stages every eligible file underneath, including
+  another window's files that merely happen to live there. Name each file individually,
+  even when they share a directory, and even when you created the directory yourself.
+  **Confirmed live 2026-08-29:** staging a two-file patch directory (`handoff/patches/`)
+  also staged two patch files belonging to another window, authored hours earlier for an
+  unrelated split. It produces no output and no warning at staging time — the sweep is
+  invisible until a separate deliberate scope check (`git diff --cached --stat`, read
+  before every commit per this same discipline) surfaces it. That check is what caught it
+  here; nothing was lost and nothing wrong was committed. A window that reads "staged by
+  exact path" as satisfied by `git add <dir>/` has a defensible reading of the old wording
+  and no reason to run that check — which is why the wording is corrected rather than left
+  to imply coverage it didn't have.
+
+  If a mis-composed commit like this happens and is caught before
   pushing, `git reset --soft HEAD~1` (recovering the exact prior staged state) followed by
   re-staging only the intended path is the clean fix — confirmed safe in the same incident,
   verified first that the bad commit had not been pushed and that no one else had pushed or
