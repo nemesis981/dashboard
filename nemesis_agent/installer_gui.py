@@ -26,6 +26,23 @@ from tkinter import ttk
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
 INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
 
+#: PRODUCT DISPLAY version — Add/Remove Programs' `DisplayVersion` and the
+#: install record. Env-overridable so a build can stamp a release number.
+#:
+#: ⛔ NOT the same thing as `attest.AGENT_VERSION`, and they MUST NOT be kept in
+#: sync (cross-reference added 2026-08-29). That one is a BUILD-IDENTITY token
+#: for attestation — "which file set is this agent" — and the values already
+#: differ (1.0.2 there vs 1.0.8 here), correctly.
+#:
+#: ⚠ Bumping THIS constant does NOT bump that one, and that asymmetry is not
+#: cosmetic: per `attest.py`'s own block, failing to bump the attestation
+#: version when the agent's shipped FILES change makes the server stamp a
+#: manifest describing files the agent lacks, and `evaluate()` returns FAILED —
+#: the TAMPERING verdict. A routine file addition then presents as an attack
+#: (this happened on 2026-08-18 when procmem.py was added).
+#:
+#: So if you are here to bump a release number, that is fine and self-contained.
+#: If you CHANGED AGENT FILES, go and bump `attest.AGENT_VERSION` as well.
 AGENT_VERSION = os.environ.get("NEMESIS_AGENT_VERSION", "1.0.8")
 UNINSTALLER   = "NemesisUninstall.exe"
 TRAY_EXE      = "NemesisTray.exe"   # tray + settings window; optional, agent runs without it

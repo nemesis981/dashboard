@@ -4582,3 +4582,27 @@ one variable at a time.
 **Verified:** all three branches exercised directly (no conf / conf readable / conf present but
 `chmod 000`), each producing a distinct and correct message. Full malware_detection suite green
 (11 files).
+### [FIXED — 2026-08-29, pending commit] Two `AGENT_VERSION` constants that must NEVER be synchronised
+`nemesis_agent/attest.py:106` (`"1.0.2"`) and `nemesis_agent/installer_gui.py:46`
+(`"1.0.8"`, env-overridable) share a name and version **different things**:
+- `attest.AGENT_VERSION` — a **build-identity** token: "which file set does this agent claim to
+  be", consumed by `attest.evaluate()` and the build-time manifest generator.
+- `installer_gui.AGENT_VERSION` — the **product display** version: Add/Remove Programs'
+  `DisplayVersion` and the install record. (A third site carries the same default inline:
+  `dashboard.py`'s version handler — left alone here to avoid conflating commits.)
+**Making them equal would be a BUG, not a tidy-up:** a display-version bump for a UI-only change
+would then falsely assert the shipped file set had changed. Verified nothing compares them and
+nothing assumes equality — so this is a naming trap, not a live defect, exactly as reported.
+**Why the trap is dangerous rather than untidy:** someone asked to "bump the agent version" finds
+the display constant first (it has the env var and the obvious user-facing meaning), bumps it,
+and never learns the other exists. Per `attest.py`'s own comment block, failing to bump the
+attestation version when shipped files change does **not** degrade gracefully — the server stamps
+a manifest describing files the agent lacks and `evaluate()` returns FAILED, which is the
+**TAMPERING** verdict. A routine file addition then presents as an attack. That is precisely the
+2026-08-18 `procmem.py` incident.
+**Noted while fixing:** `attest.py`'s comment argues for "ONE constant... rather than two places
+being remembered together" — which is exactly the situation the shared *name* recreates.
+**Fixed** by cross-referencing both constants: each now names the other, states they are
+deliberately different, and spells out that changing agent FILES requires bumping the attestation
+one independently of any release number. Documentation only — **both values unchanged**;
+`test_attestation.py` 21/21.

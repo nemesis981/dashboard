@@ -78,6 +78,31 @@ log = logging.getLogger(__name__)
 # bump is a transient `absent`; the cost of a missed one is a false tampering
 # report, which is exactly the false positive that gets a security signal
 # ignored (decision A2).
+#
+# ⛔ THERE IS A SECOND, UNRELATED `AGENT_VERSION` AND THEY MUST NOT BE
+# SYNCHRONISED (cross-reference added 2026-08-29).
+# `nemesis_agent/installer_gui.py:29` also defines `AGENT_VERSION` (currently
+# "1.0.8", env-overridable via `NEMESIS_AGENT_VERSION`; `dashboard.py`'s
+# `/version`-style handler carries the same default inline). That one is the
+# PRODUCT DISPLAY version — what Add/Remove Programs shows and what install
+# records stamp. THIS one is a BUILD-IDENTITY token for attestation: it answers
+# "which file set does this agent claim to be", not "what release is this".
+#
+# They legitimately differ, and the values already have (1.0.2 vs 1.0.8). Making
+# them equal would be a BUG, not a tidy-up: a display-version bump for a UI-only
+# change would then falsely assert the shipped file set had changed.
+#
+# ⚠ THE TRAP THIS COMMENT EXISTS TO PREVENT — and note the comment above argues
+# for "ONE constant... rather than two places being remembered together", which
+# is exactly the situation the shared NAME recreates. Someone asked to "bump the
+# agent version" finds the display constant first (it is the one with an env var
+# and an obvious user-facing meaning), bumps it, and never learns this one
+# exists. Per the block above, failing to bump THIS constant when shipped files
+# change does not degrade gracefully — it produces a FAILED verdict, which is
+# the TAMPERING verdict. That is the 2026-08-18 procmem.py incident exactly.
+#
+# So: changing agent FILES means bumping THIS constant, independently of any
+# release-number change. The two are not a pair.
 AGENT_VERSION = "1.0.2"
 
 ATTESTED = "attested"
