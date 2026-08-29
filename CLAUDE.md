@@ -748,6 +748,31 @@ sweep will never find it. For `audit_log` only, the durable marker is: use an RF
 row `id` + `request_id` in that session's worklog. Confirmed 2026-07-31 while verifying the
 `request_id` column; flagged here so it is not re-discovered later as a missed case. Do not
 generalise this exception — every other table has a field to label, and must be labelled.
+
+**SECOND DOCUMENTED EXCEPTION — `login_events` (added 2026-08-29, operator-approved).** Same
+structural cause as `audit_log`, found the same way. Its columns are `id`, `username`,
+`timestamp`, `ip_address`, `device_id`, `tailscale_ip`, `geo_country`, `geo_city`, `success`,
+`failure_reason`, `lockout_tier`, `session_id`, `user_agent`, `source`, `action` — **every one
+structured, none free-text.** A test row cannot carry the literal phrase in-band, so the
+`LIKE '%test data%'` sweep cannot find it.
+**Measured, which is why this is written down rather than assumed:** an audit on 2026-08-29
+found **at least 9 unlabelled test rows** across four usernames (`harnesstest`, `x`, `nobody`,
+`test-network`) — all `curl/8.18.0` from loopback, none with a real account — while the Rule 11
+sweep returned only **2 of 11** test rows. The two it did find had been labelled by someone
+putting the phrase in the **`username` field** (`test data 2026-08-06 quarantine-suite`):
+effective for the sweep, but it pollutes a column the product reads, so it is a workaround, not
+the convention.
+**The convention for `login_events`, mirroring `audit_log`'s:** use a distinctive,
+obviously-synthetic username (the RFC 5737 trick does not apply — the discriminating column here
+is the username, not the address) AND record the row `id` in that session's worklog. The worklog
+entry is the durable marker, exactly as for `audit_log`.
+**⚠ And when sweeping this table, do NOT delete on "looks unfamiliar".** The same audit found
+real failed logins under *mistyped* variants of the operator's own username. Those are genuine
+authentication history and are exactly what a careless cleanup would destroy — the whole reason
+the marker has to be deliberate rather than inferred.
+**Still only these two tables.** Every other table has a free-text field and must be labelled
+in-band; a third exception needs the same evidence these two have (a schema with no free-text
+column), not convenience.
 **Caveat (2026-08-03): RFC 5737 is correct for this labelling use only.** It is the wrong
 choice for exercising `is_private`-branching code — Python's `ipaddress` classifies all
 three TEST-NET blocks (RFC 5737) as `is_private=True`, so code that early-returns or

@@ -4630,3 +4630,32 @@ migration), export them, or explicitly accept losing them. Leaving the table cos
 inside a `try/except` that prints `(not found)`, so a drop degrades gracefully rather than
 crashing — but it would report `(not found)` forever unless the name is removed from that list at
 the same time.
+### [AUDIT — 2026-08-29] `login_events` test rows: the entry undercounts by ~9x, and the table cannot be labelled in-band
+Audit only; deleting rows is state-changing and needs a snapshot plus operator go-ahead.
+The entry flags **one** row (id 83, `harnesstest`). Reality: **at least 9 unlabelled test rows
+across 4 usernames**, all `curl/8.18.0` from loopback, none with a real account —
+`harnesstest` (1), `x` (1), `nobody` (1), `test-network` (6).
+**Plus one that needs its own decision:** `lockverify` has **6 rows AND a real row in `users`** —
+a test account left in the accounts table, which is a different and arguably more interesting
+finding than the log rows.
+**Genuine user data that must NOT be swept:** the operator's own account (`<operator-user>`, 158
+rows) and two near-miss typo variants of it (1 row each, real failed logins). Those are genuine
+authentication history — and note they are *mistyped* versions of a real username, so a sweep
+keying on "looks unfamiliar" would delete real evidence.
+**⚠ The structural finding — Rule 11's documented `audit_log` exception applies here too and does
+not say so.** `login_events`'s columns are `id`, `username`, `timestamp`, `ip_address`,
+`device_id`, `tailscale_ip`, `geo_country`, `geo_city`, `success`, `failure_reason`,
+`lockout_tier`, `session_id`, `user_agent`, `source`, `action` — **every one structured, none
+free-text.** So a test row here *cannot* carry the literal phrase "test data", and Rule 11's
+`LIKE '%test data%'` sweep finds only **2 of 11** test rows. Someone worked around this by
+putting the label in the `username` field (`test data 2026-08-06 quarantine-suite`) — effective
+for the sweep, but it pollutes the username column and is not what the rule asks for.
+**Recommendation:** extend Rule 11's documented exception (currently `audit_log`-only) to cover
+`login_events`, with the same marker convention — record the row `id` in the session worklog,
+since there is no in-band field. Otherwise this recurs every time anyone exercises the login path.
+**✅ DONE 2026-08-29 (operator-approved):** Rule 11's exception in `CLAUDE.md` now covers
+`login_events` alongside `audit_log`, with the measured evidence (9 unlabelled rows; sweep found
+2 of 11), the convention, and an explicit warning not to delete on "looks unfamiliar" — real
+failed logins exist under *mistyped* variants of the operator's own username. **Deleting the test
+rows themselves is still open** and needs its own snapshot; the rule change is what stops it
+recurring.
