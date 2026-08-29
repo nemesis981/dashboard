@@ -4659,3 +4659,76 @@ since there is no in-band field. Otherwise this recurs every time anyone exercis
 failed logins exist under *mistyped* variants of the operator's own username. **Deleting the test
 rows themselves is still open** and needs its own snapshot; the rule change is what stops it
 recurring.
+### [DONE — 2026-08-29] Vestigial tables dropped, with the one that wasn't vestigial exported first
+Operator-approved after the audit above. **A verified state snapshot was taken first**:
+`nemesis-state-backups/2026-08-29-1101-pre-vestigial-table-drop/` — DB half via the **sqlite3
+backup API, not `cp`** (per the 2026-08-28 WAL-fidelity rule), `PRAGMA integrity_check` = `ok`,
+**94 tables identical to live** with row counts verified per-table, plus a `STATE.txt` carrying
+the git commit (`f973dcb`), all six services `active`, and rollback instructions.
+- **`alert_notes` — EXPORTED, then dropped.** Its 4 analyst notes are preserved verbatim with
+  full alert context (rule name, classification, priority, disposition, times-seen, first-seen)
+  at `audits/alert-notes-export-2026-08-29.md` **in the private mirror**. Export verified against
+  the DB before the drop: all 4 present, text byte-identical, the whois URL in note 4 intact.
+  **Why private and not `docs/audits/`:** note 4 contains an external IP the operator was
+  researching, and the set is a record of which alerts fired on this network. Redacting it was
+  rejected — the note is *about* researching that address, so a placeholder would destroy the
+  only thing it records.
+- **`anomaly_ai_cache` — dropped, AND its reference removed** from
+  `diagnostics/anomaly_state.py` in the same change, so the diagnostic does not print a permanent
+  `(not found)` line — which would read as a fault in a check whose job is telling faults from
+  normal states.
+- **`anomaly_ai_usage` — dropped.** 0 rows, no references.
+**Verified after:** integrity `ok`, 94 → 91 tables, exactly the three removed and **no unintended
+changes**, surviving data intact (`alerts` 27, `login_events` 177, `tickets` 89,
+`anomaly_baseline` 12,282, `anomaly_incidents` 158), and all six services still `active` after a
+live DDL change.
+
+### [FIXED — 2026-08-29, pending commit] `diagnostics/anomaly_state.py`'s "Recent incidents" section had NEVER rendered — TWO bugs, not one
+**FIXED, and it was two independent defects — fixing only the reported one would have left the
+section equally broken:**
+1. `SELECT domain` — no such column. The real one is **`offending_target`**, confirmed
+   *semantically*, not merely by existence: it holds exactly what the old name implied
+   (`a2z.com`, `amazonaws.com`, `warcraftlogs.com`) and is what the module's own indexes
+   (`idx_ai_target`, `idx_ai_open_target`) key on.
+2. **`r['created_at'][:16]` sliced a float.** `created_at` is `REAL` (epoch, e.g.
+   `1787531804.11421`), so string-slicing raises `TypeError: 'float' object is not
+   subscriptable`. **With the column name corrected this still threw** — the second bug was
+   hidden behind the first. Now formatted via a `_fmt_ts()` helper matching the module's own
+   convention (`modules/anomaly_detection/module.py:2028`), which degrades to a string rather
+   than raising: in a diagnostic, one odd timestamp must not take out the whole section — the
+   exact failure being fixed.
+**Verified by RENDERING, not by absence of an exception** (the distinction mattered here):
+status `warn` → **`info`**, the error line is gone, and the section now prints 5 real incidents.
+Cross-checked programmatically against the DB — target, type and score match row-for-row for all
+5, and they are genuinely the 5 most recent of **158**.
+**Mutation-proven twice, once per bug:** reverting the column reproduces
+`no such column: domain` (warn, no section); restoring the float slice reproduces
+`'float' object is not subscriptable` (warn, no section). Both fixes are independently required.
+*(Original entry and its severity reasoning retained below.)*
+
+### ~~[MEDIUM — ⚠ HIGH VALUE, FIX SOON]~~ `diagnostics/anomaly_state.py`'s "Recent incidents" section has NEVER rendered — queries a column that does not exist (found 2026-08-29)
+> **Severity note (operator, 2026-08-29): rated MEDIUM by blast radius, but prioritise it well
+> above a typical MEDIUM.** This is not a neutral outage. A broken diagnostic that *looks*
+> broken is honest — the reader knows to distrust it. This one makes **"the dashboard looks
+> fine" actively misleading**: the section that would surface anomaly incidents renders as
+> though there is nothing to show, while 158 real incidents sit in the table. Silence reads as
+> "all clear". The fix is one word; the reason to do it soon is that every day it stays, the
+> check is quietly lying rather than merely unhelpful.
+**Pre-existing and unrelated to the table drop above** — confirmed: the change to that file
+touched only a tuple entry and a comment, nowhere near this query.
+`diagnostics/anomaly_state.py:128` runs
+`SELECT domain, incident_type, score, created_at, abuseipdb_reported FROM anomaly_incidents`.
+**`anomaly_incidents` has no `domain` column** — the equivalent is `offending_target` (verified
+via `pragma_table_info`; every other column in the query exists). So the query raises
+`no such column: domain` on **every single run**.
+**Consequences, both bad in a diagnostic:**
+1. The "Recent incidents" section **never renders** — **158 real incidents are invisible** in the
+   check meant to surface them.
+2. The broad `except Exception` at `:142` catches it, appends `Error reading anomaly DB: …`, and
+   sets `status = "warn"` — so this check has been **permanently amber for an unrelated reason**,
+   which is exactly how a real future warning gets ignored.
+**It fails loudly and was still never investigated**, which is the interesting part: the error
+text is right there in the output. An always-warn check trains its reader to stop looking.
+**Candidate fix:** `domain` → `offending_target` (one word), then confirm the section renders and
+the check returns to `info`. **Not fixed here** — unrelated to the authorized work, and it wants
+its own verification that the rendered section is correct (Rule 2).

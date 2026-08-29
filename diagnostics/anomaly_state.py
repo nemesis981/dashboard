@@ -2,6 +2,23 @@
 
 import sqlite3
 import os
+from datetime import datetime
+
+
+def _fmt_ts(value):
+    """Render `anomaly_incidents.created_at` (REAL epoch) as a readable stamp.
+
+    Matches the module's own convention (`modules/anomaly_detection/module.py`
+    formats the same column with `datetime.fromtimestamp(...).strftime(...)`).
+    Falls back to `str(value)` rather than raising: this is a DIAGNOSTIC, and a
+    single odd timestamp must not take out the whole section — which is precisely
+    the failure being fixed here, where one bad expression hid 158 incidents and
+    left the check permanently amber.
+    """
+    try:
+        return datetime.fromtimestamp(float(value)).strftime("%Y-%m-%d %H:%M")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return str(value)[:16]
 
 META = {
     "id": "anomaly_state",
@@ -108,8 +125,15 @@ def run() -> dict:
         sections.append(f"Configuration (anomaly_state):\n{kv}")
 
         # Table sizes
+        # `anomaly_ai_cache` was REMOVED from this list when the table was
+        # dropped (2026-08-29, operator-approved: 0 rows, no writers, no other
+        # readers). The lookup below is wrapped in try/except and would have
+        # degraded to "(not found)" rather than crashing — which is precisely why
+        # it had to be removed deliberately: left in place it would have printed
+        # a permanent, meaningless "(not found)" line that reads like a fault in
+        # a diagnostic whose whole job is telling faults from normal states.
         for table in ("anomaly_baseline", "anomaly_incidents",
-                      "anomaly_recurrence", "anomaly_ai_cache",
+                      "anomaly_recurrence",
                       "anomaly_abuseipdb_dedup"):
             try:
                 n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -118,13 +142,33 @@ def run() -> dict:
                 sections.append(f"{table}: (not found)")
 
         # Recent incidents
+        #
+        # ⚠ THIS SECTION HAD NEVER RENDERED ONCE. Fixed 2026-08-29 — TWO bugs,
+        # and fixing only the first would have left it just as broken:
+        #
+        #   1. It selected a `domain` column that does not exist. The real column
+        #      is `offending_target` (it holds exactly what the old name implied —
+        #      "a2z.com", "amazonaws.com" — and is what the module's own indexes
+        #      key on). The SELECT raised `no such column: domain` every run.
+        #   2. `created_at` is REAL (a float epoch, e.g. 1787531804.11421), and
+        #      the formatter sliced it as a string (`[:16]`). That raises
+        #      `TypeError: 'float' object is not subscriptable` — so even with the
+        #      column name corrected, this still threw.
+        #
+        # Why it stayed hidden: the broad `except` below appended "Error reading
+        # anomaly DB: …" and set status=warn, so the check went AMBER FOREVER for
+        # a reason unrelated to anomaly health — while 158 real incidents stayed
+        # invisible. An always-amber check trains its reader to stop looking, and
+        # an empty incidents section reads as "nothing to report" rather than
+        # "this never ran". That is worse than an obviously broken diagnostic.
         rows = conn.execute(
-            """SELECT domain, incident_type, score, created_at, abuseipdb_reported
+            """SELECT offending_target, incident_type, score, created_at,
+                      abuseipdb_reported
                FROM anomaly_incidents ORDER BY created_at DESC LIMIT 5"""
         ).fetchall()
         if rows:
             recent = "\n".join(
-                f"  [{r['created_at'][:16]}] {r['domain'][:40]} "
+                f"  [{_fmt_ts(r['created_at'])}] {str(r['offending_target'])[:40]} "
                 f"type={r['incident_type']} score={r['score']:.0f}"
                 f"{' [reported]' if r['abuseipdb_reported'] else ''}"
                 for r in rows
