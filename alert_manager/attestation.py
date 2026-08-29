@@ -140,19 +140,52 @@ def build_and_store_challenge(conn, device_id: str, agent_root: str | None = Non
     return {"nonce": nonce, "covered": list(TIER2_COVERED)}
 
 
-def ingest_challenge_response(conn, device_id: str, response):
+def ingest_challenge_response(conn, device_id: str, response, now: float | None = None):
     """Verify a Tier 2 challenge response (delivered in the dedicated heartbeat
     field `attest_challenge_response`) against the stored challenge, record
     tier2_state (OBSERVE-ONLY), and clear the outstanding challenge. Returns the
-    recorded state, or None if Tier 2 is unavailable or no challenge is outstanding.
+    recorded state, or None if Tier 2 is unavailable, no challenge is outstanding,
+    or the outstanding challenge has EXPIRED.
+
+    FRESHNESS IS ENFORCED HERE, and until 2026-08-29 it was not.
+    `CHALLENGE_TTL_SECONDS` has always documented "a stale nonce past this is not
+    accepted (freshness)", and `expires_at` has always been written at issue time
+    -- but nothing ever read it: this SELECT filtered on `device_id` alone,
+    `verify_and_record_tier2()` did not check it, and no sweeper pruned expired
+    rows. A nonce stayed answerable forever. **A stated security property that is
+    not implemented is worse than an absent one**, because a reader who checks the
+    constant concludes freshness is handled. See
+    `test_challenge_freshness.py`, whose controls pin that the refusal is
+    selective rather than a blanket deny.
+
+    `now` is injectable so the expiry boundary can be tested without sleeping;
+    same shape as `build_and_store_challenge()` above.
     """
     if not tier2_available():
         return None
     row = conn.execute(
-        "SELECT nonce, code_digests, code_python FROM agent_attestation_challenges "
-        "WHERE device_id=?", (device_id,)).fetchone()
+        "SELECT nonce, code_digests, code_python, expires_at "
+        "FROM agent_attestation_challenges WHERE device_id=?", (device_id,)).fetchone()
     if not row:
         return None
+
+    # ── Freshness gate: BEFORE any verification, so an expired nonce cannot
+    # produce a verdict. Clearing the row is part of the refusal, not a
+    # side-effect: leaving it would let the same stale challenge be raced again
+    # on the next beat, which is the replay this gate exists to close.
+    _now = time.time() if now is None else now
+    _exp = row[3]
+    # `_exp is None` is UNREACHABLE through this table -- the shipped DDL declares
+    # `expires_at REAL NOT NULL`. The guard stays anyway: without it a NULL would
+    # reach the comparison and raise TypeError, which the heartbeat's broad
+    # handler would swallow into "no tasks this beat" -- a failed read reported as
+    # a legal outcome, the exact shape CLAUDE.md's standing rule forbids. Treated
+    # as EXPIRED rather than as permission: "cannot determine" is not "fresh".
+    if _exp is None or _now >= float(_exp):
+        conn.execute("DELETE FROM agent_attestation_challenges WHERE device_id=?",
+                     (device_id,))
+        return None
+
     try:
         manifest = {"code_digests": json.loads(row[1]), "code_digest_python": row[2]}
     except Exception:                                        # noqa: BLE001
