@@ -4488,3 +4488,26 @@ database at all (0 access sites), so they need no redirect — they were false p
 first, cruder sweep, which conflated "sets no throwaway DB" with "unsafe". Fix both files of the
 pair together or neither: renaming only the sim would leave a `test_`-named script that still
 deletes live rows.
+
+### ⚠ [PROCESS] This file — and the gap inventory built from it — DRIFTS. Verify before acting (found 2026-08-29)
+**Measured, not impressionistic: 5 of ~14 checkable items swept on 2026-08-29 were already
+fixed**, and 3 of the first 4 items picked blind that day were stale. Confirmed already-done:
+`_dispatch_pending_scans` strand (fixed `e2067c0`), `/api/analyze/<rule_id>` GET→POST (now
+`methods=["POST"]`), `PIHOLE_IP` hardcoded default (fixed `d0be3d5`), `scan_conditions`
+empty-table backfill (code computes `_missing`; the live box has all 5), and "6 files ship
+literal `/home/<user>` paths" (down to 2, both fixed 2026-08-29).
+**Line numbers drift too**, independently of status: `_hour_of_week` was cited at `:1268` and
+was at `:1354`; `PIHOLE_IP` at `dashboard.py:65` and was at `:202`. And entries can be wrong
+about WHERE: `PIHOLE_IP` named `modules/dhcp/module.py`, which has never contained it, while
+missing two files that did.
+**Why it drifts structurally, so it is not fixable by being more careful:**
+`audits/base-project-gap-inventory-2026-08-28.md` (private mirror) was compiled **from this
+file**, so it inherits every stale entry rather than sampling the code. Fixes land, and only the
+person who happens to touch an entry updates it. Nothing reconciles the two.
+**What to do — cheap and non-negotiable:** treat every entry as a LEAD, not a fact. Verify
+against current code before picking work, and prefer a batched sweep to discovering it one item
+at a time (a single sweep cost far less than four individual rediscoveries). **The failure mode
+this prevents is not wasted time — it is a confusing no-op "fix" committed against
+already-correct code**, which is worse than the original stale entry.
+**Not a criticism of the inventory** — it is a genuinely useful map and was the right artifact
+to compile. It just needs re-verification against code before it can be trusted as current, and
