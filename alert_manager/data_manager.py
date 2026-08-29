@@ -365,6 +365,26 @@ NAMESPACES = {
         # case explicit table lists were added for.
         "tables": ("hw_alerts", "hw_alert_cooldowns"),
     },
+    "mem_appliance": {
+        # The memory-ladder tables, owned by `alert_manager/mem_appliance.py`.
+        #
+        # These were previously written through hw_monitor's connection, purely
+        # because hw_monitor is what drives the cycle — so they showed up as
+        # out-of-namespace writes by hw_monitor and were invisible only because
+        # hw_monitor runs in WARN mode. Granting them to hw_monitor would have
+        # been the easy fix and the wrong one: it would say hw_monitor owns
+        # tables it does not, and the next reader of that list would believe it.
+        #
+        # Safe to split precisely BECAUSE the ladder cycle owns its connection
+        # end to end — `hw_monitor.py` opens one just for `run_ladder_cycle()`,
+        # which commits its own work and closes it. Nothing else shares that
+        # transaction, so nothing is torn apart by scoping it correctly. (The
+        # attestation tables are NOT in this position — see PUNCHLIST: they are
+        # written inside the heartbeat's single transaction alongside
+        # `agent_devices`, so splitting THAT connection would trade a namespace
+        # violation for a partial-write window.)
+        "tables": ("mem_ladder_state", "mem_shadow_records"),
+    },
     "nemesis_fwd": {
         # audit_log is append-only and written by several actors; the helper adds
         # its own attribution rows there.

@@ -4632,7 +4632,17 @@ def main():
         # The SAMPLE_INTERVAL cadence IS the cadence the ladder thresholds assume.
         try:
             import mem_appliance as _mem_ladder             # noqa: PLC0415
-            _lc = _db_connect()
+            # Scoped to mem_appliance's OWN namespace, not hw_monitor's. The
+            # ladder tables belong to mem_appliance; this process only drives the
+            # cycle. Using _db_connect() here made every ladder write an
+            # out-of-namespace write by hw_monitor — harmless today only because
+            # this process runs in WARN mode, and a hard failure the moment
+            # anyone flips it to MODE_ENFORCE.
+            #
+            # Safe because this connection is opened for the cycle and closed in
+            # the `finally` below: run_ladder_cycle() commits its own work and
+            # shares a transaction with nothing else here.
+            _lc = _dm().connect("mem_appliance")
             try:
                 _sum = _mem_ladder.run_ladder_cycle(_dm(), _lc)
                 if _sum.get("shadow_new"):

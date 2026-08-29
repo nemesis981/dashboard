@@ -4839,3 +4839,30 @@ at rest** — its own open item, whose fix is a selector/verifier split with no 
 existing tokens. It is what makes leak-then-revoke realistic rather than theoretical, so it
 strengthens the case for this route, but it is a schema change of a different size.
 
+### [PARTIALLY FIXED — 2026-08-29, pending commit] `mem_*` namespace grants — one half fixed, the other half must NOT be done the same way
+**Fixed:** `mem_ladder_state` / `mem_shadow_records` now have their own `mem_appliance`
+namespace, and `hw_monitor.py` opens the ladder connection with
+`_dm().connect("mem_appliance")` instead of its own `_db_connect()`. Granting them to hw_monitor
+would have been easier and wrong — it would assert hw_monitor owns tables it does not, and the
+next reader of that list would believe it.
+**Safe precisely because the ladder cycle owns its connection end to end:** `hw_monitor.py:4637`
+opens one solely for `run_ladder_cycle()`, which commits its own work, and closes it in a
+`finally`. Nothing else shares that transaction.
+**Verified in BOTH modes:** under ENFORCE the two tables are allowed and a **control** (an
+unrelated `hw_metrics` write) is correctly `AccessDenied`, proving the grant is not too wide;
+under WARN the expected `WOULD DENY` line appears for the control only.
+**⛔ NOT fixed — `agent_attestation_challenges`. Written up as its own decision record:**
+`decisions/2026-08-29-attestation-challenges-namespace-DECISION-REQUEST.md` (private mirror),
+**awaiting an operator decision.**
+
+> **⚠ THE ANALYSIS FIRST WRITTEN HERE WAS WRONG — corrected 2026-08-29.** It claimed splitting
+> the connection would "trade a namespace violation for a partial-write window in the heartbeat
+> path." Two errors: (1) the call inside the heartbeat transaction,
+> `attestation.record_attestation()`, writes **`agent_devices`** — which IS in hw_monitor's
+> namespace, so it is not a violation at all; the challenges-table write comes from a different
+> function, `build_and_store_challenge()`, called ~1,000 lines away at `hw_monitor.py:2992`,
+> outside that transaction. (2) Atomicity is not relied upon there anyway — the block is wrapped
+> in `try/except` at `:1941` that logs and continues to the commit, deliberately.
+
+**⛔ AND THE REAL FINDING, which reframes the whole item — see the entry below.**
+
