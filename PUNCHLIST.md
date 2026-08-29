@@ -4254,6 +4254,45 @@ operator wants it; the install-side defect is what this fixes.
 Found while trimming the dead `sudo nmap` grant (previous entry); the two were independent — the
 grant was unnecessary, the package is mandatory — and landed as separate commits accordingly.
 
+### [FIXED — 2026-08-28, pending commit] `diagnostics/ufw_rules.py` reported a permissions failure as a firewall failure (Tier 1 gap inventory)
+Reported in `base-project-gap-inventory-2026-08-28.md` as "`sudo -n ufw` under an account with no
+matching sudoers rule." **The diagnosis was right that it always fails, but incomplete in a way
+that matters: there are TWO independent blockers, and the second means adding a sudoers rule is
+NOT a valid fix.**
+1. **No grant for the executing account.** `run_check()` is called from `dashboard.py`'s
+   `/api/diag` routes (`:11005`, `:11015`), so this runs as `nemesis-dash`; diagnostics-watcher
+   runs as `nemesis-diag`. `/etc/sudoers.d/nemesis` grants ufw to the *installing human*
+   (`$SUDO_USER`), not to service users. Verified: neither account is in any sudo-granting group.
+2. **`NoNewPrivileges=yes` on both units makes sudo structurally unable to elevate** — the kernel
+   ignores setuid, so a grant would not help. Verified live 2026-08-28 with a known-good/known-bad
+   pair: the *identical* command exits **0** with a valid NOPASSWD grant and exits **1** under
+   `setpriv --no-new-privs`, sudo itself saying *"the 'no new privileges' flag is set."* Live
+   `/proc/<pid>/status` confirms `NoNewPrivs: 1` on both running services.
+**This is the same trap that silently broke `device_scanner`'s `sudo nmap` for weeks** (fixed
+2026-07-29). Third instance of this failure class in this codebase.
+**User-visible impact:** every non-zero exit collapsed to `warn` + "UFW query returned rc=1", with
+sudo's error text dumped where the ruleset belongs — a permissions problem rendered as a firewall
+problem, inviting someone to debug a firewall that is perfectly healthy.
+**FIXED:** the probe now distinguishes DENIED / real-ufw-fault / not-installed / timeout, states
+plainly that a denial is **not** a firewall fault, preserves sudo's actual stderr rather than
+swallowing it, and points at the working entry point. Follows `vpn_status.py`'s existing status
+convention (batch3, `docs/audits/error-code-classification-batch3-2026-08-08.md`) rather than
+inventing a new one — that file already solved this exact problem in this exact directory.
+**Verified:** both real paths exercised end-to-end (`ok` with the live ruleset; `warn` + the
+denial branch under `setpriv --no-new-privs`). New `diagnostics/test_ufw_rules.py` — **33/0** —
+forces all four branches via a stubbed `subprocess.run`, since a genuine non-permission ufw fault
+and an uninstalled ufw cannot be produced on demand. Denial and fault are asserted **as a pair**
+(both are non-zero exits rendering `warn`, so a test checking only the denial would still pass if
+they were merged — which is the bug). **Mutation-proven:** disabling denial-detection turns the
+suite red on exactly the denial assertions. Full diagnostics suite green (7 files, 299 assertions).
+**NOT fixed, and deliberately left for Window 1 — this is real build work, not a small item:** the
+probe still cannot return actual rules under the service accounts. The authoritative privileged
+read path is `alert_manager/firewall.py`'s `list_rules()` via the `nemesis_fwd` helper (the single
+ufw chokepoint, `READ_OPS`), but it is credentialed `(username, session_id, password)` while
+`run()` is parameterless by contract, and **no diagnostic check currently takes request/session
+context**. Wiring it means changing the diagnostics contract — a framework design decision, not an
+edit to this file. Until then the check is honest about what it cannot see, rather than wrong.
+
 ### [DONE — 2026-08-28] Installer sudoers admin grants reviewed for staleness
 A routine review of `install.sh`'s NOPASSWD sudoers template (prompted by an unrelated dead-grant
 fix elsewhere in the same template) checked whether its remaining entries are still needed.
