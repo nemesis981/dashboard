@@ -226,12 +226,23 @@ below.
   source-based policy routing — see ADR 0002. This item asks only *what changed on the box
   that day*; it's an open investigation, separate from that diagnosis.)
 
-- [ ] **Stage-5 backup-purge (do during the backup rework).** When backup is reworked to a
+- [x] **Stage-5 backup-purge (do during the backup rework).** ✅ **COMPLETE — 2026-08-29**
+  (last sub-item closed; the first two had already landed). When backup is reworked to a
   single SQLite-safe shared-DB snapshot, **remove the per-module-DB references** that back up
   dead fallback files (they won't exist after Stage 6):
-  - `dashboard.py` `_backup_candidates()` (~line 4513) — the `modules/tickets/tickets.db` entry.
-  - `install.sh` restore (~lines 1084–1089) — the `tickets.db` restore block.
-  - backup help/description strings referencing `tickets.db`.
+  - [x] `dashboard.py` `_backup_candidates()` — the `modules/tickets/tickets.db` entry.
+    **Already done** before today; the function now carries a comment recording the ADR 0001
+    Stage 6 retirement.
+  - [x] `install.sh` restore — the `tickets.db` restore block. **Already done** before today;
+    `install.sh:1923` carries the equivalent comment.
+  - [x] backup help/description strings referencing `tickets.db`. **DONE 2026-08-29** — this
+    was the straggler, and it was the only one a USER could see. See the backup-modal entry
+    at the end of this file: the Settings → Backup list was still promising
+    `modules/tickets/tickets.db`, months after the file stopped existing.
+  **Worth noting for the next entry like this:** the two code sub-items were fixed and the
+  user-facing string was not, so the product's own UI kept asserting the retired file for
+  months while the code that would have collected it was long gone. The visible half is the
+  half that outlives the cleanup — check it explicitly rather than assuming it followed.
 
 - [ ] **`PIHOLE_IP` hardcoded default (Rule 8 leak).** A personal LAN IP is shipped as a
   default — replace with `127.0.0.1` / read from `/etc/nemesis.env` (defaults must be correct
@@ -4373,3 +4384,39 @@ not `$SUDO_USER`. Verified against the live unit file before fixing. Doc-only co
 code change. Same doc/code-agreement shape as the nmap grant/`SETUP_LINUX.md` split earlier
 today — that fix already corrected this file's sudoers grant-list line (`eaff9ff`), this is a
 different stale line in the same file.
+
+### [FIXED — 2026-08-29, pending commit] The backup modal told the operator the wrong contents — three ways
+`dashboard.py`'s Settings → Backup panel prints the archive's contents. That list is
+hand-maintained HTML ~2,700 lines from `_backup_candidates()`, which actually decides what is
+archived, and nothing kept the two in step. All three drifts confirmed against reality, not
+inferred:
+1. It named **`alert_manager/alerts.db`** — the database moved to `/var/lib/nemesis` in the
+   2026-07-27 relocation (`nemesis_paths.db_path()` confirms).
+2. It named **`modules/tickets/tickets.db`** — retired in ADR 0001 Stage 6. `find` confirms no
+   such file exists anywhere in the tree; `tickets`/`tickets_seq`/`tickets_settings` are tables
+   *inside* `alerts.db` (confirmed by querying the live DB).
+3. It **omitted the anomaly-detection databases entirely**, which `_backup_candidates()` does
+   archive (`modules/anomaly_detection/*.db`).
+**Understating is the more dangerous half, which is why this is not cosmetic.** Overstating is
+merely wrong; understating changes what someone does in a recovery — an operator reading the
+old list could reasonably conclude their anomaly history was unprotected, or hunt for a
+`tickets.db` that never existed while restoring.
+**This closes the last sub-item of the "Stage-5 backup-purge" entry above** — the two *code*
+sub-items had been done for months while the *user-visible* string kept asserting the retired
+file. The visible half outlived the cleanup.
+**Verified:** `dashboard.py` compiles (the definitive check for the #1-recurring-bug f-string
+hazard; no raw contractions or stray quotes introduced). New
+`test_backup_modal_matches_candidates.py`, **18/0**, pinning all three drifts plus the inverse
+(the modal must not promise something the archive never collects). **Mutation-proven:**
+restoring the old list turns it red 14/4, killing exactly the four assertions that pin the
+three drifts.
+**Two self-inflicted bugs while writing that test, both the same documented trap, worth
+recording:** a negative control asserted the retired filename was absent from `dashboard.py`'s
+source — it failed, because the comment *explaining the removal* names the path it removed.
+Rewritten to test the filesystem instead, it failed **again**, because `_backup_candidates()`'s
+own pre-existing comment also explains the retirement. This is "grep matched the supersession
+note": searching for a term finds the prose saying the term is obsolete. It also meant the
+*positive* assertions could be satisfied by a comment rather than by code. Fixed by asserting
+against a comment-stripped view of the function — **assert against executable code, never
+string presence in source.**
+

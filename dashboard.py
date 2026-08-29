@@ -9644,10 +9644,22 @@ def settings_page():
                    data-beginner="The following files will be saved — they contain your security history, tickets, and settings. Logs are not included because they are large and regenerate automatically."
                    data-intermediate="Archive contents (logs excluded — they regenerate):"
                    data-pro="Archive contents (no logs):">The following will be included in the backup:</p>
+                <!-- ⚠ THIS LIST IS A PROMISE TO THE OPERATOR ABOUT WHAT THEY ARE
+                     GETTING. It must mirror _backup_candidates() exactly. It had
+                     drifted three ways (fixed 2026-08-29): it named
+                     alert_manager/alerts.db (the DB moved to /var/lib/nemesis in
+                     the 2026-07-27 relocation), it named modules/tickets/tickets.db
+                     (retired in ADR 0001 Stage 6 — tickets/tickets_seq/
+                     tickets_settings are tables INSIDE alerts.db, and no such file
+                     exists), and it silently OMITTED the anomaly-detection
+                     databases, which are archived. Understating a backup is the
+                     more dangerous half: someone reading this could reasonably
+                     conclude their anomaly data is unprotected, or hunt for a
+                     tickets.db that never existed when restoring. -->
                 <ul class="backup-file-list">
-                    <li>Alert history <span class="file-hint">(alert_manager/alerts.db)</span></li>
-                    <li>Tickets &amp; notes <span class="file-hint">(modules/tickets/tickets.db)</span></li>
-                    <li>Hardware sensor map <span class="file-hint">(alert_manager/hw_map.json)</span></li>
+                    <li>Alert history, tickets &amp; notes <span class="file-hint">(alerts.db — tickets live in here, not a separate file)</span></li>
+                    <li>Anomaly detection history <span class="file-hint">(modules/anomaly_detection/*.db, if present)</span></li>
+                    <li>Hardware sensor map <span class="file-hint">(hw_map.json)</span></li>
                     <li>Configuration &amp; API keys <span class="file-hint">(/etc/nemesis.env)</span></li>
                 </ul>
                 <p class="backup-size-text">Estimated size: <strong id="backupSizeDisplay">&mdash;</strong></p>
