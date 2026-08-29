@@ -1132,6 +1132,24 @@ than used directly.** Standard test creds apply to all seven — see
 convention above). Bridged NICs use the host's LAN interface (`<bridged-iface>`); isolated NICs use hostonly `vboxnet0`
 (`192.168.56.0/24`).
 
+- **⛔ CREDENTIALS NEVER GO ON A COMMAND LINE — `--passwordfile`, always (standing rule,
+  added 2026-08-27 after the SECOND occurrence).** Every `VBoxManage guestcontrol` call
+  passes `--passwordfile <path>` (note: no hyphen between "password" and "file"), never
+  `--password <value>`. Same principle for any other VM/automation tool that offers a file
+  or stdin form.
+
+  **Why, concretely.** An argument is visible to every local user via `ps`, and — the way it
+  actually bit — **Python's `subprocess.TimeoutExpired` embeds the full argv in its message**,
+  so a hung command printed the VM password into a session transcript verbatim. That is the
+  second instance of this exact pattern: `local-config.md` already records a unique VM
+  password retired on 2026-08-26 for the same reason. Twice is a convention problem, not an
+  attention problem, which is why it lives here rather than in a session note.
+
+  **This matters even while the lab credential is low-value.** The current shared lab password
+  is trivially guessable, so leaking it disclosed little — but the same call shape is what
+  will be used the day a real secret is passed, and the habit is what has to be right by
+  then. Write the secret to a `0600` temp file, pass the path, delete it in a `finally`.
+
 - **Fresh-clone discipline (standing rule).** Never test additionally on a Master itself —
   always start testing from a fresh clone of the appropriate Master below. Always delete that
   clone once its testing is done, unless more testing on that exact environment/state is
