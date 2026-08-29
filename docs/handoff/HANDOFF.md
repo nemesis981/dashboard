@@ -1,197 +1,166 @@
 # HANDOFF — current state
 
-> Last updated **2026-08-27, nightly closeout (Window 2)**. Overwritten each closeout
+> Last updated **2026-08-28, nightly closeout (Window 2)**. Overwritten each closeout
 > (latest state wins). Durable history: `docs/handoff/supplements/` (append-only). Real
 > IPs/hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` —
 > placeholders here per Rule 8.
 >
-> Full detail: `docs/handoff/supplements/2026-08-27-001.md` (curated) and
-> `docs/handoff/worklog/2026-08-27-001.md` (raw chronology — **reconstructed at closeout,
-> not live-appended**; flagged as such per the standing convention, since no worklog entry
-> was written during the session itself).
+> Full detail: `docs/handoff/supplements/2026-08-28-001.md` (curated) and
+> `docs/handoff/worklog/2026-08-28-001.md` through `-004.md` (raw chronology, live-appended
+> through the day across a reboot recovery).
 
 ---
 
-## 1. Push status — both repos
+## 1. Push status — both repos, fully reconciled
 
-**`/opt/nemesis`:** verified `git rev-parse HEAD` == `git rev-parse origin/main` after this
-closeout's push (see §7, health check, for the re-verified value at write time).
+**`/opt/nemesis`:** `HEAD == origin/main`, verified via `git fetch` + `git rev-parse`
+immediately before this closeout's final commit.
 
-**`~/work/nemesis-internal`:** not this session's to verify — Window 2 did not push there
-today; Window 1/Window 3 own its sync state.
+**`~/work/nemesis-internal`:** `local` and `usb` both confirmed at the same HEAD via
+`git ls-remote` (authoritative, not just push output).
 
-## 2. `/opt/nemesis` working tree — not clean, and neither item is this closeout's to commit
+## 2. `/opt/nemesis` working tree — one item, intentionally uncommitted
 
-`git status --short` (as of this closeout):
 ```
  M CLAUDE.md
-?? alert_manager/hw_map.json
 ```
 
-- **`CLAUDE.md`** — a new, complete-looking, uncommitted diff appeared during this
-  session's closeout prep: a standing rule requiring `--passwordfile` over `--password` on
-  every `VBoxManage guestcontrol` call, citing a second same-shape credential leak (a hung
-  command's `subprocess.TimeoutExpired` embedding the full argv, including the password, in
-  a session transcript). Read in full — it is coherent, complete, and reads as finished, not
-  mid-edit. **No handoff document describes it and no window has claimed it.** Not committed
-  — whoever authored it should hand it off properly so it can be verified and landed with
-  attribution, rather than being swept in unexplained.
-- **`alert_manager/hw_map.json`** (untracked, runtime artifact from `hw_discover --auto`) —
-  still undecided: track or gitignore. Carried forward unchanged across several sessions
-  now; this decision keeps getting deferred rather than made.
+- **`CLAUDE.md`'s `--passwordfile` diff** (added 2026-08-27, standing rule after a second
+  same-shape credential leak — a hung `VBoxManage` command's `subprocess.TimeoutExpired`
+  embedding the full argv, including the password, in a session transcript). **Still
+  unattributed — now SIX sessions running.** Coherent, complete, reads as finished. No
+  handoff document describes it and no window has claimed it. Do not sweep it into any
+  future commit without its author claiming it first.
 
-## 3. This session's landed work — 14 commits, all pushed
+Everything else that was uncommitted at any point today (three worklog files, the nmap-grant
+batch, the ufw fix, `SETUP_LINUX.md`, the sudoers decision) landed and pushed during the day —
+see §3.
 
-The full ADR 0019 lockout-failsafe mechanism plus DESIGN-L4 §2/§4's authority and
-context-store work. (Three additional commits landed and pushed earlier today, before this
-batch began, and are not detailed here: `b85d04d` CLAUDE.md fleet-review pointer, `5a1fbe6`
-+ `aa0abdd` two small ADR 0019 doc corrections.)
+## 3. Today's landed work — 9 commits on `/opt/nemesis`, all pushed
 
-### ADR 0019 — lockout-failsafe (Window 1)
-- **`b73a0ad`** — `fw_revert_tokens`: a split-token store (`selector.verifier`; verifier
-  hashed at rest) for the revert-link credential.
-- **`e6d6841`** — `failsafe_revert` op in `nemesis_fwd.py`/`fw_client.py`. Also the first
-  real consumer of `NO_CREDENTIAL_OPS`, declared 2026-07-28 and never read by any dispatch
-  path until this commit — a declared-but-inert allowlist, closed rather than left as a
-  second trap.
-- **`cb71ab5`** — the standalone `/fw/revert` GET/POST endpoint, deliberately unauthenticated
-  (the endpoint exists for an admin who cannot log in) with the security boundary living in
-  the token, not a session check.
-- **`b1b0e52`** — `nemesis-fw-healthcheck` (six-check post-apply probe, UNKNOWN counted as
-  failure, self-tests its own probes before reporting) and dual manual/unattended
-  revert-window support in `nemesis-fw-apply`.
-- **`50cbf2c`** — `firewall_failsafe_override` registered as the first L4 action class, paired
-  with its ARCHITECTURE.md documentation in one commit (see §5 for why together, not the
-  handoff's original — and disproven — reasoning).
-- **`7cd2d35`** — `/api/ai/authority/clear` (the OFF half of the L4 authority toggle) with an
-  append-only `ai_authority_events` audit trail, plus a folded-in fix (`EXTERNALLY_EXECUTED`)
-  correcting `automation_readiness()`/`authority_raise_warnings()`/`refusal_ticket_text()`,
-  which previously reported the failsafe-override class as unable to act when it actually
-  does — a false-reassurance direction, not a false alarm.
+**The tailnet-leak history rewrite** (`origin/main` rewritten `9959197`→`1efe285`, all 10 tags
+verified unaffected, re-verified from a fresh GitHub clone). One residual: the pre-rewrite SHA
+is still fetchable from GitHub's object storage (branch history is clean; the object store
+isn't yet) — needs an operator-filed GitHub Support request, draftable on request. Two stray
+branches force-pushed by scope-overreach during the rewrite (`backup-closeout-reorder`,
+`stage5-2b-meminject`) were reviewed clean and deleted from `origin` per an explicit operator
+scope decision.
 
-### DESIGN-L4 (Window 3)
-- **`9f7cda4`** — the L4 context store, §4.5 review surface, and engine-side failsafe
-  consumer (`failsafe_decision.py`).
-- **`23c52a6`** — `l4_ab_harness.py`, the §5 A/B measurement instrument.
-- **`c751a77`** — the manual canary-plant route (`POST /api/malware/canary/plant`),
-  restoring a manual bait-planting path after auto-plant became opt-in.
-- **`29fe5d3`** — landed tonight: a real functional fix to `failsafe_decision.decide()`. It
-  read `result["decision"]`, a key the real `analyze()` never populates (confirmed by
-  reading every one of `analyze()`'s return statements, `module.py:3438-3597` — only `"ok"`,
-  `"text"`, `"reason"` ever appear). Every production call therefore fell through to
-  `allow_revert` regardless of input, while 64 unit checks stayed green because each one
-  injected a test double supplying `"decision"` directly. The consumer could never actually
-  assert an override on any real input until this fix. Also gives `l4_ab_harness.py` real
-  A/B measurement support (env loading, genuine per-worker L4 grants) and reframes a failed
-  §5 requirement as INCONCLUSIVE rather than FAILED (n=1 against a non-deterministic model
-  cannot disprove the mechanism).
+**CLAUDE.md/PUNCHLIST batch** (`eaff9ff`→`b4c1a24`→`1efe285` pre-rewrite hashes): Fleet Archive
+Policy target correction, WAL-fidelity fix for state snapshots, stale VM line removed.
 
-### PUNCHLIST entries (both windows, landed as their own commits)
-- **`deeca3a`** — `[LOW]` no `nosniff` header anywhere in the app (Window 3, surfaced during
-  the L4 route review).
-- **`8a53e26`** — `[HIGH]` ×2 canary false-positive root cause (the 2026-08-25 incident) +
-  `[MEDIUM]` ×2 plaintext enrollment tokens / `NO_CREDENTIAL_OPS`'s 30-day-inert history
-  (Window 1).
-- **`ae2ea44`** — `[LOW]` login-page CSRF, flagged for a deliberate operator call, not fixed
-  (Window 1).
+**The nmap dead-grant investigation**, split into two commits after a same-tree race required
+mid-flight surgery (`git reset --soft` + hunk-level re-staging) when a single commit turned out
+to conflate hygiene and a functional fix:
+- **`eaff9ff`** — dead `NOPASSWD /usr/bin/nmap` sudoers grant trimmed from `install.sh`'s
+  template; `docs/SETUP_LINUX.md`'s grant-list line corrected to match; `.gitignore` gained
+  `hw_map.json` and its two sibling paths (per-install hardware state, not source).
+- **`04eb296`** — the actual missing dependency: `install.sh` never installed the `nmap`
+  *package* itself. Fixed, verified live on the Gateway fleet VM's 26-day failure log.
 
-All report-only per Rule 1 — none of the PUNCHLIST findings were fixed inline.
+**Broader dead-grant sweep** (prompted by the above) found `systemctl`/`journalctl`/`tail`
+grants have no confirmed programmatic caller either, but a genuinely different answer: they
+serve a real human-admin workflow, unlike nmap. **`d09899e`** — reviewed, kept, no code
+change. Full reasoning in the private decision record
+(`decisions/2026-08-28-sudoers-admin-grants-RATIFIED.md`); public entry deliberately terse
+per Rule 10.
 
-## 4. Two shared-tree near-misses this session — both caught before push, both fixed
+**The gap-inventory Tier-1-PRIORITY fix**, landed as two commits after independent
+re-verification of every claim (not taken on trust — reran both new test files directly, the
+full diagnostics suite, and the AI-engine regression suite, all exact matches to what was
+reported):
+- **`2148f60`** — `modules/ai_engine/test_externally_executed.py`, closing a real test-coverage
+  gap for the `EXTERNALLY_EXECUTED` branches (24/0, mutation-proven).
+- **`db8fe81`** — `diagnostics/ufw_rules.py` no longer reports a permissions denial as a
+  firewall fault. Root cause was worse than first diagnosed: `NoNewPrivileges=yes` makes a
+  sudoers grant moot regardless of which account runs it. `diagnostics/test_ufw_rules.py`,
+  33/0, mutation-proven. Full diagnostics suite: 299/299 across 7 files.
 
-**Co-mingled `roles.py`.** Window 1's own C3 diff for `roles.py` arrived carrying two other
-windows' hunks (Window 3's four `ai_engine__route_context_*` entries, a separate
-canary-plant entry) that Window 1's handoff hadn't flagged. Caught by reading the full diff
-rather than the file list; extracted the genuine hunk via `git apply --cached` (plain
-`git apply`/`patch` both failed on a working-tree/index line-number mismatch once the other
-hunks were present). Window 3 independently derived the same hunk boundaries in their own
-landing-order handoff — cross-confirmed the split was correct.
+**Worklog + doc cleanup:**
+- **`f7bd082`** — committed the day's live worklog (three sessions spanning a reboot), with a
+  Rule-8 catch: one entry originally named the actual pre-rewrite leaked tailnet string while
+  describing the grep that confirmed its absence — caught and rephrased before commit, since
+  publishing it would have reintroduced the exact leak the history rewrite existed to remove.
+- **`acd7570`** — `docs/SETUP_LINUX.md`'s `dashboard.service` user line corrected
+  (`$SUDO_USER`→`nemesis-dash`, stale since the 2026-07-31 de-privileging effort). Assigned to
+  Window 2 in today's operator-approved Tier 1 ownership split.
 
-**An accidental commit swept in in-flight work.** While landing Window 1's authority-toggle
-work, three files that turned out to be Window 3's in-flight work
-(`failsafe_decision.py`, `l4_ab_harness.py`, `test_failsafe_decision.py`) rode along in the
-same working-tree diff and were mistakenly committed together as `8329c8f`. The operator
-caught it before push. Fixed with `git reset --soft` (a `rebase --onto` was blocked by the
-auto-mode classifier as history-rewriting; the operator supplied the safer reset-based
-sequence instead) — dropped the commit, restored the three files to uncommitted status,
-verified byte-for-byte that their content was unchanged from what had been in the dropped
-commit (two identical, one a pure superset, since Window 3 had continued editing
-`l4_ab_harness.py` live during the fix itself). Nothing was lost; nothing had been pushed.
+## 4. The reference document for outstanding work
 
-**A provenance claim that didn't check out.** A later message reported those same three
-files as sitting in a private-repo commit (`490ef44`) needing a pull, citing Rule 12 as the
-reason. Checked directly before acting: that commit touches only a handoff markdown file,
-no code, and Rule 12 only governs docs mirroring, not module source. The claim was
-mistaken phrasing, confirmed by the operator after checking with Window 3 directly — but it
-was caught by reading the actual commit before pulling anything, not by trusting the
-citation.
+`~/work/nemesis-internal/audits/base-project-gap-inventory-2026-08-28.md` — a comprehensive,
+two-tier accounting of every open item in the codebase, compiled at operator request as "the
+baseline complete gets measured against going forward." Read that, not PUNCHLIST alone, for
+current state. **Operator-approved ownership split for its Tier 1** (malware-detection and
+memory-injection-blocker items led): Window 3 has two small items, Window 1 has the real
+build-work items (canary HIGHs, agent integrity attestation, agent enumeration gaps, a new
+diagnostics-framework session-context change), Window 2's one item is done (§3 above).
 
 ## 5. Verified live this session, not just claimed (Rule 3 discipline)
 
-- Reproduced `test_roles.py` at 158/0 repeatedly against isolated `git worktree` copies
-  built from exact staged blobs — never against the shared working tree, which held other
-  windows' uncommitted content throughout the entire session.
-- Empirically disproved a stale claim in Window 1's handoff ("land ARCHITECTURE.md with C4
-  or the suite goes red") by temporarily reverting the change and re-running the suite
-  (22/0, not a failure) — then identified the real, different reason to hold them together
-  (a doc-accuracy dependency: the new paragraph asserts a fact only true once the code
-  change is also present).
-- No committed test exercises the new `EXTERNALLY_EXECUTED` branches in
-  `automation_readiness`/`authority_raise_warnings`/`refusal_ticket_text`
-  (`test_master_authority.py` and `test_package_exports.py` are both green but neither
-  touches `firewall_failsafe_override`) — exercised all three directly, against both a
-  member class and a control (non-member) class, before landing the fix.
-- Read every return statement in the real `analyze()` before landing `29fe5d3`, confirming
-  the reported bug against source rather than trusting the report.
-- Gate-checked every push: fetched, diffed the unpushed set against exactly what had been
-  confirmed, and pushed the reviewed SHA rather than the branch name.
+- Reran `diagnostics/test_ufw_rules.py` (33/0) and `modules/ai_engine/test_externally_executed.py`
+  (24/0) directly, plus all 7 diagnostics test files (299/299) and 5 AI-engine regression
+  suites (89/0, 14/0, 74/0, all-pass, 24/0) — every count matched Window 3's handoff exactly,
+  none taken on trust.
+- Re-verified the `backup-closeout-reorder`/`stage5-2b-meminject` content-clean claim
+  independently in a post-reboot session before the operator's delete decision, not just
+  trusted the earlier claim.
+- Re-checked the `hw_map.json` gitignore fix actually took (`git status --ignored`) before
+  citing it as resolved here, rather than assuming the commit did what its message said.
+- Caught and fixed a Rule-8 leak in the day's own worklog before it reached the public repo
+  (see §3).
+- Gate-checked every push on both repos: fetched, diffed the unpushed set against exactly
+  what had been named/confirmed, pushed the reviewed SHA.
 
 ## 6. Anything else queued, not yet actioned
 
-- **`CLAUDE.md`'s uncommitted credential-handling rule** (§2) — needs its author to hand it
-  off with attribution before it can be verified and landed.
-- **`hw_map.json` track-or-gitignore** (§2) — still undecided, carried forward again.
-- **No committed test covers `EXTERNALLY_EXECUTED`** — verified by hand this session (§5),
-  but a real test gap remains; worth a PUNCHLIST entry or a follow-up commit.
-- **Elevated grants** — not re-checked this session (no fresh Morning Status run; this was
-  a continuation, not a new morning start). Last live host-level check: 2026-08-25 morning
-  Morning Status. The `<gateway-vm>` grant flagged 2026-08-26 (§6 of that handoff) is
-  presumed unchanged, not re-verified.
-- Carried forward, unchanged, not touched this session: ADR 0028 §8 (six open decisions),
-  ADR 0029 (16/29 decision-register entries open, parked until V2.0), the gap-scan
-  re-audit, Stage 4's remaining corpus questions, `test_layer_c.py`,
-  `test_analyze_alert_body.py` (34/35), `_load_secret_key()`'s PermissionError gap.
+- **`CLAUDE.md`'s uncommitted `--passwordfile` diff** (§2) — sixth session flagging it,
+  still unclaimed.
+- **GitHub GC request** for the pre-rewrite object — needs the operator to file via GitHub
+  Support's web form.
+- Everything in the gap inventory's Tier 1/Tier 2 not covered by today's ownership split or
+  today's fixes — see §4. In particular: ADR 0028's 6 open decisions (unchanged), ADR 0029's
+  16 open decision-register entries (unchanged, zero drift), the fresh roadmap tally (9
+  SHIPPED / 10 PARTIAL / 65 PARKED), and today's cross-window findings (Appliance Master 553
+  commits behind, the linked-clone archive-policy gap blocking one Layer D corpus VM).
+- Two Layer D decision records (D2 RATIFIED, D3 REFRAMED) and two sourcing plans were
+  committed on Window 1's behalf to the private repo tonight, content reviewed first — D3
+  flags one residual limitation still needing its own future Rule 10 disclosure call, not yet
+  made.
+- **Not this closeout's to touch:** ~94 lines of long-standing uncommitted backlog in
+  `~/work/nemesis-internal` (old briefings/audits/scoping docs from other windows, going back
+  to early August) — noted, not acted on, not urgent.
 
 ## 7. Closeout health check
 
-- Working tree: **not clean** — see §2 (neither item is this closeout's to commit).
+- Working tree: **not clean** — see §2, intentional, not this closeout's to commit.
 - Closeout commit is HEAD: confirmed after this handoff's own commit.
 - local == origin: confirmed via `git fetch` + `git rev-parse HEAD origin/main` after push.
-- HEAD touches only docs/handoff files: confirmed (`git show --stat HEAD`).
-- Rule 8 spot-check on the committed diff: clean (placeholders only).
-- Open items durably captured: this file, §6, plus PUNCHLIST.md (unchanged since §3's
-  entries landed).
+- HEAD touches only docs/handoff files: confirmed (`git show --stat HEAD`) for this specific
+  commit — today's earlier commits (§3) each individually scope-checked before landing.
+- Rule 8 spot-check: clean on this commit; one real catch earlier in the day (§3, worklog).
+- Open items durably captured: this file, §6, plus the gap inventory (§4) and PUNCHLIST.md.
 
 ## 8. Cross-references
 
-- `docs/handoff/worklog/2026-08-27-001.md` — raw chronology (reconstructed at closeout).
-- `docs/handoff/supplements/2026-08-27-001.md` — curated narrative, this session.
-- `~/work/nemesis-internal/handoff/2026-08-27-window1-to-window2-failsafe-commit-split.md`
-  — went through three revisions as Window 1 re-synced it against what had actually landed.
-- `~/work/nemesis-internal/handoff/2026-08-27-window3-to-window2-landing-order-l4.md` — the
-  independent per-hunk ownership map that cross-confirmed the `roles.py` extraction.
-- Prior session: `docs/handoff/supplements/2026-08-26-001.md`.
+- `docs/handoff/worklog/2026-08-28-001.md` through `-004.md` — raw chronology, live-appended
+  across a reboot.
+- `docs/handoff/supplements/2026-08-28-001.md` — curated narrative, today.
+- `~/work/nemesis-internal/handoff/2026-08-28-window2-handoff.md` — Window 2's own cold-start
+  note, more procedural detail than belongs in the public HANDOFF.
+- `~/work/nemesis-internal/handoff/2026-08-28-window3-to-window2-tier1-ufw-and-ownership.md`
+  — the ufw fix handoff and ownership-split proposal, operator-approved.
+- `~/work/nemesis-internal/audits/base-project-gap-inventory-2026-08-28.md` — the reference
+  document, §4 above.
+- Prior session: `docs/handoff/supplements/2026-08-27-001.md`.
 
 ## Topology
 
-**Two real changes this session, not cosmetic.** The ADR 0019 lockout-failsafe mechanism
-is now fully live: a firewall change under test can be reverted by an admin locked out of
-the dashboard via a single-use, hashed, 30-minute token, validated entirely inside the
-privileged `nemesis_fwd` helper — the dashboard process never sees or checks it. Separately,
-the AI engine now has its first live L4 (unattended-governance) action class,
-`firewall_failsafe_override`, with a working grant/revoke toggle, an append-only audit
-trail independent of the dashboard's own `audit_log`, and (as of tonight's fix) a decision
-consumer that can actually assert an override rather than silently always resolving to
-`allow_revert`. Otherwise unchanged from prior handoffs. See
-`docs/handoff/supplements/2026-08-19-001.md` for the last full topology summary predating
-both of these.
+**No architectural change today** — today's work was investigation, cleanup, and one small
+diagnostics fix (`ufw_rules.py`), not new product surface. The two structural items from
+yesterday's topology (ADR 0019 lockout-failsafe, the L4 `firewall_failsafe_override` action
+class) are unchanged. The one thing worth carrying forward as a pattern: today surfaced a
+third instance of the same failure class (`sudo` under a `NoNewPrivileges=yes` unit with no
+matching grant — first `device_scanner`'s `sudo nmap`, then `alert_watcher`'s old
+`load_blocked_ips()`, now `ufw_rules.py`) — worth a grep for any remaining `sudo`-prefixed
+calls in service code before assuming this class is closed. See
+`docs/handoff/supplements/2026-08-19-001.md` for the last full topology summary.
