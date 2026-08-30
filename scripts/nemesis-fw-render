@@ -81,6 +81,12 @@ mapfile -t V6 < <(ip6tables -S ufw6-user-input 2>/dev/null \
 # A refused address NEVER receives a verdict regardless of this switch.
 ENFORCE="${NEMESIS_FW_ENFORCE:-1}"
 
+# Tailnet interface for the loop-prevention DROP below. NAME-matched, deliberately:
+# this is OUR OWN component with a stable name, unlike a user's VPN device whose name
+# is arbitrary (which is why vpn_dns_guard kind-matches those instead). Overridable
+# for the rare non-default tun name.
+TS_IFACE="${NEMESIS_TS_IFACE:-tailscale0}"
+
 # ── never-block guard ────────────────────────────────────────────────────────
 # FAIL-CLOSED, and deliberately strict: an enforcement table without a working
 # never-block check is worse than no table, so a guard that cannot run stops the
@@ -200,6 +206,38 @@ cat <<'NFT'
     chain forward {
         type filter hook forward priority -300; policy accept;
         counter comment "nemesis:forward:traversed"
+        # ── Tailnet loop-prevention DROP (Gateway Mode step 1b) ──────────────
+        #
+        # REPLICATES Tailscale's own ts-forward rule, which we do NOT get for free
+        # because `--netfilter-mode=nodivert` (set by configure_tailnet_enforcement
+        # since 2026-07-30) means ts-forward is MAINTAINED but never jumped from
+        # FORWARD. Its INPUT sibling -- the tailnet anti-spoof DROP -- was already
+        # replicated into ufw's before.rules for exactly this reason; this is the
+        # forward-side counterpart that was left outstanding, and install.sh says so:
+        # "ts-forward is also unjumped: replicate its loop-prevention DROP and the
+        # nat-table SNAT before enabling ip_forward".
+        #
+        # Form taken from Tailscale's own source (util/linuxfw, addBase4), not
+        # inferred from a running box:
+        #     ["-o", tunname, "-s", tsaddr.CGNATRange().String(), "-j", "DROP"]
+        # i.e. drop anything being FORWARDED OUT the tailnet interface that already
+        # carries a tailnet source -- which would be tailnet traffic re-entering the
+        # tailnet, a routing loop.
+        #
+        # INERT UNTIL FORWARDING IS ENABLED, deliberately. With ip_forward=0 the
+        # kernel never invokes the forward hook, so this rule can land well ahead of
+        # Gateway Mode and be in place BEFORE the switch flips -- which is the
+        # ordering install.sh warns about, in the safe direction.
+        #
+        # ⚠ IPv4 ONLY, and that gap is INHERITED, not introduced. Tailscale's own
+        # addBase6 has no CGNAT-DROP equivalent (a TODO in their source), so an IPv6
+        # rule here would DIVERGE from upstream on a security rule rather than
+        # replicate it. Replicating what exists and documenting what does not is the
+        # honest option; adding an untested IPv6 rule that could break legitimate
+        # tailnet forwarding is not. Revisit if upstream closes it.
+NFT
+echo "        oifname \"$TS_IFACE\" ip saddr 100.64.0.0/10 counter drop comment \"nemesis:forward:tailnet-loop\""
+cat <<'NFT'
     }
     chain output {
         type filter hook output priority -175; policy accept;
