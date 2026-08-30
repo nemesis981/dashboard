@@ -3,6 +3,49 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [MED] Rule 8: the operator's real username is a test fixture in 3 public-repo files (filed 2026-08-30)
+**41 occurrences of the operator's own first name, as a bare string literal** in an actor/username
+argument, in tracked Python that ships in the public repo. Measured, not estimated — reproduce
+with `git grep -o '"<operator-first-name>"' -- '*.py'`.
+
+*(This entry deliberately does NOT spell the name. Writing it out three more times to explain that
+it should not be in the repo would add to the very thing being reported — and a Rule 8 note that
+leaks in its own prose is the failure mode this project has already recorded. The grep above is
+runnable by anyone who can read the repo, which is everyone who could action this.)*
+
+| file | count |
+|---|---|
+| `modules/ai_engine/test_undo_path.py` | 22 |
+| `modules/ai_engine/test_master_authority.py` | 17 |
+| `modules/ai_engine/test_undo_ip_block.py` | 2 |
+
+Confined to those three — a repo-wide check for the single-quoted, `user:`-prefixed, and
+`@`-suffixed forms, outside `/home/<user>` paths, found nothing else, so this is a bounded sweep,
+not an open-ended one. (`/home/<user>` path leaks are a separate, already-known Rule 8 category
+and are NOT this entry.)
+
+**Rule 8 names usernames explicitly** alongside home paths, IPs, and emails. These read as
+harmless test scaffolding, which is exactly why they have survived: nothing about an actor
+argument looks like a leak at review time, and the file is a test rather than shipped code — but
+the repo is public either way.
+
+**Fix shape — one dedicated commit, no other changes riding along.** Add a module-level constant
+(e.g. `TEST_ACTOR = "test-operator"`) to each of the three files and replace every occurrence.
+There is currently **no constant convention in these files to follow** — checked; the literal is
+inline at all 41 sites — so the constant is itself part of the fix, and is what stops the next
+one being added by copy-paste. Verify with the grep above returning nothing,
+and re-run all three suites (`test_undo_path.py`, `test_master_authority.py`,
+`test_undo_ip_block.py`) since the actor value is asserted on in some checks.
+
+**Do NOT partially fix it.** Replacing a subset gains no privacy (the name still ships) while
+leaving the file internally inconsistent, which is worse than either end state.
+
+**Disclosed honestly: 1 of the 41 was added by me on 2026-08-30** (`3015f1b`, count in
+`test_master_authority.py` went 16 → 17). It was added deliberately, matching the 16 already
+there rather than introducing a lone inconsistent placeholder mid-commit, with this entry as the
+agreed follow-up — operator-directed. Recording it so the entry is not read as purely inherited
+debt.
+
 ### [MED] Re-evaluate `malware_file_quarantine`'s L1 capability ceiling once restore ships (filed 2026-08-30)
 **Blocked-on, ready to pick up the moment file-quarantine restore lands. Deliberately NOT part of
 the restore build — one variable at a time, operator-directed 2026-08-30.**
