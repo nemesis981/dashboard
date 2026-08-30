@@ -42,7 +42,7 @@ import tempfile
 import traceback
 
 _PASS, _FAIL = [], []
-EXPECTED_CHECKS = 37
+EXPECTED_CHECKS = 49
 
 
 def check(label, cond, detail=""):
@@ -305,6 +305,7 @@ print("\n== ROUND TRIP (synthetic authenticator, NOT a physical touch) ==")
 conn = _db()
 try:
     _signer = auth.get(conn, "auth-1")
+    _signer_record = dict(_signer)
     _assertion = make_assertion(KEYS[0], base64.b64decode(q["challenge_b64"]),
                                 RP_HASH, RP_ID)
     _consumed = []
@@ -348,6 +349,101 @@ try:
           v3.reason != aap.Reason.CONSUMPTION_RACE, v3.reason)
 finally:
     conn.close()
+
+
+print("\n== MINT: /approve spends the approval and queues a SIGNED task ==")
+# The OUTER envelope needs the server signing key. Generated into the throwaway
+# tree rather than mocked: mint_approved_task() calls the real sign_task(), and a
+# mocked signer would leave the one thing this section exists to prove -- that a
+# real, fully-signed envelope survives to the agent -- untested.
+import server_keys as _sk
+try:
+    _sk.ensure_server_keypair()
+except Exception as _e:
+    _die("could not create a throwaway server keypair: %s" % _e)
+if not _sk.have_server_keypair():
+    _die("server keypair still absent after ensure_server_keypair()")
+# A fresh request, since the one above was deliberately consumed and replayed.
+rq2 = client.post("/api/admin-approval/request", json={
+    "capability": "restart", "target": "device-0001",
+    "action_params_b64": base64.b64encode(b"{}").decode(),
+    "authenticator_id": "auth-1"})
+q2 = rq2.get_json() or {}
+_asrt = make_assertion(KEYS[0], base64.b64decode(q2["challenge_b64"]), RP_HASH, RP_ID,
+                       counter=9)
+ap = client.post("/api/admin-approval/approve", json={
+    "request_id": q2["request_id"],
+    "authenticator_data_b64": base64.b64encode(_asrt["authenticator_data"]).decode(),
+    "client_data_json_b64": base64.b64encode(_asrt["client_data_json"]).decode(),
+    "signature_b64": base64.b64encode(_asrt["signature"]).decode(),
+    "device_id": "device-0001", "action": "restart", "capability": "restart"})
+aj = ap.get_json() or {}
+check("approve succeeds and returns a task_id", ap.status_code == 200 and aj.get("task_id"), aj)
+check("the deliverable window is the 900s decided for this build",
+      aj.get("deliverable_for_seconds") == 900, aj)
+
+conn = _db()
+try:
+    _row = conn.execute("SELECT action, status, approved_envelope FROM scan_tasks "
+                        "WHERE task_id=?", (aj.get("task_id"),)).fetchone()
+finally:
+    conn.close()
+check("the task row exists and is pending", _row is not None and _row[1] == "pending", _row)
+check("the task carries a stored envelope", bool(_row and _row[2]), "no envelope stored")
+_env = json.loads(_row[2])
+check("the stored envelope carries the INNER approval block",
+      any("approval" in k for k in _env), sorted(_env))
+check("REPLAY of the spent approval is refused by /approve",
+      client.post("/api/admin-approval/approve", json={
+          "request_id": q2["request_id"],
+          "authenticator_data_b64": base64.b64encode(_asrt["authenticator_data"]).decode(),
+          "client_data_json_b64": base64.b64encode(_asrt["client_data_json"]).decode(),
+          "signature_b64": base64.b64encode(_asrt["signature"]).decode(),
+          "device_id": "device-0001", "action": "restart",
+          "capability": "restart"}).status_code == 409)
+
+
+print("\n== DELIVERY: the envelope is handed over VERBATIM, not rebuilt ==")
+import hw_monitor
+_delivered = hw_monitor._tasks_for_response("device-0001")
+_mine = [e for e in _delivered if e.get("task_id") == aj.get("task_id")]
+check("the approved task is delivered", len(_mine) == 1, len(_delivered))
+check("delivered bytes are IDENTICAL to what was minted", _mine and _mine[0] == _env,
+      "envelope was rebuilt at delivery")
+
+
+print("\n== CROSS-SIDE: the AGENT independently verifies the appliance's envelope ==")
+# The load-bearing check. The agent re-runs §7 against a key IT pinned, and spends
+# the approval AGAIN in its own claim store -- the appliance's consumption record is
+# worthless to an agent defending against that appliance.
+sys.path.insert(0, os.path.join(_REPO, "nemesis_agent"))
+import tasks as agent_tasks
+check("`restart` is APPROVAL-REQUIRED on the agent",
+      agent_tasks.disposition("restart") == agent_tasks.DISP_APPROVAL_REQUIRED,
+      agent_tasks.disposition("restart"))
+_pinned = dict(_signer_record)
+_claims = []
+try:
+    _blk = agent_tasks.verify_admin_approval(
+        _env, "device-0001", appliance_id=None, now=int(time.time()) + 1,
+        lookup=lambda aid: _pinned if aid == _pinned["authenticator_id"] else None,
+        claim=lambda rid, exp, now=None: (_claims.append(rid) or True))
+    check("the AGENT verifies the appliance-minted approval", bool(_blk))
+    check("and it spent the approval in its OWN claim store", len(_claims) == 1, _claims)
+except Exception as exc:
+    check("the AGENT verifies the appliance-minted approval", False, "%s: %s"
+          % (type(exc).__name__, exc))
+    check("and it spent the approval in its OWN claim store", False, "not reached")
+# CONTROL: the same envelope aimed at a DIFFERENT device must be refused, or the
+# target binding proves nothing.
+try:
+    agent_tasks.verify_admin_approval(
+        _env, "device-OTHER", appliance_id=None, now=int(time.time()) + 1,
+        lookup=lambda aid: _pinned, claim=lambda rid, exp, now=None: True)
+    check("CONTROL: a wrong-target envelope is REFUSED", False, "accepted")
+except Exception as exc:
+    check("CONTROL: a wrong-target envelope is REFUSED",
+          isinstance(exc, agent_tasks.TaskRejected), type(exc).__name__)
 
 
 print("\n== TOTALS ==")

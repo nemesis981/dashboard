@@ -496,7 +496,13 @@ BASE_EXEMPT_ACTIONS = frozenset({
     "checkin", "notify",
     # State-changing but long-established as server-driven, and each already
     # bounded by its own handler.
-    "scan", "restart", "update_rules",
+    #
+    # `restart` LEFT THIS SET on 2026-08-30 and is now APPROVAL-REQUIRED below —
+    # ADR 0026 §D3's first live consumer. Removed rather than listed in both:
+    # `disposition()` checks approval-required first so the stricter reading would
+    # have won anyway, but a membership that never decides anything is exactly the
+    # kind of stale entry a later reader has to reverse-engineer.
+    "scan", "update_rules",
     # Trust-plumbing, special-cased upstream of `_dispatch` and verified against
     # the currently-pinned anchor before either can run.
     ROTATE_ACTION, ATTEST_ACTION,
@@ -679,15 +685,31 @@ APPROVED_PARAMS_FIELD = "action_params_b64"
 #: id space collide with the other.
 APPROVAL_CLAIMS_DIR_NAME = "approval_claims"
 
-#: Actions that require a verified admin approval. EMPTY, and correctly so: the
-#: only capability that will need one (`push_and_run`) does not exist yet, and ADR
-#: 0026 §6 is explicit that step 5 comes last. This mirrors the precedent already
-#: set by `roles.CAPABILITY_ROUTES`, whose three capabilities also declare empty
-#: endpoint sets rather than inventing names for features nobody has built.
+#: Actions that require a verified admin approval.
 #:
-#: The MECHANISM below is complete and fully tested; only the set is empty. An
-#: action added here starts requiring an approval immediately, with no other change.
-BASE_APPROVAL_REQUIRED_ACTIONS = frozenset()
+#: WAS EMPTY until 2026-08-30, correctly so at the time: ADR §6 named
+#: `push_and_run` as the first capability to need one, and that feature does not
+#: exist. `restart` is here instead, and the substitution is deliberate — §6's
+#: ordering predates anyone checking whether `push_and_run` existed, so waiting
+#: for it would have left the whole protocol unexercised indefinitely. `restart`
+#: is a REAL, already-dispatched action with a real target device, which is what
+#: the gate's `target` binding needs to be meaningful.
+#:
+#: ⚠ AN ACTION LISTED HERE CANNOT BE QUEUED THE ORDINARY WAY. `hw_monitor.
+#: enqueue_task()` queues an intent whose envelope is built at delivery, and that
+#: envelope carries no inner approval block — this agent would refuse it. An
+#: approval-required action must be queued via `enqueue_approved_task()` with an
+#: envelope already minted by `admin_approval_gate.mint_approved_task()`. Adding
+#: an action here without moving its callers is therefore not a tightening, it is
+#: a break: every dispatch of it starts failing at the agent.
+BASE_APPROVAL_REQUIRED_ACTIONS = frozenset({
+    # ADR 0026 §D3's first live consumer, 2026-08-30. Moved out of
+    # BASE_EXEMPT_ACTIONS above. Restarting an endpoint is state-changing, has a
+    # real target device, and is disruptive enough to be worth a human's explicit
+    # per-action approval — while being one of the few existing actions whose
+    # failure mode under a bad approval is merely "the device did not restart".
+    "restart",
+})
 
 _runtime_approval_required = {}
 

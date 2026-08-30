@@ -624,14 +624,30 @@ def init_db():
                 -- server-side evidence, never from this column alone.
                 result_ok    INTEGER,
                 result_detail TEXT,
-                reported_at  TEXT
+                reported_at  TEXT,
+                -- ADR 0026 §D3: the PRE-MINTED signed envelope for an
+                -- approval-required action, stored whole as JSON.
+                --
+                -- EVERY OTHER TASK IS SIGNED AT DELIVERY, and this column is the
+                -- one exception. It exists because minting an approved envelope
+                -- CONSUMES the operator's single-use approval: the approval is
+                -- spent at the moment the human approves, so the envelope cannot
+                -- be rebuilt later when the device finally polls. It is therefore
+                -- built once, at approval, and handed over verbatim.
+                --
+                -- NULL for every ordinary task, and that NULL is meaningful:
+                -- `_tasks_for_response` builds those the normal way. A non-NULL
+                -- value means "this envelope is already signed and already paid
+                -- for -- deliver exactly these bytes, do not rebuild them."
+                approved_envelope TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_scan_tasks_device "
                   "ON scan_tasks(device_id, status)")
         _st_cols = {r[1] for r in c.execute("PRAGMA table_info(scan_tasks)").fetchall()}
         for _c, _d in (("result_ok", "INTEGER"), ("result_detail", "TEXT"),
-                       ("reported_at", "TEXT"), ("origin_queued_at", "TEXT")):
+                       ("reported_at", "TEXT"), ("origin_queued_at", "TEXT"),
+                       ("approved_envelope", "TEXT")):
             if _st_cols and _c not in _st_cols:
                 c.execute("ALTER TABLE scan_tasks ADD COLUMN %s %s" % (_c, _d))
         conn.commit()
@@ -2614,6 +2630,38 @@ def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None,
     return task_id
 
 
+def enqueue_approved_task(device_id, action, envelope, actor=None):
+    """Queue an approval-gated task that is ALREADY signed. Returns its task_id.
+
+    The inverse of `enqueue_task`'s contract, and deliberately a separate function
+    rather than a flag on it. `enqueue_task` queues an INTENT and the envelope is
+    built at delivery; this queues a FINISHED envelope that must be delivered
+    byte-for-byte. Conflating them behind a parameter would make it possible to
+    queue an approval-required action as an ordinary intent, which would then be
+    signed at delivery WITHOUT an inner approval block and refused by the agent —
+    a task that can never succeed, created by a code path that looks correct.
+
+    The task_id comes from the envelope, never generated here: the id is inside
+    the signed bytes, so a fresh one would not match what the operator approved.
+    """
+    task_id = (envelope or {}).get("task_id")
+    if not task_id:
+        raise ValueError("approved envelope carries no task_id")
+    conn = _db_connect()
+    try:
+        conn.execute(
+            "INSERT INTO scan_tasks (task_id, device_id, action, params_json, "
+            "status, created_at, actor, approved_envelope) "
+            "VALUES (?,?,?,?,'pending',?,?,?)",
+            (task_id, device_id, action, json.dumps(envelope.get("params") or {}),
+             datetime.now().isoformat(timespec="seconds"), actor,
+             json.dumps(envelope)))
+        conn.commit()
+    finally:
+        conn.close()
+    return task_id
+
+
 def _device_anchor_fingerprint(device_id):
     """Which server key this device is on, or None if never rotated.
 
@@ -2829,6 +2877,34 @@ def _redelivery_decision(status, expires_at, dispatch_count, now):
     return "redeliver"
 
 
+def _mark_task_expired(task_id, detail=None):
+    """Mark one task expired with a server-side reason. Never raises.
+
+    Matches `_requeue_expired_tasks`'s convention exactly: `result_ok` is left
+    NULL because that column means "what the device attested" and nothing was
+    attested here, and the detail is prefixed `server:` so its provenance is
+    unmistakable in the UI.
+
+    NOT a redelivery. An approved envelope that lapsed cannot be retried — the
+    single-use approval that authorised it is already spent — so the only correct
+    move is to record why and stop.
+    """
+    try:
+        conn = _db_connect()
+        try:
+            conn.execute(
+                "UPDATE scan_tasks SET status='expired', result_detail=? "
+                "WHERE task_id=?",
+                (detail or "server: approved envelope expired before the device "
+                           "polled; the approval was already spent and cannot be "
+                           "reused — request a new approval", task_id))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log.warning("could not mark task %s expired: %s", task_id, e)
+
+
 def _requeue_expired_tasks(device_id, now=None):
     """Return timed-out tasks to 'pending'; abandon ones past the attempt limit.
 
@@ -2961,7 +3037,8 @@ def _tasks_for_response(device_id):
         conn = _db_connect()
         try:
             rows = conn.execute(
-                "SELECT task_id, action, params_json FROM scan_tasks "
+                "SELECT task_id, action, params_json, approved_envelope "
+                "FROM scan_tasks "
                 "WHERE device_id=? AND status='pending' ORDER BY id LIMIT ?",
                 (device_id, MAX_TASKS_PER_BEAT)).fetchall()
         finally:
@@ -2982,11 +3059,43 @@ def _tasks_for_response(device_id):
         if signer:
             log.info("device=%s is on a non-current anchor — signing its tasks "
                      "with %s", device_id, os.path.basename(signer))
-        for task_id, action, params_json in rows:
+        for task_id, action, params_json, approved_envelope in rows:
             try:
                 params = json.loads(params_json or "{}")
             except Exception:
                 params = {}
+            if approved_envelope:
+                # ── ADR 0026 §D3: deliver the PRE-MINTED envelope verbatim ──
+                #
+                # Not rebuilt, and it must never be: the inner approval block is
+                # covered by the operator's signature, and the single-use approval
+                # that produced it was already spent at approval time. Re-signing
+                # here would produce an envelope with no inner block that the agent
+                # would refuse, and there is no second approval to spend.
+                try:
+                    env = json.loads(approved_envelope)
+                except Exception:
+                    log.error("task %s carries an unparseable approved envelope — "
+                              "skipping it rather than sending an unapproved task",
+                              task_id)
+                    continue
+                # An expired approved envelope is dropped HERE, with a reason, rather
+                # than sent for the agent to reject. The agent's refusal is correct
+                # but arrives as a task failure with no explanation the operator can
+                # act on; the approval is already spent either way, so telling them
+                # it lapsed before delivery is the only useful difference.
+                try:
+                    _exp = datetime.fromisoformat(env.get("expires_at", ""))
+                except Exception:
+                    _exp = None
+                if _exp is not None and _exp < now:
+                    log.warning("approved task %s for device=%s expired before the "
+                                "device polled (approval already spent) — not sent",
+                                task_id, device_id)
+                    _mark_task_expired(task_id)
+                    continue
+                envelopes.append(env)
+                continue
             if action == server_keys.ROTATE_ACTION:
                 envelopes.append(server_keys.build_rotation_task(
                     device_id, task_id=task_id, sign_with=signer, now=now))

@@ -479,6 +479,8 @@ ROUTE_MINIMUMS = {
     "api_admin_approval_authenticators":               (_A, _A),
     "api_admin_approval_pair":                         (_A, _A),
     "api_admin_approval_request":                      (_A, _A),
+    # The route that SPENDS an approval and queues the signed task it authorises.
+    "api_admin_approval_approve":                      (_A, _A),
     "module_malware_detection__api_finding_quarantine": (_A, _A),
     # Admin for BOTH methods, and admin rather than sub_admin deliberately:
     # restore returns a file the product judged malicious to the location it was

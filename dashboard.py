@@ -8493,6 +8493,119 @@ def api_admin_approval_request():
         conn.close()
 
 
+#: How long a MINTED approval envelope stays deliverable.
+#:
+#: DERIVED FROM THE AGENT'S POLL INTERVAL, not chosen for its own sake. The gate's
+#: own DEFAULT_TASK_TTL_S is 300s and `nemesis_agent.config.POLL_INTERVAL_DEFAULT`
+#: is also 300s, so an envelope minted just after a beat expires almost exactly as
+#: the next one arrives — the round trip would fail roughly half the time in
+#: steady state, and each failure BURNS the operator's single-use approval. Three
+#: intervals makes delivery near-certain while keeping "recent" meaningful.
+#:
+#: Widening the TIME window does not widen WHAT the approval authorises: the
+#: envelope is still bound to one device, one action and one exact parameter set,
+#: and is single-use on both sides independently. Revisit this if
+#: POLL_INTERVAL_DEFAULT changes — it is the input, not a coincidence.
+#:
+#: The server cannot shorten the wait instead: `next_poll_hint` is delivered while
+#: ANSWERING a beat, so it cannot reach an idle agent, and there is no push channel.
+APPROVED_ENVELOPE_TTL_S = 900
+
+
+@app.route("/api/admin-approval/approve", methods=["POST"])
+def api_admin_approval_approve():
+    """Verify an approval and QUEUE the signed task it authorises.
+
+    Body: {request_id, authenticator_data_b64, client_data_json_b64, signature_b64,
+           device_id, action, capability}
+
+    This is the one route that SPENDS an approval. `mint_approved_task()` verifies
+    §7 and consumes the request atomically in the same operation, so a second
+    caller racing this one loses at the database rather than at a check.
+
+    The minted envelope is stored WHOLE on the task row and delivered verbatim.
+    It cannot be rebuilt at delivery like every other task: the approval that
+    authorised it is spent, and there is no second one to spend.
+    """
+    aap, pairing, rotation, store, auth = _aap_modules()
+    from core import admin_approval_gate as gate
+    data = request.get_json(silent=True) or {}
+
+    try:
+        request_id = bytes.fromhex(str(data.get("request_id") or ""))
+    except ValueError:
+        return jsonify({"ok": False, "error": "request_id must be hex"}), 400
+    device_id = str(data.get("device_id") or "")
+    action = str(data.get("action") or "")
+    capability = str(data.get("capability") or "")
+    if not (device_id and action and capability):
+        return jsonify({"ok": False,
+                        "error": "device_id, action and capability are required"}), 400
+
+    try:
+        assertion = {
+            "authenticator_data": base64.b64decode(
+                data.get("authenticator_data_b64") or "", validate=True),
+            "client_data_json": base64.b64decode(
+                data.get("client_data_json_b64") or "", validate=True),
+            "signature": base64.b64decode(data.get("signature_b64") or "",
+                                          validate=True),
+        }
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": "assertion fields must be valid base64"}), 400
+
+    conn = _dm_conn()
+    try:
+        rec = store.load_request(conn, request_id)
+        if rec is None:
+            return jsonify({"ok": False, "error": "no such approval request"}), 404
+        signer = auth.get(conn, rec.get("authenticator_id"))
+        if signer is None or signer.get("revoked"):
+            return jsonify({"ok": False,
+                            "error": "the approving authenticator is no longer "
+                                     "active on this appliance"}), 409
+        try:
+            envelope = gate.mint_approved_task(
+                conn=conn, request_id=request_id, authenticator=signer,
+                assertion=assertion, now=int(time.time()),
+                device_id=device_id, action=action, capability=capability,
+                ttl_seconds=APPROVED_ENVELOPE_TTL_S)
+        except Exception as exc:
+            # GateRejected covers a failed signature, a target/capability mismatch,
+            # an expired request and a lost consumption race. All are refusals; the
+            # detail is returned because every one of them is something the operator
+            # must act on (re-approve, pick the right device, start over).
+            log.warning("admin-approval: mint refused: %s", exc)
+            return jsonify({"ok": False, "error": str(exc)[:300]}), 409
+    except Exception:
+        log.exception("admin-approval: minting failed")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+    finally:
+        conn.close()
+
+    # Queued only AFTER a successful mint. An approval-required task queued the
+    # ordinary way would be signed at delivery with no inner block and refused by
+    # the agent — a task that can never succeed. There is deliberately no code path
+    # that creates one.
+    try:
+        import hw_monitor
+        task_id = hw_monitor.enqueue_approved_task(
+            device_id, action, envelope, actor=_current_actor_label())
+    except Exception:
+        log.exception("admin-approval: could not queue the approved task")
+        # The approval is ALREADY SPENT at this point and cannot be replayed, so
+        # say so plainly rather than implying a retry will work.
+        return jsonify({"ok": False,
+                        "error": "the approval verified but the task could not be "
+                                 "queued; that approval is now spent and a new one "
+                                 "must be requested"}), 500
+
+    return jsonify({"ok": True, "task_id": task_id,
+                    "expires_at": envelope.get("expires_at"),
+                    "deliverable_for_seconds": APPROVED_ENVELOPE_TTL_S})
+
+
 @app.route("/api/settings/observe-every-n", methods=["POST"])
 def api_set_observe_every_n():
     """Set the remote-agent observation divisor (core settings table).

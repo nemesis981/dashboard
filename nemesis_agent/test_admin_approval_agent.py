@@ -395,8 +395,22 @@ check("every refusal reason is DISTINCT (why must not be inferred)",
 # ═══════════════════════════════════════════════════════════════════════════
 print("\n== CLASSIFICATION: the approval tier, and which way ambiguity resolves ==")
 
-check("the approval-required set is EMPTY (push_and_run is not built -- ADR §6)",
-      tasks.BASE_APPROVAL_REQUIRED_ACTIONS == frozenset())
+# WAS "the set is EMPTY (push_and_run is not built)". Correct until 2026-08-30,
+# when `restart` became D3's first live consumer -- ADR §6's "push_and_run first"
+# ordering predates anyone checking whether that feature existed, and waiting for
+# it would have left the protocol unexercised indefinitely.
+check("`restart` is APPROVAL-REQUIRED (D3's first live consumer)",
+      "restart" in tasks.BASE_APPROVAL_REQUIRED_ACTIONS,
+      tasks.BASE_APPROVAL_REQUIRED_ACTIONS)
+check("  ...and it LEFT the exempt set rather than being listed in both",
+      "restart" not in tasks.BASE_EXEMPT_ACTIONS)
+check("  ...and it resolves through disposition(), not just set membership",
+      tasks.disposition("restart") == tasks.DISP_APPROVAL_REQUIRED,
+      tasks.disposition("restart"))
+# CONTROL: a sibling that was classified alongside it must be UNAFFECTED, or this
+# would pass equally well if every action had become approval-required.
+check("CONTROL: `scan` is still EXEMPT (the move was scoped to one action)",
+      tasks.disposition("scan") == tasks.DISP_EXEMPT, tasks.disposition("scan"))
 tasks.register_approval_required_action("push_and_run", "test")
 check("a registered action reports APPROVAL_REQUIRED",
       tasks.disposition("push_and_run") == tasks.DISP_APPROVAL_REQUIRED)
