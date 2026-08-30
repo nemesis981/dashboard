@@ -1533,9 +1533,19 @@ configure_forkb_nat() {
     #
     #   Verified 2026-08-30 from the commit record (`d72cda8`'s measured live test
     #   against an enrolled agent, and `7f28d16`'s replicated DROP), NOT from a
-    #   live iptables read — `sudo -n` was unavailable in that session, and an
-    #   empty `iptables -S` is the instrument failing rather than evidence. Worth
-    #   one live confirmation by whoever next has root.
+    #   live iptables read: `iptables` is not in this box's NOPASSWD grant list, so
+    #   `sudo -n iptables -S FORWARD` is DENIED and returns nothing. An empty
+    #   result there is the command being refused, not the chain being empty.
+    #
+    #   (An earlier version of this note said "`sudo -n` was unavailable", which
+    #   was wrong and worth correcting rather than leaving: `sudo -n` works fine
+    #   here — `sudo -n -l` lists real grants — and only the specific command is
+    #   denied. Stating the broader claim would send the next reader looking for a
+    #   missing sudo capability instead of a missing grant ENTRY, which is a
+    #   different fix. Same failure family this file already documents: an empty
+    #   read reported as a measurement.)
+    #
+    #   Worth one live confirmation by whoever next has root.
     #
     # EGRESS INTERFACE IS DERIVED, NOT PINNED. A hardcoded interface silently
     # stops matching whenever egress changes. We ask vpn_dns_guard for the

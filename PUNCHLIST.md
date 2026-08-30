@@ -3,6 +3,44 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [MED] The appliance cannot resolve its own MagicDNS names (filed 2026-08-30)
+**⛔ NOT the PIA/DNS investigation. Deliberately filed separately — do not merge them.** Two
+unrelated DNS problems being conflated is how both get misdiagnosed, and the evidence that these
+are distinct is below rather than asserted.
+
+**Symptom, measured:** `getent hosts <this-box>.<tailnet>.ts.net` FAILS on the appliance while
+ordinary resolution works (`getent hosts one.one.one.one` succeeds via `127.0.0.1` → Pi-hole).
+`tailscale status` reports a health check:
+
+> *Tailscale failed to set the DNS configuration of your device: writing to
+> "/etc/resolv.pre-tailscale-backup.conf" in rename of "/etc/resolv.conf":
+> open /etc/resolv.pre-tailscale-backup.conf: permission denied*
+
+**The record itself is fine** — querying Tailscale's own resolver directly
+(`dig @100.100.100.100 <name>`) returns the correct tailnet address. This is a local
+resolution-path problem, not a MagicDNS registration problem.
+
+**Why this is NOT the PIA/DNS work, three independent reasons:**
+1. **Nemesis never writes `/etc/resolv.conf`.** `core/vpn_dns_guard.py` only ever READS it
+   (`_resolv_conf_servers()` opens it for reading). There is no writer anywhere in the repo.
+2. **`/etc/resolv.conf` is the stock `systemd-resolved` symlink, last modified 2026-04-22** —
+   months before any of this month's DNS work. Nothing recent touched it.
+3. **`systemd-resolved` is active and owns the file.** The warning is Tailscale falling back to
+   file-rename because it could not manage DNS through resolved, then failing to create its
+   backup in `/etc`. That is a Tailscale/systemd-resolved interaction.
+
+**Impact — low today, and worth being precise about why.** It does NOT affect clients connecting
+TO this box: a laptop or phone resolves MagicDNS through its OWN Tailscale, which is why the
+admin-approval pairing flow over `https://<name>.ts.net` works despite this. What it WOULD affect
+is anything server-side that resolves a tailnet peer BY NAME. Nothing on the current critical
+paths does, which is why this is MED and not HIGH — but that is a property of today's code, not a
+guarantee, and it would fail as an unexplained connection error rather than a DNS one.
+
+**Fix shape (not investigated, deliberately — this is a capture, per Rule 7):** likely either
+letting Tailscale use the `systemd-resolved` D-Bus path instead of file manipulation, or granting
+it what it needs to write its backup. Do NOT "fix" it by hand-editing `/etc/resolv.conf`: it is a
+managed symlink and the change would be reverted, leaving a confusing intermediate state.
+
 ### [MED] Rule 8: the operator's real username is a test fixture in 3 public-repo files (filed 2026-08-30)
 **41 occurrences of the operator's own first name, as a bare string literal** in an actor/username
 argument, in tracked Python that ships in the public repo. Measured, not estimated — reproduce
