@@ -294,7 +294,14 @@ def patch_externals(live):
         "enrich": alert_watcher.enrich_ip,
         "insert": alert_watcher.ufw_insert_top,
         "delete": alert_watcher.expire_quarantine,
-        "email": alert_watcher.send_email,
+        # `alert_watcher.send_email` NEVER EXISTED -- `git log -S"def send_email"`
+        # on alert_watcher.py returns nothing. This suite has been crashing with
+        # AttributeError on this very line (before any patching happened), and
+        # the real send path is `notify.notify()`, reached via
+        # `send_quarantine_email()`. `send_email` does exist -- in
+        # alert_manager/email_utils.py, a different module never imported here --
+        # which is the likeliest origin of the wrong name.
+        "notify": alert_watcher.notify.notify,
     }
 
     alert_watcher.enrich_ip = lambda ip: {
@@ -306,11 +313,14 @@ def patch_externals(live):
         "summary": f"{ip} - synthetic test (CRITICAL)",
     }
 
-    def fake_email(subj, body):
-        calls["emails"].append(subj)
+    # Matches notify.notify(severity, subject, body, family_key=..., actor=...).
+    # **kwargs deliberately, so an added keyword upstream does not turn this
+    # stub into a TypeError that reads as a quarantine failure.
+    def fake_notify(severity, subject, body, **kwargs):
+        calls["emails"].append(subject)
         return True
 
-    alert_watcher.send_email = fake_email
+    alert_watcher.notify.notify = fake_notify
 
     if not live:
         def fake_insert(ip):
@@ -331,7 +341,7 @@ def restore(saved):
     alert_watcher.enrich_ip = saved["enrich"]
     alert_watcher.ufw_insert_top = saved["insert"]
     alert_watcher.expire_quarantine = saved["delete"]
-    alert_watcher.send_email = saved["email"]
+    alert_watcher.notify.notify = saved["notify"]
 
 
 def inject_and_verify(rule_id, calls):
