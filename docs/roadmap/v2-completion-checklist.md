@@ -91,13 +91,19 @@ already existed, neither built).
   `anomaly_baseline` table's pattern. Newly-registered-domain checking explicitly deferred to
   the v2 community backend build, not this item. Not yet built.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 1 (core, owned-fleet correlation).** Was
-  always a v2 target — see "Checklist correction" above, not a new decision. Not yet built; needs
-  a short spec before code, per the roadmap doc's own status line (unchanged since promotion,
-  2026-06-28). Verified live 2026-08-30: zero code anywhere in the repo.
+  always a v2 target — see "Checklist correction" above, not a new decision. **Spec written
+  2026-08-30** (in the roadmap doc) — grounded in verified existing schema (finding tables,
+  device/IP identity), but gates on one open question: whether Suricata `eve.json` flow-event
+  logging is live on the production box, not verified from the repo. Build not started.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 2 (venue/epidemic spread).** Reopened
-  2026-08-30 — see "Gate reopening" above, including the flagged open tension with the
-  ARP-spoofing park decision. Not yet built; needs a real spec/ADR (thresholds, baseline windows,
-  false-positive handling) before code, per the roadmap doc's own "Reasoning / shape" section.
+  2026-08-30 — see "Gate reopening" above. **Signal set scoped against current visibility
+  2026-08-30** (in the roadmap doc): 2 of 5 signals are Suricata rule-authoring work only, 2
+  share Tier 1's open flow-logging question, and 1 (ARP anomalies) is architecturally the same
+  detector as the already-parked ARP-spoofing item — flagged as an unresolved tension, not
+  decided. Outbound-only IoT beaconing (C2/botnet, no LAN-neighbor attack) recommended
+  **excluded** from this scope, as its own future line item. Still needs a real spec/ADR
+  (thresholds, baseline windows, false-positive handling) before code — scoping is the input to
+  that, not a substitute for it.
 
 - [ ] **gateway-mode-scoping.md** — scoping only, zero code or ADR exists yet. Full gateway vs.
   bridged-peer opt-in toggle, segmentation enforcement. Not required to *ship* before v2 closes,
