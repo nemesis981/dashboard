@@ -110,10 +110,24 @@ immediately. Enrollment data is the difference between guessing and knowing.
 baseline, cautious alerts. Month 6 — precise behavioral model, near-zero false positives.
 **The longer Nemesis runs, the smarter it gets** — per device, per network, per user pattern.
 
-## Tier 2 — Venue / epidemic spread (later, separate addition)
+## Tier 2 — Venue / epidemic spread (v2 target, reopened 2026-08-30)
 The broader "outbreak on a shared/public LAN" detection described below — unknown devices,
-baseline-from-scratch, agentless-guest protection. Stays parked until Tier 1 ships and the
-venue market is scheduled. Everything from here down describes **Tier 2**.
+baseline-from-scratch, agentless-guest protection. Everything from here down describes
+**Tier 2**.
+
+**Was parked** until Tier 1 shipped and the venue market was scheduled — a business-timing
+gate, not a technical one. **Reopened into v2 scope 2026-08-30, operator-directed**, because
+Tier 2 is the only design in the project that detects a compromised IoT/agentless device
+spreading to or attacking other LAN devices: Tier 1's trigger requires an already-flagged,
+agent-monitored source, which an agentless device structurally cannot produce, so Tier 1 alone
+leaves IoT-as-pivot invisible even when fully built. Full reasoning and the gate record:
+`v2-completion-checklist.md`'s "Gate reopening — 2026-08-30" section.
+
+*(This heading and paragraph previously still read "later, separate addition ... stays parked,"
+contradicting this doc's own top status line after the 2026-08-30 reopening. Corrected
+2026-08-30. Noted rather than silently overwritten: a stale section header outliving a status
+change is the exact failure mode this project's morning roadmap audit exists to catch — and
+this doc had it in the same session the reopening was recorded.)*
 
 ## What
 Detect a device on a shared/public LAN exhibiting **spread** behavior — the network
