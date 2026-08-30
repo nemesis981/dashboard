@@ -211,9 +211,13 @@ NAMESPACES = {
     # `test_lan_integrity_registry.py` exists specifically to close that gap: it
     # asserts this grant matches the module's actual DDL, so a table added without
     # a grant fails a test instead of failing in production.
+    # `lan_integrity_arp_bindings` added 2026-08-30 for ARP-spoofing detection --
+    # named individually, per the line above, NOT taken as licence to relax to a
+    # `lan_integrity_` prefix. Four exact names is the point.
     "lan_integrity":      {"tables": ("lan_integrity_state",
                                       "lan_integrity_dhcp_servers",
-                                      "lan_integrity_findings")},
+                                      "lan_integrity_findings",
+                                      "lan_integrity_arp_bindings")},
 
     # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
     # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the

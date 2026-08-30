@@ -33,7 +33,7 @@ import data_manager                             # noqa: E402
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 15
+EXPECTED_CHECKS = 16
 
 MODULE_NAME = "lan_integrity"
 
@@ -75,10 +75,11 @@ def test_ddl_was_actually_found():
     print("\n[CONTROL: the parser found real DDL -- an empty set would pass everything below]")
     tables = _tables_created_by_module()
     check("parser found at least one CREATE TABLE", len(tables) >= 1, True)
-    check("parser found exactly the three expected tables", len(tables), 3)
+    check("parser found exactly the four expected tables", len(tables), 4)
     check("state table found", "lan_integrity_state" in tables, True)
     check("servers table found", "lan_integrity_dhcp_servers" in tables, True)
     check("findings table found", "lan_integrity_findings" in tables, True)
+    check("arp bindings table found", "lan_integrity_arp_bindings" in tables, True)
 
 
 def test_namespace_grant_matches_ddl():

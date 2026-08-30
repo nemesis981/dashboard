@@ -43,6 +43,7 @@ from modules import NemesisModule, get_data_manager
 import sys as _sys
 _sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rogue_dhcp                                          # noqa: E402
+import arp_watch                                           # noqa: E402
 
 log = logging.getLogger("nemesis.lan_integrity")
 
@@ -106,13 +107,47 @@ def _init_db() -> None:
                 assigned_ip TEXT,
                 reason      TEXT,
                 detail      TEXT,
+                -- Tier 2 contract (see signals.py). `confidence` is a VISIBILITY
+                -- statement, not a probability: "observed" means broadcast-class
+                -- so our view of that class is complete; "partial" means derived
+                -- from this host's own cache, where absence proves nothing.
+                confidence  TEXT,
+                subject_ip  TEXT,
+                subject_mac TEXT,
+                previous_mac TEXT,
+                source      TEXT,
                 status      TEXT DEFAULT 'open',
                 closed_by   TEXT,
                 closed_at   REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS lan_integrity_arp_bindings (
+                ip              TEXT PRIMARY KEY,
+                mac             TEXT,
+                previous_mac    TEXT,
+                first_seen      REAL,
+                last_seen       REAL,
+                observed_count  INTEGER DEFAULT 0,
+                change_count    INTEGER DEFAULT 0,
+                last_change_ts  REAL,
+                last_source     TEXT
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_integrity_findings_status "
                      "ON lan_integrity_findings(status, ts DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_lan_integrity_arp_mac "
+                     "ON lan_integrity_arp_bindings(mac)")
+
+        # Guarded migration (PRAGMA table_info + ADD COLUMN), matching the repo's
+        # DDL discipline. These five columns back signals.py's Tier 2 contract and
+        # were added when ARP detection landed; a findings table created by the
+        # rogue-DHCP-only version predates them.
+        existing = {r[1] for r in conn.execute(
+            "PRAGMA table_info(lan_integrity_findings)").fetchall()}
+        for col in ("confidence", "subject_ip", "subject_mac", "previous_mac", "source"):
+            if col not in existing:
+                conn.execute("ALTER TABLE lan_integrity_findings ADD COLUMN %s TEXT" % col)
         conn.commit()
 
 
@@ -170,7 +205,8 @@ def _tail_cycle() -> dict:
     replayed from a meaningless offset. Same shape as anomaly_detection's tailer,
     which is the proven one in this codebase.
     """
-    summary = {"events": 0, "findings": 0, "servers": 0, "error": None}
+    summary = {"events": 0, "findings": 0, "servers": 0,
+               "arp_events": 0, "arp_findings": 0, "error": None}
 
     ok, detail = rogue_dhcp.selftest()
     if not ok:
@@ -201,19 +237,30 @@ def _tail_cycle() -> dict:
 
     now = time.time()
     observations = []
+    arp_observations = []
     try:
         with open(EVE_LOG, "rb") as fh:
             fh.seek(offset)
             for raw in fh:
-                if b'"event_type":"dhcp"' not in raw and b'"event_type": "dhcp"' not in raw:
+                # ONE pass, both event types. Two passes would need two offsets
+                # over the same file, and any drift between them would silently
+                # skip or replay records for one detector but not the other.
+                is_dhcp = b'"event_type":"dhcp"' in raw or b'"event_type": "dhcp"' in raw
+                is_arp = b'"event_type":"arp"' in raw or b'"event_type": "arp"' in raw
+                if not (is_dhcp or is_arp):
                     continue
                 try:
                     rec = json.loads(raw)
                 except Exception:
                     continue
-                obs = rogue_dhcp.parse_event(rec)
-                if obs is not None:
-                    observations.append(obs)
+                if is_dhcp:
+                    obs = rogue_dhcp.parse_event(rec)
+                    if obs is not None:
+                        observations.append(obs)
+                if is_arp:
+                    aobs = arp_watch.parse_eve_event(rec)
+                    if aobs is not None:
+                        arp_observations.append(aobs)
             new_offset = fh.tell()
     except OSError as exc:
         summary["error"] = "eve.json read failed: %s" % exc
@@ -224,6 +271,26 @@ def _tail_cycle() -> dict:
     _set_state("eve_inode", st.st_ino)
     _set_state("last_cycle_ts", now)
     summary["events"] = len(observations)
+    summary["arp_events"] = len(arp_observations)
+
+    # The kernel ARP cache is read EVERY cycle, independently of eve, because it
+    # is the only ARP source available until Suricata's `arp` logger is enabled
+    # (it ships `enabled: no`). Read here rather than inside the eve branch so a
+    # quiet or absent eve log does not also silence this one.
+    cache_obs = _read_proc_arp()
+    if cache_obs:
+        arp_observations.extend(cache_obs)
+        _bump_state("arp_cache_reads_total", len(cache_obs))
+
+    if arp_observations:
+        try:
+            with _db() as conn:
+                summary["arp_findings"] = _arp_cycle(conn, arp_observations, now)
+                conn.commit()
+        except Exception:
+            log.exception("lan_integrity: ARP pass failed")
+        _bump_state("arp_events_total", len([o for o in arp_observations
+                                             if o.get("source") == "suricata_arp"]))
 
     if not observations:
         return summary
@@ -248,10 +315,12 @@ def _tail_cycle() -> dict:
                 continue
             conn.execute("""
                 INSERT INTO lan_integrity_findings(
-                    ts, kind, severity, server_ip, client_mac, assigned_ip, reason, detail, status)
-                VALUES(?, 'rogue_dhcp', ?, ?, ?, ?, ?, ?, 'open')
+                    ts, kind, severity, server_ip, client_mac, assigned_ip, reason, detail,
+                    confidence, subject_ip, subject_mac, source, status)
+                VALUES(?, 'rogue_dhcp', ?, ?, ?, ?, ?, ?, 'observed', ?, ?, 'suricata_dhcp', 'open')
             """, (now, verdict["severity"], obs["server_ip"], obs["client_mac"],
-                  obs["assigned_ip"], verdict["reason"], json.dumps(obs, sort_keys=True)))
+                  obs["assigned_ip"], verdict["reason"], json.dumps(obs, sort_keys=True),
+                  obs["server_ip"], obs["client_mac"]))
             written += 1
         conn.commit()
 
@@ -262,6 +331,134 @@ def _tail_cycle() -> dict:
     _set_state("dhcp_events_total", total)
     _set_state("last_event_ts", now)
     return summary
+
+
+def _bump_state(key, delta):
+    """Increment a counter. Read-modify-write inside one connection scope."""
+    try:
+        cur = int(_get_state(key, "0") or 0)
+    except (TypeError, ValueError):
+        cur = 0
+    _set_state(key, cur + int(delta))
+
+
+def _gateways(path="/proc/net/route"):
+    """Default-gateway addresses, from the kernel routing table.
+
+    A file read, not `ip route`: no subprocess, no iproute2 dependency inside the
+    sandbox, matching device_scanner's reasoning for reading /proc/net/arp.
+    Returns an EMPTY set on any failure -- and callers must understand what that
+    means: no address is treated as a gateway, so a takeover degrades to a plain
+    binding change (high instead of critical). It NEVER causes a missed finding,
+    only a less severe one. That is the safe direction for an unreadable premise.
+    """
+    out = set()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh.readlines()[1:]:
+                f = line.split()
+                if len(f) < 3 or f[1] != "00000000":
+                    continue
+                gw = f[2]
+                if gw == "00000000":
+                    continue
+                # little-endian hex, as the kernel writes it
+                out.add(".".join(str(int(gw[i:i + 2], 16)) for i in (6, 4, 2, 0)))
+    except OSError:
+        return set()
+    return out
+
+
+def _read_proc_arp(path="/proc/net/arp"):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return arp_watch.parse_proc_arp(fh.read())
+    except OSError:
+        return []
+
+
+def _arp_cycle(conn, observations, now):
+    """Apply ARP observations to the binding table and raise findings.
+
+    Returns the number of findings written. FAILS CLOSED on a broken detector,
+    for the same reason the DHCP pass does: an ARP detector on a healthy LAN is
+    silent, so a broken one is indistinguishable from a clean network.
+    """
+    ok, detail = arp_watch.selftest()
+    if not ok:
+        _set_state("selftest_ok", "0")
+        raise RuntimeError("arp_watch selftest failed: %s" % detail)
+
+    gateways = _gateways()
+    written = 0
+
+    for obs in observations:
+        row = conn.execute(
+            "SELECT mac, change_count, last_change_ts FROM lan_integrity_arp_bindings "
+            "WHERE ip=?", (obs["ip"],)).fetchone()
+        prior = None if row is None else {
+            "mac": row[0], "change_count": row[1], "last_change_ts": row[2]}
+
+        verdict = arp_watch.classify(obs, prior, gateways=gateways, now=now)
+
+        if prior is None:
+            conn.execute(
+                "INSERT INTO lan_integrity_arp_bindings(ip, mac, first_seen, last_seen, "
+                "observed_count, change_count, last_source) VALUES(?,?,?,?,1,0,?)",
+                (obs["ip"], obs["mac"], now, now, obs.get("source")))
+        elif verdict is None:
+            conn.execute(
+                "UPDATE lan_integrity_arp_bindings SET last_seen=?, "
+                "observed_count=observed_count+1, last_source=? WHERE ip=?",
+                (now, obs.get("source"), obs["ip"]))
+        else:
+            conn.execute(
+                "UPDATE lan_integrity_arp_bindings SET mac=?, previous_mac=?, last_seen=?, "
+                "observed_count=observed_count+1, change_count=?, last_change_ts=?, "
+                "last_source=? WHERE ip=?",
+                (obs["mac"], prior["mac"], now, verdict["change_count"], now,
+                 obs.get("source"), obs["ip"]))
+
+        if verdict is not None and _write_finding(conn, verdict, now):
+            written += 1
+
+    # Multi-claim is evaluated ACROSS bindings, not per observation -- a MAC
+    # holding many addresses is invisible from any single event.
+    by_mac = {}
+    for ip_addr, mac in conn.execute(
+            "SELECT ip, mac FROM lan_integrity_arp_bindings WHERE mac IS NOT NULL"):
+        by_mac.setdefault(mac, []).append(ip_addr)
+    for mac, ips in by_mac.items():
+        verdict = arp_watch.classify_multi_claim(mac, ips)
+        if verdict is not None and _write_finding(conn, verdict, now):
+            written += 1
+
+    return written
+
+
+def _write_finding(conn, verdict, now):
+    """Insert a finding unless an equivalent one is already open.
+
+    Dedup is per (kind, subject) rather than per event: a spoofer re-asserting
+    itself every few seconds would otherwise write a row per packet.
+    """
+    subject = verdict.get("subject_ip") or verdict.get("subject_mac")
+    existing = conn.execute(
+        "SELECT 1 FROM lan_integrity_findings WHERE status='open' AND kind=? "
+        "AND COALESCE(subject_ip, subject_mac)=? LIMIT 1",
+        (verdict["signal"], subject)).fetchone()
+    if existing is not None:
+        return False
+    conn.execute("""
+        INSERT INTO lan_integrity_findings(
+            ts, kind, severity, reason, detail, confidence,
+            subject_ip, subject_mac, previous_mac, source, status)
+        VALUES(?,?,?,?,?,?,?,?,?,?, 'open')
+    """, (now, verdict["signal"], verdict["severity"], verdict["reason"],
+          json.dumps(verdict, sort_keys=True), verdict.get("confidence"),
+          verdict.get("subject_ip"), verdict.get("subject_mac"),
+          verdict.get("previous_mac"), verdict.get("source")))
+    return True
 
 
 class Module(NemesisModule):
