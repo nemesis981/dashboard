@@ -283,6 +283,31 @@ and conflating it into Tier 2 risks the same kind of silent scope-widening this 
 discipline exists to catch. If the operator wants it in scope, it should be its own named line
 item — not inferred from "epidemic spread" covering it by implication.
 
+**⚠ REASSESSED 2026-08-30 — exclusion STANDS, but its cost basis changed materially. Read this
+before re-deciding.** The exclusion above was made before the switched-LAN visibility limit was
+measured (see the Tier 1 revision). That measurement changes the comparison in this item's
+favour, and the reasoning is recorded here rather than left in a session transcript:
+
+- **Egress is one of the few things the appliance genuinely sees.** ~89–91% of captured flows
+  involve the appliance as an endpoint, and it is the LAN's DNS server. Outbound beaconing is
+  therefore observable **today, with no new sensor and no gateway-mode dependency.**
+- **It is the only IoT-compromise signal on this page that survives without gateway mode.** Every
+  other agentless-device signal (fan-out, new-device-noisy, and the targeted half of
+  port-sweep/SMB-RDP) is gated on the topological question. This one is not.
+- **So the original "materially different detection shape, would need its own signal design"
+  reasoning still holds — but it is no longer the *expensive* option relative to the
+  alternatives.** It was excluded partly as the costlier add; after measurement it is plausibly
+  the cheaper one, because it needs no visibility change that the others all require.
+- **What has NOT changed:** it is still a different signal (per-device baseline of external
+  destinations and beacon intervals, not LAN-peer behaviour), and folding it into Tier 2 by
+  implication would still be the silent scope-widening this doc warns against. It should be its
+  own line item when built — the recommendation is unchanged, only the cost ranking behind it.
+
+**Practical consequence worth stating plainly:** if `gateway-mode-scoping.md` returns as
+expensive or long-dated, this item becomes the highest-value remaining IoT-compromise coverage
+available in the meantime, rather than the deferred extra it was assessed as. Weigh it against
+gateway mode's answer, not in isolation.
+
 ## PUNCHLIST fix — Suricata rule mislabel (`PUNCHLIST.md:3203-3218`), decided, not applied
 
 Verified this session: real, already-documented, exactly as described — rules 1000001-1000003
