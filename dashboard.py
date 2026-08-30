@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+import base64
 import secrets
 from urllib.parse import urlparse
 import logging
@@ -8203,6 +8204,293 @@ try:
     _ai_register_undo("ip_block_permanent", _undo_ip_block)
 except Exception:
     log.exception("undo: could not register the reversal handlers")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin Approval Protocol v1 (ADR 0026 §D3) — pairing and approval requests
+#
+# The protocol library has been complete and tested since 2026-08-24 and was
+# unreachable: no route ever created a request, paired an authenticator, or minted
+# an approved task. It was NOT forgotten -- §D6 recorded a verified blocker
+# (WebAuthn needs a secure context and a domain-name RP ID; the appliance served
+# plain HTTP on a bare IP) which Stage 0 cleared on 2026-08-24. These routes are
+# the deferred wiring.
+#
+# ⚠ WHAT THESE ROUTES DELIBERATELY DO NOT DO
+# ------------------------------------------
+# They do NOT parse a WebAuthn attestationObject. No CBOR decoder exists anywhere
+# in this codebase, and adding one to accept attestation blobs would be a large
+# new trusted parser on an unauthenticated-input path. The client supplies an
+# already-decoded COSE_Key mapping instead (`getPublicKey()` +
+# `getPublicKeyAlgorithm()` give a browser everything needed to build one), which
+# `build_registration()` validates by actually constructing the key -- a malformed
+# key is refused at pairing rather than surfacing much later as an unexplained
+# signature rejection.
+#
+# ⚠ PAIRING IS NOT APPROVAL-GATED, AND THAT IS THE SPEC, NOT AN OVERSIGHT
+# ----------------------------------------------------------------------
+# §5: "Registration MUST NOT itself require an approval from a companion." On a
+# fresh appliance no companion exists, so requiring one to register the first would
+# deadlock pairing forever with no recovery short of reinstall. `rotation.
+# register_authenticator()` enforces the real rule: unapproved only while
+# `bootstrap_open()` (fewer than two registrations EVER, revoked included), and
+# approval-required after. This route calls THAT, never `authenticators.register`
+# directly, so the bootstrap window cannot be re-entered by revoking.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _aap_modules():
+    """Import the protocol modules lazily. Kept out of module scope on purpose --
+    see the init_admin_approval_tables call site for the measured PYTHONPATH
+    constraint that governs where these may be imported."""
+    from core import admin_approval as aap
+    from core import admin_approval_pairing as pairing
+    from core import admin_approval_rotation as rotation
+    from core import admin_approval_store as store
+    from core import admin_approval_authenticators as auth
+    return aap, pairing, rotation, store, auth
+
+
+def _aap_public_view(rec):
+    """An authenticator record with NO key material. Allowlist, not blocklist:
+    a field added to the table later must not appear here by default."""
+    return {
+        "authenticator_id": rec.get("authenticator_id"),
+        "user_id": rec.get("user_id"),
+        "mode": rec.get("mode"),
+        "cose_alg": rec.get("cose_alg"),
+        "registered_at": rec.get("registered_at"),
+        "revoked": bool(rec.get("revoked")),
+        "created_by": rec.get("created_by"),
+    }
+
+
+@app.route("/api/admin-approval/authenticators", methods=["GET"])
+def api_admin_approval_authenticators():
+    """Registered authenticators and whether a capability may be unlocked yet.
+
+    Returns NO key material and no fingerprints. The fingerprint is the value an
+    operator compares out of band against the companion app to defend the
+    enrollment trust root; publishing it from an authenticated-but-ordinary read
+    would hand an attacker the exact string they need to display.
+    """
+    try:
+        aap, pairing, rotation, store, auth = _aap_modules()
+        conn = _dm_conn()
+        try:
+            records = auth.all_records(conn)
+            verdict = pairing.can_unlock(records)
+            return jsonify({
+                "ok": True,
+                "authenticators": [_aap_public_view(r) for r in records],
+                "active_count": len(pairing.active_authenticators(records)),
+                "minimum_for_unlock": pairing.MIN_AUTHENTICATORS_FOR_UNLOCK,
+                "can_unlock": bool(verdict.allowed),
+                "unlock_refusal": verdict.reason,
+                "bootstrap_open": rotation.bootstrap_open(conn),
+            })
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("admin-approval: could not list authenticators")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+
+
+@app.route("/api/admin-approval/pair", methods=["POST"])
+def api_admin_approval_pair():
+    """Register an authenticator (§5). Admin-only; POST because it mutates.
+
+    Body: {authenticator_id, mode, cose_alg, public_key, [rp_id_hash_b64],
+           [approval]}  -- `approval` is required once bootstrap has closed.
+
+    RP ID IS PINNED HERE, ON FIRST WEBAUTHN PAIRING, and nowhere else. That is the
+    Stage 0 plan's explicit sequencing: `core/rp_identity.py` pins on first use and
+    pinning is effectively one-way, so it must happen when pairing is actually
+    built rather than as a side effect of a TLS rollout. A credential created under
+    one RP ID is unusable under another, so pinning early and wrongly would silently
+    invalidate every authenticator paired before the correction.
+    """
+    aap, pairing, rotation, store, auth = _aap_modules()
+    data = request.get_json(silent=True) or {}
+    actor = _current_actor_label()
+
+    try:
+        mode = int(data.get("mode", aap.MODE_WEBAUTHN))
+        cose_alg = int(data.get("cose_alg"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "mode and cose_alg must be integers"}), 400
+
+    # public_key arrives in TAGGED-JSON form, decoded with the protocol's own
+    # `untag_bytes`. Not a bespoke encoding: a COSE_Key has INTEGER labels and
+    # BYTE values, neither of which survives JSON, and this is already the exact
+    # shape the authenticator table stores (`authenticators.py:195`), the agent's
+    # pinned store holds, and `export_for_installer` emits. Accepting a different
+    # one here would give the companion app two encodings to implement and two
+    # chances to disagree about the key it is registering.
+    raw_pk = data.get("public_key")
+    if not isinstance(raw_pk, dict):
+        return jsonify({"ok": False,
+                        "error": "public_key must be a tagged-JSON COSE_Key object "
+                                 "(integer labels as 'int:N', bytes as {'b64': ...})"}), 400
+    try:
+        public_key = aap.untag_bytes(raw_pk)
+    except Exception as exc:
+        # untag_bytes RAISES rather than skipping a malformed field, deliberately;
+        # surfacing that as a 400 keeps the failure at the decode that caused it
+        # instead of as an unexplained signature rejection much later.
+        return jsonify({"ok": False,
+                        "error": "public_key is not a valid tagged-JSON COSE_Key: %s"
+                                 % str(exc)[:200]}), 400
+
+    rp_hash = None
+    pinned_now = None
+    if mode == aap.MODE_WEBAUTHN:
+        raw = data.get("rp_id_hash_b64")
+        if raw:
+            try:
+                rp_hash = base64.b64decode(raw, validate=True)
+            except Exception:
+                return jsonify({"ok": False,
+                                "error": "rp_id_hash_b64 is not valid base64"}), 400
+        else:
+            # Derive-and-pin. Fails CLOSED: if the RP ID cannot be derived we refuse
+            # to pair rather than pairing against a guess, because a credential bound
+            # to the wrong RP ID can never be used and the failure would surface as an
+            # unexplained signature rejection much later.
+            try:
+                from core import rp_identity
+                conn = _dm_conn()
+                try:
+                    if rp_identity.pinned_rp_id() is None:
+                        pinned_now = rp_identity.pin_rp_id()
+                    rp_hash = rp_identity.rp_id_hash()
+                finally:
+                    conn.close()
+            except Exception as exc:
+                log.exception("admin-approval: could not resolve the RP ID")
+                return jsonify({"ok": False,
+                                "error": "could not determine this appliance's WebAuthn "
+                                         "RP ID (%s); refusing to pair against a guess"
+                                         % str(exc)[:120]}), 409
+
+    try:
+        record = pairing.build_registration(
+            authenticator_id=str(data.get("authenticator_id") or ""),
+            user_id=str(data.get("user_id") or actor or "operator"),
+            mode=mode, cose_alg=cose_alg, public_key=public_key,
+            rp_id_hash=rp_hash)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": "invalid registration: %s"
+                                              % str(exc)[:200]}), 400
+
+    conn = _dm_conn()
+    try:
+        try:
+            stored = rotation.register_authenticator(conn, record, actor=actor)
+        except Exception as exc:
+            # RotationError covers both "no approval supplied when one is required"
+            # and "the approval does not authorize this key". Both are refusals, not
+            # server faults, so 409 rather than 500.
+            return jsonify({"ok": False, "error": str(exc)[:300]}), 409
+        records = auth.all_records(conn)
+        verdict = pairing.can_unlock(records)
+        return jsonify({
+            "ok": True,
+            "authenticator": _aap_public_view(stored),
+            "rp_id_pinned_now": pinned_now,
+            "active_count": len(pairing.active_authenticators(records)),
+            "can_unlock": bool(verdict.allowed),
+            "unlock_refusal": verdict.reason,
+            "bootstrap_open": rotation.bootstrap_open(conn),
+        })
+    except Exception:
+        log.exception("admin-approval: pairing failed")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+    finally:
+        conn.close()
+
+
+@app.route("/api/admin-approval/request", methods=["POST"])
+def api_admin_approval_request():
+    """Create a PENDING approval request and return what the companion must sign.
+
+    Body: {capability, target, action_params_b64, authenticator_id}
+
+    `request_id`, `nonce` and `match_code` are generated inside `create_request()`
+    with a CSPRNG and are never accepted from the caller (§4.1) -- a
+    caller-supplied request_id would let the requester choose the value the
+    approval is bound to.
+
+    Returns the challenge the companion signs. It is DERIVED here from the stored
+    record, not echoed from the request, so the client cannot influence what gets
+    signed by varying what it sent.
+    """
+    aap, pairing, rotation, store, auth = _aap_modules()
+    data = request.get_json(silent=True) or {}
+
+    capability = str(data.get("capability") or "")
+    if not capability:
+        return jsonify({"ok": False, "error": "capability is required"}), 400
+    authenticator_id = str(data.get("authenticator_id") or "")
+    if not authenticator_id:
+        return jsonify({"ok": False, "error": "authenticator_id is required"}), 400
+
+    try:
+        action_params = base64.b64decode(data.get("action_params_b64") or "",
+                                         validate=True)
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": "action_params_b64 is not valid base64"}), 400
+
+    conn = _dm_conn()
+    try:
+        signer = auth.get(conn, authenticator_id)
+        if signer is None or signer.get("revoked"):
+            return jsonify({"ok": False,
+                            "error": "no active authenticator %r on this appliance"
+                                     % authenticator_id}), 409
+
+        # §5 floor, enforced BEFORE a request exists rather than at approval time:
+        # a request the operator can never satisfy is worse than a clear refusal,
+        # and it would sit in the table until it expired.
+        verdict = pairing.can_unlock(auth.all_records(conn))
+        if not verdict.allowed:
+            return jsonify({"ok": False, "error": verdict.reason,
+                            "have": verdict.have, "need": verdict.need}), 409
+
+        rec = store.create_request(
+            conn,
+            user_id=signer.get("user_id"),
+            capability=capability,
+            target=str(data.get("target") or ""),
+            action_params=action_params,
+            appliance_id="",          # no appliance-identity value exists yet; see
+                                      # agent.py's note at verify_admin_approval
+            authenticator_id=authenticator_id,
+            created_by=_current_actor_label())
+
+        payload = aap.encode_payload(
+            request_id=rec["request_id"], capability=rec["capability"],
+            target=rec["target"], action_params=rec["action_params"],
+            appliance_id=rec["appliance_id"],
+            authenticator_id=rec["authenticator_id"],
+            issued_at=rec["issued_at"], expires_at=rec["expires_at"],
+            match_code=rec["match_code"], nonce=rec["nonce"])
+
+        return jsonify({
+            "ok": True,
+            "request_id": rec["request_id"].hex(),
+            # Shown to the operator and compared BY EYE against the companion's
+            # display -- the out-of-band check that a request the companion is
+            # about to sign is the one the operator actually made.
+            "match_code": "%03d" % rec["match_code"],
+            "challenge_b64": base64.b64encode(aap.challenge_for(payload)).decode(),
+            "expires_at": rec["expires_at"],
+        })
+    except Exception:
+        log.exception("admin-approval: could not create an approval request")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+    finally:
+        conn.close()
 
 
 @app.route("/api/settings/observe-every-n", methods=["POST"])

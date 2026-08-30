@@ -466,6 +466,19 @@ ROUTE_MINIMUMS = {
     # setting a finding's status is triage, hence user.
     "module_malware_detection__api_findings":           (_V, _A),
     "module_malware_detection__api_finding_detail":     (_V, _A),
+    # ── Admin Approval Protocol v1 (ADR 0026 §D3) ────────────────────────────
+    # ALL admin, both methods. Pairing registers a key that can authorize
+    # privileged action; the listing reveals which devices can approve; creating a
+    # request is the first half of exercising a capability. None of the three is a
+    # read an ordinary user has any reason to make.
+    #
+    # ⚠ The GET is admin too, deliberately breaking the usual viewonly-can-read
+    # pattern: knowing WHICH authenticators exist and whether the appliance is
+    # still in its unapproved bootstrap window is reconnaissance for exactly the
+    # window in which pairing is unguarded.
+    "api_admin_approval_authenticators":               (_A, _A),
+    "api_admin_approval_pair":                         (_A, _A),
+    "api_admin_approval_request":                      (_A, _A),
     "module_malware_detection__api_finding_quarantine": (_A, _A),
     # Admin for BOTH methods, and admin rather than sub_admin deliberately:
     # restore returns a file the product judged malicious to the location it was
