@@ -1885,11 +1885,29 @@ ufw_and_finish() {
         warn "No dashboard password was set — generated a random one (shown at completion)"
     fi
 
-    # Create htpasswd file (bcrypt, nginx user readable only)
-    htpasswd -bcB /etc/nginx/.nemesis_htpasswd nemesis "$CFG_DASHBOARD_PASSWORD" 2>/dev/null
-    chmod 640 /etc/nginx/.nemesis_htpasswd
-    chown root:www-data /etc/nginx/.nemesis_htpasswd
-    ok "Created /etc/nginx/.nemesis_htpasswd (user: nemesis)"
+    # ── NO htpasswd FILE IS CREATED, and nothing references one ──────────────
+    #
+    # REMOVED 2026-08-30 (operator ruling): HTTP Basic Auth is gone from every
+    # vhost, so the file it existed to serve has no consumer. Creating it anyway
+    # would leave a credential on disk that nothing checks — which reads to a
+    # future maintainer as a live auth layer and invites "restoring" the
+    # auth_basic lines to match it.
+    #
+    # WHY BASIC AUTH WENT, so this is not re-added as a hardening improvement:
+    #   * it was a SECOND credential prompt, visually identical to the dashboard's
+    #     own login in a mobile browser, and generated real support confusion;
+    #   * it BLOCKED the routes whose entire design is "reachable by someone with
+    #     no dashboard account" — /fw/revert (ADR 0019 Amendment 03's
+    #     lockout-failsafe, needed precisely when the admin cannot log in) and
+    #     /email/enroll (a household member holding a code). Both were silently
+    #     unreachable behind it;
+    #   * what it actually defended against — scanners reaching the app — is
+    #     already covered: ufw restricts :443 to the tailnet (100.64.0.0/10) and
+    #     rate-limits :80 on the LAN, and the dashboard's own login carries
+    #     cumulative tiered lockout (3 attempts/5min, 5/15min + email, 10/60min +
+    #     email) shared with nemesis_fwd so one budget covers both entry points.
+    #
+    # The dashboard login is now the SOLE authentication gate on every path.
 
     # Write nginx site config
     cat > /etc/nginx/sites-available/nemesis <<'NGINXEOF'
@@ -1901,18 +1919,16 @@ server {
     client_max_body_size 100M;
 
     # Auth-exempt (token-credentialed installer download + the reachability probe).
-    # Matched before `location /`, so these skip HTTP Basic auth.
+    # Matched before `location /`. These were the Basic-auth exemptions; Basic
+    # auth is gone (see above), so the block now exists only to keep these paths
+    # grouped and greppable. Do NOT read it as evidence of an auth layer.
     location ~ ^/(install/windows/|api/health) {
-        auth_basic off;
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
 
     location / {
-        auth_basic "Nemesis Firewall";
-        auth_basic_user_file /etc/nginx/.nemesis_htpasswd;
-
         proxy_pass http://127.0.0.1:5000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
@@ -1975,11 +1991,9 @@ NGINXEOF
     echo -e "${GREEN}${BOLD}═══════════════════════════════════════════════════════════════════════${NC}"
     echo ""
     echo -e "  ${BOLD}Dashboard URL:${NC}    http://$DETECTED_IP"
-    echo -e "  ${BOLD}Login:${NC}            Username: nemesis"
-    echo -e "  ${BOLD}Password:${NC}         $CFG_DASHBOARD_PASSWORD"
-    echo ""
-    echo "  Save this password — it is stored in /etc/nginx/.nemesis_htpasswd"
-    echo "  To change it later:  sudo htpasswd /etc/nginx/.nemesis_htpasswd nemesis"
+    echo -e "  ${BOLD}First login:${NC}      Open the dashboard URL above."
+    echo "  You will be taken to /setup to create your administrator account."
+    echo "  That account IS the login — there is no separate browser password prompt."
     echo ""
     echo -e "  ${BOLD}Next steps:${NC}"
     echo ""

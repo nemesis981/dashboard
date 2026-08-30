@@ -3,6 +3,40 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [HIGH] install.sh's generated nginx vhost is missing two things the live one has (filed 2026-08-30)
+Found while removing Basic Auth from the installer. A **fresh install today produces a materially
+different — and weaker — nginx config than this box runs**, in two ways that are invisible until
+something misbehaves:
+
+| | live `sites-enabled/nemesis` | what install.sh generates |
+|---|---|---|
+| `auth_basic` | 0 | 0 ✅ *(aligned 2026-08-30)* |
+| `X-Nemesis-Door` headers | **3** | **0** ❌ |
+| `limit_req` / `limit_conn` | **7** | **0** ❌ |
+
+**1. No door headers → session realms silently degrade.** `_current_door()` derives the realm from
+the `X-Nemesis-Door` header nginx injects, and `realm_from_header()` returns `REALM_DIRECT` for
+anything it cannot positively verify. With no header emitted, EVERY request on a fresh install
+resolves to `direct`. That is fail-closed (correct) and consistent (so no logout loop), but it
+means the LAN/TLS realm split — the whole point of `session_realm` — does not exist on a fresh
+install. A session issued at one door would be accepted at the other, which is exactly the
+cross-door replay the module was built to prevent.
+
+**2. No rate limiting.** The live config has 7 `limit_req`/`limit_conn` directives; the generated
+one has none. Now that Basic Auth is gone product-wide, the app's tiered lockout is the sole
+brute-force control on a fresh install, with no nginx-level layer beneath it.
+
+**⚠ Note the door-header secret is per-install** (`NEMESIS_DOOR_SECRET` in `/etc/nemesis.env`), so
+the fix is not a literal copy of this box's file — the installer must generate the secret and
+interpolate it, the way it already does for other per-install values. That is why this is filed
+rather than fixed inline: it needs real work and its own verification, not a paste.
+
+**Also vestigial, found the same pass:** `CFG_DASHBOARD_PASSWORD` is still PROMPTED for
+(`install.sh:212`) and read from config (`:423`), but since the htpasswd file it fed was removed
+it now feeds nothing. The installer asks for a "Dashboard login password" that does nothing. Left
+in place deliberately — removing it touches the interactive config flow and the config-file
+format, which is a separate change from an nginx cleanup.
+
 ### [MED] The appliance cannot resolve its own MagicDNS names (filed 2026-08-30)
 **⛔ NOT the PIA/DNS investigation. Deliberately filed separately — do not merge them.** Two
 unrelated DNS problems being conflated is how both get misdiagnosed, and the evidence that these
