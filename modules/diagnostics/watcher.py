@@ -17,6 +17,7 @@ hand-runnable: `python3 -m modules.diagnostics.watcher [--verbose]`.
 
 import os
 import re
+import json
 import shutil
 import socket
 import logging
@@ -72,6 +73,14 @@ _NOTE_IPV6_ABSENT = "ipv6 not provisioned on this link"
 #: We could not determine whether IPv6 is provisioned. NOT the same as either of
 #: the two above — see `ipv6_expectation`.
 _NOTE_IPV6_UNKNOWN = "ipv6 provisioning undetermined"
+#: A tunnel carries this host's default route and is blocking IPv6 egress. Consumer
+#: VPNs commonly disable IPv6 outright as leak protection, so a failing keytest is
+#: the EXPECTED result while tunnelled rather than a fault. Same distinction
+#: _NOTE_IPV6_ABSENT already draws for an IPv4-only link, applied to a fourth case.
+_NOTE_IPV6_VPN_BLOCKED = "ipv6 blocked by vpn"
+#: The raw-egress probe cannot leave a host whose tunnel/killswitch blocks every
+#: non-tunnel egress. Named separately so it is visible, not swallowed.
+_NOTE_EGRESS_VPN_BLOCKED = "raw egress blocked by vpn"
 
 
 # ── Is IPv6 even expected here? ───────────────────────────────────────────────
@@ -155,6 +164,127 @@ def _selftest_ipv6_expectation() -> None:
 
 
 _selftest_ipv6_expectation()
+
+
+# ── Is this host's EGRESS carried by a tunnel? ───────────────────────────────
+#
+# THE BUG THIS CLOSES (found 2026-08-30, in a fix that shipped and was reverted
+# within one cycle). The first attempt fed the verdict from `_probe_vpn()`, which
+# is True if ANY registered provider reports connected — and `_probe_tailscale`
+# reports connected on every Nemesis appliance, because agent enrollment runs over
+# the tailnet. That made the flag permanently True, which silently suppressed every
+# genuine IPv6 fault and downgraded every real raw-egress failure. A loss of
+# detection coverage, which complains about nothing and so is worse than noise.
+#
+# `vpn_connected` is a fine OBSERVATION and is still recorded to the samples table.
+# It is the wrong VERDICT INPUT. What the verdict needs is narrower: is this host's
+# default egress actually going through a tunnel?
+#
+# Matched by KERNEL LINK KIND, never by name — `tailscale0`, `tun0` and `wg0` are
+# all tunnel-kind, so the name tells you nothing that matters. The discriminator is
+# whether a tunnel-kind interface CARRIES A DEFAULT ROUTE (main or any policy
+# table). Measured on this box: a plain Tailscale mesh has per-peer /32s in table 52
+# and NO default, so it is correctly excluded; PIA connected installs one and is
+# correctly included.
+#
+# EXIT-NODE CASE — DECIDED DELIBERATELY, NOT INHERITED. A host using a Tailscale
+# exit node DOES carry a default route on `tailscale0` and therefore DOES qualify.
+# That is intentional: its egress genuinely is tunnelled, so an IPv6 or raw-egress
+# failure is attributable to the tunnel path rather than to a local fault, and
+# reporting DEGRADED forever would re-create the exact permanent-episode problem
+# this whole family of fixes exists to remove. Pinned by test.
+TUNNEL_LINK_KINDS = frozenset({"tun", "tap", "wireguard", "gre", "vti", "vti6",
+                               "ip6tnl", "ppp"})
+
+
+def _default_route_devs(runner):
+    """Devices carrying a default route in ANY table. None = could not tell."""
+    rc, out = runner(["ip", "-j", "route", "show", "table", "all"])
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        routes = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    return {r.get("dev") for r in routes
+            if isinstance(r, dict) and r.get("dst") == "default" and r.get("dev")}
+
+
+def _link_kind(iface, runner):
+    """Kernel link kind for `iface`, or None if it has none / cannot be read."""
+    rc, out = runner(["ip", "-j", "-d", "link", "show", iface])
+    if rc != 0 or not out.strip():
+        return None
+    try:
+        entries = json.loads(out)
+    except (ValueError, TypeError):
+        return None
+    if not entries or not isinstance(entries[0], dict):
+        return None
+    return (entries[0].get("linkinfo") or {}).get("info_kind")
+
+
+def tunnel_carries_default(runner=None) -> bool:
+    """True when a tunnel-kind interface carries this host's default route.
+
+    A failed read returns False — the STRICT answer, which keeps fault reporting
+    on. That is a deliberate fail-closed choice rather than a silent default: the
+    permissive answer is the one that suppresses alerts, so it must never be
+    reachable by accident.
+    """
+    runner = runner or _run
+    devs = _default_route_devs(runner)
+    if not devs:
+        return False
+    for dev in sorted(devs):
+        if _link_kind(dev, runner) in TUNNEL_LINK_KINDS:
+            return True
+    return False
+
+
+def _selftest_tunnel_carries_default() -> None:
+    """Prove this can return BOTH answers before either is trusted.
+
+    Runs at import, in the production path. The reverted 2026-08-30 fix failed
+    precisely because its input was never measured against reality — a predicate
+    that can only say True looks identical to a working one.
+    """
+    def mk(routes_json, kinds):
+        def runner(cmd):
+            if "route" in cmd:
+                return (0, routes_json)
+            iface = cmd[-1]
+            if iface not in kinds:
+                return (1, "")
+            k = kinds[iface]
+            body = '{"linkinfo":{"info_kind":"%s"}}' % k if k else '{}'
+            return (0, "[%s]" % body)
+        return runner
+
+    phys = '[{"dst":"default","dev":"eth0"}]'
+    tun = '[{"dst":"default","dev":"tun0"}]'
+    mesh = '[{"dst":"default","dev":"eth0"},{"dst":"100.64.0.1","dev":"tailscale0"}]'
+    exitnode = '[{"dst":"default","dev":"tailscale0"}]'
+
+    cases = [
+        (mk(phys, {"eth0": None}), False, "physical-only egress is NOT tunnelled"),
+        (mk(tun, {"tun0": "tun"}), True, "a tun device carrying default IS tunnelled"),
+        (mk(mesh, {"eth0": None, "tailscale0": "tun"}), False,
+         "a mesh VPN with no default route must NOT qualify"),
+        (mk(exitnode, {"tailscale0": "tun"}), True,
+         "an exit node DOES carry the default and DOES qualify (decided)"),
+        (lambda cmd: (1, ""), False, "a failed read must not read as tunnelled"),
+        (lambda cmd: (0, "not json"), False, "unparseable output must not read as tunnelled"),
+    ]
+    for runner, expected, why in cases:
+        got = tunnel_carries_default(runner=runner)
+        if got != expected:
+            raise AssertionError(
+                "tunnel_carries_default self-test failed (%s): got %r, expected %r"
+                % (why, got, expected))
+
+
+_selftest_tunnel_carries_default()
 
 
 # ── command runner (per-probe isolation: one failing probe never kills the run)─
@@ -393,17 +523,25 @@ def _probe(cfg: dict):
     latency_ms = round(a_secs * 1000, 1) if a_secs is not None else None
     flags = {"routing_ok": routing_ok, "dns_ok": dns_ok,
              "egress_ok": egress_ok, "api_ok": api_ok}
-    note = _note(flags, v4_ok, v6_ok, v6_expect)
-    return flags, latency_ms, note, raw, (v4_ok, v6_ok, v6_expect), vpn_connected
+    # Verdict input is the TUNNEL test, not `vpn_connected` — see
+    # `tunnel_carries_default()`. `vpn_connected` remains an observation only.
+    tunnelled = tunnel_carries_default()
+    raw.append(f"  [egress.tunnelled] {tunnelled}")
+    note = _note(flags, v4_ok, v6_ok, v6_expect, tunnelled)
+    return (flags, latency_ms, note, raw, (v4_ok, v6_ok, v6_expect),
+            vpn_connected, tunnelled)
 
 
-def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
+def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED,
+          tunnelled=False) -> str:
     if not flags["routing_ok"]:
         return _NOTE_NO_ROUTE
     if not flags["dns_ok"]:
         return _NOTE_DNS_FAIL
     if not flags["egress_ok"]:
-        return _NOTE_EGRESS_FAIL
+        # A killswitch blocks the raw-egress probe by design. Name that condition
+        # rather than reporting it as a fault — same treatment as the IPv6 notes.
+        return _NOTE_EGRESS_VPN_BLOCKED if tunnelled else _NOTE_EGRESS_FAIL
     # IPv4 is reported ahead of IPv6 now. On an IPv4-only link an IPv6 failure is
     # expected and uninformative, so letting it win the note would bury a real
     # IPv4 fault behind a permanent one — which is how the old ordering behaved
@@ -411,6 +549,11 @@ def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
     if flags["api_ok"] and not v4_ok:
         return _NOTE_IPV4_FAIL
     if flags["api_ok"] and not v6_ok:
+        # Checked BEFORE provisioning state: the address stays on the interface
+        # while the tunnel blocks egress, so `ipv6_expectation()` still reports
+        # EXPECTED and cannot distinguish this case on its own.
+        if tunnelled:
+            return _NOTE_IPV6_VPN_BLOCKED
         if v6_expect == IPV6_NOT_PROVISIONED:
             return _NOTE_IPV6_ABSENT      # not a fault; stated, not hidden
         if v6_expect == IPV6_UNKNOWN:
@@ -420,7 +563,8 @@ def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
 
 
 def classify(flags: dict, v4_ok: bool, v6_ok: bool,
-             v6_expect: str = IPV6_EXPECTED) -> str:
+             v6_expect: str = IPV6_EXPECTED,
+             tunnelled: bool = False) -> str:
     """The is-it-me-or-them verdict (spec §6).
 
     `v6_expect` decides whether a failed IPv6 keytest counts against the verdict
@@ -428,22 +572,46 @@ def classify(flags: dict, v4_ok: bool, v6_ok: bool,
     on an IPv4-only link the failure is the expected result and must not produce
     a DEGRADED verdict on every cycle forever (see `ipv6_expectation`).
 
-    Defaulting to IPV6_EXPECTED keeps the strict behaviour for any caller that
-    has not been updated — a caller that forgets to pass it gets the old, noisier
-    answer rather than a silently more permissive one.
+    `tunnelled` does the same job for a VPN carrying this host's egress (added
+    2026-08-30). A leak-blocking VPN disables IPv6 and blocks the raw-egress probe
+    BY DESIGN, so both fail every cycle while the tunnel is up — the identical
+    permanent-episode shape an IPv4-only link produced.
+
+    ⚠ It comes from `tunnel_carries_default()`, NOT from `vpn_connected`. The first
+    version of this fix used the latter, which is True whenever ANY provider is
+    connected — permanently true on an appliance running Tailscale for enrollment —
+    and so silently suppressed every real IPv6 fault. See that function's comment.
+
+    Both flags default to the strict answer, so a caller that forgets either gets
+    the old, noisier verdict rather than a silently more permissive one.
     """
     local_ok = flags["routing_ok"] and flags["dns_ok"] and flags["egress_ok"]
+    egress_blocked_by_vpn = False
     if not local_ok:
-        return "LOCAL_FAIL"          # it's us
+        # A tunnelled host frequently cannot send the raw-egress probe at all.
+        # That DEGRADES rather than escalating to LOCAL_FAIL — but only when
+        # routing and DNS are both healthy, so a genuine local fault under a VPN
+        # still reports as one. Measured 2026-08-30: one `egress_ok=0` sample
+        # escalated a whole episode to LOCAL_FAIL while routing, DNS and the API
+        # were all green.
+        if (tunnelled and flags["routing_ok"] and flags["dns_ok"]
+                and not flags["egress_ok"]):
+            egress_blocked_by_vpn = True
+        else:
+            return "LOCAL_FAIL"      # it's us
     if not flags["api_ok"]:
         return "UPSTREAM_FAIL"       # local green, upstream dead — it's them
     # api_ok from here on: the upstream is reachable by SOME address family.
     if not v4_ok:
         return "DEGRADED"            # IPv4 down is always a real degradation
+    if egress_blocked_by_vpn:
+        return "DEGRADED"            # visible, but not blamed on the host
     if v6_ok:
         return "ALL_OK"
     # IPv6 keytest failed. Whether that is a degradation depends on whether this
     # link has IPv6 at all.
+    if tunnelled:
+        return "ALL_OK"              # tunnel blocks IPv6 by design; note says so
     if v6_expect == IPV6_EXPECTED:
         return "DEGRADED"
     # NOT_PROVISIONED -> genuinely fine. UNKNOWN -> we could not establish that a
@@ -585,13 +753,15 @@ def run_once(actor: str = "watcher-service", verbose=None) -> dict:
         verbose = _verbose_now(cfg)
 
     ts = datetime.now()
-    flags, latency_ms, note, raw_lines, (v4_ok, v6_ok, v6_expect), vpn_connected = _probe(cfg)
-    verdict = classify(flags, v4_ok, v6_ok, v6_expect)
+    (flags, latency_ms, note, raw_lines, (v4_ok, v6_ok, v6_expect),
+     vpn_connected, tunnelled) = _probe(cfg)
+    verdict = classify(flags, v4_ok, v6_ok, v6_expect, tunnelled)
 
     summary = (f"{ts.isoformat()} verdict={verdict} "
                f"routing={int(bool(flags['routing_ok']))} dns={int(bool(flags['dns_ok']))} "
                f"egress={int(bool(flags['egress_ok']))} api={int(bool(flags['api_ok']))} "
                f"vpn={int(bool(vpn_connected))} "
+               f"tunnelled={int(bool(tunnelled))} "
                f"lat={latency_ms if latency_ms is not None else '-'}ms"
                + (f" note={note}" if note else ""))
 
