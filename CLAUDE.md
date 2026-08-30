@@ -74,28 +74,42 @@ session, before anything else. Run these and report the results in a clean block
      was caught by accident.
 
 7. **Elevated access grants — surfaced live every session, not noted once and forgotten.**
-   HANDOFF.md's "⚠ Standing elevated grants — REVIEW FOR REVOCATION" section is the running
-   list this rule formalizes as recurring Morning Status behavior, same spirit as item 6's
-   "LIVE each session, baseline diff" — a grant flagged once in a session that ends and is
-   never re-surfaced is exactly how an unneeded grant outlives its reason and nobody notices.
-   Each morning, check what is CURRENTLY live — don't just carry forward yesterday's list
-   unchecked:
+   `docs/handoff/elevated-grants-tracking.md` is the running list this rule formalizes as
+   recurring Morning Status behavior, same spirit as item 6's "LIVE each session, baseline
+   diff" — a grant flagged once in a session that ends and is never re-surfaced is exactly
+   how an unneeded grant outlives its reason and nobody notices. Each morning, check what is
+   CURRENTLY live — don't just carry forward yesterday's list unchecked:
    - sudo NOPASSWD entries: `sudo -n -l`
    - non-default group memberships that grant meaningful access (e.g. `pihole`, `nemesis-db`,
-     `nemesis-fw`) for every account HANDOFF is tracking: `getent group <name>` / `id <user>`
+     `nemesis-fw`) for every account being tracked: `getent group <name>` / `id <user>`
    - polkit rules: `ls /etc/polkit-1/rules.d/` (needs root to read on this box — note
      explicitly if the current session can't check it rather than silently skipping)
-   - any other standing elevated grant already named in HANDOFF's list
-   Report a short "Elevated grants:" line in the Morning Status output and keep the detail in
-   HANDOFF.md's existing section — a grant still needed stays listed with its reason; one no
-   longer needed gets flagged for revocation, not silently dropped from the list without a
-   revoke actually happening. **No hardcoded grant list lives in this file** — same reasoning
-   as item 6's baseline: a copy here is a second source of truth that desyncs the moment
-   someone forgets to update it after a grant is added or revoked, and a stale "all clear" is
-   worse than no check at all. Treat every claimed grant the same way the route-security audit
-   treats an unconfirmed finding: verify it against live state (`sudo -n -l`, `getent group`,
-   actual file/group membership) before writing it into HANDOFF or the briefing as fact — a
-   claim that doesn't check out gets flagged as contradicted, not written down anyway.
+   - any other standing elevated grant already named in the tracking file
+   Report a short "Elevated grants:" line in the Morning Status output, and **update
+   `docs/handoff/elevated-grants-tracking.md` directly, in place** — a grant still needed
+   stays listed with its reason; one no longer needed gets flagged for revocation, not
+   silently dropped from the list without a revoke actually happening.
+   **⛔ This detail lives in its OWN file, edited in place — it does NOT get embedded in
+   `HANDOFF.md` (standing rule, added 2026-08-30 after this exact section thinned to
+   nothing across four consecutive closeouts — `f79f5ad` full → `670ab6b` pointer-only →
+   `f20d696`/`5086b51` gone entirely, traced via `git log -p`).** `HANDOFF.md` is
+   OVERWRITTEN wholesale each closeout (Rule 9) — content embedded there survives only if
+   every closeout author remembers to manually retype or carry it forward in full, with no
+   diff warning and no reflog entry when it's dropped. Same failure shape as the
+   uncommitted-tracked-file hazard the "commit locally, immediately" rule (2026-08-29,
+   above) exists to close: a structural gap, not a vigilance gap, and vigilance had already
+   failed four times running before this fix. `elevated-grants-tracking.md` is edited in
+   place (never regenerated from scratch, same discipline as `PUNCHLIST.md`) specifically
+   so it cannot lose content nobody touched. `HANDOFF.md` carries only a one-line pointer +
+   current-state summary referencing it — cheap enough to keep current every closeout, and
+   if that pointer line ever does go stale, the detail behind it hasn't.
+   **No hardcoded grant list lives in THIS file (CLAUDE.md)** — same reasoning as item 6's
+   baseline: a copy here is a second source of truth that desyncs the moment someone forgets
+   to update it after a grant is added or revoked, and a stale "all clear" is worse than no
+   check at all. Treat every claimed grant the same way the route-security audit treats an
+   unconfirmed finding: verify it against live state (`sudo -n -l`, `getent group`, actual
+   file/group membership) before writing it into the tracking file or the briefing as fact —
+   a claim that doesn't check out gets flagged as contradicted, not written down anyway.
 
 Format the output as:
 ```
