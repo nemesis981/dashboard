@@ -42,7 +42,7 @@ import tempfile
 import traceback
 
 _PASS, _FAIL = [], []
-EXPECTED_CHECKS = 49
+EXPECTED_CHECKS = 54
 
 
 def check(label, cond, detail=""):
@@ -190,6 +190,10 @@ def pair(idx, auth_id, **over):
             "public_key": aap.tag_bytes(COSE[idx]),
             "rp_id_hash_b64": base64.b64encode(RP_HASH).decode()}
     body.update(over)
+    # An explicit None means "omit it", which is how a real browser calls this --
+    # it never sends rp_id_hash_b64, leaving the server to derive and pin.
+    if body.get("rp_id_hash_b64") is None:
+        body.pop("rp_id_hash_b64", None)
     return client.post("/api/admin-approval/pair", json=body)
 
 
@@ -444,6 +448,44 @@ try:
 except Exception as exc:
     check("CONTROL: a wrong-target envelope is REFUSED",
           isinstance(exc, agent_tasks.TaskRejected), type(exc).__name__)
+
+
+print("\n== RP ID: the derive-and-pin branch (the one that shipped broken) ==")
+# ⚠ THIS BRANCH HAD NEVER EXECUTED IN A TEST. Every pairing above supplies
+# rp_id_hash_b64, which skips it entirely -- so a route that called
+# `pin_rp_id()` with no argument passed the whole suite and failed on the second
+# live attempt with "missing 1 required positional argument: 'value'". A branch
+# with no test that ENTERS it is untested however green the file looks.
+#
+# The pin file is redirected to the throwaway tree first: pinning is effectively
+# one-way, and a test must never pin the real appliance as a side effect.
+from core import rp_identity as _rp
+_rp.RP_ID_FILE = os.path.join(_TMP, "rp_id_pin")
+check("precondition: nothing is pinned in the throwaway tree",
+      _rp.pinned_rp_id() is None, _rp.pinned_rp_id())
+# Reopen the bootstrap window: by this point the suite has registered two
+# authenticators, so pairing would be refused for a DIFFERENT reason (no
+# approval) and this section would test that instead of what it is here for.
+# bootstrap_open() counts every record ever made, so the rows must go.
+_c = _db()
+try:
+    _c.execute("DELETE FROM admin_approval_authenticators")
+    _c.commit()
+finally:
+    _c.close()
+
+_r = pair(2, "auth-rp", rp_id_hash_b64=None)
+_j = _r.get_json() or {}
+check("pairing succeeds WITHOUT a client-supplied rp_id_hash",
+      _r.status_code == 200 and _j.get("ok"), _j)
+check("  ...and it reports the RP ID it pinned on this request",
+      bool(_j.get("rp_id_pinned_now")), _j)
+check("the pin is now persisted", _rp.pinned_rp_id() is not None)
+# CONTROL: a second pairing must NOT re-report a pin -- it is already pinned, and
+# claiming otherwise would tell an operator their identity changed.
+_r2 = pair(0, "auth-rp2", rp_id_hash_b64=None)
+check("CONTROL: a later pairing does not claim to pin again",
+      not (_r2.get_json() or {}).get("rp_id_pinned_now"), _r2.get_json())
 
 
 print("\n== TOTALS ==")

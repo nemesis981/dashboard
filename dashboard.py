@@ -8550,13 +8550,26 @@ def api_admin_approval_pair():
             # unexplained signature rejection much later.
             try:
                 from core import rp_identity
-                conn = _dm_conn()
-                try:
-                    if rp_identity.pinned_rp_id() is None:
-                        pinned_now = rp_identity.pin_rp_id()
-                    rp_hash = rp_identity.rp_id_hash()
-                finally:
-                    conn.close()
+                # ⚠ ONE CALL, DELIBERATELY. `rp_id_hash()` -> `rp_id()` already
+                # does the whole job: return the pin if one exists, honour the env
+                # override, otherwise derive AND pin atomically.
+                #
+                # This block previously hand-rolled that sequence -- a
+                # `pinned_rp_id() is None` check followed by `pin_rp_id()` -- and
+                # got it wrong twice over: `pin_rp_id` takes the VALUE to pin and
+                # was called with no argument, and the check-then-act left a race
+                # where two pairings could both see None. It failed on the second
+                # live pairing attempt with "missing 1 required positional
+                # argument: 'value'". Reimplementing a helper that already exists
+                # is what created both faults; calling it is what fixes them.
+                #
+                # `pinned_rp_id()` is read FIRST only to report whether this
+                # request is the one that pinned, for the UI message. It is not
+                # part of the decision.
+                was_pinned = rp_identity.pinned_rp_id()
+                rp_hash = rp_identity.rp_id_hash()
+                if was_pinned is None:
+                    pinned_now = rp_identity.pinned_rp_id()
             except Exception as exc:
                 log.exception("admin-approval: could not resolve the RP ID")
                 return jsonify({"ok": False,
