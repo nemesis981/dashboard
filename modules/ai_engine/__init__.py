@@ -58,6 +58,15 @@ from .module import (
     #   get_pricing_drift_banner_html — the drift banner was swallowed by a bare
     #     `except Exception: pass`, so the operator never saw a pricing change.
     raise_authority, get_pricing_drift_banner_html,
+    # ADDED 2026-08-30 with the L1 wiring — the FOURTH instance of this exact
+    # omission class, and the pattern is now unmistakable: a symbol added to
+    # module.py is not usable by dashboard.py until it is re-exported here, and
+    # the failure is an ImportError swallowed by whatever try/except surrounds
+    # the call site. The proposal loop is the ladder's L1 rung; without these
+    # five names its first production writer could not import the function it
+    # exists to call.
+    create_proposal, get_proposal, list_proposals,
+    respond_to_proposal, execute_proposal,
     #   clear_authority_override — backs /api/ai/authority/clear, the OFF half of
     #     the standing toggle. Added 2026-08-27: `raise` shipped 2026-08-23 with no
     #     counterpart, so an authority grant could be made through the UI and then
@@ -96,4 +105,6 @@ __all__ = [
     "register_undo_handler", "undo_handler_for",
     "raise_authority", "get_pricing_drift_banner_html",
     "clear_authority_override",
+    "create_proposal", "get_proposal", "list_proposals",
+    "respond_to_proposal", "execute_proposal",
 ]

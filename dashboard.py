@@ -7834,10 +7834,54 @@ def analyze_alert(rule_id):
         else:
             new_action = "pending"
         analysis["authority_level"] = _disposition_level
-        if analysis.get("risk_level") == "LOW" and _disposition_level < 2:
+        # ── L1: PROPOSE, do not set (2026-08-30) ────────────────────────────
+        #
+        # This branch is the ladder's FIRST PRODUCTION WRITER. Until now the
+        # three-way split documented above had only two arms in code: L1 fell
+        # through to `pending`, behaviourally identical to L0, so the rung the
+        # comment describes did not exist. `create_proposal()` was built for
+        # exactly this call and had no caller anywhere in the repo.
+        #
+        # STRICTLY ADDITIVE. `new_action` is already "pending" on this path and
+        # is NOT changed here — proposing is not acting, and an L1 engine must
+        # leave the alert exactly as an L0 engine would. The only difference a
+        # reader should see is that a row now exists in `ai_proposals` and the
+        # note says so.
+        #
+        # The return value IS checked. `create_proposal()` swallows its own
+        # exception and returns None, so an unchecked call would leave the engine
+        # reporting that it proposed when nothing was recorded — a failed write
+        # reading as a completed one, which is the exact shape this codebase
+        # already refuses elsewhere.
+        _proposal_id = None
+        if analysis.get("risk_level") == "LOW" and _disposition_level == 1:
+            try:
+                from modules.ai_engine import create_proposal as _mk_proposal
+                _proposal_id = _mk_proposal(
+                    "alert_disposition", "alert", rule_id, "ignore",
+                    (analysis.get("summary")
+                     or "LOW risk verdict; proposed disposition: ignore"),
+                    analysis.get("model_used"))
+            except Exception as _pexc:                       # noqa: BLE001
+                # Never let a proposal failure break the analysis response. The
+                # alert stays pending either way; the engine simply has nothing
+                # recorded to be approved.
+                app.logger.warning("ai: could not record an L1 proposal for "
+                                   "rule_id=%s: %s", rule_id, _pexc)
+                _proposal_id = None
+        if _proposal_id:
+            analysis["proposal_id"] = _proposal_id
+            analysis["disposition_note"] = (
+                "left pending, and PROPOSED for approval (proposal #%d): the AI "
+                "engine holds authority level L1 for alert dispositions, which "
+                "permits proposing but not setting one" % _proposal_id)
+        elif analysis.get("risk_level") == "LOW" and _disposition_level < 2:
             # Say so, rather than silently declining to act. A reader comparing a
             # LOW verdict against a still-pending alert must be able to see that
             # the engine was not permitted, not that it failed.
+            #
+            # Also reached when an L1 proposal FAILED to record — deliberately, so
+            # the note never claims a proposal exists that does not.
             analysis["disposition_note"] = (
                 "left pending: the AI engine holds authority level L%d for alert "
                 "dispositions (L2 required to set one)" % _disposition_level)
@@ -8053,6 +8097,60 @@ try:
     )
 except Exception:
     log.exception("chat: could not register the alert anchor")
+
+
+def _do_alert_disposition(proposal):
+    """Carry out an approved alert disposition. The FORWARD half of
+    `_undo_alert_disposition`, and the ladder's first executor.
+
+    Until 2026-08-30 only the reversal existed. `execute_proposal()` takes its
+    executor as a PARAMETER, so nothing in the repo supplied one for any class —
+    the undo registry was highly visible and its forward counterpart simply was
+    not there.
+
+    Deliberately the MIRROR of the undo, field for field: undo moves
+    `pending -> proposed_action` in reverse by matching on the proposed action,
+    this moves `pending -> proposed_action`. Written as one guarded UPDATE for the
+    same reason the undo is: a read-then-write would let a human's decision in
+    between be silently overwritten.
+
+    Returns (ok, detail) and reports failure honestly. `execute_proposal` marks the
+    proposal executed ONLY on a real success, so a row never claims an action was
+    taken while the alert still sits pending.
+    """
+    action = (proposal.get("proposed_action") or "").strip()
+    if action not in ("ignore", "block", "pending"):
+        # Refuse an action this executor does not understand rather than writing
+        # it: `alerts.action` has no CHECK constraint, so an unexpected value
+        # would be stored and then read back as though it meant something.
+        return False, "refusing to apply unrecognised disposition %r" % action[:40]
+    try:
+        conn = _dm_conn()
+        cur = conn.execute(
+            "UPDATE alerts SET action=? WHERE rule_id=? AND action='pending'",
+            (action, proposal["row_id"]))
+        conn.commit()
+        changed = cur.rowcount
+        conn.close()
+        if changed == 0:
+            # Either the alert is gone, or a human already dispositioned it. Not an
+            # error, but NOT an application either — say which, rather than
+            # reporting a success that changed nothing.
+            return False, ("no pending alert matched rule_id=%s (already "
+                           "dispositioned, or removed)" % proposal["row_id"])
+        return True, "alert %s set to %s" % (proposal["row_id"], action)
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("ai: alert disposition executor failed")
+        return False, "execution failed: %s" % str(exc)[:200]
+
+
+#: Forward executors by action class. `execute_proposal()` takes the executor as a
+#: parameter, so SOMETHING has to choose it — and letting an HTTP caller name the
+#: executor would be the whole security model inverted. This registry is the
+#: server's own answer to "what does approving this actually do".
+_PROPOSAL_EXECUTORS = {
+    "alert_disposition": _do_alert_disposition,
+}
 
 
 def _undo_alert_disposition(proposal):
@@ -8491,6 +8589,93 @@ def api_admin_approval_request():
         return jsonify({"ok": False, "error": "internal error"}), 500
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AI authority ladder — L1 propose/approve/execute routes (ARCHITECTURE.md Phase 3)
+#
+# The loop these expose was complete and tested with ZERO callers: create_proposal,
+# respond_to_proposal, get_proposal and execute_proposal had no production caller
+# anywhere, and `ai_proposals` held 0 rows. That was a DELIBERATE staged build, not
+# an omission — see ARCHITECTURE.md's note, updated in this same commit.
+#
+# API-ONLY, deliberately. Phase 3 as scoped also calls for an approve/reject UI;
+# that is separate future work. These routes make the loop real and exercised,
+# which is what the ADR 0026 §D3 A2 work actually needs from it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/api/ai/proposals", methods=["GET"])
+def api_ai_proposals():
+    """The approve/reject queue. `?pending=1` for undecided ones only."""
+    try:
+        from modules.ai_engine import list_proposals as _list
+        pending_only = str(request.args.get("pending", "")).strip() in ("1", "true", "yes")
+        rows = _list(limit=200, pending_only=pending_only)
+        return jsonify({"ok": True, "proposals": rows, "pending_only": pending_only})
+    except Exception:
+        log.exception("ai: could not list proposals")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+
+
+@app.route("/api/ai/proposal/<int:pid>/respond", methods=["POST"])
+def api_ai_proposal_respond(pid):
+    """Approve or reject a proposal. Body: {"response": "approved"|"rejected"}.
+
+    Recording a decision is NOT executing it — the two are separate routes on
+    purpose, mirroring the split `respond_to_proposal`'s own docstring calls for
+    ("deciding" and "do it now" are different moments, and the audit trail needs
+    both). An approval that silently executed would collapse them.
+
+    The FIRST decision stands; the library refuses a second rather than
+    overwriting, so a double-click cannot erase the audit trail.
+    """
+    data = request.get_json(silent=True) or {}
+    response = str(data.get("response") or "").strip()
+    if response not in ("approved", "rejected"):
+        return jsonify({"ok": False,
+                        "error": "response must be 'approved' or 'rejected'"}), 400
+    try:
+        from modules.ai_engine import respond_to_proposal as _respond
+        result = _respond(pid, response, _current_actor_label())
+    except Exception:
+        log.exception("ai: could not record a proposal response")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+    # "already approved by X" is a refusal, not a server fault.
+    return (jsonify(result), 200) if result.get("ok") else (jsonify(result), 409)
+
+
+@app.route("/api/ai/proposal/<int:pid>/execute", methods=["POST"])
+def api_ai_proposal_execute(pid):
+    """Carry out an already-approved proposal.
+
+    THE EXECUTOR IS CHOSEN SERVER-SIDE, from `_PROPOSAL_EXECUTORS`, never named by
+    the caller. `execute_proposal()` takes it as a parameter, so a route that let
+    the request pick would let a caller supply arbitrary behaviour for an
+    action class a human approved on entirely different terms.
+
+    Every other refusal — not approved, already executed, no undo handler
+    registered — is the library's, unchanged. The undo requirement in particular
+    is load-bearing and is not re-implemented here.
+    """
+    try:
+        from modules.ai_engine import get_proposal as _get, execute_proposal as _exec
+        p = _get(pid)
+        if not p:
+            return jsonify({"ok": False, "error": "no such proposal"}), 404
+        executor = _PROPOSAL_EXECUTORS.get(p.get("action_class"))
+        if executor is None:
+            # Fail CLOSED and say why. An action class with no registered forward
+            # executor is one this server does not know how to carry out; guessing
+            # (or no-opping and reporting success) would be far worse than refusing.
+            return jsonify({"ok": False,
+                            "error": "no forward executor is registered for action "
+                                     "class %r, so this proposal cannot be carried "
+                                     "out" % p.get("action_class")}), 409
+        result = _exec(pid, executor, actor=_current_actor_label())
+    except Exception:
+        log.exception("ai: could not execute proposal")
+        return jsonify({"ok": False, "error": "internal error"}), 500
+    return (jsonify(result), 200) if result.get("ok") else (jsonify(result), 409)
 
 
 #: How long a MINTED approval envelope stays deliverable.

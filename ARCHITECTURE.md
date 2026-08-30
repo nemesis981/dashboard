@@ -277,12 +277,38 @@ any *user standing rule*. Standing rules **narrow only** — there is deliberate
 type that raises a term, so no wording of a rule can widen authority. That is a structural
 guarantee, not a matter of the model interpreting an instruction conservatively.
 
-⚠ **Current state (2026-08-21): the ladder is INERT.** `ai_authority`, `ai_proposals` and
-`ai_standing_rules` exist as schema with **no production writer**, so `earned` resolves to
-L0 on every install and `effective_ceiling()` returns 0 for every class. In practice the AI
-is explain-only everywhere, and today it gates only what the chat may *say* — no execution
-path consults it, because nothing executes. Wiring L1 (propose + approve/reject) is the
-next step; see the scoping note in the private mirror.
+⚠ **Superseded 2026-08-30 — kept because the reason it changed matters.**
+Until 2026-08-30 the ladder was **INERT** (past tense — see the current state below).
+`ai_authority`, `ai_proposals` and `ai_standing_rules` existed as schema with **no production
+writer**, so `earned` resolved to L0 on every install and `effective_ceiling()` returned 0 for
+every class. The AI was explain-only everywhere, gating only what the chat may *say*.
+
+✅ **Current state (2026-08-30): L1 is wired — propose, approve/reject, execute.**
+`ai_proposals` now has a production writer. The alert-verdict path proposes at L1 (it does
+**not** act — `new_action` stays `pending`, exactly as at L0), and
+`/api/ai/proposals`, `/api/ai/proposal/<id>/respond` and `/api/ai/proposal/<id>/execute`
+expose the queue, the decision and the carrying-out as three separate steps. `ai_authority`
+still has no writer other than promotion, so **`earned` remains L0 until an operator raises
+it deliberately** — see the bootstrap note below.
+
+⚠ **The loop cannot self-start, by construction.** Promotion is the only writer of
+`ai_authority`, `_consider_promotion()` runs only on an approved response, and proposals are
+only generated at L1 — so with `ai_authority` empty nothing proposes, nothing is approved and
+nothing promotes. Reaching L1 the first time requires a deliberate master-password
+`raise_authority("alert_disposition", 1, …)`. That is a property of the design, not a defect,
+but it is invisible until you look for it: without the raise, the queue simply stays empty and
+everything reports healthy.
+
+⚠ **This wiring was taken OUT OF ORDER, deliberately (operator decision, 2026-08-30).** The
+recorded plan sequences it as Phase 3, behind Phase 1 (coverage) and Phase 2
+(digest/narrative). **Neither of those has shipped, and this is not a claim that they are
+skippable** — they remain outstanding work. L1 was brought forward because this loop is the
+prerequisite for ADR 0026 §D3's appliance-local approval gating (A2) and has independent
+value; it did not need to wait on them. Recorded here so the reordering is a decision on the
+record rather than an inference from commit dates.
+
+**API-only for now.** Phase 3 as scoped also calls for an approve/reject UI; that is separate
+future work, and the routes above are deliberately usable without it.
 
 ✅ **Reconciled 2026-08-21.** The alert-verdict path (`/api/analyze/<rule_id>`) used
 to write `alerts.action` without consulting `effective_ceiling()` at all, while chat on the

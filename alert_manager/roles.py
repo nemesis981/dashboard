@@ -466,6 +466,15 @@ ROUTE_MINIMUMS = {
     # setting a finding's status is triage, hence user.
     "module_malware_detection__api_findings":           (_V, _A),
     "module_malware_detection__api_finding_detail":     (_V, _A),
+    # ── AI authority ladder — L1 propose/approve/execute (ARCHITECTURE Phase 3) ──
+    # Reading the queue is a genuine read, so viewonly may GET it. Deciding and
+    # executing are admin: an approval is what promotes the engine's authority
+    # (5 consecutive approvals earn a level), so approving is not merely acting on
+    # one alert — it is teaching the ladder, and that must not be delegable to a
+    # role that cannot raise authority directly.
+    "api_ai_proposals":                                (_V, _A),
+    "api_ai_proposal_respond":                         (_A, _A),
+    "api_ai_proposal_execute":                         (_A, _A),
     # ── Admin Approval Protocol v1 (ADR 0026 §D3) ────────────────────────────
     # ALL admin, both methods. Pairing registers a key that can authorize
     # privileged action; the listing reveals which devices can approve; creating a

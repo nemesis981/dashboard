@@ -101,9 +101,39 @@ def main():
     check("the architecture diagram no longer labels ai_engine with the old modes",
           "Teaching / Automated mode" not in arch)
 
-    print("\n-- the doc states the ladder's current inert state --")
-    check("it says the ladder is inert / has no production writer",
-          "INERT" in arch or "no production writer" in arch)
+    print("\n-- the doc states the ladder's CURRENT state --")
+    # ⚠ THIS CHECK WAS REWRITTEN 2026-08-30, AND IT WAS PASSING VACUOUSLY.
+    #
+    # It used to assert `"INERT" in arch or "no production writer" in arch` —
+    # correct while the ladder was inert. When L1 was wired, ARCHITECTURE.md kept
+    # a HISTORICAL paragraph ("until this date the ladder was INERT ... with no
+    # production writer"), so the substring match still found both terms and the
+    # check stayed GREEN while asserting the opposite of the truth.
+    #
+    # That is the standing "a grep matches the prose saying the thing is
+    # obsolete" failure, in the one place least likely to be suspected: the test
+    # written to catch stale doc claims. A substring search cannot distinguish a
+    # live claim from its own supersession note.
+    #
+    # Rewritten to assert the CURRENT fact, with a control. Both halves are
+    # required: the first alone would pass on a doc that claimed L1 was wired
+    # while still presenting the inert state as current.
+    check("it states L1 is WIRED (propose/approve/execute), not inert",
+          "L1 is wired" in arch or "L1 is wired" in arch.replace("**", ""),
+          "ARCHITECTURE.md does not state the ladder's current wired state")
+    # Each line must disambiguate ITSELF. A marker on the preceding line does not
+    # help a line-based scan — found immediately when this control fired on a
+    # historical sentence whose "Until 2026-08-30" sat on the line above.
+    _inert_live = [ln for ln in arch.splitlines()
+                   if "INERT" in ln and "Superseded" not in ln
+                   and "past tense" not in ln.lower()
+                   and not re.search(r"\buntil\b", ln, re.I)]
+    check("CONTROL: no INERT claim is presented as CURRENT", not _inert_live,
+          repr(_inert_live))
+    # The bootstrap is invisible until looked for and is the single thing most
+    # likely to make a correct install look broken, so the doc must carry it.
+    check("it documents that the loop cannot self-start without a raise",
+          "cannot self-start" in arch)
 
     print("\n%d passed, %d failed" % (passed, failed))
     return 1 if failed else 0
