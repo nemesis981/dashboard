@@ -56,11 +56,77 @@ Found framing during the diagnostics VM audit 2026-06-28.
   shape of cheap prerequisite as the DHCP `extended: yes` flip this session already did for
   rogue-DHCP, and belongs first in the build order, not discovered mid-build.
 
-**Spec:**
-1. **Verify flow-event availability live** (the open question above). If off, enable it
-   (`suricata.yaml` outputs stanza, install.sh + live-box flip, same pattern as
-   `rogue-dhcp-detection.md`'s DHCP flip including the State-Snapshots discipline for the live
-   edit).
+### ⛔ REVISION 2026-08-30 — flow logging is ON, and that does NOT unblock Tier 1
+
+**The open question above was answered twice, and the first answer was wrong.** Flow logging is
+live and emitting (`suricata.yaml` outputs stanza has `- flow` uncommented; tens of thousands of
+flow events in the live `eve.json`). That was initially reported as unblocking Tier 1. **It does
+not.** Availability of flow events and visibility of the traffic Tier 1 needs are different
+questions, and only the first one was checked.
+
+**Measured on the live box, two independent passes (Window 1, then re-derived here):**
+
+| slice of captured flows | share |
+|---|---|
+| involving the appliance itself as one endpoint | ~89–91% |
+| broadcast / multicast / link-local | small remainder |
+| **true peer-to-peer (neither endpoint the appliance, not broadcast)** | **~0.1–0.7%, single-digit distinct peer pairs** |
+
+**Root cause is structural, not configuration.** On a switched LAN a non-gateway appliance sees
+only: traffic addressed to or from itself, and broadcast/multicast. Two other devices talking
+unicast to each other are never presented to its NIC. No Suricata setting changes this — it is a
+property of where the appliance sits in the topology, which is exactly what
+`gateway-mode-scoping.md` is about.
+
+**How the first check went wrong, recorded because the shape recurs:** the initial pass counted
+flows where both endpoints were RFC1918 and read that as peer-to-peer. The appliance's own LAN
+address is itself RFC1918, so every appliance↔device flow satisfied that filter. The count was
+accurate; the label on it was not. Same failure family as the standing "check the SHAPE of the
+output, not just whether the value looks plausible" practice — a plausible number sourced from
+somewhere other than where its label claimed.
+
+### What Tier 1 can honestly claim under this constraint
+
+Tier 1's headline framing — *"device A was flagged → is A now reaching for B, C, D?"* — is
+**precisely the part that does not work today.** Unicast A→B lateral movement is structurally
+invisible. Stating that plainly rather than shipping a detector whose name promises it:
+
+**Available now, without gateway mode:**
+1. **Flagged device → the appliance itself.** Post-detection probing of the appliance's own
+   services is fully visible. Overlaps rule 1000003's existing territory.
+2. **Flagged device → outbound/external.** Visible because the appliance is the LAN's DNS server
+   and sees egress. A flagged device that starts beaconing out is detectable — this is real,
+   useful signal and does not depend on gateway mode.
+3. **Flagged device → broadcast-level LAN behaviour.** ARP scanning, mDNS/SSDP flooding, DHCP
+   probing all reach the appliance by definition. A flagged device that starts *discovering* the
+   LAN is visible even though its subsequent unicast connections are not.
+4. **Broad sweeps, by self-inclusion.** A horizontal scan across the subnet hits the appliance
+   too, so the appliance detects the scanner **by being one of its targets** — not by observing
+   the scan. This is how the existing host-defence rules already catch LAN-internal scanning.
+
+**NOT available without gateway mode:**
+- Unicast peer-to-peer correlation — the actual "is A reaching for B" question.
+- **Targeted** attacks specifically: A→B only, never touching the appliance. Note the asymmetry
+  this creates — *broad, noisy* attacks are caught by self-inclusion; *narrow, deliberate* ones
+  are not. Coverage is inversely proportional to attacker precision, which is the wrong direction
+  and must not be papered over.
+
+**Confidence level, revised:** Tier 1 as originally scoped assumed full LAN visibility and
+**cannot be built to that claim today.** What is buildable now is a *post-detection egress and
+discovery-behaviour correlator* — genuinely valuable, materially narrower than the name
+"lateral-movement detection" implies. If built in this reduced form it must be named and
+documented for what it actually observes, or it becomes a detector that reads as covering
+device-to-device movement while structurally never seeing it.
+
+**Build status: HELD pending `gateway-mode-scoping.md`** (Window 1, in progress). That decision
+determines whether Tier 1 ships in the reduced form above or in its full originally-scoped form.
+Not finalizing either shape until it lands — building the reduced version now risks either
+rework or a permanently mis-named detector.
+
+**Spec (steps 2-6 below stand; step 1 is superseded by the revision above):**
+1. ~~**Verify flow-event availability live.**~~ **DONE 2026-08-30 — flow logging confirmed on and
+   emitting. Superseded: availability confirmed, sufficiency disproven. See the revision above.**
+   No config flip needed; the blocker is topological, not a setting.
 2. **Trigger:** a new row lands in any of the four finding tables above, for a device with a
    resolvable `device_id`/MAC (owned/enrolled — Tier 1 explicitly excludes unenrolled/agentless
    devices, that's Tier 2's problem).
@@ -171,19 +237,34 @@ a substitute for it.
 
 | Signal | Current visibility | Gap |
 |---|---|---|
-| Connection fan-out | **Same open question as Tier 1** — needs flow/connection-level `eve.json` data, not verified as currently emitted (see Tier 1 spec above). Shared prerequisite, not a separate gap per tier. | Flow-logging verification (shared with Tier 1) |
-| Peer port-scan / sweep | Suricata's `threshold`/`detection_filter` mechanics already proven in `config/suricata/local.rules` (rules 1-6) for scans *against the Nemesis host*. The same rule shape, retargeted to `$HOME_NET` peer-to-peer instead of host-defence, is a rule-authoring task, not a new capability — Suricata already counts this correctly at the engine level. | Needs new rules (or generalized versions), not new infrastructure |
-| SMB/RDP probing | Same as above — a scoped Suricata rule (destination ports 445/3389 across `$HOME_NET`) is the same shape as the existing service-port-concentration rule (sid 1000003), retargeted. | Needs new rules |
-| ARP anomalies | **Architecturally, not just conceptually, the same unresolved tension already flagged in `v2-completion-checklist.md`.** `modules/lan_integrity/module.py`'s own docstring (landed this session, for rogue-DHCP) explicitly names ARP spoofing as one of two already-scoped-and-parked siblings meant to land in that exact module. Building Tier 2's ARP-anomaly signal now means building the parked ARP-spoofing detector now, under a different backlog entry, the same day it was deliberately left parked for its gateway-mode dependency. **Not resolved here — this scoping pass surfaces it a second time, more concretely (same module, not just same topic), it does not decide it.** | Blocked on the gateway-mode decision, same as the parked item it would actually be |
-| New-device-immediately-noisy | Device-join detection already exists (`device_scanner`/`agent_devices`/`devices` — a device's first-seen timestamp is already tracked). The "immediately noisy" half needs the same flow/fan-out visibility as signal 1. | Shared prerequisite with fan-out, no new gap beyond that |
+**⛔ TABLE REVISED 2026-08-30** — the original version treated "flow logging emitting?" as the
+shared prerequisite. It is emitting, and that is not the constraint. See the Tier 1 revision
+above: the appliance cannot see unicast peer-to-peer traffic at all on a switched LAN
+(~0.1–0.7% of captured flows are true peer-to-peer). Rows updated to reflect the real gate.
 
-**Net: of five signals, one (ARP anomalies) is not just gated but is the literal same detector
-as an already-parked item; two (port-sweep, SMB/RDP) are Suricata rule-authoring work with no
-new infrastructure needed; two (fan-out, new-device-noisy) share a single open prerequisite
-(flow-event visibility) with Tier 1.** A real Tier 2 spec should either exclude ARP anomalies
-explicitly (deferring it to whenever gateway-mode is decided, consistent with today's ARP
-decision) or make the case for building it now and retiring the separate parked entry — but not
-carry both a "parked" and an "in Tier 2" status for the same detector unaddressed.
+| Signal | Current visibility | Gap |
+|---|---|---|
+| Connection fan-out | **Gated on gateway mode, not on flow logging.** Fan-out means one host opening connections to many *peers* — the exact unicast traffic the appliance never sees. Partially visible in one narrow form: fan-out broad enough to include the appliance is detectable by self-inclusion (see Tier 1 revision item 4), which catches noisy sweeps and misses targeted ones. | `gateway-mode-scoping.md` (Window 1, in progress) |
+| Peer port-scan / sweep | Rule-authoring on proven mechanics (`local.rules` rules 1-6). **Caveat the original scoping missed:** a *broad* sweep is detectable because it includes the appliance among its targets; a *targeted* probe A→B that never touches the appliance is not. So this is buildable now, but its honest claim is "detects broad subnet sweeps," not "detects peer port-scanning." | Buildable now, at the reduced claim. No visibility dependency for the sweep case |
+| SMB/RDP probing | Same shape and same caveat as above. A subnet-wide 445/3389 sweep self-includes the appliance and is detectable; a single A→B SMB probe is invisible. Worth stating explicitly because worm-style lateral movement is often exactly the targeted case. | Buildable now, at the reduced claim |
+| ARP anomalies | **Ownership resolved 2026-08-30: Window 1's, in `lan_integrity`** — they own that module and found the visibility caveat. Operator decision: **build it now**, deliberately overriding the gateway-mode dependency rather than waiting for it (the dependency is overridden, not removed — if gateway mode later changes the module's vantage point this may need rework, and that constraint stays on record here). **Tier 2 consumes this as a component; Tier 2's build does not implement it.** Note ARP is broadcast, so it is one of the few signals the appliance genuinely sees today. | Not Tier 2's to build. Consumed as a dependency |
+| New-device-immediately-noisy | **Split by visibility.** Device-join detection exists (`device_scanner`/`agent_devices`/`devices`, first-seen already tracked) and the *broadcast* half of "immediately noisy" (a new device instantly ARP/mDNS/SSDP-flooding) is visible today. The *unicast* half (instantly opening peer connections) is not — same gate as fan-out. | Broadcast half buildable now; unicast half gated on gateway mode |
+
+**Net, revised 2026-08-30:** of five signals — **one (ARP) is now Window 1's to build and Tier 2's
+to consume**, decision made; **two (port-sweep, SMB/RDP) are buildable now but only at a reduced
+claim** (broad sweeps via appliance self-inclusion, not targeted probes); **two (fan-out,
+new-device-noisy) split** — their broadcast-observable half is buildable now, their unicast half
+is gated on `gateway-mode-scoping.md` alongside Tier 1's core correlation.
+
+**The through-line across both tiers:** every signal that depends on watching two *other* devices
+converse is gated on the same topological question, and no amount of Suricata configuration
+substitutes for it. Everything buildable today is buildable because it is either addressed to the
+appliance, broadcast, or broad enough to include the appliance as a target. That is a real and
+defensible detection surface — it is simply not the surface either tier's original framing
+described, and the naming has to follow the capability rather than the intent.
+
+**Not finalizing either tier's shape** until `gateway-mode-scoping.md` returns (Window 1, in
+progress) — it determines whether these signals ship in reduced form now or full form later.
 
 ### Outbound-only IoT case (botnet/C2 beaconing, no LAN-neighbor attacks) — flagged, not resolved
 
