@@ -697,6 +697,13 @@ def capability_for_endpoint(endpoint):
     return None
 
 
+#: Capabilities whose endpoints are correctly registered in ROUTE_MINIMUMS but
+#: absent from the live url_map because their module is disabled. Populated by
+#: `assert_capabilities_sane`. Dormant, NOT broken -- and visible rather than
+#: silently skipped.
+_dormant_capabilities = {}
+
+
 def assert_capabilities_sane(endpoints=None):
     """The four D2 rules, checked mechanically. Raises RoleError listing failures.
 
@@ -740,6 +747,35 @@ def assert_capabilities_sane(endpoints=None):
         known = set(endpoints)
         for name, routes in CAPABILITY_ROUTES.items():
             missing = sorted(set(routes) - known)
+            # ⚠ A MODULE ROUTE IS CONDITIONAL ON ITS MODULE BEING ENABLED, and
+            # treating its absence as a typo took the dashboard down.
+            #
+            # LIVE OUTAGE 2026-08-30: `enroll_email_account` names
+            # `module_email_security_api_enroll_create`. The name is CORRECT and
+            # matches at all three sites (views.routes(), ROUTE_MINIMUMS,
+            # CAPABILITY_ROUTES) -- but `email_security` ships
+            # `enabled_by_default: false`, so its routes never register and the
+            # endpoint is legitimately absent from `app.url_map`. This rule then
+            # raised at startup on EVERY boot: a permanent crash-loop, not a race.
+            #
+            # The typo protection this rule exists for is NOT weakened, because a
+            # typo is caught by a DIFFERENT and stronger check above: an endpoint
+            # absent from ROUTE_MINIMUMS raises there, and `modules_loader`
+            # additionally REFUSES to register any module endpoint missing from
+            # ROUTE_MINIMUMS. So a misspelled module endpoint is still fatal; only
+            # a correctly-registered one whose module is switched off is tolerated.
+            #
+            # CORE endpoints are deliberately still checked against the live map:
+            # a core route always registers, so its absence really is a defect.
+            deferred = sorted(
+                ep for ep in missing
+                if ep.startswith("module_") and ep in ROUTE_MINIMUMS)
+            missing = [ep for ep in missing if ep not in deferred]
+            if deferred:
+                # Surfaced, never silent -- a capability that grants nothing today
+                # because its module is off is a real (if benign) state, and the
+                # operator should be able to see it rather than infer it.
+                _dormant_capabilities[name] = deferred
             if missing:
                 problems.append("capability %r names endpoint(s) that do not exist "
                                 "(a typo protects nothing while looking like "
