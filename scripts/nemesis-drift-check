@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Assert two install-time security properties are still true. ROOT-ONLY, periodic.
+
+Mirrors scripts/nemesis-integrity-check deliberately: a root-owned periodic check that
+writes a FACT FILE, which an unprivileged poller turns into a ticket.
+
+⚠ WHY THIS SHAPE AND NOT A diagnostics/ MODULE. /etc/ufw/before.rules is 0640
+root:root and diagnostics-watcher runs as nemesis-diag, so the anti-spoof half is
+STRUCTURALLY unreadable there -- a diagnostics module would report UNDETERMINED forever
+for the more important of the two properties. Root is required, and a root process must
+not write alerts.db (root-owned WAL siblings lock nemesis-dash out of its own
+database), so the result reaches the product as a fact file instead.
+
+Exit codes:  0 both properties hold | 1 drift detected | 2 cannot verify (FAIL CLOSED)
+"""
+import json, os, subprocess, sys, tempfile, datetime
+
+sys.path.insert(0, "/opt/nemesis/core")
+import netfilter_drift as ND                                        # noqa: E402
+
+STATUS = os.environ.get("NEMESIS_DRIFT_STATUS", "/var/lib/nemesis-drift/status.json")
+UFW_RULES = os.environ.get("NEMESIS_UFW_RULES", "/etc/ufw/before.rules")
+EXIT_OK, EXIT_DRIFT, EXIT_CANNOT = 0, 1, 2
+
+
+def _prefs():
+    """Tailscale prefs, or None. Reading them IS the liveness proof -- see the module
+    docstring on why `systemctl is-active tailscaled` must never be used here."""
+    try:
+        r = subprocess.run(["tailscale", "debug", "prefs"],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout if r.returncode == 0 else None
+    except Exception:                                               # noqa: BLE001
+        return None
+
+
+def _rules():
+    try:
+        with open(UFW_RULES, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None            # explicit unread, NOT an empty ruleset
+
+
+def write_status(path, payload):
+    """Atomic tmp-then-rename. Never raises: a failed write must not turn a real
+    finding into a crash, and the exit code stays the primary signal."""
+    try:
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".drift-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, sort_keys=True, indent=2)
+                fh.write("\n")
+            os.chmod(tmp, 0o644)      # root writes, everyone may read
+            os.replace(tmp, path)
+        except Exception:
+            try: os.unlink(tmp)
+            except OSError: pass
+            raise
+    except Exception as exc:                                        # noqa: BLE001
+        print("drift: could not write status file %s: %s" % (path, exc), file=sys.stderr)
+
+
+def main():
+    ok, detail = ND.selftest()
+    if not ok:
+        # FAIL CLOSED: a checker that cannot prove it distinguishes healthy from
+        # reverted must not go on to report "both properties hold".
+        payload = {"checked_at": datetime.datetime.now(datetime.timezone.utc)
+                   .isoformat(timespec="seconds"),
+                   "verdict": "cannot_verify", "exit_code": EXIT_CANNOT,
+                   "findings": ["self-test failed: %s" % detail], "checks": {}}
+        write_status(STATUS, payload)
+        print("CANNOT VERIFY: %s" % detail, file=sys.stderr)
+        return EXIT_CANNOT
+
+    m_status, m_detail = ND.check_netfilter_mode(_prefs())
+    a_status, a_detail = ND.check_antispoof(_rules())
+    overall = ND.overall([m_status, a_status])
+    findings = [d for s, d in ((m_status, m_detail), (a_status, a_detail))
+                if s != ND.OK]
+    code = {ND.OK: EXIT_OK, ND.DRIFTED: EXIT_DRIFT,
+            ND.UNDETERMINED: EXIT_CANNOT}[overall]
+
+    write_status(STATUS, {
+        "checked_at": datetime.datetime.now(datetime.timezone.utc)
+                      .isoformat(timespec="seconds"),
+        "verdict": overall, "exit_code": code, "findings": findings,
+        "checks": {"netfilter_mode": {"status": m_status, "detail": m_detail},
+                   "antispoof_rule": {"status": a_status, "detail": a_detail}},
+    })
+    for s, d in ((m_status, m_detail), (a_status, a_detail)):
+        print("%-13s %s" % (s.upper(), d))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
