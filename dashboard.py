@@ -10097,6 +10097,26 @@ def settings_page():
             'the commercial tier. You&#39;re running the free tier &mdash; a single admin account.</p></div>'
         )
 
+    # ── Network Role (Gateway Mode) capability table ──────────────────────────
+    # FAIL-SOFT BY CONSTRUCTION. This is a DISPLAY card: it must never be able to
+    # take the settings page down. Any failure yields an empty string and the page
+    # renders without it, rather than 500-ing over a table nobody is depending on.
+    #
+    # Mode is derived from persisted config alone -- no privileged calls, no sysctl
+    # read -- because the card only needs to say which mode is configured, and the
+    # cheapest correct answer is the one least able to break.
+    try:
+        from core import gateway_mode as _gw
+        _gw_env = _read_nemesis_env()
+        _gw_iface = _gw_env.get("NEMESIS_GW_LAN_IFACE") or None
+        _gw_cidr = _gw_env.get("NEMESIS_GW_LAN_CIDR") or None
+        gateway_role_html = _gw.render_capability_table(
+            _gw.MODE_GATEWAY if (_gw_iface and _gw_cidr) else _gw.MODE_BRIDGED,
+            _gw_iface, _gw_cidr)
+    except Exception:
+        log.exception("settings: gateway capability table unavailable")
+        gateway_role_html = ""
+
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -10438,6 +10458,7 @@ def settings_page():
         <p id="moduleMsg" style="display:none;font-size:0.85em;margin-top:10px"></p>
     </div>
 
+    {gateway_role_html}
 
     <div class="settings-card">
         <h2>🌡️ Hardware Tools</h2>
