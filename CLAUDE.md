@@ -1177,6 +1177,30 @@ not a collection of isolated entries** — a new entry is a change to the whole 
 each still needs to be there and still satisfies 1–8. The set's risk is its union, not its
 newest member.
 
+### Every module declaring routes needs a registry-completeness test (standing practice, added 2026-08-30)
+**Any module implementing `get_routes()` MUST carry a test asserting its declared routes match
+`roles.ROUTE_MINIMUMS` in BOTH directions** — every route `get_routes()` returns has a
+`ROUTE_MINIMUMS` entry, AND no `ROUTE_MINIMUMS` entry names an endpoint the module doesn't
+actually declare. Reference implementation:
+`modules/lan_integrity/test_lan_integrity_registry.py`'s `test_routes_are_registered()` — copy
+its shape for new modules rather than reinventing it.
+
+**Why this just became load-bearing, not merely good practice.** `8a8580f` (2026-08-30) fixed a
+live crash-loop: `assert_capabilities_sane`'s startup check used to treat any `ROUTE_MINIMUMS`
+entry absent from the LIVE `url_map` as a fatal typo — which was WRONG for a disabled module
+(its routes never register, so the "absence" is legitimate, not a mismatch) but had been the
+only thing catching a genuine module-route/`ROUTE_MINIMUMS` mismatch loudly, at every boot. The
+fix is correct and necessary (a disabled module must not crash-loop the whole dashboard), but it
+means the runtime now defers — records as "dormant," does not raise — on any `module_`-prefixed
+endpoint present in `ROUTE_MINIMUMS` but absent from the live map. **That is exactly the shape a
+real declared-route/registry mismatch would also take** when the module is disabled, or more
+generally whenever the live `url_map` can't be trusted to reflect what should be there. The
+static per-module registry-completeness test is now the ONLY thing that still catches this
+mismatch class loudly and deterministically, independent of whether the module happens to be
+enabled at test time. Skipping it on a new module is no longer "one less nice-to-have test" — it
+is the one check standing between a real typo and a silent, permanent dormant-capability
+misclassification that nothing else in the startup path will ever flag.
+
 ### Verification/derivation code must prove its own premise (standing practice, added 2026-08-01)
 **Nine instances in one day, all the same shape.** An empty comparison read as "agree." A
 failed counter lookup silently defaulting to zero and reported as a real measurement. An
