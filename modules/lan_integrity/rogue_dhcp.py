@@ -23,15 +23,28 @@ ONLY SERVER-ORIGINATED MESSAGES ARE CLAIMS OF AUTHORITY
     client message as evidence of a server would make every DHCP client on the
     network look like a DHCP server. `SERVER_MESSAGE_TYPES` is that boundary.
 
-DEGRADES HONESTLY WITHOUT SURICATA'S `extended: yes`
-    Server identity comes from the eve record's top-level `src_ip`, which is
-    present in the DEFAULT (non-extended) DHCP logger output — so the core
-    detection works before any Suricata config change. Extended mode adds the
-    advertised `routers` / `dns_servers`, which is what upgrades a finding from
-    "an unexpected server answered" to "an unexpected server tried to become
-    your gateway/resolver". Absent that data the verdict is unchanged; only the
-    severity evidence is thinner, and `payload_known` says which case you are in
-    rather than letting a thin finding read as a complete one.
+⚠ `extended: yes` IS A COVERAGE CHANGE, NOT ONLY A SEVERITY ONE — MEASURED
+    This was initially documented (wrongly) as a severity upgrade only. Measured
+    2026-08-30 by running Suricata offline against a crafted pcap holding one
+    OFFER and one ACK:
+
+        extended: no   ->  1 event  (the ACK only; the OFFER is DROPPED)
+        extended: yes  ->  2 events (OFFER and ACK, with routers/dns_servers)
+
+    Suricata's non-extended mode logs "just enough to map a MAC to an IP", and in
+    practice that means the ACK. **The OFFER never reaches the log at all.**
+
+    Why that matters to THIS detector: a rogue server's defining act is racing the
+    real server with an OFFER. If the victim accepts the rogue, a rogue ACK
+    follows and we would see it either way. But a rogue that OFFERS AND LOSES THE
+    RACE produces an OFFER and no ACK — invisible without extended logging. The
+    flip therefore moves this detector from "sees rogue servers that WON" to "sees
+    rogue servers that are TRYING", which is the early warning.
+
+    Detection still functions without it, on ACKs alone, and server identity still
+    comes from the eve record's top-level `src_ip`. `payload_known` still says
+    which case a finding was built from. But do NOT describe the un-flipped state
+    as full coverage with thinner evidence — it is NARROWER COVERAGE.
 """
 
 # DHCP message types that only a SERVER sends. A client's DISCOVER/REQUEST/

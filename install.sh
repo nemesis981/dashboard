@@ -686,8 +686,14 @@ install_suricata() {
         # comes from the eve record's top-level src_ip. `extended: yes` adds the
         # ADVERTISED routers/dns_servers, which is what separates "an unexpected
         # server answered" from "an unexpected server tried to become your
-        # gateway and resolver". It upgrades findings rather than enabling them,
-        # which is why a failure here is a warning and not a fatal install error.
+        # gateway and resolver".
+        #
+        # It ALSO widens coverage — corrected 2026-08-30 after measurement: with
+        # extended off, Suricata logs the ACK only and drops the OFFER entirely,
+        # so a rogue server that offers and loses the race is invisible. Detection
+        # still functions without this (on ACKs), which is why a failure here is a
+        # warning rather than a fatal install error — but it is narrower coverage,
+        # not merely less detail.
         #
         # Scoped to the `- dhcp:` block with awk rather than a global sed:
         # several eve loggers carry their own `extended:` key, and a file-wide
