@@ -1,0 +1,527 @@
+[
+ {
+  "dst": "default",
+  "gateway": "192.0.2.1",
+  "dev": "enp131s0",
+  "table": "piavpnrt",
+  "flags": []
+ },
+ {
+  "dst": "default",
+  "dev": "tun0",
+  "table": "piavpnOnlyrt",
+  "scope": "link",
+  "flags": []
+ },
+ {
+  "type": "blackhole",
+  "dst": "default",
+  "table": "piavpnOnlyrt",
+  "metric": 32000,
+  "flags": []
+ },
+ {
+  "dst": "default",
+  "dev": "tun0",
+  "table": "piavpnFwdrt",
+  "scope": "link",
+  "flags": []
+ },
+ {
+  "type": "blackhole",
+  "dst": "default",
+  "table": "piavpnFwdrt",
+  "metric": 32000,
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.2",
+  "dev": "tailscale0",
+  "table": "52",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.3",
+  "dev": "tailscale0",
+  "table": "52",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.4",
+  "dev": "tailscale0",
+  "table": "52",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.5",
+  "dev": "tailscale0",
+  "table": "52",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.6",
+  "dev": "tailscale0",
+  "table": "52",
+  "flags": []
+ },
+ {
+  "dst": "0.0.0.0/1",
+  "gateway": "192.0.2.7",
+  "dev": "tun0",
+  "flags": []
+ },
+ {
+  "dst": "default",
+  "gateway": "192.0.2.1",
+  "dev": "enp131s0",
+  "protocol": "static",
+  "metric": 20101,
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.8",
+  "gateway": "192.0.2.7",
+  "dev": "tun0",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.9/18",
+  "dev": "tun0",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.10",
+  "flags": []
+ },
+ {
+  "dst": "128.0.0.0/1",
+  "gateway": "192.0.2.7",
+  "dev": "tun0",
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.11",
+  "gateway": "192.0.2.1",
+  "dev": "enp131s0",
+  "flags": []
+ },
+ {
+  "dst": "169.254.0.0/16",
+  "dev": "enp129s0",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "169.254.0.2",
+  "metric": 100,
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.12/22",
+  "dev": "enp131s0",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.13",
+  "metric": 101,
+  "flags": []
+ },
+ {
+  "dst": "192.0.2.14/24",
+  "dev": "vboxnet0",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.15",
+  "flags": [
+   "linkdown"
+  ]
+ },
+ {
+  "dst": "224.0.0.0/4",
+  "dev": "enp129s0",
+  "protocol": "static",
+  "scope": "link",
+  "metric": 100,
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "192.0.2.10",
+  "dev": "tun0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "192.0.2.10",
+  "flags": []
+ },
+ {
+  "type": "broadcast",
+  "dst": "192.0.2.16",
+  "dev": "tun0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.10",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "192.0.2.17",
+  "dev": "tailscale0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "192.0.2.17",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "127.0.0.0/8",
+  "dev": "lo",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "127.0.0.1",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "127.0.0.1",
+  "dev": "lo",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "127.0.0.1",
+  "flags": []
+ },
+ {
+  "type": "broadcast",
+  "dst": "127.255.255.255",
+  "dev": "lo",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "127.0.0.1",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "169.254.0.2",
+  "dev": "enp129s0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "169.254.0.2",
+  "flags": []
+ },
+ {
+  "type": "broadcast",
+  "dst": "169.254.255.255",
+  "dev": "enp129s0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "169.254.0.2",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "192.0.2.13",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "192.0.2.13",
+  "flags": []
+ },
+ {
+  "type": "broadcast",
+  "dst": "192.0.2.18",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.13",
+  "flags": []
+ },
+ {
+  "type": "local",
+  "dst": "192.0.2.15",
+  "dev": "vboxnet0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "host",
+  "prefsrc": "192.0.2.15",
+  "flags": []
+ },
+ {
+  "type": "broadcast",
+  "dst": "192.0.2.19",
+  "dev": "vboxnet0",
+  "table": "local",
+  "protocol": "kernel",
+  "scope": "link",
+  "prefsrc": "192.0.2.15",
+  "flags": [
+   "linkdown"
+  ]
+ },
+ {
+  "type": "blackhole",
+  "dst": "default",
+  "dev": "lo",
+  "table": "piavpnFwdrt",
+  "metric": 32000,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::1",
+  "dev": "tailscale0",
+  "table": "52",
+  "metric": 1024,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::2/48",
+  "dev": "tailscale0",
+  "table": "52",
+  "metric": 1024,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::3/64",
+  "dev": "enp131s0",
+  "protocol": "ra",
+  "metric": 101,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2000::/3",
+  "dev": "tun0",
+  "metric": 1024,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::4/64",
+  "dev": "enp131s0",
+  "protocol": "ra",
+  "metric": 101,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::5",
+  "dev": "tailscale0",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "2001:db8::6/64",
+  "protocol": "ra",
+  "metric": 106,
+  "flags": [],
+  "pref": "medium",
+  "nexthops": [
+   {
+    "gateway": "fe80::262d:6cff:fed3:1c54",
+    "dev": "enp131s0",
+    "weight": 1,
+    "flags": []
+   },
+   {
+    "gateway": "fe80::d2cb:ddff:fe9a:f754",
+    "dev": "enp131s0",
+    "weight": 1,
+    "flags": []
+   }
+  ]
+ },
+ {
+  "dst": "fe80::/64",
+  "dev": "tailscale0",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "fe80::/64",
+  "dev": "vboxnet0",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [
+   "linkdown"
+  ],
+  "pref": "medium"
+ },
+ {
+  "dst": "fe80::/64",
+  "dev": "tun0",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "fe80::/64",
+  "dev": "enp131s0",
+  "protocol": "kernel",
+  "metric": 1024,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "dst": "default",
+  "gateway": "fe80::d2cb:ddff:fe9a:f754",
+  "dev": "enp131s0",
+  "protocol": "ra",
+  "metric": 20101,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "::1",
+  "dev": "lo",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "2001:db8::7",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "2001:db8::8",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "2001:db8::9",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "2001:db8::a",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "2001:db8::5",
+  "dev": "tailscale0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "fe80::1c2:c826:4775:26c5",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "fe80::800:27ff:fe00:0",
+  "dev": "vboxnet0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "fe80::61d8:d5e3:7178:941b",
+  "dev": "tailscale0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "local",
+  "dst": "fe80::7a51:1a17:9be8:17ea",
+  "dev": "tun0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 0,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "multicast",
+  "dst": "ff00::/8",
+  "dev": "tailscale0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "multicast",
+  "dst": "ff00::/8",
+  "dev": "vboxnet0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [
+   "linkdown"
+  ],
+  "pref": "medium"
+ },
+ {
+  "type": "multicast",
+  "dst": "ff00::/8",
+  "dev": "enp131s0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ },
+ {
+  "type": "multicast",
+  "dst": "ff00::/8",
+  "dev": "tun0",
+  "table": "local",
+  "protocol": "kernel",
+  "metric": 256,
+  "flags": [],
+  "pref": "medium"
+ }
+]

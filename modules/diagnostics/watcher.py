@@ -196,9 +196,43 @@ _selftest_ipv6_expectation()
 TUNNEL_LINK_KINDS = frozenset({"tun", "tap", "wireguard", "gre", "vti", "vti6",
                                "ip6tnl", "ppp"})
 
+# ── What counts as "this device carries the whole address space" ─────────────
+#
+# ⚠ A BARE `dst == "default"` TEST IS NOT ENOUGH, and believing it was is why the
+# first two versions of this predicate were PIA-specific without looking it.
+# Measured live with PIA connected (2026-08-30):
+#
+#     tun0 routes in MAIN:  0.0.0.0/1, 128.0.0.0/1, 2000::/3, ...
+#     tun0 'default' routes: only in piavpnOnlyrt and piavpnFwdrt
+#
+# PIA matched the old test ONLY because it also installs `default` inside its own
+# policy tables (its killswitch and forwarding tables) — PIA implementation detail.
+# The routes actually carrying traffic are the `/1` STRADDLE, which OpenVPN's
+# `redirect-gateway def1` installs precisely so it can capture everything WITHOUT
+# replacing the default route. A vanilla OpenVPN client therefore has no `default`
+# on its tunnel at all, and would have been classified "not tunnelled" — returning
+# the false-DEGRADED alerts for what is probably the most common consumer
+# full-tunnel setup.
+#: Destinations that cover an entire family on their own.
+_WHOLE_SPACE_SINGLE = frozenset({"default", "0.0.0.0/0", "::/0", "2000::/3"})
+#: Destination PAIRS that together cover a family. BOTH halves are required: one
+#: `/1` covers half the space and is a split tunnel, not a full one.
+_WHOLE_SPACE_PAIRS = (frozenset({"0.0.0.0/1", "128.0.0.0/1"}),
+                      frozenset({"::/1", "8000::/1"}))
+# `2000::/3` IS COUNTED — a deliberate decision, not an oversight. It is the whole
+# allocated IPv6 global-unicast space, i.e. every IPv6 address a connectivity probe
+# can target. What it excludes (ULA fc00::/7, link-local fe80::/10, multicast
+# ff00::/8) are not probe destinations, so for THIS predicate's question — "is this
+# host's egress carried by a tunnel" — it is whole-space. Observed live on PIA's
+# tun0, so it is a measured case rather than a hypothetical.
 
-def _default_route_devs(runner):
-    """Devices carrying a default route in ANY table. None = could not tell."""
+
+def _whole_space_devs(runner):
+    """Devices whose routes cover an entire address family. None = could not tell.
+
+    `None` and `set()` are different answers and are kept apart deliberately: one
+    means the instrument failed, the other is a real measurement of "nothing".
+    """
     rc, out = runner(["ip", "-j", "route", "show", "table", "all"])
     if rc != 0 or not out.strip():
         return None
@@ -206,26 +240,52 @@ def _default_route_devs(runner):
         routes = json.loads(out)
     except (ValueError, TypeError):
         return None
-    return {r.get("dev") for r in routes
-            if isinstance(r, dict) and r.get("dst") == "default" and r.get("dev")}
+    by_dev = {}
+    for r in routes:
+        if not isinstance(r, dict):
+            continue
+        dev, dst = r.get("dev"), r.get("dst")
+        if dev and dst:
+            by_dev.setdefault(dev, set()).add(dst)
+    devs = set()
+    for dev, dsts in by_dev.items():
+        if not dsts.isdisjoint(_WHOLE_SPACE_SINGLE):
+            devs.add(dev)
+        elif any(pair <= dsts for pair in _WHOLE_SPACE_PAIRS):
+            devs.add(dev)
+    return devs
 
 
-def _link_kind(iface, runner):
+def _link_kind(iface, runner, exists=None):
     """Kernel link kind for `iface`, or None if it has none / cannot be read."""
+    exists = exists or os.path.exists
+    kind = None
     rc, out = runner(["ip", "-j", "-d", "link", "show", iface])
-    if rc != 0 or not out.strip():
-        return None
-    try:
-        entries = json.loads(out)
-    except (ValueError, TypeError):
-        return None
-    if not entries or not isinstance(entries[0], dict):
-        return None
-    return (entries[0].get("linkinfo") or {}).get("info_kind")
+    if rc == 0 and out.strip():
+        try:
+            entries = json.loads(out)
+            if entries and isinstance(entries[0], dict):
+                kind = (entries[0].get("linkinfo") or {}).get("info_kind")
+        except (ValueError, TypeError):
+            kind = None
+    if kind:
+        return kind
+    # Fallback for iproute2 builds that omit linkinfo for tun/tap devices — the
+    # same fallback `vpn_dns_guard._iface_kind` already documents and relies on.
+    # Without it a real OpenVPN tun on such a build reads as "not a tunnel", which
+    # is the same silent miss the straddle gap above produced.
+    if exists("/sys/class/net/%s/tun_flags" % iface):
+        return "tun"
+    return None
 
 
-def tunnel_carries_default(runner=None) -> bool:
-    """True when a tunnel-kind interface carries this host's default route.
+def tunnel_carries_egress(runner=None, exists=None) -> bool:
+    """True when a tunnel-kind interface carries this host's whole-space egress.
+
+    ⚠ NAMED `_egress`, NOT `_default`: it deliberately does NOT key on `default`
+    alone. See `_WHOLE_SPACE_SINGLE` / `_WHOLE_SPACE_PAIRS` — OpenVPN's
+    `redirect-gateway def1` captures everything via a `/1` straddle and never
+    installs a default at all.
 
     A failed read returns False — the STRICT answer, which keeps fault reporting
     on. That is a deliberate fail-closed choice rather than a silent default: the
@@ -233,16 +293,34 @@ def tunnel_carries_default(runner=None) -> bool:
     reachable by accident.
     """
     runner = runner or _run
-    devs = _default_route_devs(runner)
+    devs = _whole_space_devs(runner)
     if not devs:
         return False
     for dev in sorted(devs):
-        if _link_kind(dev, runner) in TUNNEL_LINK_KINDS:
+        if _link_kind(dev, runner, exists) in TUNNEL_LINK_KINDS:
             return True
     return False
 
 
-def _selftest_tunnel_carries_default() -> None:
+# ── DESIGN NOTE: why this differs from forkb_policy_route.classify_topology ──
+#
+# `core/forkb_policy_route.py:classify_topology()` reads the MAIN TABLE ONLY, and
+# says so explicitly. This predicate reads ALL TABLES. That divergence is
+# deliberate, and both are correct, because they answer different questions:
+#
+#   Fork B asks  "which interface is the REAL egress, so I can masquerade out of
+#                 it?"  A split-tunnel VPN diverts via policy tables, so consulting
+#                 those would name the tunnel and mask the true egress. Main only.
+#
+#   This asks    "is this host's traffic being carried by a tunnel, such that the
+#                 IPv6 and raw-egress probes are expected to fail?"  PIA's
+#                 full-tunnel default lives ONLY in policy tables (piavpnOnlyrt /
+#                 piavpnFwdrt) — reading main only would answer "not tunnelled"
+#                 while every probe is in fact tunnel-bound. All tables.
+#
+# Recorded here so a future reader comparing the two does not conclude one is a
+# bug. If either question changes, revisit BOTH — they are not interchangeable.
+def _selftest_tunnel_carries_egress() -> None:
     """Prove this can return BOTH answers before either is trusted.
 
     Runs at import, in the production path. The reverted 2026-08-30 fix failed
@@ -261,10 +339,17 @@ def _selftest_tunnel_carries_default() -> None:
             return (0, "[%s]" % body)
         return runner
 
+    never = lambda _p: False
+
     phys = '[{"dst":"default","dev":"eth0"}]'
     tun = '[{"dst":"default","dev":"tun0"}]'
     mesh = '[{"dst":"default","dev":"eth0"},{"dst":"100.64.0.1","dev":"tailscale0"}]'
     exitnode = '[{"dst":"default","dev":"tailscale0"}]'
+    # OpenVPN `redirect-gateway def1`: NO default on the tunnel at all.
+    ovpn = ('[{"dst":"default","dev":"eth0"},'
+            '{"dst":"0.0.0.0/1","dev":"tun0"},{"dst":"128.0.0.0/1","dev":"tun0"}]')
+    # Only ONE half of the straddle — a split tunnel, must NOT qualify.
+    half = '[{"dst":"default","dev":"eth0"},{"dst":"0.0.0.0/1","dev":"tun0"}]'
 
     cases = [
         (mk(phys, {"eth0": None}), False, "physical-only egress is NOT tunnelled"),
@@ -273,18 +358,22 @@ def _selftest_tunnel_carries_default() -> None:
          "a mesh VPN with no default route must NOT qualify"),
         (mk(exitnode, {"tailscale0": "tun"}), True,
          "an exit node DOES carry the default and DOES qualify (decided)"),
+        (mk(ovpn, {"eth0": None, "tun0": "tun"}), True,
+         "OpenVPN redirect-gateway def1 (/1 straddle, no default) IS tunnelled"),
+        (mk(half, {"eth0": None, "tun0": "tun"}), False,
+         "half a straddle is a split tunnel and must NOT qualify"),
         (lambda cmd: (1, ""), False, "a failed read must not read as tunnelled"),
         (lambda cmd: (0, "not json"), False, "unparseable output must not read as tunnelled"),
     ]
     for runner, expected, why in cases:
-        got = tunnel_carries_default(runner=runner)
+        got = tunnel_carries_egress(runner=runner, exists=never)
         if got != expected:
             raise AssertionError(
-                "tunnel_carries_default self-test failed (%s): got %r, expected %r"
+                "tunnel_carries_egress self-test failed (%s): got %r, expected %r"
                 % (why, got, expected))
 
 
-_selftest_tunnel_carries_default()
+_selftest_tunnel_carries_egress()
 
 
 # ── command runner (per-probe isolation: one failing probe never kills the run)─
@@ -524,8 +613,8 @@ def _probe(cfg: dict):
     flags = {"routing_ok": routing_ok, "dns_ok": dns_ok,
              "egress_ok": egress_ok, "api_ok": api_ok}
     # Verdict input is the TUNNEL test, not `vpn_connected` — see
-    # `tunnel_carries_default()`. `vpn_connected` remains an observation only.
-    tunnelled = tunnel_carries_default()
+    # `tunnel_carries_egress()`. `vpn_connected` remains an observation only.
+    tunnelled = tunnel_carries_egress()
     raw.append(f"  [egress.tunnelled] {tunnelled}")
     note = _note(flags, v4_ok, v6_ok, v6_expect, tunnelled)
     return (flags, latency_ms, note, raw, (v4_ok, v6_ok, v6_expect),
@@ -577,7 +666,7 @@ def classify(flags: dict, v4_ok: bool, v6_ok: bool,
     BY DESIGN, so both fail every cycle while the tunnel is up — the identical
     permanent-episode shape an IPv4-only link produced.
 
-    ⚠ It comes from `tunnel_carries_default()`, NOT from `vpn_connected`. The first
+    ⚠ It comes from `tunnel_carries_egress()`, NOT from `vpn_connected`. The first
     version of this fix used the latter, which is True whenever ANY provider is
     connected — permanently true on an appliance running Tailscale for enrollment —
     and so silently suppressed every real IPv6 fault. See that function's comment.

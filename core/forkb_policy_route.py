@@ -79,6 +79,15 @@ def classify_topology(default_route_ifaces, iface_kinds, tunnel_kinds=None):
     Reads only the MAIN table on purpose: a split-tunnel VPN diverts traffic through
     policy-routing tables, so consulting those would report the tunnel and mask the real
     egress -- the same reason `masquerade_egress_iface()` reads main only.
+
+    ⚠ DELIBERATE DIVERGENCE, not a bug in either place. `modules/diagnostics/watcher.py`'s
+    `tunnel_carries_egress()` reads ALL TABLES and also treats an OpenVPN `/1` straddle as
+    whole-space. It answers a DIFFERENT question -- "is traffic tunnelled, so the IPv6 and
+    raw-egress probes are expected to fail?" -- and PIA's full-tunnel default lives only in
+    its policy tables, so main-only would answer "not tunnelled" while every probe is
+    tunnel-bound. This function's question is "which interface is the REAL egress for
+    masquerading?", where the opposite reading is required. If either question changes,
+    revisit BOTH; they are not interchangeable.
     """
     kinds = _resolve_tunnel_kinds(tunnel_kinds)
     ifaces = [i for i in (default_route_ifaces or []) if i]

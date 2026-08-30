@@ -17,7 +17,7 @@ nothing.
 **The 36-check suite of that version passed it.** Every test supplied the flag as an
 explicit boolean, which proves the BRANCH and says nothing about what production
 supplies. A branch test proves the branch, not the predicate. So this file now also
-tests the PREDICATE — `tunnel_carries_default()` — including the exact mesh-VPN
+tests the PREDICATE — `tunnel_carries_egress()` — including the exact mesh-VPN
 shape that was mis-read, and the live value on the host it runs on.
 
 THE NEGATIVES ARE THE LOAD-BEARING HALF: every permissive case is paired with one
@@ -39,7 +39,7 @@ from modules.diagnostics import watcher as w
 _fail = []
 _count = 0
 
-EXPECTED_CHECKS = 50
+EXPECTED_CHECKS = 61
 
 
 def check(label, got, want):
@@ -69,53 +69,123 @@ def mk_runner(routes_json, kinds):
     return runner
 
 
+NO_SYSFS = lambda _p: False          # default: no tun_flags fallback available
+
+
+def carries(routes_json, kinds, exists=NO_SYSFS):
+    return w.tunnel_carries_egress(runner=mk_runner(routes_json, kinds), exists=exists)
+
+
 PHYS = '[{"dst":"default","dev":"eth0"}]'
 TUN = '[{"dst":"default","dev":"tun0"}]'
 MESH = '[{"dst":"default","dev":"eth0"},{"dst":"100.64.0.1","dev":"tailscale0"}]'
 EXITNODE = '[{"dst":"default","dev":"tailscale0"}]'
+# OpenVPN `redirect-gateway def1`: captures everything via a /1 straddle and never
+# installs a default on the tunnel at all. THE CASE THE OLD PREDICATE MISSED.
+OVPN_DEF1 = ('[{"dst":"default","dev":"eth0"},'
+             '{"dst":"0.0.0.0/1","dev":"tun0"},{"dst":"128.0.0.0/1","dev":"tun0"}]')
+# Only one half of the straddle -> covers half the space -> a SPLIT tunnel.
+HALF = '[{"dst":"default","dev":"eth0"},{"dst":"0.0.0.0/1","dev":"tun0"}]'
+# WireGuard full tunnel, AllowedIPs=0.0.0.0/0, wg-quick policy table.
+WG_FULL = '[{"dst":"default","dev":"eth0"},{"dst":"default","dev":"wg0","table":"51820"}]'
+# WireGuard split tunnel: AllowedIPs is a specific prefix only.
+WG_SPLIT = '[{"dst":"default","dev":"eth0"},{"dst":"10.2.0.0/16","dev":"wg0"}]'
+# IPv6 straddle + the global-unicast form observed live on PIA.
+V6_STRADDLE = '[{"dst":"default","dev":"eth0"},{"dst":"::/1","dev":"tun0"},{"dst":"8000::/1","dev":"tun0"}]'
+V6_GUA = '[{"dst":"default","dev":"eth0"},{"dst":"2000::/3","dev":"tun0"}]'
+# A tun device on an iproute2 build that omits linkinfo entirely.
+NOKIND = '[{"dst":"0.0.0.0/1","dev":"tun0"},{"dst":"128.0.0.0/1","dev":"tun0"}]'
 
 
 # ── 0. THE PREDICATE — the half the reverted fix got wrong ───────────────────
 def test_predicate_mesh_vpn_must_not_qualify():
     """THE regression test. A mesh VPN with no default route is NOT tunnelled."""
     check("mesh VPN (tailscale0 up, no default) -> NOT tunnelled",
-          w.tunnel_carries_default(mk_runner(MESH, {"eth0": None, "tailscale0": "tun"})),
+          w.tunnel_carries_egress(mk_runner(MESH, {"eth0": None, "tailscale0": "tun"})),
           False)
     check("physical-only egress -> NOT tunnelled",
-          w.tunnel_carries_default(mk_runner(PHYS, {"eth0": None})), False)
+          w.tunnel_carries_egress(mk_runner(PHYS, {"eth0": None})), False)
     check("tun device carrying the default -> tunnelled",
-          w.tunnel_carries_default(mk_runner(TUN, {"tun0": "tun"})), True)
+          w.tunnel_carries_egress(mk_runner(TUN, {"tun0": "tun"})), True)
     check("wireguard device carrying the default -> tunnelled",
-          w.tunnel_carries_default(mk_runner(TUN, {"tun0": "wireguard"})), True)
+          w.tunnel_carries_egress(mk_runner(TUN, {"tun0": "wireguard"})), True)
     # Matched by KIND, never by name — the name proves nothing either way.
     check("a device NAMED tun0 with no tunnel kind -> NOT tunnelled",
-          w.tunnel_carries_default(mk_runner(TUN, {"tun0": None})), False)
+          w.tunnel_carries_egress(mk_runner(TUN, {"tun0": None})), False)
     check("predicate DIFFERS between mesh and exit-node routing tables",
-          w.tunnel_carries_default(mk_runner(MESH, {"eth0": None, "tailscale0": "tun"}))
-          != w.tunnel_carries_default(mk_runner(EXITNODE, {"tailscale0": "tun"})), True)
+          w.tunnel_carries_egress(mk_runner(MESH, {"eth0": None, "tailscale0": "tun"}))
+          != w.tunnel_carries_egress(mk_runner(EXITNODE, {"tailscale0": "tun"})), True)
+
+
+def test_predicate_protocol_families():
+    """The generalisation pass: OpenVPN and WireGuard, full vs split."""
+    check("OpenVPN redirect-gateway def1 (/1 straddle, NO default) -> tunnelled",
+          carries(OVPN_DEF1, {"eth0": None, "tun0": "tun"}), True)
+    check("half a straddle (one /1 only) -> NOT tunnelled (split)",
+          carries(HALF, {"eth0": None, "tun0": "tun"}), False)
+    check("WireGuard full tunnel (default in wg-quick policy table) -> tunnelled",
+          carries(WG_FULL, {"eth0": None, "wg0": "wireguard"}), True)
+    check("WireGuard split tunnel (specific AllowedIPs only) -> NOT tunnelled",
+          carries(WG_SPLIT, {"eth0": None, "wg0": "wireguard"}), False)
+    check("IPv6 straddle ::/1 + 8000::/1 -> tunnelled",
+          carries(V6_STRADDLE, {"eth0": None, "tun0": "tun"}), True)
+    check("IPv6 2000::/3 global-unicast -> tunnelled (decided, observed on PIA)",
+          carries(V6_GUA, {"eth0": None, "tun0": "tun"}), True)
+
+
+def test_predicate_sysfs_fallback():
+    """iproute2 builds that omit linkinfo must still classify a real tun."""
+    check("tun with NO linkinfo and no sysfs -> NOT tunnelled",
+          carries(NOKIND, {"tun0": None}, exists=NO_SYSFS), False)
+    check("tun with NO linkinfo but tun_flags in sysfs -> tunnelled (fallback)",
+          carries(NOKIND, {"tun0": None},
+                  exists=lambda p: p == "/sys/class/net/tun0/tun_flags"), True)
+    check("sysfs fallback does NOT fire for a physical device",
+          carries('[{"dst":"default","dev":"eth0"}]', {"eth0": None},
+                  exists=lambda p: p == "/sys/class/net/tun0/tun_flags"), False)
+
+
+def test_predicate_against_real_pia_capture():
+    """Replay the REAL routing captured while PIA was connected (2026-08-30)."""
+    import json as _json
+    fx = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures")
+    rp = os.path.join(fx, "routes-pia-connected.json")
+    lp = os.path.join(fx, "link-tun0-pia.json")
+    if not (os.path.exists(rp) and os.path.exists(lp)):
+        check("real PIA capture fixture present", False, True)
+        check("real PIA capture -> tunnelled", False, True)
+        return
+    routes, link = open(rp).read(), open(lp).read()
+    def runner(cmd):
+        if "route" in cmd:
+            return (0, routes)
+        return (0, link) if cmd[-1] == "tun0" else (0, '[{}]')
+    check("real PIA capture fixture present", True, True)
+    check("real PIA-connected capture -> tunnelled",
+          w.tunnel_carries_egress(runner=runner, exists=NO_SYSFS), True)
 
 
 def test_predicate_exit_node_decided_deliberately():
     """DECIDED: an exit node DOES qualify. Its egress genuinely is tunnelled."""
     check("tailscale EXIT NODE carrying the default -> tunnelled (deliberate)",
-          w.tunnel_carries_default(mk_runner(EXITNODE, {"tailscale0": "tun"})), True)
+          w.tunnel_carries_egress(mk_runner(EXITNODE, {"tailscale0": "tun"})), True)
 
 
 def test_predicate_fails_closed():
     """A failed read must never read as tunnelled — permissive is the unsafe side."""
-    check("failed route read -> NOT tunnelled", w.tunnel_carries_default(lambda c: (1, "")), False)
-    check("empty route output -> NOT tunnelled", w.tunnel_carries_default(lambda c: (0, "")), False)
+    check("failed route read -> NOT tunnelled", w.tunnel_carries_egress(lambda c: (1, "")), False)
+    check("empty route output -> NOT tunnelled", w.tunnel_carries_egress(lambda c: (0, "")), False)
     check("unparseable route JSON -> NOT tunnelled",
-          w.tunnel_carries_default(lambda c: (0, "not json")), False)
+          w.tunnel_carries_egress(lambda c: (0, "not json")), False)
     check("route ok but link read fails -> NOT tunnelled",
-          w.tunnel_carries_default(mk_runner(TUN, {})), False)
+          w.tunnel_carries_egress(mk_runner(TUN, {})), False)
 
 
 def test_predicate_live_value_on_this_host():
     """Pin what production actually supplies — the check the reverted fix lacked."""
-    live_tunnelled = w.tunnel_carries_default()
+    live_tunnelled = w.tunnel_carries_egress()
     live_vpn = w._probe_vpn([])
-    check("LIVE tunnel_carries_default() returns a bool",
+    check("LIVE tunnel_carries_egress() returns a bool",
           isinstance(live_tunnelled, bool), True)
     # On a host where a mesh VPN is up but carries no default, the two MUST
     # disagree. Reported either way, so a host lacking the case cannot look like
@@ -239,6 +309,9 @@ def test_notes_are_controlled_vocabulary():
 
 if __name__ == "__main__":
     test_predicate_mesh_vpn_must_not_qualify()
+    test_predicate_protocol_families()
+    test_predicate_sysfs_fallback()
+    test_predicate_against_real_pia_capture()
     test_predicate_exit_node_decided_deliberately()
     test_predicate_fails_closed()
     test_predicate_live_value_on_this_host()
