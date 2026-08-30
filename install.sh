@@ -679,6 +679,45 @@ install_suricata() {
         # Replace any interface name under the af-packet section
         sed -i -E "s|(  - interface: )[^ ]+|\1$DETECTED_IFACE|g" "$yaml_file"
         ok "Suricata configured for interface $DETECTED_IFACE"
+
+        # ── Extended DHCP eve logging (modules/lan_integrity) ────────────────
+        # Added 2026-08-30. The `- dhcp:` eve logger is already enabled by
+        # default, so rogue-DHCP detection works without this -- server identity
+        # comes from the eve record's top-level src_ip. `extended: yes` adds the
+        # ADVERTISED routers/dns_servers, which is what separates "an unexpected
+        # server answered" from "an unexpected server tried to become your
+        # gateway and resolver". It upgrades findings rather than enabling them,
+        # which is why a failure here is a warning and not a fatal install error.
+        #
+        # Scoped to the `- dhcp:` block with awk rather than a global sed:
+        # several eve loggers carry their own `extended:` key, and a file-wide
+        # substitution would silently flip all of them.
+        local dhcp_tmp
+        dhcp_tmp="$(mktemp)"
+        if awk '
+            /^[[:space:]]*-[[:space:]]*dhcp:[[:space:]]*$/ { in_dhcp=1; print; next }
+            in_dhcp && /^[[:space:]]*-[[:space:]]*[a-z0-9_-]+:[[:space:]]*$/ { in_dhcp=0 }
+            in_dhcp && !done && /^[[:space:]]*extended:/ {
+                match($0, /^[[:space:]]*/); indent=substr($0, 1, RLENGTH)
+                print indent "extended: yes"; done=1; next
+            }
+            { print }
+        ' "$yaml_file" > "$dhcp_tmp" && [[ -s "$dhcp_tmp" ]]; then
+            cp -a "$dhcp_tmp" "$yaml_file"
+            # VERIFY THE EDIT TOOK. An awk that matched nothing exits 0 and
+            # produces a valid file -- indistinguishable from success.
+            if grep -A6 -E '^[[:space:]]*-[[:space:]]*dhcp:[[:space:]]*$' "$yaml_file" \
+                 | grep -qE '^[[:space:]]*extended:[[:space:]]*yes'; then
+                ok "Suricata extended DHCP logging enabled"
+            else
+                warn "Could not enable Suricata extended DHCP logging — rogue-DHCP"
+                warn "detection still works, but advertised gateway/DNS will not be recorded."
+                warn "  Fix later with: $DASHBOARD_DIR/scripts/enable-suricata-dhcp-extended.sh"
+            fi
+        else
+            warn "Could not rewrite $yaml_file for extended DHCP logging — skipping"
+        fi
+        rm -f "$dhcp_tmp"
     else
         warn "/etc/suricata/suricata.yaml not found — configure the interface manually:"
         warn "  sudo nano /etc/suricata/suricata.yaml  (look for 'af-packet')"
