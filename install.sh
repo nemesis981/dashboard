@@ -483,8 +483,68 @@ ANTHROPIC_OUTPUT_PRICE_PER_MTOK=${CFG_ANTHROPIC_OUTPUT_PRICE}
 #
 # Example:  NEMESIS_NEVER_BLOCK=10.0.0.5,10.0.0.6
 NEMESIS_NEVER_BLOCK=
+
+# ── Gateway Mode — OFF, and left off by this installer ───────────────────────
+#
+# Gateway Mode is when Nemesis sits inline as your network's router rather than
+# as a device on it. It is a deliberate, per-deployment choice, not a default:
+# it means taking your existing router out of routing duty, and a mistake here
+# takes the whole network offline rather than degrading one feature.
+#
+# BOTH values below must be set for anything to happen. Leaving either blank
+# means no source-NAT rule is generated at all -- the safe state is "the rule
+# does not exist", not "the rule exists and matches nothing".
+#
+# ⚠ THESE LIVE HERE, AND NOT IN A SERVICE ENVIRONMENT, FOR A MEASURED REASON.
+# The firewall watcher re-renders the ruleset on its own whenever ufw changes,
+# in its own environment. Anything passed as a one-off environment variable is
+# silently dropped at the next re-render -- observed on the test rig: the rule
+# was correct, loaded, and gone within seconds, with traffic then leaving
+# un-translated while every status surface reported success. Persisted here, the
+# renderer reproduces it on every invocation, including the ones nobody ran.
+#
+#   NEMESIS_GW_LAN_IFACE  the interface facing your LAN (the side NOT translated)
+#   NEMESIS_GW_LAN_CIDR   that LAN's subnet, e.g. 192.168.10.0/24
+#
+# Example:  NEMESIS_GW_LAN_IFACE=eth1
+#           NEMESIS_GW_LAN_CIDR=192.168.10.0/24
+NEMESIS_GW_LAN_IFACE=
+NEMESIS_GW_LAN_CIDR=
 EOF
     ok "/etc/nemesis.env written"
+}
+
+
+verify_gateway_config_path() {
+    # PROVE THE RENDERER READS PERSISTED CONFIG -- known-good AND known-bad.
+    #
+    # This exists because the failure it guards against is silent: if the renderer
+    # cannot reproduce gateway config from /etc/nemesis.env, the NAT rule appears
+    # once and then disappears at the watcher's next re-render, and every surface
+    # still reports success. A check that only confirmed "the file exists" would
+    # not catch that, so this renders BOTH ways and requires the answers to differ.
+    #
+    # Non-fatal: Gateway Mode is optional and off. A failure here means the mode
+    # cannot be switched on safely later, which is worth a loud warning at install
+    # time rather than a discovery during a network cutover.
+    local render="$DASHBOARD_DIR/scripts/nemesis-fw-render"
+    [ -x "$render" ] || { warn "nemesis-fw-render not executable — skipping gateway config check"; return 0; }
+
+    local tmp_on tmp_off out_on out_off
+    tmp_on="$(mktemp)"; tmp_off="$(mktemp)"
+    printf 'NEMESIS_GW_LAN_IFACE=probe0\nNEMESIS_GW_LAN_CIDR=198.51.100.0/24\n' > "$tmp_on"
+    : > "$tmp_off"
+
+    out_on="$(NEMESIS_ENV_FILE="$tmp_on" NEMESIS_FW_ENFORCE=0 "$render" render 2>/dev/null | grep -c 'nemesis:nat:gateway-snat' || true)"
+    out_off="$(NEMESIS_ENV_FILE="$tmp_off" NEMESIS_FW_ENFORCE=0 "$render" render 2>/dev/null | grep -c 'nemesis:nat:gateway-snat' || true)"
+    rm -f "$tmp_on" "$tmp_off"
+
+    if [ "$out_on" = "1" ] && [ "$out_off" = "0" ]; then
+        ok "Gateway Mode config path verified (renderer reads /etc/nemesis.env)"
+    else
+        warn "Gateway Mode config path NOT verified (configured=$out_on, unconfigured=$out_off; expected 1 and 0)."
+        warn "  Gateway Mode would not survive a firewall re-render. Do not enable it until this is fixed."
+    fi
 }
 
 ###############################################################################
@@ -1189,6 +1249,7 @@ setup_nemesis_group() {
     ok "Added $SUDO_USER to nemesis group"
 
     write_env_file
+    verify_gateway_config_path
 
     chown root:nemesis /etc/nemesis.env
     chmod 640 /etc/nemesis.env
