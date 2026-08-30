@@ -85,7 +85,41 @@ ENFORCE="${NEMESIS_FW_ENFORCE:-1}"
 # this is OUR OWN component with a stable name, unlike a user's VPN device whose name
 # is arbitrary (which is why vpn_dns_guard kind-matches those instead). Overridable
 # for the rare non-default tun name.
-TS_IFACE="${NEMESIS_TS_IFACE:-tailscale0}"
+# ⚠ CONFIG MUST BE READ FROM PERSISTENT STATE, NOT INHERITED FROM THE CALLER.
+#
+# Found the hard way on the VM rig 2026-08-30: the gateway SNAT chain was rendered
+# correctly, loaded correctly, and had VANISHED within seconds. `nemesis-fw-watch`
+# re-renders this script autonomously on ufw drift, IN ITS OWN ENVIRONMENT -- so
+# anything supplied only as an environment variable by a one-off invocation is
+# silently dropped from the very next re-render. The chain existed for about two
+# seconds and the traffic then left un-NATted, with every surface reporting success.
+#
+# So the standing "the renderer emits all forward/NAT rules" constraint is necessary
+# but NOT sufficient: the renderer must also be able to REPRODUCE the same output
+# from persistent state on an invocation nobody configured. Values are read from
+# /etc/nemesis.env (the established config location), with the process environment
+# taking precedence so tests can override without touching system config.
+#
+# Read by targeted grep rather than sourcing the file: /etc/nemesis.env holds
+# secrets, and sourcing it wholesale would pull them into the render environment for
+# no reason.
+NEMESIS_ENV_FILE="${NEMESIS_ENV_FILE:-/etc/nemesis.env}"
+_envget() {
+    local key="$1"
+    [ -r "$NEMESIS_ENV_FILE" ] || return 0
+    sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$NEMESIS_ENV_FILE" \
+        | tail -1 | sed 's/^"//; s/"$//; s/^'"'"'//; s/'"'"'$//'
+}
+
+TS_IFACE="${NEMESIS_TS_IFACE:-$(_envget NEMESIS_TS_IFACE)}"
+TS_IFACE="${TS_IFACE:-tailscale0}"
+
+# ── Gateway Mode SNAT (step 2) ────────────────────────────────────────────────
+# BOTH must be set or no NAT chain is emitted at all. Gateway Mode is off by
+# default and an unconfigured masquerade is meaningless, so the safe state is
+# "the chain does not exist" rather than "the chain exists and matches nothing".
+GW_LAN_IFACE="${NEMESIS_GW_LAN_IFACE:-$(_envget NEMESIS_GW_LAN_IFACE)}"
+GW_LAN_CIDR="${NEMESIS_GW_LAN_CIDR:-$(_envget NEMESIS_GW_LAN_CIDR)}"
 
 # ── never-block guard ────────────────────────────────────────────────────────
 # FAIL-CLOSED, and deliberately strict: an enforcement table without a working
@@ -243,6 +277,38 @@ cat <<'NFT'
         type filter hook output priority -175; policy accept;
         counter comment "nemesis:output:traversed"
     }
+NFT
+
+# ── Gateway Mode source-NAT ───────────────────────────────────────────────────
+#
+# ⚠ THIS CHAIN LIVES INSIDE nemesis_enforce DELIBERATELY, not in a table of its own.
+# Both `nemesis-fw-apply` and `nemesis_fw_watch.py` are scoped to `inet
+# nemesis_enforce` BY NAME (apply reverts with `nft delete table inet
+# nemesis_enforce`; the watcher keys on TABLE_NAME). A separate `nemesis_gw_nat`
+# table -- the shape the 2026-08-06 gateway-zone experiment used -- would therefore
+# sit OUTSIDE both: it would SURVIVE a failsafe revert, leaving NAT live after the
+# enforcement table had been rolled back, and it would be invisible to tamper
+# detection. One table means one owner, one atomic revert, one watched object.
+#
+# ⚠ NEGATIVE SCOPE (`oifname !=`), NOT `-o <derived egress>`. This is the shape
+# proven on the VM rig 2026-08-30. Scoping to a DERIVED egress interface fails
+# whenever the route changes underneath it: with a split-tunnel VPN up, traffic
+# leaves via the tunnel while the derivation still (correctly) reports the physical
+# NIC, the rule never matches, and packets exit UN-NATTED carrying the client's
+# private source. Measured: 6 such packets. Scoping instead by the interface that
+# must NOT be translated -- the LAN side, a configuration fact we own -- was proven
+# correct in BOTH VPN states. Do not "simplify" this back to a positive match.
+#
+# IPv4 only: NATing IPv6 is not a goal, and `ip saddr` here matches v4 in the inet
+# family by construction.
+if [ -n "$GW_LAN_IFACE" ] && [ -n "$GW_LAN_CIDR" ]; then
+    echo "    chain gateway_snat {"
+    echo "        type nat hook postrouting priority srcnat; policy accept;"
+    echo "        ip saddr $GW_LAN_CIDR oifname != \"$GW_LAN_IFACE\" counter masquerade comment \"nemesis:nat:gateway-snat\""
+    echo "    }"
+fi
+
+cat <<'NFT'
 }
 NFT
 } > "$OUT"
