@@ -3,6 +3,34 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [MED] Re-evaluate `malware_file_quarantine`'s L1 capability ceiling once restore ships (filed 2026-08-30)
+**Blocked-on, ready to pick up the moment file-quarantine restore lands. Deliberately NOT part of
+the restore build — one variable at a time, operator-directed 2026-08-30.**
+
+`modules/ai_engine/module.py:507` sets `CEILING_KIND["malware_file_quarantine"] = "capability"`,
+which makes its L1 ceiling **not overridable by the operator at all** (`:700`, `:4063` →
+`capability_ceiling_not_overridable`). The justification is stated in three places and is a single
+fact: **no restore path exists.** See `modules/malware_detection/module.py:2826` ("the product has
+no restore path -- an AI-initiated quarantine could not be undone"), `:4759` ("Pinned at L1 in
+ACTION_CLASS_CEILINGS because no restore path exists"), and the chat-context note at `:4700`.
+
+**Once restore ships, that justification is factually gone** — and a `"capability"` ceiling whose
+named missing capability now exists is asserting something untrue about the code. `ceiling_kind`'s
+own docstring (`:558-565`) distinguishes `"capability"` (the code *cannot* do it) from
+`"threshold"` (it can, but policy says don't); the comment at `:515` is explicit that labelling
+something `"capability"` when the code *can* do it is the error to avoid.
+
+**What this entry is NOT:** it is not "raise the ceiling to L2/L3." That is a separate authority
+decision the operator owns. This entry is narrower and purely factual — **re-evaluate whether
+`"capability"` is still the honest `CEILING_KIND`**, and if not, reclassify it to `"threshold"`
+(which leaves the actual level at L1 until someone deliberately raises it, but stops the code
+claiming an impossibility that no longer holds).
+
+Also update the three comments above and the chat-context text at `:4700` — that one is
+user-facing, and after restore ships it would be actively telling users a false thing about the
+product. `modules/ai_engine/test_master_authority.py:65-66` asserts the `"capability"` kind and
+will need updating in the same change.
+
 ### [HIGH] `NEMESIS_DB_PATH` redirects the DB but NOT canary filesystem side-effects (found 2026-08-26)
 `modules/malware_detection/module.py:1883` — `_canary_user_home()` is `os.path.expanduser("~")`
 and is unaffected by `NEMESIS_DB_PATH`. `Module.start()` (`:4427`) calls
