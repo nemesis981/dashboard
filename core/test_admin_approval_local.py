@@ -34,7 +34,7 @@ import tempfile
 import traceback
 
 _PASS, _FAIL = [], []
-EXPECTED_CHECKS = 30
+EXPECTED_CHECKS = 39
 
 
 def check(label, cond, detail=""):
@@ -290,6 +290,78 @@ check("RECORD_IS_ON_BOX_ONLY is declared true", local.RECORD_IS_ON_BOX_ONLY is T
 check("the module says it does NOT provide non-repudiation",
       "NOT non-repudiation" in (local.__doc__ or "")
       or "not non-repudiation" in (local.__doc__ or "").lower())
+
+
+print("\n== CROSS-LANGUAGE: the JS builds the SAME action_params bytes ==")
+# ⚠ THE SILENT-FAILURE RISK OF THE WHOLE BROWSER HALF. static/admin-approval.js
+# constructs action_params in JavaScript and the server rebuilds it in Python;
+# the two are compared as BYTES, so any divergence -- key order, whitespace,
+# number formatting -- produces a signature that never verifies, with no error
+# pointing at the cause. Pinned here rather than discovered during the first live
+# ceremony.
+#
+# The expected string is what JSON.stringify() emits for an object whose keys are
+# written in alphabetical order (its output preserves insertion order and uses no
+# whitespace), which is what the .js does deliberately to match Python's
+# sort_keys=True + separators=(",",":").
+_py_bytes = local.local_action_params(
+    action_class="ip_block_permanent", row_id="198.51.100.9",
+    proposed_action="block", proposal_id=41)
+_js_expected = (b'{"action_class":"ip_block_permanent","proposal_id":41,'
+                b'"proposed_action":"block","row_id":"198.51.100.9","v":1}')
+check("python action_params matches what the browser emits", _py_bytes == _js_expected,
+      "py=%r js=%r" % (_py_bytes, _js_expected))
+# CONTROL: the comparison must be capable of failing -- a reordered payload must
+# NOT match, or this assertion proves nothing about ordering.
+_reordered = b'{"v":1,"action_class":"ip_block_permanent","proposal_id":41,"proposed_action":"block","row_id":"198.51.100.9"}'
+check("CONTROL: a reordered payload does NOT match (ordering is load-bearing)",
+      _py_bytes != _reordered)
+# And the .js must actually contain that key order -- asserting the Python side
+# alone would pass even if the JS were changed to something else entirely.
+_js_src = open(os.path.join(_REPO, "static", "admin-approval.js")).read()
+_i = _js_src.find("action_class: actionClass")
+_order_ok = (_i > 0 and _js_src.find("proposal_id:", _i) > _i
+             and _js_src.find("proposed_action:", _i) > _js_src.find("proposal_id:", _i)
+             and _js_src.find("row_id:", _i) > _js_src.find("proposed_action:", _i)
+             and _js_src.find("v: 1", _i) > _js_src.find("row_id:", _i))
+check("the .js still lists those keys in the matching order", _order_ok,
+      "static/admin-approval.js key order drifted from local_action_params()")
+
+
+print("\n== UI RENDERERS: markup the ceremony can actually drive ==")
+# An empty string is a LEGAL return from the pending card (no proposals) and is
+# also what a broken renderer returns, since both fail-soft to "". Asserting only
+# "it did not raise" cannot tell those apart, so both states are checked.
+with dashboard.app.test_request_context():
+    _pair_html = dashboard._render_admin_approval_pairing_html()
+check("the pairing card renders", len(_pair_html) > 100, len(_pair_html))
+check("it loads the static ceremony JS, not inline script",
+      "/static/admin-approval.js" in _pair_html and "function " not in _pair_html)
+
+_pid_ui = ai.create_proposal("ip_block_permanent", "alert", "203.0.113.77", "block",
+                             "ui render check", "m")
+with dashboard.app.test_request_context():
+    _pend_html = dashboard._render_pending_approvals_html()
+check("the pending card renders when a proposal exists", len(_pend_html) > 100,
+      len(_pend_html))
+check("it carries every data attribute the ceremony reads",
+      all(a in _pend_html for a in ("data-action-class", "data-row-id",
+                                    "data-proposed", "data-authenticator")),
+      _pend_html[:200])
+check("it flags that this class needs a security key",
+      "security key" in _pend_html, _pend_html[:200])
+# CONTROL: with the queue drained the card must be EMPTY, not merely shorter --
+# an always-present empty card trains people to stop looking at it.
+conn = _db()
+try:
+    conn.execute("UPDATE ai_proposals SET human_response='rejected' "
+                 "WHERE human_response IS NULL")
+    conn.commit()
+finally:
+    conn.close()
+with dashboard.app.test_request_context():
+    _empty = dashboard._render_pending_approvals_html()
+check("CONTROL: an empty queue renders NOTHING at all", _empty == "", len(_empty))
 
 
 print("\n== TOTALS ==")

@@ -8698,6 +8698,155 @@ def api_admin_approval_request():
 # which is what the ADR 0026 §D3 A2 work actually needs from it.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _render_admin_approval_pairing_html():
+    """Settings card: register and list admin-approval authenticators.
+
+    CONFIGURATION, which is why it lives in settings while the pending-approvals
+    card lives on the dashboard. Pairing a key is setup; approving an action is
+    operations. Two places to look, deliberately, rather than one card that means
+    two things.
+
+    FAIL-SOFT: any failure yields an empty string and the settings page renders
+    without this card. A pairing UI must never be able to take settings down —
+    settings is where you would go to fix it.
+
+    Contains NO inline JavaScript. The ceremony lives in
+    /static/admin-approval.js; this emits markup and data attributes only. See
+    that file's header for why (the f-string/JS bug class).
+    """
+    try:
+        from core import admin_approval_pairing as pairing
+        from core import admin_approval_authenticators as auth
+        from core import admin_approval_rotation as rotation
+        conn = _dm_conn()
+        try:
+            records = auth.all_records(conn)
+            verdict = pairing.can_unlock(records)
+            bootstrap = rotation.bootstrap_open(conn)
+        finally:
+            conn.close()
+    except Exception:
+        log.exception("settings: admin-approval pairing card unavailable")
+        return ""
+
+    active = [r for r in records if not r.get("revoked")]
+    rows = ""
+    for r in active:
+        rows += (
+            '<li style="margin-bottom:6px">'
+            '<code>%s</code>'
+            '<span style="color:#888;font-size:0.85em"> — registered %s</span>'
+            '</li>' % (html.escape(str(r.get("user_id") or "unnamed")),
+                       html.escape(str(r.get("registered_at") or "")))
+        )
+    if not rows:
+        rows = ('<li style="color:#888">None registered yet.</li>')
+
+    if verdict.allowed:
+        state = ('<div style="color:#5f5;font-size:0.85em">'
+                 '%d registered — approvals are available.</div>' % len(active))
+    else:
+        # The §5 floor is a refusal, not a warning: below two keys the server
+        # will not record an unlock at all. Say the number, not just "not yet".
+        state = ('<div style="color:#ffaa00;font-size:0.85em">%s</div>'
+                 % html.escape(str(verdict.reason or "")))
+
+    boot = ""
+    if bootstrap:
+        # The unapproved window is worth surfacing rather than leaving implicit:
+        # while it is open, anyone with an admin session can add a key.
+        boot = ('<div style="color:#ffaa00;font-size:0.82em;margin-top:8px">'
+                'Setup mode: keys can still be added without an existing key\'s '
+                'approval. This closes automatically once two are registered.</div>')
+
+    return (
+        '<div class="settings-card">'
+        '<h2>🔑 Approval Security Keys</h2>'
+        '<div style="color:#bbb;font-size:0.85em;margin-bottom:10px">'
+        'Some actions require a physical security key or phone to approve them, '
+        'in addition to being signed in. Two keys are required so that losing one '
+        'does not lock you out.</div>'
+        '<ul style="list-style:none;padding-left:0;margin:10px 0">%s</ul>'
+        '%s%s'
+        '<button onclick="aapPair()" style="margin-top:12px">Register a key</button>'
+        '<script src="/static/admin-approval.js"></script>'
+        '</div>' % (rows, state, boot)
+    )
+
+
+def _render_pending_approvals_html():
+    """Dashboard card: proposals awaiting a human decision.
+
+    OPERATIONS, which is why it is here and not in settings. Renders nothing at
+    all when the queue is empty — an always-present empty card trains people to
+    stop looking at it, and this one matters precisely when it is non-empty.
+
+    Fail-soft for the same reason as the pairing card: this must never be able to
+    take the dashboard down.
+    """
+    try:
+        from modules.ai_engine import list_proposals, local_approval_required
+        from core import admin_approval_authenticators as auth
+        pending = list_proposals(limit=25, pending_only=True) or []
+        if not pending:
+            return ""
+        conn = _dm_conn()
+        try:
+            active = auth.active(conn)
+        finally:
+            conn.close()
+        first_auth = active[0].get("authenticator_id") if active else ""
+    except Exception:
+        log.exception("dashboard: pending-approvals card unavailable")
+        return ""
+
+    items = ""
+    for p in pending:
+        try:
+            needs = bool(local_approval_required(p.get("action_class")))
+        except Exception:
+            # Fail toward REQUIRING the key: an unreadable requirement must not
+            # resolve to "no approval needed", which would present a one-click
+            # button for an action the server will then refuse.
+            needs = True
+        badge = ""
+        if needs:
+            badge = ('<span style="color:#ffaa00;font-size:0.78em"> · security key '
+                     'required</span>')
+        items += (
+            '<div id="aap-proposal-%d" class="aap-proposal" '
+            'data-action-class="%s" data-row-id="%s" data-proposed="%s" '
+            'data-authenticator="%s" '
+            'style="border-top:1px solid #333;padding:10px 0">'
+            '<div style="font-size:0.9em"><strong>%s</strong> → <code>%s</code>%s</div>'
+            '<div style="color:#bbb;font-size:0.82em;margin:4px 0">%s</div>'
+            '<button onclick="aapRespond(%d,\'approved\')">Approve</button> '
+            '<button onclick="aapRespond(%d,\'rejected\')">Reject</button> '
+            '<button onclick="aapExecute(%d,%s)">Carry out</button>'
+            '</div>' % (
+                p["id"],
+                html.escape(str(p.get("action_class") or "")),
+                html.escape(str(p.get("row_id") or "")),
+                html.escape(str(p.get("proposed_action") or "")),
+                html.escape(str(first_auth or "")),
+                html.escape(str(p.get("proposed_action") or "")),
+                html.escape(str(p.get("row_id") or "")),
+                badge,
+                html.escape(str(p.get("reasoning") or "")[:200]),
+                p["id"], p["id"], p["id"], "true" if needs else "false")
+        )
+
+    return (
+        '<div class="card">'
+        '<h2>⚖️ Awaiting Your Decision</h2>'
+        '<div style="color:#bbb;font-size:0.85em">The security engine has '
+        'proposed these actions and will not take them until you decide.</div>'
+        '%s'
+        '<script src="/static/admin-approval.js"></script>'
+        '</div>' % items
+    )
+
+
 def _ai_local_approval_required(action_class):
     """Does this class need an A2 approval? False if ai_engine is unavailable.
 
@@ -10372,6 +10521,8 @@ def settings_page():
     {_add_user_html}
     <script src="/static/agent-enroll.js"></script>
     {_render_agent_devices_html()}
+
+    {_render_admin_approval_pairing_html()}
 
     <div id="moduleRestartBanner" style="display:none;background:#2a1800;border:1px solid #ffaa00;border-radius:8px;padding:12px 16px;margin-bottom:16px;align-items:center;gap:12px;flex-wrap:wrap">
         <span class="tier-text"
@@ -16407,6 +16558,11 @@ def dashboard():
     </div>
 
     <div class="grid">
+        <!-- Proposals awaiting a human decision. Renders NOTHING when the queue is
+             empty, deliberately: an always-present empty card trains people to stop
+             looking, and this one matters exactly when it is not empty. Placed first
+             so it is seen when it does appear. -->
+        {_render_pending_approvals_html()}
         <!-- Pi-hole and System Status cards are always-visible at-a-glance status widgets;
              intentionally excluded from collapsible sections. -->
         <div class="card">
