@@ -18,7 +18,7 @@ import forkb_policy_route as F
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 80
+EXPECTED_CHECKS = 109
 
 K = {"tun", "tap", "wireguard", "vti", "vti6", "ppp", "gre", "ip6tnl"}
 
@@ -222,6 +222,135 @@ def test_verify_installed():
           False)
 
 
+def test_plan_action_asymmetry():
+    print("\n[the debounce is ASYMMETRIC -- that asymmetry IS the safety property]")
+    check("teardown is IMMEDIATE under full_tunnel (never debounced)",
+          F.plan_action(F.FULL_TUNNEL, True, 100.0, 100.0, 8)[0], F.TEARDOWN)
+    check("teardown is immediate under undetermined too",
+          F.plan_action(F.UNDETERMINED, True, 100.0, 100.0, 8)[0], F.TEARDOWN)
+    check("install IS debounced", F.plan_action(F.SPLIT_TUNNEL, False, 100.0, 100.0, 8)[0],
+          F.WAIT)
+    check("CONTROL: the SAME state after the debounce installs",
+          F.plan_action(F.SPLIT_TUNNEL, False, 109.0, 100.0, 8)[0], F.INSTALL)
+    check("nothing to tear down -> noop, not an error",
+          F.plan_action(F.FULL_TUNNEL, False, 100.0, 100.0, 8)[0], F.NOOP)
+    check("already installed and stable -> noop",
+          F.plan_action(F.SPLIT_TUNNEL, True, 109.0, 100.0, 8)[0], F.NOOP)
+    check("no_vpn installs once stable",
+          F.plan_action(F.NO_VPN, False, 109.0, 100.0, 8)[0], F.INSTALL)
+    check("reason states the debounce is being skipped for teardown",
+          "without debounce" in F.plan_action(F.FULL_TUNNEL, True, 100.0, 100.0, 8)[1], True)
+
+
+def _harness(topology_ifaces, kinds, rules="", table="", route_get="", default_route=""):
+    """Injected collectors + a recording runner. No root, no network, no VPN."""
+    ran = []
+    state = {"rules": rules, "table": table}
+
+    def collect(what):
+        if what == "topology":
+            return topology_ifaces, kinds
+        if what == "rules":
+            return state["rules"]
+        if what == "table":
+            return state["table"]
+        if what == "route_get":
+            return route_get
+        if what == "default_route":
+            return default_route
+        if what == "in_iface":
+            return "tailscale0"
+        raise AssertionError("unexpected collector key %r" % what)
+
+    def run(cmd):
+        ran.append(" ".join(cmd))
+        # Model the kernel: an install makes the objects appear, a teardown removes them.
+        if cmd[:3] == ["ip", "rule", "add"]:
+            state["rules"] = "30:\tfrom 100.64.0.0/10 iif tailscale0 lookup 291"
+        if cmd[:3] == ["ip", "route", "replace"]:
+            state["table"] = "default via 10.0.0.1 dev eth0"
+        if cmd[:3] == ["ip", "rule", "del"]:
+            state["rules"] = ""
+        if cmd[:3] == ["ip", "route", "flush"]:
+            state["table"] = ""
+        return 0, ""
+
+    return collect, run, ran
+
+
+def test_reconcile_installs_and_verifies():
+    print("\n[reconcile: install, then PROVE it is winning]")
+    collect, run, ran = _harness(["eth0"], {"eth0": ""},
+                                 route_get="1.2.3.4 dev eth0 src 5.6.7.8",
+                                 default_route="default via 10.0.0.1 dev eth0")
+    r = F.reconcile(collect, run, now=109.0, stable_since=100.0, debounce=8)
+    check("action is install", r["action"], F.INSTALL)
+    check("it verified winning", r.get("winning"), True)
+    check("ok", r["ok"], True)
+    check("the rule really was added", any("rule add" in c for c in ran), True)
+    check("...and the delete came first (idempotent)", ran[0].startswith("ip rule del"), True)
+
+
+def test_reconcile_rolls_back_a_losing_bypass():
+    print("\n[THE CRITICAL CASE: installed but NOT winning must be rolled back]")
+    # route_get reports the VPN's interface: another rule took precedence.
+    collect, run, ran = _harness(["eth0"], {"eth0": ""},
+                                 route_get="1.2.3.4 dev wg0 src 10.0.0.9",
+                                 default_route="default via 10.0.0.1 dev eth0")
+    r = F.reconcile(collect, run, now=109.0, stable_since=100.0, debounce=8)
+    check("reported NOT ok", r["ok"], False)
+    check("action records the rollback", r["action"], "install_rolled_back")
+    check("winning is False", r.get("winning"), False)
+    check("the bypass was actually removed again",
+          any("route flush" in c for c in ran), True)
+    check("...and the reason says why", "NOT winning" in r["reason"], True)
+    # An installed-but-losing bypass sends inspected traffic through the user's VPN
+    # while every surface reports a successful install. Leaving it is worse than none.
+    check("CONTROL: the same flow WITH a winning probe does not roll back",
+          F.reconcile(*_harness(["eth0"], {"eth0": ""},
+                                route_get="1.2.3.4 dev eth0",
+                                default_route="default via 10.0.0.1 dev eth0")[:2],
+                      now=109.0, stable_since=100.0, debounce=8)["action"], F.INSTALL)
+
+
+def test_reconcile_tears_down_on_full_tunnel():
+    print("\n[full-tunnel VPN comes up while a bypass is live -> immediate teardown]")
+    collect, run, ran = _harness(["wg0"], {"wg0": "wireguard"},
+                                 rules="30:\tfrom 100.64.0.0/10 iif tailscale0 lookup 291",
+                                 table="default via 10.0.0.1 dev eth0")
+    r = F.reconcile(collect, run, now=100.0, stable_since=100.0, debounce=8)
+    check("action is teardown", r["action"], F.TEARDOWN)
+    check("ok (the bypass is gone)", r["ok"], True)
+    check("rule removed before table", ran[0].startswith("ip rule del"), True)
+    check("table flushed", any("route flush" in c for c in ran), True)
+
+
+def test_reconcile_refuses_an_occupied_table():
+    print("\n[refuse to append to a routing table someone else may own]")
+    collect, run, ran = _harness(["eth0"], {"eth0": ""},
+                                 table="default via 9.9.9.9 dev someone-elses",
+                                 route_get="1.2.3.4 dev eth0",
+                                 default_route="default via 10.0.0.1 dev eth0")
+    r = F.reconcile(collect, run, now=109.0, stable_since=100.0, debounce=8)
+    check("not ok", r["ok"], False)
+    check("nothing was executed", ran, [])
+    check("reason names the table", str(F.BYPASS_TABLE_ID) in r["reason"], True)
+
+
+def test_reconcile_aborts_on_broken_selftest():
+    print("\n[a detector that cannot prove itself must not touch routing]")
+    orig = F.selftest
+    F.selftest = lambda: (False, "forced")
+    try:
+        collect, run, ran = _harness(["eth0"], {"eth0": ""})
+        r = F.reconcile(collect, run, now=109.0, stable_since=100.0, debounce=8)
+        check("aborts", r["action"], "abort")
+        check("not ok", r["ok"], False)
+        check("NOTHING was executed", ran, [])
+    finally:
+        F.selftest = orig
+
+
 def test_selftest():
     print("\n[the instrument proves it produces every answer it claims]")
     ok, detail = F.selftest()
@@ -243,6 +372,12 @@ if __name__ == "__main__":
     test_plan_install()
     test_plan_teardown()
     test_verify_installed()
+    test_plan_action_asymmetry()
+    test_reconcile_installs_and_verifies()
+    test_reconcile_rolls_back_a_losing_bypass()
+    test_reconcile_tears_down_on_full_tunnel()
+    test_reconcile_refuses_an_occupied_table()
+    test_reconcile_aborts_on_broken_selftest()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:

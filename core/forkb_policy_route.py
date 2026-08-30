@@ -301,6 +301,140 @@ def verify_installed(rule_show_output, table_route_output,
     return True, "bypass present: rule pref %s -> table %s with a default route" % (pref, table_id)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Transition handling + reconciliation
+# ─────────────────────────────────────────────────────────────────────────────
+
+WAIT, NOOP, TEARDOWN = "wait", "noop", "teardown"
+
+
+def debounce_seconds():
+    """Reuse `vpn_dns_guard`'s debounce rather than inventing a second one.
+
+    Lazy import for the same reason as `_resolve_tunnel_kinds`: that module runs
+    logging.basicConfig() at import. Falls back to its documented default if it cannot
+    be imported, so this module still functions standalone -- and 8 is not a guess, it
+    is the value that module ships.
+    """
+    try:
+        from vpn_dns_guard import DEBOUNCE_SECONDS  # noqa: PLC0415
+        return DEBOUNCE_SECONDS
+    except Exception:  # noqa: BLE001
+        return 8
+
+
+def plan_action(topology, currently_installed, now, stable_since, debounce=None):
+    """(action, reason) -- what to do about the bypass right now.
+
+    ⚠ THE DEBOUNCE IS DELIBERATELY ASYMMETRIC, and the asymmetry is the safety property.
+
+    INSTALLING is debounced: a VPN flapping through connect/reconnect would otherwise
+    thrash the routing table, and waiting a few seconds to add a bypass costs nothing.
+
+    TEARING DOWN IS NOT DEBOUNCED. If the topology has become one where Fork B must
+    decline, the bypass must go immediately. Waiting would leave a rule in place that
+    deliberately routes traffic around a VPN the user has just brought up -- and under a
+    FULL-tunnel VPN that is the strongest possible posture violation, because the user
+    chose to route everything through it.
+
+    The two directions are not symmetric in risk: REMOVING the bypass always returns
+    traffic to ordinary routing (safe), while ADDING it changes where traffic goes
+    (the direction that needs care). Debounce the risky direction only.
+    """
+    if debounce is None:
+        debounce = debounce_seconds()
+
+    if topology in (FULL_TUNNEL, UNDETERMINED):
+        if currently_installed:
+            return TEARDOWN, ("topology is %s -- removing the bypass immediately, "
+                              "without debounce" % topology)
+        return NOOP, "topology is %s and no bypass is installed" % topology
+
+    if now - stable_since < debounce:
+        return WAIT, ("topology %s not yet stable for %ss (%.1fs so far)"
+                      % (topology, debounce, max(0.0, now - stable_since)))
+    if currently_installed:
+        return NOOP, "bypass already installed and topology is stable"
+    return INSTALL, "topology %s stable -- installing the bypass" % topology
+
+
+def reconcile(collect, run, now, stable_since, debounce=None):
+    """One reconciliation pass. Returns a result dict; never raises for expected states.
+
+    `collect` supplies observations, `run` executes an argv list and returns (rc, out).
+    Both are injected so the whole flow is testable without root, a VPN, or a network.
+
+    ⚠ ORDER MATTERS AND IS THE POINT: install, then VERIFY WINNING, and TEAR DOWN AGAIN
+    if the verification fails. An installed-but-losing bypass is worse than no bypass at
+    all -- it sends inspected traffic through the user's VPN while every surface reports
+    a successful install. So a bypass that cannot prove it is winning does not get to
+    stay.
+    """
+    ok, detail = selftest()
+    if not ok:
+        return {"ok": False, "action": "abort",
+                "reason": "self-test failed, refusing to touch routing: %s" % detail}
+
+    ifaces, kinds = collect("topology")
+    topology, treason = classify_topology(ifaces, kinds)
+    installed, _ = verify_installed(collect("rules"), collect("table"))
+
+    action, areason = plan_action(topology, installed, now, stable_since, debounce)
+    result = {"ok": True, "topology": topology, "action": action,
+              "reason": areason, "topology_reason": treason, "installed": installed}
+
+    if action in (WAIT, NOOP):
+        return result
+
+    if action == TEARDOWN:
+        for cmd in plan_teardown():
+            run(cmd)
+        still, _ = verify_installed(collect("rules"), collect("table"))
+        result["ok"] = not still
+        if still:
+            result["reason"] = "TEARDOWN DID NOT TAKE -- bypass is still present"
+        return result
+
+    # INSTALL
+    egress = next((i for i in ifaces if kinds.get(i, "") not in _resolve_tunnel_kinds(None)), None)
+    decision, egress, msg = decide(topology, egress, treason)
+    result["message"] = msg
+    if decision == DECLINE:
+        result["action"] = NOOP
+        result["reason"] = msg
+        return result
+
+    if not table_is_free(collect("table")):
+        result["ok"] = False
+        result["action"] = NOOP
+        result["reason"] = ("routing table %s is not empty -- refusing to append to a "
+                            "table someone else may own" % BYPASS_TABLE_ID)
+        return result
+
+    gw, _dev = parse_default_route(collect("default_route"))
+    cmds = plan_install(egress, gw, collect("in_iface"))
+    if cmds is None:
+        result["ok"] = False
+        result["action"] = NOOP
+        result["reason"] = "could not plan an install (missing egress or inbound iface)"
+        return result
+    for cmd in cmds:
+        run(cmd)
+
+    winning, wdetail = verify_winning(collect("route_get"), egress)
+    result["winning"] = winning
+    result["verify"] = wdetail
+    if not winning:
+        # Roll back rather than leave a bypass that silently loses.
+        for cmd in plan_teardown():
+            run(cmd)
+        result["ok"] = False
+        result["action"] = "install_rolled_back"
+        result["reason"] = ("installed but NOT winning, so it was removed again: %s"
+                            % wdetail)
+    return result
+
+
 # ── Self-test: prove the instrument produces every answer it claims ───────────
 _K = {"tun", "tap", "wireguard", "vti", "vti6", "ppp", "gre", "ip6tnl"}
 
@@ -372,4 +506,14 @@ def selftest():
     if ok:
         return False, "canary: a rule pointing at an EMPTY table was called installed"
 
-    return True, "21 canaries passed"
+    # Transition handling: the asymmetry is the safety property, so prove BOTH halves.
+    if plan_action(FULL_TUNNEL, True, 100.0, 100.0, 8)[0] != TEARDOWN:
+        return False, "canary: teardown was debounced (it must be immediate)"
+    if plan_action(SPLIT_TUNNEL, False, 100.0, 100.0, 8)[0] != WAIT:
+        return False, "canary: install was not debounced"
+    if plan_action(SPLIT_TUNNEL, False, 109.0, 100.0, 8)[0] != INSTALL:
+        return False, "canary: install never fires after the debounce elapses"
+    if plan_action(UNDETERMINED, True, 100.0, 100.0, 8)[0] != TEARDOWN:
+        return False, "canary: an undetermined topology did not tear down"
+
+    return True, "25 canaries passed"
