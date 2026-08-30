@@ -15,7 +15,41 @@ threat-feed integration directly as *"[V2 — add to the community backend build
 doc changes needed here — recorded so this open question from the delta review doesn't get
 re-litigated.
 
-## The gate — nine items, checked off before v2 is called done
+## Gate reopening — 2026-08-30, operator-directed (not scope creep)
+
+**DNS-exfiltration detection and rogue-DHCP detection are added to this gate, effective
+2026-08-30.** Both were previously outside v2 scope (deferred alongside ARP-spoofing detection);
+the operator explicitly reopened the closed gate for these two, while leaving ARP parked/v3.
+Recorded here as a deliberate decision, not a silently-expanding scope — the exact failure mode
+this checklist exists to prevent, applied to itself: a gate that can be reopened without leaving
+a record of *why* is no more trustworthy than one that silently grows.
+
+**Reasoning (operator's, recorded verbatim in substance):** both are cheap enough to justify
+adding to v2 rather than deferring to v3 — telemetry is already flowing (Suricata's `eve.json`
+already carries DNS events, and DHCP extended-logging is a config flip, not new
+infrastructure), and DNS-exfiltration detection extends existing `anomaly_detection` tailer
+code rather than standing up a new pipeline. **ARP-spoofing detection stays parked/v3** —
+unlike the other two, it has a structural dependency on the unmade gateway-mode decision
+(`gateway-mode-scoping.md`, already item 1 on this gate below), so reopening it now would just
+create a second gate item blocked on the same undecided piece.
+
+Full technical scope: `docs/roadmap/dns-exfiltration-detection.md`,
+`docs/roadmap/rogue-dhcp-detection.md` (both new 2026-08-30, capture/build-ready, not yet
+built — build order: rogue-DHCP first, DNS-exfiltration second, per the docs' own
+cross-references).
+
+## The gate — eleven items, checked off before v2 is called done
+
+- [ ] **rogue-dhcp-detection.md** — Suricata `dhcp: logger: extended: yes` config flip
+  (install.sh + live box) plus a small consumer watching for a second DHCP server answering.
+  No gateway-mode dependency. Not yet built.
+- [ ] **dns-exfiltration-detection.md** — extends the existing `anomaly_detection` DNS tailer.
+  Requires fixing two data-destruction points in that tailer first (the `_QTYPES = {"A",
+  "AAAA"}` filter and the `_root_domain()` FQDN-collapse, `modules/anomaly_detection/module.py:101`
+  and `:1336`) — both discard exactly the signal DNS-exfiltration detection depends on. Core
+  false-positive suppression is a new per-client-per-domain baseline, extending the existing
+  `anomaly_baseline` table's pattern. Newly-registered-domain checking explicitly deferred to
+  the v2 community backend build, not this item. Not yet built.
 
 - [ ] **gateway-mode-scoping.md** — scoping only, zero code or ADR exists yet. Full gateway vs.
   bridged-peer opt-in toggle, segmentation enforcement. Not required to *ship* before v2 closes,
@@ -66,6 +100,8 @@ not to disappear from a carried-forward list by attrition.
 `docs/roadmap/enterprise-gap-audit-2026.md` (v2/v3 item catalog), `docs/roadmap/gateway-mode-scoping.md`,
 `docs/architecture/0019-deterministic-enforcement-point.md`,
 `docs/roadmap/clean-uninstall-build-spec.md`, `docs/roadmap/malware-detection-pipeline.md`,
-`docs/roadmap/data-retention-and-archival-policy.md`, `docs/handoff/HANDOFF.md` (current carried
-items — this checklist doesn't replace HANDOFF's carry-forward tracking, it groups the subset that
-specifically gates v2).
+`docs/roadmap/data-retention-and-archival-policy.md`,
+`docs/roadmap/rogue-dhcp-detection.md`, `docs/roadmap/dns-exfiltration-detection.md` (2026-08-30
+gate reopening — see above), `docs/handoff/HANDOFF.md` (current carried items — this checklist
+doesn't replace HANDOFF's carry-forward tracking, it groups the subset that specifically gates
+v2).
