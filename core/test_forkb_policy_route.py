@@ -18,7 +18,7 @@ import forkb_policy_route as F
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 46
+EXPECTED_CHECKS = 80
 
 K = {"tun", "tap", "wireguard", "vti", "vti6", "ppp", "gre", "ip6tnl"}
 
@@ -142,6 +142,86 @@ def test_verify_winning():
     check("empty output -> NOT winning", F.verify_winning("", "eth0")[0], False)
 
 
+def test_parse_default_route():
+    print("\n[reading the egress + gateway to point the bypass table at]")
+    check("via form", F.parse_default_route("default via 10.0.0.1 dev eth0 proto static"),
+          ("10.0.0.1", "eth0"))
+    check("directly-connected default keeps the device, gateway None",
+          F.parse_default_route("default dev ppp0 scope link"), (None, "ppp0"))
+    check("picks the default line out of a full table",
+          F.parse_default_route("10.0.0.0/24 dev eth0\ndefault via 10.0.0.1 dev eth0"),
+          ("10.0.0.1", "eth0"))
+    check("no default -> (None, None)", F.parse_default_route("10.0.0.0/24 dev eth0"),
+          (None, None))
+    check("empty -> (None, None)", F.parse_default_route(""), (None, None))
+    check("None -> (None, None)", F.parse_default_route(None), (None, None))
+    check("a device-less default is not usable", F.parse_default_route("default via 10.0.0.1"),
+          (None, None))
+
+
+def test_table_claim():
+    print("\n[claiming a routing table ID is a convention, not a guarantee]")
+    check("empty table is free", F.table_is_free(""), True)
+    check("whitespace-only is free", F.table_is_free("   \n "), True)
+    check("None is free", F.table_is_free(None), True)
+    check("an OCCUPIED table is refused (do not append to a stranger's table)",
+          F.table_is_free("default via 1.2.3.4 dev eth9"), False)
+
+
+def test_plan_install():
+    print("\n[install plan: idempotent by construction]")
+    cmds = F.plan_install("eth0", "10.0.0.1", "tailscale0")
+    check("three steps", len(cmds), 3)
+    check("DELETE precedes add (ip rule add appends, it does not replace)",
+          cmds[0][:3], ["ip", "rule", "del"])
+    check("route uses `replace`, which is idempotent", cmds[1][2], "replace")
+    check("route targets our table", cmds[1][-2:], ["table", "291"])
+    check("rule selects on SOURCE, never a mark",
+          "from" in cmds[2] and "fwmark" not in cmds[2], True)
+    check("...our tunnel is the inbound selector", cmds[2][cmds[2].index("iif") + 1],
+          "tailscale0")
+    check("...and the source prefix is our tailnet", cmds[2][cmds[2].index("from") + 1],
+          F.FORKB_SOURCE_PREFIX)
+    check("pref is below PIA's observed 50", F.BYPASS_RULE_PREF < 50, True)
+    check("...and above `local` at 0, which must never be displaced",
+          F.BYPASS_RULE_PREF > 0, True)
+
+    gwless = F.plan_install("ppp0", None, "tailscale0")
+    check("a directly-connected egress plans without `via`", "via" in gwless[1], False)
+    check("...and still names the device", gwless[1][-3], "ppp0")
+
+    check("no egress -> no plan", F.plan_install("", "10.0.0.1", "tailscale0"), None)
+    check("no inbound iface -> no plan", F.plan_install("eth0", "10.0.0.1", ""), None)
+    check("neither -> no plan", F.plan_install(None, None, None), None)
+
+
+def test_plan_teardown():
+    print("\n[teardown order is load-bearing]")
+    td = F.plan_teardown()
+    check("rule removed FIRST", td[0][:3], ["ip", "rule", "del"])
+    check("...then the table flushed", td[1][:3], ["ip", "route", "flush"])
+    # A live rule pointing at an emptied table falls through to the next rule, which
+    # silently reverts traffic to the VPN path -- the exact outcome this prevents.
+    check("CONTROL: the order is not incidental -- table flush is second",
+          td[1][-1], "291")
+
+
+def test_verify_installed():
+    print("\n[PRESENT is not WINNING -- this checks only presence]")
+    rules = "30:\tfrom 100.64.0.0/10 iif tailscale0 lookup 291"
+    ok, d = F.verify_installed(rules, "default via 10.0.0.1 dev eth0")
+    check("fully installed -> ok", ok, True)
+    check("no rule -> not installed", F.verify_installed("", "default via x dev y")[0], False)
+    ok, d = F.verify_installed(rules, "")
+    check("rule pointing at an EMPTY table -> not installed", ok, False)
+    check("...and says why it matters", "falls through" in d, True)
+    ok, d = F.verify_installed(rules, "10.0.0.0/24 dev eth0")
+    check("table without a default route -> not installed", ok, False)
+    check("rule at the wrong table -> not installed",
+          F.verify_installed("30:\tfrom 100.64.0.0/10 lookup 999", "default via x dev y")[0],
+          False)
+
+
 def test_selftest():
     print("\n[the instrument proves it produces every answer it claims]")
     ok, detail = F.selftest()
@@ -158,6 +238,11 @@ if __name__ == "__main__":
     test_hybrid_ruling()
     test_parse_route_get()
     test_verify_winning()
+    test_parse_default_route()
+    test_table_claim()
+    test_plan_install()
+    test_plan_teardown()
+    test_verify_installed()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:

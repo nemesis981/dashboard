@@ -187,6 +187,120 @@ def verify_winning(route_get_output, expected_iface):
     return True, "bypass is winning: traffic selects %s" % got
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Install / teardown — PLANNED here, executed by a thin privileged applier.
+#
+# The split is deliberate and mirrors `nemesis-fw-render` / `nemesis-fw-apply`:
+# everything that DECIDES is pure and testable without root, and the part that runs
+# as root does no thinking. A planner that cannot be tested without privilege is a
+# planner that does not get tested.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: Routing table for the bypass. Clear of the reserved trio (253 default / 254 main /
+#: 255 local) and of PIA's 256-259. Claimed only after `table_is_free()` confirms it is
+#: empty -- an ID nobody owns is a convention, not a guarantee.
+BYPASS_TABLE_ID = 291
+
+#: Rule priority. Below PIA's observed 50-102 so we are evaluated first, above `local`
+#: at 0 which must never be displaced.
+#:
+#: ⚠ THIS NUMBER IS A BEST EFFORT, NOT A GUARANTEE, and that is exactly why
+#: `verify_winning()` exists. Rule priority is an unmanaged namespace with no registry:
+#: nothing stops another client installing at pref 1 tomorrow. The number is chosen to
+#: win against what is observable today; the MEASUREMENT is what makes it safe.
+BYPASS_RULE_PREF = 30
+
+
+def parse_default_route(output):
+    """(gateway, device) from `ip route show default`, or (None, None).
+
+    (None, None) means UNPARSEABLE and callers must refuse -- never substitute a guess.
+    A directly-connected default (no `via`) yields a gateway of None with a real device,
+    which is a legitimate shape and is preserved rather than flattened into failure.
+    """
+    if not output:
+        return None, None
+    for line in output.splitlines():
+        toks = line.split()
+        if not toks or toks[0] != "default":
+            continue
+        gw = toks[toks.index("via") + 1] if "via" in toks and toks.index("via") + 1 < len(toks) else None
+        dev = toks[toks.index("dev") + 1] if "dev" in toks and toks.index("dev") + 1 < len(toks) else None
+        if dev:
+            return gw, dev
+    return None, None
+
+
+def table_is_free(route_show_output):
+    """True if our chosen table is empty, i.e. safe to claim.
+
+    An occupied table means someone else is using the ID. Refuse rather than append to
+    a stranger's routing table -- the failure mode of getting this wrong is silently
+    redirecting somebody else's traffic.
+    """
+    return not (route_show_output or "").strip()
+
+
+def plan_install(egress_iface, gateway, in_iface,
+                 src_prefix=FORKB_SOURCE_PREFIX,
+                 table_id=BYPASS_TABLE_ID, pref=BYPASS_RULE_PREF):
+    """argv lists to install the bypass, or None if the inputs are not sufficient.
+
+    IDEMPOTENT BY CONSTRUCTION: every add is preceded by a delete of the same object.
+    `ip rule add` does NOT replace -- it appends a duplicate, so repeated installs would
+    otherwise stack identical rules that must each be deleted separately. The deletes
+    are expected to fail on a clean system and the applier must tolerate that.
+    """
+    if not egress_iface or not in_iface:
+        return None
+    route = ["ip", "route", "replace", "default"]
+    if gateway:
+        route += ["via", gateway]
+    route += ["dev", egress_iface, "table", str(table_id)]
+    return [
+        # Delete-then-add, so a re-run converges instead of accumulating.
+        ["ip", "rule", "del", "pref", str(pref)],
+        route,
+        ["ip", "rule", "add", "pref", str(pref), "from", src_prefix,
+         "iif", in_iface, "lookup", str(table_id)],
+    ]
+
+
+def plan_teardown(table_id=BYPASS_TABLE_ID, pref=BYPASS_RULE_PREF):
+    """argv lists to remove the bypass completely.
+
+    Rule first, then the table. Reversing that order would leave a live rule pointing at
+    an emptied table, and a rule with no route falls through to the next rule -- traffic
+    would silently revert to the VPN path during the gap, which is the outcome the whole
+    mechanism exists to prevent.
+    """
+    return [
+        ["ip", "rule", "del", "pref", str(pref)],
+        ["ip", "route", "flush", "table", str(table_id)],
+    ]
+
+
+def verify_installed(rule_show_output, table_route_output,
+                     table_id=BYPASS_TABLE_ID, pref=BYPASS_RULE_PREF):
+    """(ok, detail) -- is the bypass PRESENT? Presence only, never sufficiency.
+
+    ⚠ PRESENT IS NOT WINNING. This confirms the objects exist; `verify_winning()` is what
+    confirms traffic actually takes them. Both are required, and passing this one alone
+    is the shape of a check that looks like coverage and is not.
+    """
+    rules = rule_show_output or ""
+    want = "%s:" % pref
+    if want not in rules:
+        return False, "no ip rule at pref %s" % pref
+    if str(table_id) not in rules:
+        return False, "rule at pref %s does not reference table %s" % (pref, table_id)
+    if not (table_route_output or "").strip():
+        return False, "table %s is empty -- a rule pointing at nothing falls through" % table_id
+    if "default" not in table_route_output:
+        return False, "table %s has no default route" % table_id
+    return True, "bypass present: rule pref %s -> table %s with a default route" % (pref, table_id)
+
+
 # ── Self-test: prove the instrument produces every answer it claims ───────────
 _K = {"tun", "tap", "wireguard", "vti", "vti6", "ppp", "gre", "ip6tnl"}
 
@@ -232,4 +346,30 @@ def selftest():
     if ok:
         return False, "canary: unparseable route output was treated as agreement"
 
-    return True, "12 canaries passed"
+    gw, dev = parse_default_route("default via 10.0.0.1 dev eth0 proto static")
+    if (gw, dev) != ("10.0.0.1", "eth0"):
+        return False, "canary: default-route parsing lost the gateway or device"
+    if parse_default_route("garbage") != (None, None):
+        return False, "canary: unparseable route output did not fail closed"
+
+    cmds = plan_install("eth0", "10.0.0.1", "tailscale0")
+    if not cmds or cmds[0][:3] != ["ip", "rule", "del"]:
+        return False, "canary: install plan is not idempotent (no delete before add)"
+    if plan_install("", "10.0.0.1", "tailscale0") is not None:
+        return False, "canary: install planned with no egress interface"
+    if plan_install("eth0", "10.0.0.1", "") is not None:
+        return False, "canary: install planned with no inbound interface"
+
+    td = plan_teardown()
+    if td[0][:3] != ["ip", "rule", "del"]:
+        return False, "canary: teardown removes the table before the rule"
+
+    ok, _ = verify_installed("30:\tfrom 100.64.0.0/10 iif tailscale0 lookup 291",
+                             "default via 10.0.0.1 dev eth0")
+    if not ok:
+        return False, "canary: a correctly installed bypass was not recognised"
+    ok, _ = verify_installed("30:\tfrom 100.64.0.0/10 iif tailscale0 lookup 291", "")
+    if ok:
+        return False, "canary: a rule pointing at an EMPTY table was called installed"
+
+    return True, "21 canaries passed"
