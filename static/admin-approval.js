@@ -34,6 +34,28 @@ function aapB64uToBuf(s) {
   return buf.buffer;
 }
 
+/* The tagged-bytes wrapper key, and it MUST equal admin_approval.BYTES_TAG.
+ *
+ * Stated once as a constant rather than inline at each use: the first live
+ * pairing attempt failed because two call sites both spelled it 'b64', and a
+ * wrong value here fails in a way that names the wrong thing entirely (see
+ * aapBytes below). One place to change, one place to be wrong. */
+var AAP_BYTES_TAG = '__bytes_b64__';
+
+/* Wrap an ArrayBuffer as the tagged-JSON bytes object the server decodes.
+ *
+ * ⚠ IF THIS TAG IS WRONG THE ERROR WILL NOT SAY SO. `untag_bytes()` only treats
+ * a dict as wrapped bytes when its ONLY key is BYTES_TAG; anything else falls
+ * through to the integer-label loop, and because TagError subclasses ValueError
+ * the resulting failure is reported as "bad integer label 'int:-2'" — pointing
+ * at the label, which is always valid, instead of at the value. Observed live
+ * 2026-08-30. Do not trust that message if this ever fails again. */
+function aapBytes(buf) {
+  var o = {};
+  o[AAP_BYTES_TAG] = aapBufToB64(buf);
+  return o;
+}
+
 /* ArrayBuffer -> standard base64, which is what every route here expects. */
 function aapBufToB64(buf) {
   var bytes = new Uint8Array(buf), s = '';
@@ -110,8 +132,14 @@ function aapCoseFromCredential(cred) {
     'int:1': 2,        /* kty: EC2   */
     'int:3': -7,       /* alg: ES256 */
     'int:-1': 1,       /* crv: P-256 */
-    'int:-2': { 'b64': aapBufToB64(x.buffer) },
-    'int:-3': { 'b64': aapBufToB64(y.buffer) }
+    // ⚠ THE TAG IS `__bytes_b64__`, NOT `b64`. It must match
+    // admin_approval.BYTES_TAG exactly — untag_bytes() only treats a dict as
+    // wrapped bytes when its ONLY key is that literal string, and anything else
+    // falls through to the label loop and is rejected as an untyped key.
+    // Got this wrong on the first live pairing attempt (2026-08-30); see
+    // AAP_BYTES_TAG below, which exists so the constant is stated once.
+    'int:-2': aapBytes(x.buffer),
+    'int:-3': aapBytes(y.buffer)
   };
 }
 

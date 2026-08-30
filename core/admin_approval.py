@@ -485,10 +485,27 @@ def untag_bytes(obj):
             if not isinstance(k, str):
                 raise TagError("non-string key %r" % (k,))
             if k.startswith("int:"):
+                # ⚠ THE int() AND THE RECURSION ARE SEPARATED DELIBERATELY.
+                #
+                # They were in ONE try until 2026-08-30, and because `TagError`
+                # subclasses `ValueError`, a genuine failure in the VALUE was
+                # caught by that `except ValueError` and re-raised as "bad
+                # integer label" — naming the label, which is the one part that
+                # cannot be at fault, since `int("-2")` never raises.
+                #
+                # Cost real diagnostic time on the first live WebAuthn pairing:
+                # the browser sent a bytes wrapper tagged `b64` instead of
+                # `__bytes_b64__`, and the report pointed at `int:-2` rather than
+                # at its value. An error that names the wrong component is worse
+                # than a generic one — it sends the reader somewhere specific and
+                # wrong.
                 try:
-                    out[int(k[4:])] = untag_bytes(v)
+                    label = int(k[4:])
                 except ValueError as exc:
                     raise TagError("bad integer label %r" % k) from exc
+                # OUTSIDE the try: a TagError from below is already precise and
+                # must propagate unchanged.
+                out[label] = untag_bytes(v)
             elif k.startswith("str:"):
                 out[k[4:]] = untag_bytes(v)
             else:

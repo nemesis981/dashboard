@@ -34,7 +34,7 @@ import tempfile
 import traceback
 
 _PASS, _FAIL = [], []
-EXPECTED_CHECKS = 39
+EXPECTED_CHECKS = 46
 
 
 def check(label, cond, detail=""):
@@ -362,6 +362,57 @@ finally:
 with dashboard.app.test_request_context():
     _empty = dashboard._render_pending_approvals_html()
 check("CONTROL: an empty queue renders NOTHING at all", _empty == "", len(_empty))
+
+
+print("\n== REGRESSION: the browser's COSE wrapper must use the REAL bytes tag ==")
+# ⚠ THIS IS THE FIRST-LIVE-PAIRING FAILURE (2026-08-30), pinned so it cannot
+# return. The .js emitted {"b64": ...} instead of {"__bytes_b64__": ...}. That is
+# not a tagged-bytes wrapper, so untag_bytes fell through to the label loop and
+# -- because TagError subclasses ValueError and the recursion was inside the
+# int() try -- reported "bad integer label 'int:-2'", naming the one component
+# that cannot be at fault. Both halves are asserted: the tag, and the error.
+import base64 as _b64
+_wrong = {"int:-2": {"b64": _b64.b64encode(b"\x11" * 32).decode()}}
+try:
+    aap.untag_bytes(_wrong)
+    check("a wrong bytes tag is rejected", False, "accepted silently")
+    check("  ...and the error names the VALUE, not the label", False, "not reached")
+except Exception as _e:
+    check("a wrong bytes tag is rejected", True)
+    check("  ...and the error names the VALUE, not the label",
+          "untyped key" in str(_e) and "integer label" not in str(_e), str(_e))
+# CONTROL: a genuinely malformed LABEL must still report as a label problem, or
+# the fix above would have simply moved the confusion.
+try:
+    aap.untag_bytes({"int:notanumber": 1})
+    check("CONTROL: a bad integer label still reports as a bad label", False, "accepted")
+except Exception as _e2:
+    check("CONTROL: a bad integer label still reports as a bad label",
+          "bad integer label" in str(_e2), str(_e2))
+
+# The .js must actually use the constant, not a literal that drifted back.
+_js2 = open(os.path.join(_REPO, "static", "admin-approval.js")).read()
+check("the .js declares the tag as __bytes_b64__",
+      "AAP_BYTES_TAG = '__bytes_b64__'" in _js2)
+check("CONTROL: no bare 'b64' bytes-wrapper literal remains in the .js",
+      "{ 'b64':" not in _js2 and "{'b64':" not in _js2)
+
+# And the SPKI backward-search the .js uses must find a real P-256 point.
+from cryptography.hazmat.primitives import serialization as _ser
+_k = ec.generate_private_key(ec.SECP256R1())
+_spki = _k.public_key().public_bytes(_ser.Encoding.DER,
+                                     _ser.PublicFormat.SubjectPublicKeyInfo)
+_idx = -1
+for _i in range(len(_spki) - 65, -1, -1):
+    if _spki[_i] == 0x04:
+        _idx = _i
+        break
+_n = _k.public_key().public_numbers()
+check("the .js SPKI backward-search locates the uncompressed point",
+      _idx >= 0 and len(_spki) - _idx == 65, "idx=%s len=%s" % (_idx, len(_spki)))
+check("  ...and yields the key's real x and y",
+      _spki[_idx+1:_idx+33] == _n.x.to_bytes(32, "big")
+      and _spki[_idx+33:_idx+65] == _n.y.to_bytes(32, "big"))
 
 
 print("\n== TOTALS ==")
