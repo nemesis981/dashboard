@@ -432,6 +432,44 @@ number.
   and no reason to run that check — which is why the wording is corrected rather than left
   to imply coverage it didn't have.
 
+  **⚠ AND AN EXACT FILE PATH IS STILL NOT ENOUGH WHEN TWO WINDOWS EDIT THE SAME FILE.**
+  This is a THIRD case, distinct from both above, and it is the one the previous two
+  wordings actively imply is covered. `git add <file>` stages **the whole file as it stands
+  on disk** — every uncommitted change in it, whoever made them. Naming one exact file
+  protects against `-A`'s breadth and against a directory's subtree. It does nothing
+  whatsoever about a co-edited file, because there is no narrower unit to name: the
+  hazard is not *which paths* you staged, it is that one path contains two authors' work.
+
+  **Confirmed live 2026-08-30.** Window 3 staged `dashboard.py` by exact path for the ADR
+  0026 A2 build. The file also held 21 uncommitted lines of Window 1's Gateway Mode
+  settings-page wiring, edited in the shared checkout at the same time. The commit
+  published both under one author and one message.
+
+  **THE SCOPE CHECK DID NOT CATCH IT, AND THAT IS THE PART WORTH INTERNALISING.**
+  `git diff --cached --stat` was run before committing, exactly as this section requires.
+  It reported `dashboard.py | 151 +++-` — a plausible number for the work in hand, so it
+  read as confirmation. **A file-level stat cannot show that a file has two authors in it.**
+  The previous case was caught by that check because the sweep added extra FILENAMES, which
+  a stat does show. Here the sweep was inside a file that legitimately belonged in the
+  commit, and the only visible symptom was a line count nobody could have called wrong.
+
+  **What actually works, in order of preference:**
+  - **`git diff --cached <file>` — read the DIFF, not the stat**, for any file another
+    window might also be editing. It is the only check that can see a second author.
+  - **`git add -p <file>`** to stage hunks deliberately when you already know the file is
+    shared.
+  - **Check `git status` for co-editors BEFORE starting**, not just before committing: a
+    file already showing ` M` that you did not modify is the warning, and it is visible
+    hours earlier than the commit.
+
+  **If it happens anyway, and it is caught before a push, the fix is clean** — the same
+  `reset --soft` below, then recommit each author's work separately. **Prove the split is
+  lossless BEFORE running any git command**, not after: diff the two reconstructed versions
+  and confirm one contains only the other author's lines and drops none of yours. In the
+  2026-08-30 incident the first reconstruction attempt FAILED that check and aborted
+  without touching git; had it been trusted and verified afterwards, the recovery itself
+  would have been the second loss.
+
   If a mis-composed commit like this happens and is caught before
   pushing, `git reset --soft HEAD~1` (recovering the exact prior staged state) followed by
   re-staging only the intended path is the clean fix — confirmed safe in the same incident,
