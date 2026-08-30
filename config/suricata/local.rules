@@ -101,14 +101,19 @@
 # designed to, tripped Nemesis's own host-defence rules.
 #
 # Root cause is different from the port false positive and needed a different fix.
-# These rules are named "against Nemesis host" but their DESTINATION is all of
-# $HOME_NET, so they fire on scans against ANY LAN device -- including scans
-# performed BY this host. Excluding this host as a SOURCE removes the self-noise
-# while KEEPING that wider coverage: another LAN device scanning a third device
-# (lateral movement) is still detected. Narrowing the destination to this host
-# instead would have been the other option; it was NOT taken, because it would
-# silently drop that lateral-movement coverage. Flagged as a design note: the rule
-# NAMES still describe a narrower scope than what they actually watch.
+# At the time, these rules were NAMED "against Nemesis host" while their
+# DESTINATION was all of $HOME_NET, so they fire on scans against ANY LAN device
+# -- including scans performed BY this host. Excluding this host as a SOURCE
+# removes the self-noise while KEEPING that wider coverage: another LAN device
+# scanning a third device (lateral movement) is still detected. Narrowing the
+# destination to this host instead would have been the other option; it was NOT
+# taken, because it would silently drop that lateral-movement coverage.
+#
+# The naming half of that mismatch was RESOLVED 2026-08-30 -- the rules now say
+# "against any LAN device" (see the naming note below). This paragraph is kept in
+# the PAST TENSE deliberately: it is the account of why the destination is wide,
+# which is still load-bearing, and it must not be read as a live claim that the
+# names are still wrong.
 #
 # WHY A BUILD-TIME PLACEHOLDER AND NOT A suricata.yaml ADDRESS-GROUP. The host's
 # address differs per install, so it cannot be committed (Rule 8). The obvious
@@ -147,12 +152,25 @@
 # a split would strand it. rev is bumped because the rule text changed -- Suricata
 # otherwise treats an edited rule as the same revision.
 #
+# EXTENDED 2026-08-30 to sids 1000004-1000006 (rev:1 -> rev:2), same treatment,
+# so the ruleset states one convention rather than two. A half-renamed ruleset is
+# worse than a uniformly wrong one: an operator then cannot tell from the alert
+# text alone which convention a given rule follows.
+#
+# sid:1000003 is deliberately NOT renamed and its name is CORRECT AS IS. Its
+# destination is $HOME_NET like the others, but "Nemesis service ports" names the
+# PORT SET it watches ([22,80,443,5000,5001] -- this box's own listeners), not the
+# host it defends. The phrase is accurate; changing it would make it less so.
+#
 # ⚠ STILL OPEN, deliberately NOT changed here (separate PUNCHLIST items):
-#   * sids 1000003-1000006 carry the SAME "against Nemesis host" mismatch and the
-#     same $HOME_NET destination. Only these two were in scope for this ruling.
-#   * "sweep" still overstates the test: these are SYN RATE counters with no
-#     port-diversity condition, so a high-rate single-port client can trip them.
-#     That is a rule-design change, not a naming one, and is its own open item.
+#   * "sweep" still overstates the test: 1000001/1000002 are SYN RATE counters
+#     with no port-diversity condition, so a high-rate single-port client can trip
+#     them. A rule-design change, not a naming one, and its own open item.
+#   * ASYMMETRY, pre-existing and unrelated to naming: 1000001-1000003 exclude
+#     this host as a SOURCE (!@NEMESIS_HOST@, the 2026-08-06 self-scan fix), but
+#     1000004-1000006 use `any` and would therefore still fire on this box's own
+#     stealth scanning. Not changed here -- it is a scope change, not a rename,
+#     and the box has no reason to emit NULL/FIN/XMAS probes today.
 #
 # ── 1. Horizontal SYN sweep -- moderate. P2 -> alerts, no auto-quarantine.
 #      Destination excludes this host's own service ports (see the note above):
@@ -216,27 +234,27 @@ alert tcp !@NEMESIS_HOST@ any -> $HOME_NET [22,80,443,5000,5001] (\
 
 # 4. NULL scan -- no flags set at all (nmap -sN).
 alert tcp any any -> $HOME_NET any (\
-    msg:"NEMESIS Host-defence: NULL-flag stealth scan against Nemesis host"; \
+    msg:"NEMESIS Host-defence: NULL-flag stealth scan against any LAN device"; \
     flags:0; \
     threshold:type both, track by_src, count 10, seconds 60; \
     classtype:attempted-recon; \
     priority:2; \
-    sid:1000004; rev:1;)
+    sid:1000004; rev:2;)
 
 # 5. FIN scan -- FIN only, no ACK (nmap -sF).
 alert tcp any any -> $HOME_NET any (\
-    msg:"NEMESIS Host-defence: FIN-flag stealth scan against Nemesis host"; \
+    msg:"NEMESIS Host-defence: FIN-flag stealth scan against any LAN device"; \
     flags:F,12; \
     threshold:type both, track by_src, count 10, seconds 60; \
     classtype:attempted-recon; \
     priority:2; \
-    sid:1000005; rev:1;)
+    sid:1000005; rev:2;)
 
 # 6. XMAS scan -- FIN+PSH+URG (nmap -sX).
 alert tcp any any -> $HOME_NET any (\
-    msg:"NEMESIS Host-defence: XMAS-flag stealth scan against Nemesis host"; \
+    msg:"NEMESIS Host-defence: XMAS-flag stealth scan against any LAN device"; \
     flags:FPU,12; \
     threshold:type both, track by_src, count 10, seconds 60; \
     classtype:attempted-recon; \
     priority:2; \
-    sid:1000006; rev:1;)
+    sid:1000006; rev:2;)
