@@ -30,6 +30,8 @@ FORWARD gate must be in place BEFORE forwarding is enabled, never the other way 
 `plan_enable()` therefore takes an explicit `forward_gate_ready` and refuses without it.
 """
 
+import html as _html
+
 SYSCTL_DROPIN = "/etc/sysctl.d/99-nemesis-gateway.conf"
 SYSCTL_KEY = "net.ipv4.ip_forward"
 
@@ -142,6 +144,124 @@ def verify_forwarding(dropin_content, live_output, want_enabled):
     if live_on:
         return False, "expected forwarding off but the live value is 1"
     return False, "live value is 0 but a drop-in still persists 1 -- it returns on reboot"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Capability table (step 5) -- DEFINED *AND RENDERED*.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Mirrors modules/dhcp's MODE_CAPABILITIES shape, and deliberately does NOT repeat
+# its gap: that table is defined in code and returned by a getter, but never rendered
+# into the dashboard, so the honest per-mode tradeoffs it carefully records are
+# invisible to the person actually choosing. `render_capability_table()` below is the
+# point of this step -- the data without the rendering would be the same omission one
+# level up.
+#
+# ⚠ THE `unaffected` LIST IS NOT PADDING. Gateway Mode is the highest-blast-radius
+# toggle in the product, and the temptation with such a toggle is to let the safe
+# default look impoverished so the risky one looks necessary. Security is never the
+# upsell here: choosing bridged-peer costs segmentation and inbound hosting, and costs
+# NOTHING in intrusion detection, malware scanning, agent protection, or host
+# firewalling. Saying so explicitly, next to the losses, is what makes the table
+# honest rather than promotional.
+
+MODE_GATEWAY = "gateway"
+MODE_BRIDGED = "bridged"
+
+GATEWAY_CAPABILITIES = {
+    MODE_GATEWAY: {
+        "label": "Nemesis is your network's gateway",
+        "inline_l3_gate": True,
+        "segmentation": "enforced -- but only with Nemesis serving DHCP AND "
+                        "VLAN-capable switch/AP hardware. Nemesis cannot manufacture "
+                        "layer-2 separation the hardware does not provide.",
+        "gains": [
+            "Traffic between your devices and the internet passes through Nemesis, so "
+            "it can be filtered rather than only observed.",
+            "Device tiering from DHCP becomes meaningful, because the boundary it "
+            "assigns is actually enforced rather than merely recorded.",
+            "Removes the architectural blocker for inbound hosting / DMZ. That feature "
+            "is separately scoped and NOT shipped by this toggle.",
+        ],
+        "degraded": [],
+        "cost": [
+            "Your existing router must give up routing and NAT duty. On locked-down "
+            "ISP hardware that is often not possible, and that is a legitimate reason "
+            "to stay on the default.",
+            "The highest blast radius of any setting in Nemesis: a mistake here takes "
+            "the whole network offline rather than degrading one feature.",
+        ],
+        "notes": "Switch into and out of this mode is reversible and verified on all "
+                 "four axes, and rolls back if any step fails.",
+    },
+    MODE_BRIDGED: {
+        "label": "Nemesis is a device on your network",
+        "inline_l3_gate": False,
+        "segmentation": "UNAVAILABLE, regardless of network hardware",
+        "gains": [],
+        "degraded": [
+            "No enforced segmentation. Devices can be grouped, but nothing stops "
+            "traffic crossing between groups.",
+            "No inline gate on traffic between your devices and the internet -- "
+            "Nemesis sees what reaches it, and cannot filter what does not.",
+            "DHCP-based tiering assigns without isolating.",
+            "No inbound hosting / DMZ.",
+        ],
+        "unaffected": [
+            "Intrusion detection (Suricata): unchanged for wired traffic Nemesis can "
+            "see. The WiFi blind spot is closed by the inspection-proxy tunnel, not by "
+            "becoming the gateway -- so this choice neither opens nor worsens it.",
+            "Malware scanning: host and endpoint based, independent of network role.",
+            "Agent protection on your devices: entirely host-based.",
+            "Nemesis protecting itself (host firewall, alert-driven blocking): "
+            "unaffected. Only the forward-traffic half is gateway-gated.",
+        ],
+        "cost": [],
+        "notes": "The default, and the right answer for most networks -- especially "
+                 "where the router cannot be taken out of routing duty.",
+    },
+}
+
+
+def _li(items):
+    return "".join("<li>%s</li>" % _html.escape(str(i)) for i in items)
+
+
+def render_capability_table(current_mode=MODE_BRIDGED, iface=None, cidr=None):
+    """HTML for the mode chooser. Static markup, NO JavaScript, deliberately.
+
+    The dashboard renders HTML from Python strings, and the single most common defect
+    in this codebase is a quote or apostrophe inside embedded JS breaking the render
+    with a silent SyntaxError. A capability table needs no JS at all, so it carries
+    none -- the safest way to not hit that bug is to give it nothing to hit.
+
+    Every interpolated value is escaped: `iface` and `cidr` come from /etc/nemesis.env,
+    which an operator edits by hand, so they are untrusted input to this renderer even
+    though they are not attacker-controlled in the usual sense.
+    """
+    if current_mode not in GATEWAY_CAPABILITIES:
+        current_mode = MODE_BRIDGED
+    out = ["<div class='card'><h3>Network Role</h3>"]
+    if iface and cidr:
+        out.append("<p class='muted'>LAN side: %s on %s</p>"
+                   % (_html.escape(str(cidr)), _html.escape(str(iface))))
+    for mode, cap in GATEWAY_CAPABILITIES.items():
+        active = " (current)" if mode == current_mode else ""
+        out.append("<section><h4>%s%s</h4>" % (_html.escape(cap["label"]), active))
+        out.append("<p><b>Segmentation:</b> %s</p>" % _html.escape(cap["segmentation"]))
+        if cap["gains"]:
+            out.append("<p><b>What this gains</b></p><ul>%s</ul>" % _li(cap["gains"]))
+        # The list modules/dhcp defines and never shows. Showing it is the point.
+        if cap["degraded"]:
+            out.append("<p><b>What is degraded</b></p><ul>%s</ul>" % _li(cap["degraded"]))
+        if cap.get("unaffected"):
+            out.append("<p><b>What is NOT affected</b></p><ul>%s</ul>"
+                       % _li(cap["unaffected"]))
+        if cap["cost"]:
+            out.append("<p><b>Cost</b></p><ul>%s</ul>" % _li(cap["cost"]))
+        out.append("<p class='muted'>%s</p></section>" % _html.escape(cap["notes"]))
+    out.append("</div>")
+    return "".join(out)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

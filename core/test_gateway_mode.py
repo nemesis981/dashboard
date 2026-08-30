@@ -14,7 +14,7 @@ import gateway_mode as G
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 79
+EXPECTED_CHECKS = 102
 
 
 def check(label, got, want):
@@ -270,6 +270,64 @@ def test_verify_state_reports_every_axis():
     check("...with no problems", probs, [])
 
 
+def test_capability_table_is_RENDERED_not_just_defined():
+    print("\n[the whole point of step 5: the data is actually rendered]")
+    h = G.render_capability_table()
+    check("produces markup", len(h) > 500, True)
+    check("both modes appear", h.count("<section>"), 2)
+    # modules/dhcp defines a `degraded` list and never renders it. Not repeating that.
+    check("the DEGRADED list is rendered", "What is degraded" in h, True)
+    check("...and its content, not just the heading",
+          "No enforced segmentation" in h, True)
+    check("the UNAFFECTED list is rendered", "What is NOT affected" in h, True)
+    check("the COST of the risky mode is rendered", "What this gains" in h and "Cost" in h, True)
+
+
+def test_security_is_never_the_upsell():
+    print("\n[the safe default must not be made to look impoverished]")
+    h = G.render_capability_table(G.MODE_BRIDGED)
+    for claim in ("Intrusion detection", "Malware scanning", "Agent protection",
+                  "protecting itself"):
+        check("bridged mode states %-24s is unaffected" % ("'%s'" % claim),
+              claim in h, True)
+    check("...and says the WiFi gap is closed elsewhere, not by this toggle",
+          "inspection-proxy tunnel" in h, True)
+    # The honest framing only works if the losses are shown too.
+    check("CONTROL: the losses are shown alongside", "What is degraded" in h, True)
+
+
+def test_current_mode_is_marked():
+    print("\n[the operator must be able to see which mode they are in]")
+    hb = G.render_capability_table(G.MODE_BRIDGED)
+    hg = G.render_capability_table(G.MODE_GATEWAY)
+    check("bridged marked current",
+          "Nemesis is a device on your network (current)" in hb, True)
+    check("gateway NOT marked when bridged",
+          "Nemesis is your network's gateway (current)" in hb, False)
+    check("gateway marked current when gateway",
+          "Nemesis is your network&#x27;s gateway (current)" in hg
+          or "Nemesis is your network's gateway (current)" in hg, True)
+    check("an unknown mode falls back to bridged rather than marking nothing",
+          "(current)" in G.render_capability_table("nonsense"), True)
+
+
+def test_render_escapes_and_carries_no_js():
+    print("\n[#1 recurring bug: no JS at all, and every interpolation escaped]")
+    h = G.render_capability_table(iface="<img src=x onerror=alert(1)>", cidr="10.0.0.0/24")
+    check("hostile iface is escaped", "<img" in h, False)
+    check("...and present in escaped form", "&lt;img" in h, True)
+    # NOT a bare `"<b>" not in html` -- the template legitimately contains <b> tags
+    # (e.g. "<b>Segmentation:</b>"), so that assertion tests the wrong thing and
+    # failed for a reason unrelated to escaping. Assert on the INJECTED content.
+    hc = G.render_capability_table(iface="eth1", cidr="<b>pwn</b>")
+    check("hostile cidr does not appear raw", "<b>pwn</b>" in hc, False)
+    check("...and does appear escaped", "&lt;b&gt;pwn&lt;/b&gt;" in hc, True)
+    check("no <script> anywhere", "<script" in h, False)
+    check("LAN line omitted when unconfigured", "LAN side" in G.render_capability_table(), False)
+    check("...and shown when configured",
+          "LAN side" in G.render_capability_table(iface="eth1", cidr="10.0.0.0/24"), True)
+
+
 def test_selftest():
     print("\n[the instrument proves it produces every answer it claims]")
     ok, detail = G.selftest()
@@ -292,6 +350,10 @@ if __name__ == "__main__":
     test_switch_aborts_on_broken_selftest()
     test_ordering_is_asserted_both_ways()
     test_verify_state_reports_every_axis()
+    test_capability_table_is_RENDERED_not_just_defined()
+    test_security_is_never_the_upsell()
+    test_current_mode_is_marked()
+    test_render_escapes_and_carries_no_js()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:
