@@ -60,6 +60,13 @@ from modules.diagnostics import watcher as diag_watcher  # noqa: E402
 # Core-side episode notifier, shared with vpn_dns_guard. Resolves via the unit's
 # PYTHONPATH (/opt/nemesis/alert_manager), same as `nemesis_paths` above.
 import nemesis_connectivity_notify as conn_notify         # noqa: E402
+import integrity_watch as _integrity_watch                # noqa: E402
+
+#: Last ticketed integrity finding, so an hourly checker reporting the same
+#: tampering does not file a ticket every cycle. Process-local by design: a
+#: restart re-files once, which is the safe direction -- re-notifying about a
+#: real finding is recoverable, silently dropping one is not.
+_INTEGRITY_STATE = {"sig": None}
 
 _running = True
 
@@ -233,6 +240,26 @@ def main() -> None:
                 log.info("diagnostics-service: self-gated off — skipping probe")
         except Exception:
             log.exception("diagnostics-service: probe cycle error")
+
+        # ── File-integrity fact file -> ticket (ADR-adjacent; Option A, 2026-08-29) ──
+        # This watcher is the poller because it is already periodic and is NOT
+        # web-facing. The ROOT checker cannot file the ticket itself: modules/tickets
+        # lives inside the tree it verifies, and a root process writing alerts.db
+        # would create root-owned WAL siblings that lock the dashboard out of its own
+        # database -- the documented reason nemesis_fw_watch.py touches no DB either.
+        #
+        # ⚠ Scope, so it is never over-read: this catches DRIFT and ACCIDENTAL
+        # tampering. An attacker with root can delete or falsify the fact file and
+        # nothing here would notice. Only the off-box heartbeat covers that.
+        #
+        # Wrapped separately from the probe cycle ON PURPOSE: an integrity-reporting
+        # failure must not stop diagnostics probes, and a probe failure must not
+        # suppress integrity reporting. Sharing one try block would couple them.
+        try:
+            _INTEGRITY_STATE["sig"] = _integrity_watch.poll_once(
+                last_signature=_INTEGRITY_STATE["sig"])[1]
+        except Exception:
+            log.exception("diagnostics-service: integrity poll error")
 
         # Sleep in 1s increments so SIGTERM/SIGINT shut us down promptly.
         _probe_sleep(_interval_seconds())

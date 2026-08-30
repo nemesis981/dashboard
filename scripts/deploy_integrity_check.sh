@@ -20,6 +20,7 @@ set -euo pipefail
 
 DEST="/usr/local/lib/nemesis-integrity"
 REPO="${1:-/opt/nemesis}"
+STATUS_DIR="/var/lib/nemesis-integrity"
 UNIT="/etc/systemd/system/nemesis-integrity.service"
 TIMER="/etc/systemd/system/nemesis-integrity.timer"
 
@@ -27,6 +28,11 @@ TIMER="/etc/systemd/system/nemesis-integrity.timer"
 [ -d "$REPO" ] || { echo "ABORT: repo not found at $REPO" >&2; exit 2; }
 
 install -d -o root -g root -m 0500 "$DEST"
+
+# The FACT FILE directory is deliberately NOT $DEST. $DEST is 0500 root:root, which
+# the poller's user (nemesis-diag) cannot even traverse. This is root-WRITABLE and
+# world-READABLE: root writes the verdict, unprivileged reads it, never the reverse.
+install -d -o root -g root -m 0755 "$STATUS_DIR"
 
 # The checker's OWN copy of the verifier. It must NOT import the repo's copy --
 # an attacker editing the tree would otherwise be editing the verifier's logic.
@@ -59,6 +65,8 @@ User=root
 ExecStart=$DEST/nemesis-integrity-check --root $REPO
 # The checker reads; it never writes to the tree it verifies.
 ProtectSystem=strict
+# The one path it may write: the fact file the in-tree poller reads.
+ReadWritePaths=$STATUS_DIR
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
