@@ -313,4 +313,13 @@ cat <<'NFT'
 NFT
 } > "$OUT"
 
-[ "$OUT" != "/dev/stdout" ] && echo "  wrote $OUT (${#V4[@]} v4, ${#V6[@]} v6 derived rules, ${#REFUSED[@]} refused by the never-block guard)" >&2
+# ⚠ AN `if`, NOT `[ ... ] && echo`. As the LAST statement in the script, the
+# short-circuit form leaks its own status: when $OUT IS /dev/stdout the test is
+# false, the `&&` never runs, and the script EXITS NON-ZERO despite having
+# rendered perfectly. Pre-existing (exit 3 before the gateway work, 1 after), and
+# it means any caller doing `render > f && nft -f f` silently skips the load --
+# which is exactly how it was found. The `-o` form used by nemesis-fw-enforce
+# takes the true branch and always exited 0, so production was never affected.
+if [ "$OUT" != "/dev/stdout" ]; then
+    echo "  wrote $OUT (${#V4[@]} v4, ${#V6[@]} v6 derived rules, ${#REFUSED[@]} refused by the never-block guard)" >&2
+fi
