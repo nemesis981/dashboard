@@ -1493,20 +1493,49 @@ configure_forkb_nat() {
     # net.ipv4.ip_forward IS DELIBERATELY LEFT AT 0 HERE. Read this before
     # "fixing" that:
     #
-    #   Tailscale owns the head of the FORWARD chain. `iptables -S` shows
-    #   `-A FORWARD -j ts-forward` FIRST, ahead of every ufw chain, and inside it
-    #   `-A ts-forward -i tailscale0 -j MARK ...` followed by
-    #   `-A ts-forward -m mark --mark 0x40000/0xff0000 -j ACCEPT`. ACCEPT is
-    #   terminating, so any forwarded packet arriving on tailscale0 is accepted
-    #   before ufw ever sees it. `ufw route` rules CANNOT gate this traffic — a
-    #   rule added there would look like an open-relay lock and control nothing.
+    #   ⚠ CORRECTED 2026-08-30. THE PARAGRAPH THIS REPLACES WAS STALE FROM
+    #   2026-07-30 AND ITS STALENESS WAS EXPENSIVE: it declared a production-grade
+    #   FORWARD gate "an unresolved design question (ufw is the mandated
+    #   chokepoint, but Tailscale pre-empts it)", which made Gateway Mode look far
+    #   costlier than it was for roughly a month. The premise had already been
+    #   fixed the same day it was written.
     #
-    #   Therefore ip_forward=0 is currently the ONLY thing preventing this box
-    #   from forwarding tunnel traffic. Enabling it at install time would make the
-    #   box an open forwarding path for anything that reaches the tailnet, gated
-    #   solely by Tailscale's own ACLs. Fork B validation enables it per-run and
-    #   restores it; a production-grade FORWARD gate is an unresolved design
-    #   question (ufw is the mandated chokepoint, but Tailscale pre-empts it).
+    #   WHAT IT USED TO SAY, and why it was true when written: Tailscale owned the
+    #   head of the FORWARD chain (`-A FORWARD -j ts-forward` FIRST, ahead of every
+    #   ufw chain), and ts-forward's terminating ACCEPT meant a forwarded packet
+    #   arriving on tailscale0 was accepted before ufw ever saw it. `ufw route`
+    #   rules genuinely could not gate that traffic.
+    #
+    #   WHAT CHANGED: `configure_tailnet_enforcement()` has set
+    #   `tailscale set --netfilter-mode=nodivert` since 2026-07-30, which stops
+    #   Tailscale jumping to its own chains at all. ts-forward is still MAINTAINED
+    #   but is never jumped from FORWARD, so it pre-empts nothing. **ufw IS the
+    #   reachable chokepoint for tailnet-sourced forwarded traffic.**
+    #
+    #   ⚠ AND THAT REACHABILITY IS NOT FREE — DO NOT READ THIS AS "ufw route rules
+    #   just work now". nodivert disabled Tailscale's OWN protective rules along
+    #   with its ACCEPTs. Two of them were load-bearing and are replicated by this
+    #   installer precisely because they no longer apply:
+    #     * the tailnet ANTI-SPOOF DROP (ts-input's sibling), which ADR 0011's
+    #       unforgeable-source-IP guarantee depends on — replicated into
+    #       before.rules above ufw's conntrack RELATED,ESTABLISHED accept;
+    #     * the tailnet LOOP-PREVENTION DROP (ts-forward's own), emitted by
+    #       `scripts/nemesis-fw-render`, form taken from Tailscale's source
+    #       (util/linuxfw addBase4) rather than inferred from a running box.
+    #   ufw being reachable is a consequence of removing Tailscale's rules; the
+    #   replicas are what keep that safe. Removing either replica re-opens what
+    #   nodivert turned off, and it will not look like a firewall failure.
+    #
+    #   ip_forward=0 therefore remains the installed default, but it is no longer
+    #   "the ONLY thing" standing between this box and open forwarding — a real
+    #   ufw FORWARD gate is now buildable. Fork B validation still enables
+    #   ip_forward per-run and restores it.
+    #
+    #   Verified 2026-08-30 from the commit record (`d72cda8`'s measured live test
+    #   against an enrolled agent, and `7f28d16`'s replicated DROP), NOT from a
+    #   live iptables read — `sudo -n` was unavailable in that session, and an
+    #   empty `iptables -S` is the instrument failing rather than evidence. Worth
+    #   one live confirmation by whoever next has root.
     #
     # EGRESS INTERFACE IS DERIVED, NOT PINNED. A hardcoded interface silently
     # stops matching whenever egress changes. We ask vpn_dns_guard for the
@@ -1521,6 +1550,23 @@ configure_forkb_nat() {
     #   rule rather than guess. That refusal is the required behaviour.
     #
     # KNOWN GAP — FORK B IS PIA-DOWN-ONLY (2026-07-29):
+    #
+    #   ⚠ STILL UNFALSIFIED AS OF 2026-08-30, AND NOT CONFIRMED EITHER — read this
+    #   before "correcting" the straddle claim below. A reconciliation observed no
+    #   0.0.0.0/1/128.0.0.0/1 routes in any routing table and it was proposed as
+    #   evidence the claim is stale. IT IS NOT. The claim below is explicitly about
+    #   the PIA-CONNECTED state; the observation was taken PIA-DISCONNECTED
+    #   (verified: zero tunnel interfaces present), which is exactly what the claim
+    #   predicts for that state. Absence of the straddle while PIA is down is
+    #   CONSISTENT with the claim, not contrary to it.
+    #
+    #   Falsifying it requires observing the routing table with PIA UP — which
+    #   cannot be done here, because PIA is deliberately disabled on this
+    #   deployment (PUNCHLIST "[FUTURE] PIA VPN deliberately disabled"). So this
+    #   paragraph stands as WRITTEN-BUT-UNRETESTED since 2026-07-29, and that is
+    #   the honest status: neither re-confirmed nor disproven. Do not upgrade it to
+    #   "verified" and do not delete it as stale without a PIA-up observation.
+    #
     #   PIA does not replace the main default route; it straddles it with
     #   0.0.0.0/1 and 128.0.0.0/1 via the tunnel. Those are MORE SPECIFIC than
     #   `default`, so when PIA is connected, forwarded traffic actually leaves via
