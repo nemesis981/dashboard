@@ -72,6 +72,15 @@ _NOTE_IPV6_ABSENT = "ipv6 not provisioned on this link"
 #: We could not determine whether IPv6 is provisioned. NOT the same as either of
 #: the two above — see `ipv6_expectation`.
 _NOTE_IPV6_UNKNOWN = "ipv6 provisioning undetermined"
+#: A VPN tunnel is up and is blocking IPv6 egress. Consumer VPNs commonly disable
+#: or block IPv6 outright as leak protection, so a failing keytest is the EXPECTED
+#: result while tunnelled rather than a fault. Same distinction _NOTE_IPV6_ABSENT
+#: already draws for an IPv4-only link — "a thing that should work does not" vs
+#: "this is the normal condition here" — applied to a fourth case.
+_NOTE_IPV6_VPN_BLOCKED = "ipv6 blocked by vpn"
+#: The raw-egress probe cannot leave a tunnelled host whose VPN killswitch blocks
+#: every non-tunnel egress. Named separately so it is visible, not swallowed.
+_NOTE_EGRESS_VPN_BLOCKED = "raw egress blocked by vpn"
 
 
 # ── Is IPv6 even expected here? ───────────────────────────────────────────────
@@ -393,17 +402,20 @@ def _probe(cfg: dict):
     latency_ms = round(a_secs * 1000, 1) if a_secs is not None else None
     flags = {"routing_ok": routing_ok, "dns_ok": dns_ok,
              "egress_ok": egress_ok, "api_ok": api_ok}
-    note = _note(flags, v4_ok, v6_ok, v6_expect)
+    note = _note(flags, v4_ok, v6_ok, v6_expect, vpn_connected)
     return flags, latency_ms, note, raw, (v4_ok, v6_ok, v6_expect), vpn_connected
 
 
-def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
+def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED,
+          vpn_connected=False) -> str:
     if not flags["routing_ok"]:
         return _NOTE_NO_ROUTE
     if not flags["dns_ok"]:
         return _NOTE_DNS_FAIL
     if not flags["egress_ok"]:
-        return _NOTE_EGRESS_FAIL
+        # A killswitch blocks the raw-egress probe by design. Name that condition
+        # rather than reporting it as a fault — same treatment as the IPv6 notes.
+        return _NOTE_EGRESS_VPN_BLOCKED if vpn_connected else _NOTE_EGRESS_FAIL
     # IPv4 is reported ahead of IPv6 now. On an IPv4-only link an IPv6 failure is
     # expected and uninformative, so letting it win the note would bury a real
     # IPv4 fault behind a permanent one — which is how the old ordering behaved
@@ -411,6 +423,11 @@ def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
     if flags["api_ok"] and not v4_ok:
         return _NOTE_IPV4_FAIL
     if flags["api_ok"] and not v6_ok:
+        # Checked BEFORE provisioning state: the address stays on the interface
+        # while the tunnel blocks egress, so `ipv6_expectation()` still reports
+        # EXPECTED and cannot distinguish this case on its own.
+        if vpn_connected:
+            return _NOTE_IPV6_VPN_BLOCKED  # expected while tunnelled
         if v6_expect == IPV6_NOT_PROVISIONED:
             return _NOTE_IPV6_ABSENT      # not a fault; stated, not hidden
         if v6_expect == IPV6_UNKNOWN:
@@ -420,7 +437,8 @@ def _note(flags, v4_ok, v6_ok, v6_expect=IPV6_EXPECTED) -> str:
 
 
 def classify(flags: dict, v4_ok: bool, v6_ok: bool,
-             v6_expect: str = IPV6_EXPECTED) -> str:
+             v6_expect: str = IPV6_EXPECTED,
+             vpn_connected: bool = False) -> str:
     """The is-it-me-or-them verdict (spec §6).
 
     `v6_expect` decides whether a failed IPv6 keytest counts against the verdict
@@ -428,22 +446,44 @@ def classify(flags: dict, v4_ok: bool, v6_ok: bool,
     on an IPv4-only link the failure is the expected result and must not produce
     a DEGRADED verdict on every cycle forever (see `ipv6_expectation`).
 
-    Defaulting to IPV6_EXPECTED keeps the strict behaviour for any caller that
-    has not been updated — a caller that forgets to pass it gets the old, noisier
-    answer rather than a silently more permissive one.
+    `vpn_connected` does the same job for a VPN tunnel (added 2026-08-30). A
+    leak-blocking VPN disables IPv6 egress and blocks the raw-egress probe BY
+    DESIGN, so both fail on every cycle for as long as the tunnel is up — the
+    identical permanent-episode shape the IPv4-only link produced. It is a
+    separate input from `v6_expect` because `ipv6_expectation()` cannot see it:
+    that measures whether a global IPv6 ADDRESS exists, and the address stays
+    while the tunnel blocks the traffic.
+
+    Both flags default to the strict answer, so a caller that forgets either gets
+    the old, noisier verdict rather than a silently more permissive one.
     """
     local_ok = flags["routing_ok"] and flags["dns_ok"] and flags["egress_ok"]
+    egress_blocked_by_vpn = False
     if not local_ok:
-        return "LOCAL_FAIL"          # it's us
+        # A tunnelled host frequently cannot send the raw-egress probe at all.
+        # That DEGRADES rather than escalating to LOCAL_FAIL — but only when
+        # routing and DNS are both healthy, so a genuine local fault under a VPN
+        # still reports as one. Measured 2026-08-30: a single `egress_ok=0`
+        # sample escalated a whole episode to LOCAL_FAIL while routing, DNS and
+        # the API were all green.
+        if (vpn_connected and flags["routing_ok"] and flags["dns_ok"]
+                and not flags["egress_ok"]):
+            egress_blocked_by_vpn = True
+        else:
+            return "LOCAL_FAIL"      # it's us
     if not flags["api_ok"]:
         return "UPSTREAM_FAIL"       # local green, upstream dead — it's them
     # api_ok from here on: the upstream is reachable by SOME address family.
     if not v4_ok:
         return "DEGRADED"            # IPv4 down is always a real degradation
+    if egress_blocked_by_vpn:
+        return "DEGRADED"            # visible, but not blamed on the host
     if v6_ok:
         return "ALL_OK"
     # IPv6 keytest failed. Whether that is a degradation depends on whether this
     # link has IPv6 at all.
+    if vpn_connected:
+        return "ALL_OK"              # tunnel blocks IPv6 by design; note says so
     if v6_expect == IPV6_EXPECTED:
         return "DEGRADED"
     # NOT_PROVISIONED -> genuinely fine. UNKNOWN -> we could not establish that a
@@ -586,7 +626,7 @@ def run_once(actor: str = "watcher-service", verbose=None) -> dict:
 
     ts = datetime.now()
     flags, latency_ms, note, raw_lines, (v4_ok, v6_ok, v6_expect), vpn_connected = _probe(cfg)
-    verdict = classify(flags, v4_ok, v6_ok, v6_expect)
+    verdict = classify(flags, v4_ok, v6_ok, v6_expect, vpn_connected)
 
     summary = (f"{ts.isoformat()} verdict={verdict} "
                f"routing={int(bool(flags['routing_ok']))} dns={int(bool(flags['dns_ok']))} "
