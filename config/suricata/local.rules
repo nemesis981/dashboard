@@ -128,17 +128,43 @@
 # address. The repo copy must NEVER contain a real address -- test_local_rules.py
 # asserts that.
 
+# ── NAMING (sid 1000001/1000002 renamed 2026-08-30, rev:2 -> rev:3) ──────────
+# These two said "against Nemesis host" while their destination is $HOME_NET --
+# the WHOLE LAN -- so they fire on a scan against any LAN device, not just this
+# box. That mismatch is not cosmetic: it is what made the 2026-08-06 self-scan
+# false positive read as an attack for a week, because the alert text described a
+# target the rule was not actually scoped to.
+#
+# THE LAN-WIDE SCOPE IS DELIBERATE AND WAS KEPT. Narrowing the destination to this
+# host was considered as the fix for that noise and REJECTED -- it would silently
+# drop lateral-movement coverage (one LAN device scanning another), which is real
+# value these rules provide today. So the honest fix is the NAME, not the rule.
+#
+# RENAMED rather than SPLIT into host-targeted and LAN-wide families (operator
+# ruling, 2026-08-30): a split would mint new SIDs, and every historical alert,
+# ticket and AI report already references these two. SIDs are the stable identity
+# an operator and the incident history both key on; renaming preserves that while
+# a split would strand it. rev is bumped because the rule text changed -- Suricata
+# otherwise treats an edited rule as the same revision.
+#
+# ⚠ STILL OPEN, deliberately NOT changed here (separate PUNCHLIST items):
+#   * sids 1000003-1000006 carry the SAME "against Nemesis host" mismatch and the
+#     same $HOME_NET destination. Only these two were in scope for this ruling.
+#   * "sweep" still overstates the test: these are SYN RATE counters with no
+#     port-diversity condition, so a high-rate single-port client can trip them.
+#     That is a rule-design change, not a naming one, and is its own open item.
+#
 # ── 1. Horizontal SYN sweep -- moderate. P2 -> alerts, no auto-quarantine.
 #      Destination excludes this host's own service ports (see the note above):
 #      SYNs to advertised services are normal client traffic, not breadth.
 alert tcp !@NEMESIS_HOST@ any -> $HOME_NET ![22,53,80,443,5000,5001] (\
-    msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (moderate)"; \
+    msg:"NEMESIS Host-defence: TCP SYN sweep against any LAN device (moderate)"; \
     flow:to_server; \
     flags:S,12; \
     threshold:type both, track by_src, count 30, seconds 60; \
     classtype:attempted-recon; \
     priority:2; \
-    sid:1000001; rev:2;)
+    sid:1000001; rev:3;)
 
 # ── 2. Horizontal SYN sweep -- aggressive. P1 -> eligible for auto-quarantine.
 #      Deliberately a separate rule rather than a second threshold on rule 1:
@@ -154,13 +180,13 @@ alert tcp !@NEMESIS_HOST@ any -> $HOME_NET ![22,53,80,443,5000,5001] (\
 #      a firewall rule. That adjacency is why the scoping fix belongs HERE and not
 #      only in a threshold.
 alert tcp !@NEMESIS_HOST@ any -> $HOME_NET ![22,53,80,443,5000,5001] (\
-    msg:"NEMESIS Host-defence: TCP SYN sweep against Nemesis host (aggressive)"; \
+    msg:"NEMESIS Host-defence: TCP SYN sweep against any LAN device (aggressive)"; \
     flow:to_server; \
     flags:S,12; \
     threshold:type both, track by_src, count 100, seconds 60; \
     classtype:attempted-recon; \
     priority:1; \
-    sid:1000002; rev:2;)
+    sid:1000002; rev:3;)
 
 # ── 3. Service-port probe concentration against Nemesis's own listeners.
 #      :22 (ssh), :5000 (dashboard), :5001 (hw-monitor), :443/:80 (nginx).
