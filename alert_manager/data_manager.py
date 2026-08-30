@@ -199,6 +199,22 @@ NAMESPACES = {
     # failure `lookup` hit above.
     "netprobe":           {"tables": ()},
 
+    # LAN integrity (rogue DHCP; ARP-spoof and IPv6 rogue-RA scoped to land here).
+    # DICT form, EXACT-match -- NOT a `lan_integrity_` prefix tuple, for the reason
+    # the dhcp entry above spells out at length: a bare tuple falls through to
+    # `startswith()`, so a prefix grant would silently pre-authorise every future
+    # lan_integrity_* table this module ever grows. The two siblings already parked
+    # for this module will each need their own table named here, deliberately.
+    # ⚠ Per the dhcp entry's warning, ADDING THE NAME HERE IS NOT OPTIONAL AND IS
+    # NOT COVERED BY THE MODULE'S OWN SUITE -- an ungranted write is refused at
+    # RUNTIME with a `WOULD DENY` log line and the write silently not happening.
+    # `test_lan_integrity_registry.py` exists specifically to close that gap: it
+    # asserts this grant matches the module's actual DDL, so a table added without
+    # a grant fails a test instead of failing in production.
+    "lan_integrity":      {"tables": ("lan_integrity_state",
+                                      "lan_integrity_dhcp_servers",
+                                      "lan_integrity_findings")},
+
     # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
     # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the
     # dashboard can render a persistent degraded banner and so every transition

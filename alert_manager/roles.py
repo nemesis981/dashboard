@@ -412,6 +412,19 @@ ROUTE_MINIMUMS = {
     "module_netprobe__api_trace":    (_A, _A),
     "module_netprobe__api_targets":  (_U, _A),
 
+    # lan_integrity — read side is VIEWONLY: which DHCP servers answered on your
+    # own LAN is network-health information, not private content, and the whole
+    # point of the card is that a non-expert sees the warning. The two WRITE
+    # routes are ADMIN, and `_api_pin` especially so: pinning a server declares it
+    # legitimate, which SUPPRESSES future findings about it. That is a
+    # detection-disabling action wearing the clothes of a settings change, so it
+    # gets the same gate as any other security-default change.
+    "module_lan_integrity__api_status":   (_V, _A),
+    "module_lan_integrity__api_servers":  (_V, _A),
+    "module_lan_integrity__api_findings": (_V, _A),
+    "module_lan_integrity__api_pin":      (_A, _A),
+    "module_lan_integrity__api_close":    (_A, _A),
+
     # email_security — BOTH admin, which is stricter than the dominant
     # (viewonly, admin) shape here, deliberately:
     #   * the quarantine LIST is not neutral metadata. It exposes who emails the

@@ -1,0 +1,14 @@
+{
+  "name": "lan_integrity",
+  "display_name": "LAN Integrity",
+  "version": "0.1.0",
+  "description": "Watches for another device on your network claiming a job it should not have. First detector: a rogue DHCP server — a machine handing out addresses, gateways and DNS servers alongside (or instead of) your real router, which is how an attacker puts itself on the path of your traffic without needing any password. Passive: it reads DHCP messages Suricata already logs and emits nothing itself. Servers are never trusted automatically — you confirm which one is yours, so a rogue server that answers first cannot make itself the expected one. Named for the class rather than for DHCP because ARP-spoofing and IPv6 rogue-router detection are scoped to land here too.",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": true,
+  "config_keys": [],
+  "enabled_by_default": true,
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
+}
