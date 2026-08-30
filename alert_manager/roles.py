@@ -467,6 +467,11 @@ ROUTE_MINIMUMS = {
     "module_malware_detection__api_findings":           (_V, _A),
     "module_malware_detection__api_finding_detail":     (_V, _A),
     "module_malware_detection__api_finding_quarantine": (_A, _A),
+    # Admin for BOTH methods, and admin rather than sub_admin deliberately:
+    # restore returns a file the product judged malicious to the location it was
+    # found in. It is the inverse of quarantine and carries strictly more risk,
+    # so it is gated no lower than quarantine itself.
+    "module_malware_detection__api_finding_restore":    (_A, _A),
     "module_malware_detection__api_finding_status":     (_U, _U),
     "module_malware_detection__api_scan":               (_A, _A),
     "module_malware_detection__api_scan_status":        (_V, _A),
