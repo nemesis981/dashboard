@@ -14,7 +14,7 @@ import gateway_mode as G
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 36
+EXPECTED_CHECKS = 38
 
 
 def check(label, got, want):
@@ -94,8 +94,15 @@ def test_both_halves_required():
     check("...and says sysctl --system was not run", "never applied" in d, True)
 
     check("neither -> not ok", G.verify_forwarding("", "0", True)[0], False)
-    check("unreadable live value -> not ok (never assume)",
-          G.verify_forwarding(G.DROPIN_CONTENT, None, True)[0], False)
+    # ⚠ ASSERT THE REASON, NOT JUST THE VERDICT. An unreadable live value and a
+    # written-but-unapplied drop-in BOTH return ok=False, so a boolean-only test
+    # cannot distinguish them -- and it did not: a mutation disabling the
+    # unreadable-value guard passed this suite until this check was added. The two
+    # states send the operator to completely different fixes.
+    ok, d = G.verify_forwarding(G.DROPIN_CONTENT, None, True)
+    check("unreadable live value -> not ok (never assume)", ok, False)
+    check("...and is reported AS unreadable", "could not read" in d, True)
+    check("...NOT misreported as 'never applied'", "never applied" in d, False)
 
     print("\n  [and the disabled direction is checked too, not assumed]")
     check("cleanly disabled -> ok", G.verify_forwarding("", "0", False)[0], True)
