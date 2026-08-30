@@ -8698,6 +8698,117 @@ def api_admin_approval_request():
 # which is what the ADR 0026 §D3 A2 work actually needs from it.
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _ai_local_approval_required(action_class):
+    """Does this class need an A2 approval? False if ai_engine is unavailable.
+
+    ⚠ FALSE IS THE WRONG-DIRECTION DEFAULT and it is chosen anyway, for one
+    reason: this is consulted only INSIDE the execute route, and if ai_engine
+    cannot be imported then `execute_proposal` cannot be called either, so the
+    action does not happen. The refusal comes from the missing import, not from
+    here. Returning True would produce a confusing "approval required" message
+    for what is actually a module-loading failure.
+    """
+    try:
+        from modules.ai_engine import local_approval_required
+        return bool(local_approval_required(action_class))
+    except Exception:
+        log.exception("ai: could not determine local-approval requirement for %r",
+                      action_class)
+        return False
+
+
+def _verify_local_approval_for(proposal, pid):
+    """(approval_record, error, status) — verify an A2 approval for this proposal.
+
+    Returns (None, error, status) on every refusal. The approval is CONSUMED as
+    part of verification, atomically, so a caller racing this one loses at the
+    database rather than at a check.
+    """
+    from core import admin_approval_local as local
+    from core import admin_approval_store as store
+    from core import admin_approval_authenticators as auth
+
+    data = request.get_json(silent=True) or {}
+    try:
+        request_id = bytes.fromhex(str(data.get("approval_request_id") or ""))
+    except ValueError:
+        return None, "approval_request_id must be hex", 400
+    if not request_id:
+        return None, ("this action class requires a verified admin approval: "
+                      "supply approval_request_id and the assertion fields"), 400
+    try:
+        assertion = {
+            "authenticator_data": base64.b64decode(
+                data.get("authenticator_data_b64") or "", validate=True),
+            "client_data_json": base64.b64decode(
+                data.get("client_data_json_b64") or "", validate=True),
+            "signature": base64.b64decode(data.get("signature_b64") or "",
+                                          validate=True),
+        }
+    except Exception:
+        return None, "assertion fields must be valid base64", 400
+
+    conn = _dm_conn()
+    try:
+        rec = store.load_request(conn, request_id)
+        if rec is None:
+            return None, "no such approval request", 404
+        signer = auth.get(conn, rec.get("authenticator_id"))
+        if signer is None or signer.get("revoked"):
+            return None, ("the approving authenticator is no longer active on "
+                          "this appliance"), 409
+        try:
+            verified = local.verify_local_approval(
+                stored_request=rec, authenticator=signer, assertion=assertion,
+                now=int(time.time()),
+                action_class=proposal.get("action_class"),
+                row_id=proposal.get("row_id"),
+                proposed_action=proposal.get("proposed_action"),
+                proposal_id=pid,
+                consume=lambda rid: store.consume(conn, rid))
+        except local.LocalApprovalError as exc:
+            # Binding mismatch, bad signature, expired, already spent. All
+            # refusals the operator must act on, so the detail is returned.
+            log.warning("ai: local approval refused for proposal %s: %s", pid, exc)
+            return None, str(exc)[:300], 409
+        # Carry the binding through so execute_proposal can re-check it against
+        # the proposal it is actually about to run.
+        out = dict(verified)
+        out["proposal_id"] = pid
+        return out, None, 200
+    finally:
+        conn.close()
+
+
+def _record_local_approval(approval, action_class, pid):
+    """Append one row to the A2 log. Never raises — see below.
+
+    ⚠ A FAILED LOG WRITE MUST NOT UNDO THE ACTION, and cannot: the approval is
+    already spent and the executor has already run. Raising here would turn a
+    recording problem into a second, misleading failure on top of whatever the
+    executor reported. Logged loudly instead, because an executed action with no
+    record is the state worth being noisy about.
+    """
+    try:
+        from core import admin_approval_local as local
+        row = local.record_row(stored_request=approval, action_class=action_class,
+                               proposal_id=pid, actor=_current_actor_label(),
+                               now=int(time.time()))
+        conn = _dm_conn()
+        conn.execute(
+            "INSERT INTO ai_local_approval_log (request_id, action_class, "
+            "proposal_id, target, authenticator_id, approved_by, executed_by, "
+            "spent_at) VALUES (?,?,?,?,?,?,?,?)",
+            (row["request_id"], row["action_class"], row["proposal_id"],
+             row["target"], row["authenticator_id"], row["approved_by"],
+             row["executed_by"], row["spent_at"]))
+        conn.commit()
+        conn.close()
+    except Exception:
+        log.exception("ai: proposal %s executed under a spent approval but the "
+                      "approval log row FAILED to write", pid)
+
+
 @app.route("/api/ai/proposals", methods=["GET"])
 def api_ai_proposals():
     """The approve/reject queue. `?pending=1` for undecided ones only."""
@@ -8765,7 +8876,23 @@ def api_ai_proposal_execute(pid):
                             "error": "no forward executor is registered for action "
                                      "class %r, so this proposal cannot be carried "
                                      "out" % p.get("action_class")}), 409
-        result = _exec(pid, executor, actor=_current_actor_label())
+
+        # ── A2: appliance-local admin approval (ADR 0026 §D3) ───────────────
+        approval = None
+        if _ai_local_approval_required(p.get("action_class")):
+            approval, err, code = _verify_local_approval_for(p, pid)
+            if approval is None:
+                return jsonify({"ok": False, "error": err}), code
+
+        result = _exec(pid, executor, actor=_current_actor_label(),
+                       approval=approval)
+        # The approval is SPENT by now either way — `verify_local_approval`
+        # consumes atomically as part of verifying. Record it whether or not the
+        # executor succeeded: a spent approval that authorised a failed action is
+        # exactly the sequence an operator reconstructing an incident needs to
+        # see, and omitting it would make the log agree only with successes.
+        if approval is not None:
+            _record_local_approval(approval, p.get("action_class"), pid)
     except Exception:
         log.exception("ai: could not execute proposal")
         return jsonify({"ok": False, "error": "internal error"}), 500
@@ -10310,6 +10437,7 @@ def settings_page():
         </div>
         <p id="moduleMsg" style="display:none;font-size:0.85em;margin-top:10px"></p>
     </div>
+
 
     <div class="settings-card">
         <h2>🌡️ Hardware Tools</h2>

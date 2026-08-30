@@ -272,7 +272,16 @@ pid_ip = ai.create_proposal("ip_block_permanent", "alerts", "192.88.99.7",
                             "block permanently", "test data 2026-08-21 undo path",
                             "claude-haiku-4-5")
 ai.respond_to_proposal(pid_ip, "approved", "paul")
-ai.execute_proposal(pid_ip, lambda p: (True, "blocked"))
+# `ip_block_permanent` became A2-gated on 2026-08-30 (LOCAL_APPROVAL_REQUIRED), so
+# execute_proposal now refuses it without a verified admin approval. A minimal
+# pre-verified record is supplied here rather than switching this scenario to a
+# non-gated class: what this section tests is the UNDO path's context threading,
+# and ip_block_permanent is the class whose undo actually requires a credential —
+# the whole point of the scenario. A2's own verification is covered end-to-end in
+# core/test_admin_approval_local.py; duplicating it here would test it twice and
+# this behaviour zero times.
+ai.execute_proposal(pid_ip, lambda p: (True, "blocked"),
+                    approval={"proposal_id": pid_ip})
 
 r = ai.undo_proposal(pid_ip, "paul")
 check("undo FAILS when no credential is supplied", not r["ok"], r)

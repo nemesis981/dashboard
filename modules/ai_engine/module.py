@@ -155,6 +155,39 @@ def _init_db() -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_aip_class ON ai_proposals(action_class);
 
+        -- ADR 0026 §D3 "A2": one row per SPENT admin approval on an
+        -- appliance-local action. APPEND-ONLY by convention — nothing in this
+        -- codebase updates or deletes a row here, and nothing should.
+        --
+        -- ⚠ ATTRIBUTION, NOT NON-REPUDIATION, and the difference is load-bearing.
+        -- This table is on the same appliance as the action it records. Root can
+        -- rewrite it, so it is evidence for an operator reconstructing what
+        -- happened, NOT proof against someone who controlled the box. No off-box
+        -- replication exists in this project (measured 2026-08-30), which is why
+        -- the weaker claim is the honest one. `admin_approval_local.
+        -- RECORD_IS_ON_BOX_ONLY` states the same thing where a caller will see it.
+        --
+        -- Carries NO key material and NO assertion bytes: this is a record that
+        -- an approval was spent, not a re-verifiable copy of one. Storing the
+        -- signature would invite re-verification from the log, which is the
+        -- appliance-trusting-itself move A2 cannot support.
+        --
+        -- Columns are the shippable set: when the off-box dead-man's-switch
+        -- heartbeat exists, these rows can go as-is without a migration.
+        CREATE TABLE IF NOT EXISTS ai_local_approval_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            request_id       TEXT NOT NULL,
+            action_class     TEXT NOT NULL,
+            proposal_id      INTEGER NOT NULL,
+            target           TEXT,
+            authenticator_id TEXT,
+            approved_by      TEXT,
+            executed_by      TEXT,
+            spent_at         INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_alal_proposal
+            ON ai_local_approval_log(proposal_id);
+
         -- User-defined standing rules. These NARROW behaviour only — see
         -- effective_ceiling(). No rule type raises the ceiling, so a rule worded to
         -- widen authority cannot do so. active=0 is a soft delete (the standing
@@ -4062,8 +4095,40 @@ def _authority_override(action_class: str) -> dict | None:
         return None
 
 
+def _paired_authenticator_count():
+    """How many active admin authenticators are paired, or None if unknowable.
+
+    None is a REAL answer, not a failure default: `raise_authority` refuses an
+    A2-gated raise while this is unknown rather than treating "cannot tell" as
+    "none are paired", which would silently take the bootstrap path and accept
+    the master password alone.
+    """
+    try:
+        from core import admin_approval_authenticators as _auth
+        conn = _conn()
+        try:
+            return len(_auth.active(conn))
+        finally:
+            conn.close()
+    except Exception as exc:                                 # noqa: BLE001
+        # ⚠ A MISSING TABLE IS ZERO, NOT UNKNOWN, and conflating the two was a
+        # real defect on the first run of this code: `test_master_authority`
+        # raises an A2-gated class in a DB where the admin-approval tables were
+        # never created, and the raise was refused as "cannot determine" — which
+        # would equally have blocked any real install that had not yet
+        # initialised those tables, with a message that misdescribed why.
+        #
+        # No table means no authenticator has ever been registered. That is a
+        # definite answer and takes the bootstrap path. Every OTHER failure
+        # (locked, corrupt, permission) really is unknown and still refuses.
+        if "no such table" in str(exc).lower():
+            return 0
+        log.exception("ai_engine: could not count paired authenticators")
+        return None
+
+
 def raise_authority(action_class: str, level: int, master_pw: str,
-                    granted_by: str, reason: str = "") -> dict:
+                    granted_by: str, reason: str = "", approval=None) -> dict:
     """Manually raise a class's authority, gated on the master password.
 
     Refuses, with a reason the UI can show verbatim, when:
@@ -4092,6 +4157,47 @@ def raise_authority(action_class: str, level: int, master_pw: str,
                 ("%s is capped at L%d by a MISSING CAPABILITY, not by caution: "
                  "the code has no way to reverse this action. No password can "
                  "raise it until that capability exists." % (action_class, hard))}
+
+    # ── A2: raising an approval-gated class REMOVES its approval gate ────────
+    #
+    # At L2+ the engine acts without a human per act — that is what the rung
+    # means. So raising an A2-gated class past L1 does not merely grant authority,
+    # it DELETES the requirement that a human sign for each action. Protecting
+    # that with a credential weaker than the gate it removes is the wrong way
+    # round: the master password is single-factor and its bcrypt hash lives in
+    # `ai_settings` in this same database, so anything with DB write access can
+    # replace it without ever calling `set_master_password` (whose rotation guard
+    # is application-layer only). An admin approval's key is on separate hardware
+    # with nothing here to overwrite.
+    #
+    # SCOPED TO A2-GATED CLASSES ONLY, deliberately. Classes with no approval gate
+    # lose nothing by keeping the master password, and requiring a signature for
+    # every raise would add friction with no matching risk.
+    if local_approval_required(action_class) and level > L1_RECOMMEND:
+        paired = _paired_authenticator_count()
+        if paired is None:
+            # Could not determine. Refuse: "cannot tell whether an approval is
+            # possible" must not resolve to "proceed without one".
+            return {"ok": False, "error":
+                    "cannot determine whether any authenticator is paired; "
+                    "refusing to raise an approval-gated class while that is "
+                    "unknown"}
+        if paired > 0 and not approval:
+            return {"ok": False, "error":
+                    ("%s requires a verified admin approval to raise above L1, "
+                     "not the master password alone: raising it removes the "
+                     "per-action approval requirement, so the raise is gated at "
+                     "least as strongly as the thing it removes"
+                     % action_class), "needs_admin_approval": True}
+        if paired == 0:
+            # BOOTSTRAP. With no authenticator paired there is no key that could
+            # sign this, so requiring one would deadlock the raise permanently —
+            # the same deadlock `admin_approval_pairing` avoids for first
+            # registration, and avoided the same way. Logged loudly because it is
+            # the one path where the weaker credential still suffices.
+            log.warning("ai_engine: raising A2-gated %s on the master password "
+                        "alone — no authenticator is paired (bootstrap path)",
+                        action_class)
     try:
         conn = _conn()
         # ONE TRANSACTION. The grant and its history entry commit together or not
@@ -4638,13 +4744,49 @@ def respond_to_proposal(proposal_id: int, response: str, responded_by: str) -> d
             "promoted": promoted}
 
 
-def execute_proposal(proposal_id: int, executor, actor: str | None = None) -> dict:
+#: Action classes that additionally require a verified ADMIN APPROVAL (ADR 0026
+#: §D3 "A2") before `execute_proposal` will carry them out.
+#:
+#: EMPTY IS A LEGAL STATE and means "no class requires a local approval". A class
+#: listed here cannot be executed by an approve-then-execute alone: a human must
+#: also have signed for this exact proposal on a paired authenticator.
+#:
+#: ⚠ A2 IS ONLY COHERENT AT L1, and that constrains what belongs here. At L2+ the
+#: engine acts without a human per act — that is the definition of the rung — so a
+#: class requiring a per-act signature is L1 wearing an L2 label. Anything listed
+#: here should stay at L1_RECOMMEND in ACTION_CLASS_CEILINGS, and `raise_authority`
+#: enforces the other half: raising an A2-gated class REMOVES this requirement, so
+#: the raise itself needs an approval (see that function).
+#:
+#: `ip_block_permanent` chosen on measured frequency, not severity alone
+#: (2026-08-30): 2 rows in `quarantines` across its whole history against 22
+#: disposition-shaped alerts. A per-action ceremony is proportionate at ~2/month
+#: and would be routed around at the other rate — and a mechanism people work
+#: around is worse than none.
+LOCAL_APPROVAL_REQUIRED = frozenset({"ip_block_permanent"})
+
+
+def local_approval_required(action_class: str) -> bool:
+    """Does this class need a verified admin approval to execute?"""
+    return action_class in LOCAL_APPROVAL_REQUIRED
+
+
+def execute_proposal(proposal_id: int, executor, actor: str | None = None,
+                     approval=None) -> dict:
     """Carry out an APPROVED proposal via `executor(proposal) -> (ok, detail)`.
 
-    THREE REFUSALS, all deliberate:
+    FOUR REFUSALS, all deliberate:
       * not approved            -> an unapproved action is not an action
       * already executed        -> re-running is not idempotent in the real world
       * NO UNDO HANDLER         -> see below
+      * NO ADMIN APPROVAL       -> for classes in LOCAL_APPROVAL_REQUIRED (A2).
+                                   `approval` is an already-verified record from
+                                   `admin_approval_local.verify_local_approval`;
+                                   this function does NOT verify it itself, because
+                                   verification needs the assertion and the
+                                   authenticator store, which are the caller's to
+                                   hold. What it enforces is that one was obtained
+                                   and that it is bound to THIS proposal.
 
     The undo requirement is the load-bearing one. An action whose class has no
     registered reversal cannot be executed here at all, no matter how much
@@ -4664,6 +4806,28 @@ def execute_proposal(proposal_id: int, executor, actor: str | None = None) -> di
         return {"ok": False, "error":
                 "refusing to execute %s: no undo handler registered for that "
                 "action class, so it could not be reversed" % p["action_class"]}
+    if local_approval_required(p["action_class"]):
+        # A2. The approval must be present AND bound to this proposal — a
+        # verified approval for a DIFFERENT proposal is not authorisation for
+        # this one, and checking only presence would accept exactly that.
+        if not approval:
+            return {"ok": False, "error":
+                    "refusing to execute %s: it requires a verified admin "
+                    "approval and none was supplied" % p["action_class"]}
+        try:
+            bound_to = int(approval.get("proposal_id"))
+        except (TypeError, ValueError, AttributeError):
+            # An approval whose binding cannot be read is not a weak approval, it
+            # is an unreadable one. Fail closed rather than treating "cannot
+            # determine" as "permitted".
+            return {"ok": False, "error":
+                    "refusing to execute %s: the supplied approval carries no "
+                    "readable proposal binding" % p["action_class"]}
+        if bound_to != int(proposal_id):
+            return {"ok": False, "error":
+                    "refusing to execute %s: the supplied approval authorises "
+                    "proposal %d, not %d" % (p["action_class"], bound_to,
+                                             proposal_id)}
     try:
         ok, detail = executor(p)
     except Exception as exc:                                 # noqa: BLE001
