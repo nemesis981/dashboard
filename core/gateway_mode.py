@@ -144,6 +144,161 @@ def verify_forwarding(dropin_content, live_output, want_enabled):
     return False, "live value is 0 but a drop-in still persists 1 -- it returns on reboot"
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The reversible switch (step 4) -- the deployment gate.
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ⚠ ORDERING RUNS IN OPPOSITE DIRECTIONS, AND BOTH DIRECTIONS ARE UNSAFE IF REVERSED.
+#
+#   ENABLING:  the FORWARD gate and the SNAT rule must exist BEFORE ip_forward=1.
+#              Enabling forwarding first is the ordering install.sh warns about -- a
+#              window in which the box forwards with no rules in place.
+#
+#   DISABLING: ip_forward must go to 0 BEFORE the SNAT rule is removed. Removing NAT
+#              while still forwarding leaves a window in which traffic is forwarded
+#              UN-TRANSLATED, carrying private source addresses out to the internet.
+#
+# So this is not one sequence run backwards; it is two sequences whose safe orders
+# happen to be mirror images. Both are asserted by tests, because reversing either
+# opens a real window and neither would fail loudly.
+#
+# ⚠ EVERY STEP CARRIES ITS OWN UNDO, and the rollback is VERIFIED, not assumed. A
+# rollback that silently fails is worse than no rollback: it leaves the box in a
+# half-switched state while reporting that it recovered.
+
+SNAT_PRESENT, SNAT_ABSENT = "snat_present", "snat_absent"
+
+
+def plan_switch(enable, iface=None, cidr=None):
+    """Ordered (name, do, undo) steps for a switch in either direction.
+
+    `do` and `undo` are opaque action tuples the executor interprets; keeping them
+    data rather than callables is what makes the ORDER itself testable without
+    running anything.
+    """
+    if enable:
+        if not iface or not cidr:
+            return None
+        return [
+            # Config first: the renderer reads it, so it must be persisted before any
+            # render can produce the SNAT chain.
+            ("write_config",
+             ("config_set", iface, cidr),
+             ("config_clear", None, None)),
+            # Render + apply: this installs BOTH the SNAT chain and the loop-prevention
+            # DROP. This is the gate, and it must exist before forwarding does.
+            ("apply_ruleset", ("render_apply", None, None), ("render_apply", None, None)),
+            # Only now is it safe to forward.
+            ("enable_forwarding", ("fwd", 1, None), ("fwd", 0, None)),
+        ]
+    return [
+        # Stop forwarding FIRST. Removing NAT while forwarding is still on would leak
+        # untranslated private sources.
+        ("disable_forwarding", ("fwd", 0, None), ("fwd", 1, None)),
+        ("clear_config", ("config_clear", None, None), ("config_set", iface, cidr)),
+        ("apply_ruleset", ("render_apply", None, None), ("render_apply", None, None)),
+    ]
+
+
+def verify_state(enable, config_iface, config_cidr, dropin_content, live_output,
+                 snat_present):
+    """(ok, problems) -- is the box ACTUALLY in the requested state, on every axis?
+
+    Checks all four axes and returns EVERY problem, not the first. A switch that
+    half-applied needs the whole picture: reporting only the first failure invites
+    fixing one axis and re-running into the next.
+    """
+    problems = []
+    fwd_ok, fwd_detail = verify_forwarding(dropin_content, live_output, enable)
+    if not fwd_ok:
+        problems.append("forwarding: %s" % fwd_detail)
+
+    configured = bool(config_iface) and bool(config_cidr)
+    if enable and not configured:
+        problems.append("config: gateway interface/CIDR not persisted")
+    if not enable and configured:
+        problems.append("config: gateway interface/CIDR still persisted")
+
+    if enable and not snat_present:
+        problems.append("ruleset: SNAT chain missing (traffic would forward untranslated)")
+    if not enable and snat_present:
+        problems.append("ruleset: SNAT chain still present after disable")
+    return (not problems), problems
+
+
+def switch(enable, iface, cidr, run, collect):
+    """Perform the switch, verifying each direction and rolling back on any failure.
+
+    `run(action)` executes one action tuple and returns True/False.
+    `collect()` returns the live state as a dict, used for verification.
+
+    Returns a result dict. On failure the completed steps are undone in REVERSE order
+    and the RESTORED state is then verified against the state recorded before anything
+    was touched -- so "rolled back" is a measurement, not a claim.
+    """
+    ok, detail = selftest()
+    if not ok:
+        return {"ok": False, "phase": "abort",
+                "reason": "self-test failed, refusing to switch: %s" % detail}
+
+    before = collect()
+    steps = plan_switch(enable, iface, cidr)
+    if steps is None:
+        return {"ok": False, "phase": "plan",
+                "reason": "enabling requires both a LAN interface and a CIDR"}
+
+    done = []
+    for name, do, _undo in steps:
+        if not run(do):
+            # Undo in REVERSE order, then PROVE the box is back where it started.
+            #
+            # ⚠ A DERIVED ARTIFACT CANNOT BE UNDONE IN REVERSE ORDER WITH ITS INPUTS.
+            # The ruleset is RE-DERIVED from the persisted config, so its "undo" is
+            # another render -- and a render run before the config is restored simply
+            # re-creates what it was supposed to remove. Found by the forced-failure
+            # test: failing at step 3 rolled back apply_ruleset (re-render, config
+            # still present -> SNAT chain survives) and only then cleared the config,
+            # leaving the chain live with no config behind it.
+            #
+            # So the ruleset is reconciled ONCE, AFTER every input has been restored.
+            # Idempotent, and correct whichever subset of steps had run.
+            for dname, _d, undo in reversed(done):
+                if undo[0] == "render_apply":
+                    continue
+                run(undo)
+            run(("render_apply", None, None))
+            after = collect()
+            restored = (after == before)
+            return {"ok": False, "phase": "rollback", "failed_step": name,
+                    "rolled_back": [d[0] for d in reversed(done)],
+                    "restored": restored,
+                    "reason": ("step %r failed; rolled back %d step(s) and the prior "
+                               "state was %s" % (name, len(done),
+                                                 "restored" if restored else
+                                                 "NOT restored -- MANUAL RECOVERY NEEDED"))}
+        done.append((name, do, _undo))
+
+    st = collect()
+    vok, problems = verify_state(enable, st.get("iface"), st.get("cidr"),
+                                 st.get("dropin"), st.get("live"), st.get("snat"))
+    if not vok:
+        # The steps all reported success and the box is STILL wrong. Roll back,
+        # with the same re-derive-last rule as above.
+        for dname, _d, undo in reversed(done):
+            if undo[0] == "render_apply":
+                continue
+            run(undo)
+        run(("render_apply", None, None))
+        after = collect()
+        return {"ok": False, "phase": "verify", "problems": problems,
+                "restored": after == before,
+                "reason": "all steps reported success but verification failed: %s"
+                          % "; ".join(problems)}
+    return {"ok": True, "phase": "done",
+            "reason": "gateway mode %s and verified on all axes"
+                      % ("enabled" if enable else "disabled")}
+
+
 def selftest():
     """(ok, detail). Runs in the production path."""
     a, _, _ = plan_enable(False)
@@ -179,4 +334,24 @@ def selftest():
     if not verify_forwarding("", "0", False)[0]:
         return False, "canary: a correctly disabled state was not recognised"
 
-    return True, "12 canaries passed"
+    # The two orderings are mirror images, and reversing EITHER opens a real window.
+    en = [n for n, _d, _u in plan_switch(True, "eth1", "10.0.0.0/24")]
+    if en != ["write_config", "apply_ruleset", "enable_forwarding"]:
+        return False, "canary: enable order is wrong (%s)" % en
+    dis = [n for n, _d, _u in plan_switch(False)]
+    if dis[0] != "disable_forwarding":
+        return False, "canary: disable does not stop forwarding FIRST"
+    if plan_switch(True, "eth1", None) is not None:
+        return False, "canary: enable planned without a CIDR"
+
+    ok, probs = verify_state(True, "eth1", "10.0.0.0/24", DROPIN_CONTENT, "1", True)
+    if not ok:
+        return False, "canary: a fully enabled state did not verify"
+    ok, probs = verify_state(True, "eth1", "10.0.0.0/24", DROPIN_CONTENT, "1", False)
+    if ok or not any("SNAT chain missing" in p for p in probs):
+        return False, "canary: a missing SNAT chain was not caught"
+    ok, probs = verify_state(False, None, None, "", "0", False)
+    if not ok:
+        return False, "canary: a cleanly disabled state did not verify"
+
+    return True, "18 canaries passed"

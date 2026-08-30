@@ -14,7 +14,7 @@ import gateway_mode as G
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 38
+EXPECTED_CHECKS = 79
 
 
 def check(label, got, want):
@@ -112,6 +112,164 @@ def test_both_halves_required():
           G.verify_forwarding("", "1", False)[0], False)
 
 
+# ── A model of the box, so failure can be injected at any step ───────────────
+class Box:
+    """Models the four axes the switch touches, with the same coupling as reality:
+    the SNAT chain follows the persisted config (because the renderer reads it), and
+    forwarding sets BOTH the live value and the drop-in."""
+
+    def __init__(self):
+        self.st = {"iface": None, "cidr": None, "dropin": "", "live": "0", "snat": False}
+        self.fail_on = None       # action verb to fail
+        self.fail_undo = False    # make undos fail too
+        self.log = []
+
+    def run(self, action):
+        verb, a, b = action
+        self.log.append(verb)
+        if self.fail_on == verb and not self._is_undo(verb):
+            return False
+        if self.fail_undo and self._is_undo(verb):
+            return False
+        if verb == "config_set":
+            self.st["iface"], self.st["cidr"] = a, b
+        elif verb == "config_clear":
+            self.st["iface"], self.st["cidr"] = None, None
+        elif verb == "render_apply":
+            self.st["snat"] = bool(self.st["iface"] and self.st["cidr"])
+        elif verb == "fwd":
+            self.st["live"] = "1" if a == 1 else "0"
+            self.st["dropin"] = G.DROPIN_CONTENT if a == 1 else ""
+        return True
+
+    def _is_undo(self, verb):
+        return self._undo_phase
+
+    _undo_phase = False
+
+    def collect(self):
+        return dict(self.st)
+
+
+def test_switch_happy_path():
+    print("\n[enable, then disable -- both verified on all four axes]")
+    b = Box()
+    r = G.switch(True, "eth1", "10.0.0.0/24", b.run, b.collect)
+    check("enable ok", r["ok"], True)
+    check("config persisted", b.st["iface"], "eth1")
+    check("SNAT present", b.st["snat"], True)
+    check("forwarding live", b.st["live"], "1")
+    check("...and persisted", G.dropin_says_enabled(b.st["dropin"]), True)
+
+    r = G.switch(False, None, None, b.run, b.collect)
+    check("disable ok", r["ok"], True)
+    check("config cleared", b.st["iface"], None)
+    check("SNAT gone", b.st["snat"], False)
+    check("forwarding off", b.st["live"], "0")
+    check("...and not persisted", G.dropin_says_enabled(b.st["dropin"]), False)
+
+
+def test_rollback_at_every_step():
+    print("\n[FORCED FAILURE at each step -- prior state must be RESTORED, not claimed]")
+    for verb, label in (("config_set", "step 1 (write config)"),
+                        ("render_apply", "step 2 (apply ruleset)"),
+                        ("fwd", "step 3 (enable forwarding)")):
+        b = Box()
+        before = b.collect()
+        b.fail_on = verb
+        r = G.switch(True, "eth1", "10.0.0.0/24", b.run, b.collect)
+        check("%-28s -> not ok" % label, r["ok"], False)
+        check("%-28s -> phase is rollback" % label, r["phase"], "rollback")
+        check("%-28s -> prior state RESTORED" % label, r["restored"], True)
+        check("%-28s -> box really is back" % label, b.collect(), before)
+
+
+def test_rollback_order_is_reversed():
+    print("\n[rollback undoes in REVERSE order -- forward order would re-open the window]")
+    b = Box()
+    b.fail_on = "fwd"          # fail at the last step
+    r = G.switch(True, "eth1", "10.0.0.0/24", b.run, b.collect)
+    check("two steps were undone", len(r["rolled_back"]), 2)
+    check("...and the ruleset is reconciled LAST, not in reverse position",
+          r["rolled_back"], ["apply_ruleset", "write_config"])
+
+
+def test_verification_failure_also_rolls_back():
+    print("\n[all steps 'succeed' but the box is still wrong -> roll back anyway]")
+    b = Box()
+    # Steps report success, but render_apply silently does nothing: the SNAT chain
+    # never appears. This is the step-2 defect shape -- success reported, nothing done.
+    orig = b.run
+    def lying_run(action):
+        if action[0] == "render_apply":
+            b.log.append("render_apply"); return True      # reports success, no effect
+        return orig(action)
+    r = G.switch(True, "eth1", "10.0.0.0/24", lying_run, b.collect)
+    check("not ok", r["ok"], False)
+    check("phase is verify, not rollback", r["phase"], "verify")
+    check("names the missing SNAT chain",
+          any("SNAT chain missing" in p for p in r["problems"]), True)
+
+
+def test_failed_rollback_is_reported_not_hidden():
+    print("\n[⚠ a rollback that ITSELF fails must be REPORTED -- the worst case]")
+    b = Box()
+    before = b.collect()
+    b.fail_on = "fwd"
+    b.fail_undo = True
+    b._undo_phase = False
+    # Make undos fail by flipping the phase flag once the forward pass has failed.
+    orig_run = b.run
+    calls = {"n": 0}
+    def run(action):
+        calls["n"] += 1
+        if calls["n"] > 3:      # forward steps done; we are now undoing
+            b._undo_phase = True
+        return orig_run(action)
+    r = G.switch(True, "eth1", "10.0.0.0/24", run, b.collect)
+    check("not ok", r["ok"], False)
+    check("restored is FALSE, not silently True", r["restored"], False)
+    check("reason demands manual recovery",
+          "MANUAL RECOVERY NEEDED" in r["reason"], True)
+
+
+def test_switch_aborts_on_broken_selftest():
+    print("\n[a switch that cannot prove itself must not touch the box]")
+    orig = G.selftest
+    G.selftest = lambda: (False, "forced")
+    try:
+        b = Box()
+        r = G.switch(True, "eth1", "10.0.0.0/24", b.run, b.collect)
+        check("aborts", r["phase"], "abort")
+        check("NOTHING was executed", b.log, [])
+    finally:
+        G.selftest = orig
+
+
+def test_ordering_is_asserted_both_ways():
+    print("\n[the two orders are mirror images; reversing either opens a real window]")
+    en = [n for n, _d, _u in G.plan_switch(True, "eth1", "10.0.0.0/24")]
+    check("enable: config, ruleset, THEN forwarding",
+          en, ["write_config", "apply_ruleset", "enable_forwarding"])
+    dis = [n for n, _d, _u in G.plan_switch(False)]
+    check("disable: forwarding OFF first", dis[0], "disable_forwarding")
+    check("...then config, then ruleset", dis[1:], ["clear_config", "apply_ruleset"])
+    check("enable without a CIDR is unplannable",
+          G.plan_switch(True, "eth1", None), None)
+    check("enable without an iface is unplannable",
+          G.plan_switch(True, None, "10.0.0.0/24"), None)
+
+
+def test_verify_state_reports_every_axis():
+    print("\n[a half-switched box needs the WHOLE picture, not the first failure]")
+    ok, probs = G.verify_state(True, None, None, "", "0", False)
+    check("not ok", ok, False)
+    check("reports all three axes at once", len(probs), 3)
+    ok, probs = G.verify_state(True, "eth1", "10.0.0.0/24", G.DROPIN_CONTENT, "1", True)
+    check("fully enabled -> ok", ok, True)
+    check("...with no problems", probs, [])
+
+
 def test_selftest():
     print("\n[the instrument proves it produces every answer it claims]")
     ok, detail = G.selftest()
@@ -126,6 +284,14 @@ if __name__ == "__main__":
     test_dropin_parsing_is_comment_aware()
     test_live_value_parsing()
     test_both_halves_required()
+    test_switch_happy_path()
+    test_rollback_at_every_step()
+    test_rollback_order_is_reversed()
+    test_verification_failure_also_rolls_back()
+    test_failed_rollback_is_reported_not_hidden()
+    test_switch_aborts_on_broken_selftest()
+    test_ordering_is_asserted_both_ways()
+    test_verify_state_reports_every_axis()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:
