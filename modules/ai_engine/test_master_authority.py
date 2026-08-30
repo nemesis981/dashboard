@@ -11,7 +11,7 @@ THE PROPERTY UNDER TEST is the set of things the password CANNOT do, because
 that is where a credential-gated override goes wrong. A password establishes WHO
 you are; it never changes what the code is capable of. Specifically it cannot:
   * make an irreversible action reversible  (execute_proposal's undo gate)
-  * lift a CAPABILITY ceiling               (no password creates a restore path)
+  * lift a CAPABILITY ceiling               (no password creates a missing reversal)
   * lift the spend cap                      (a liftable flood limit is not one)
   * override the user's OWN standing rule   (edit the rule instead)
 and a demotion must clear a standing override, LOUDLY -- a password entered last
@@ -62,12 +62,27 @@ def check(label, cond, detail=""):
 
 
 print("\n== CEILING KIND: a judgment vs a fact about the code ==")
-check("malware_file_quarantine is a CAPABILITY ceiling (no restore path exists)",
-      ai.ceiling_kind("malware_file_quarantine") == "capability")
+# malware_file_quarantine was THE capability exemplar until 2026-08-30, when
+# _restore_file() and its undo handler shipped and the pin became factually
+# wrong. It is now a threshold, so this asserts the NEW fact.
+check("malware_file_quarantine is a THRESHOLD ceiling (restore now exists)",
+      ai.ceiling_kind("malware_file_quarantine") == "threshold")
 check("alert_disposition is a THRESHOLD ceiling (a judgment)",
       ai.ceiling_kind("alert_disposition") == "threshold")
 check("an UNCLASSIFIED class defaults to capability, the restrictive answer",
       ai.ceiling_kind("something_nobody_classified") == "capability")
+# ⚠ NO PRODUCTION CLASS IS "capability" ANY MORE. That is correct -- it is a
+# statement of fact about the code, and the one fact that made it true was
+# fixed. But it means the capability MECHANISM would lose all coverage if these
+# tests simply followed the last class out the door: the gate still exists, and
+# the day someone adds a genuinely irreversible action it must still hold.
+# Every capability assertion below therefore runs against a SYNTHETIC class
+# injected for the test, not against whatever production happens to contain.
+_SYNTH = "synthetic_irreversible_for_test"
+ai.ACTION_CLASS_CEILINGS[_SYNTH] = 1
+ai.CEILING_KIND[_SYNTH] = "capability"
+check("SYNTHETIC: an injected capability class reads as capability",
+      ai.ceiling_kind(_SYNTH) == "capability")
 check("CONTROL: the two kinds are not all the same value",
       len({ai.ceiling_kind(c) for c in ai.ACTION_CLASS_CEILINGS}) == 2,
       {c: ai.ceiling_kind(c) for c in ai.ACTION_CLASS_CEILINGS})
@@ -126,15 +141,23 @@ eff = ai.effective_ceiling("ip_action_internal")
 check("and the effective level really is above the original ceiling",
       eff["level"] == 3 and ai.ACTION_CLASS_CEILINGS["ip_action_internal"] == 1, eff)
 
-r = ai.raise_authority("malware_file_quarantine", 3, PW, "paul")
+# Against the SYNTHETIC capability class (see the note above): the production
+# class that used to serve here is a threshold now, and asserting this against a
+# threshold would silently stop testing the gate while still passing.
+r = ai.raise_authority(_SYNTH, 3, PW, "paul")
 check("a CAPABILITY class REFUSES to be raised past its ceiling", not r["ok"], r)
 check("and the refusal explains it is a missing capability, not caution",
       "MISSING CAPABILITY" in r.get("error", ""), r)
 check("CONTROL: the capability class was not raised",
-      ai.effective_ceiling("malware_file_quarantine")["level"] <= 1,
-      ai.effective_ceiling("malware_file_quarantine"))
+      ai.effective_ceiling(_SYNTH)["level"] <= 1, ai.effective_ceiling(_SYNTH))
 check("CONTROL: but it CAN be raised WITHIN its ceiling",
-      ai.raise_authority("malware_file_quarantine", 1, PW, "paul")["ok"])
+      ai.raise_authority(_SYNTH, 1, PW, "paul")["ok"])
+# And the now-threshold class must behave like a threshold: raisable past its
+# hard ceiling with the password. This is the assertion that would have caught
+# the flip being made in the map but not honoured by raise_authority.
+_rq = ai.raise_authority("malware_file_quarantine", 2, PW, "paul")
+check("the now-THRESHOLD malware class CAN be raised past L1 with the password",
+      _rq.get("ok"), _rq)
 
 print("\n== THE UNDO GATE IS ABSOLUTE, REGARDLESS OF PASSWORD ==")
 # alert_disposition is at L2 by override, and has NO undo handler registered in
@@ -157,9 +180,18 @@ print("\n== THE WARNING TEXT SAYS THE RIGHT THING, PER CLASS ==")
 w = ai.authority_raise_warnings("ip_block_permanent", 2)
 check("an irreversible class warns it CANNOT BE UNDONE",
       any("CANNOT BE UNDONE" in x for x in w), w)
-w2 = ai.authority_raise_warnings("malware_file_quarantine", 2)
+# Against the synthetic capability class, for the reason given at its
+# definition: malware_file_quarantine carried this assertion until 2026-08-30
+# and is a threshold now, so leaving it here would quietly stop exercising the
+# capability warning while still passing.
+w2 = ai.authority_raise_warnings(_SYNTH, 2)
 check("a capability class warns the raise will not enable the action",
       any("missing capability" in x for x in w2), w2)
+# The converse, which is the assertion that proves the flip reached this
+# surface too and not merely the map.
+w2b = ai.authority_raise_warnings("malware_file_quarantine", 2)
+check("the now-THRESHOLD malware class gets NO missing-capability warning",
+      not any("missing capability" in x for x in w2b), w2b)
 w3 = ai.authority_raise_warnings("alert_disposition", 2)
 check("CONTROL: a reversible class does NOT get the cannot-be-undone warning",
       not any("CANNOT BE UNDONE" in x for x in w3), w3)
@@ -282,11 +314,26 @@ check("and the reason is the SILENT one: no undo handler",
 check("the detail says it could not be taken back if wrong",
       all("taken back" in x["detail"] for x in r), r)
 
-rm = ai.automation_readiness(surface_key="malware_t", level=2)
+ai.register_anchor("synth_t", lambda r: {"x": 1}, action_classes=(_SYNTH,))
+rm = ai.automation_readiness(surface_key="synth_t", level=2)
 check("the capability class is inert for a DIFFERENT, named reason",
       rm[0]["reason"] == "capability_ceiling", rm)
-check("and says no restore path is available",
-      "no restore path" in rm[0]["detail"], rm)
+check("and says no password can lift it",
+      "no password" in rm[0]["detail"], rm)
+# The detail no longer names file restore. It used to -- correctly, while
+# malware_file_quarantine was the only capability ceiling in existence. Now the
+# branch is reachable ONLY via an unclassified or synthetic class, so a message
+# about restore paths would misdescribe every case that can actually reach it.
+check("and does NOT claim a missing restore path (that example expired)",
+      "restore path" not in rm[0]["detail"], rm)
+
+# The real malware class now reports the ORDINARY reason, not the capability
+# one -- it has a registered undo handler and a threshold ceiling, so at L2 it
+# is genuinely ready. Asserting the reason CHANGED is what proves the flip took
+# effect end to end, rather than only in the map.
+rq = ai.automation_readiness(surface_key="malware_t", level=2)
+check("the malware class no longer reports a capability ceiling",
+      rq[0]["reason"] != "capability_ceiling", rq)
 
 # CONTROL: a class that genuinely CAN act must report so, or this is a
 # function that only ever says "no" and proves nothing.

@@ -490,9 +490,18 @@ ACTION_CLASS_CEILINGS = {
 #:   THRESHOLD  -- a judgment about how much authority is appropriate. Someone
 #:                 in charge may decide to trust the engine earlier than its
 #:                 track record warrants. That is their call to make.
-#:   CAPABILITY -- the code cannot do the thing safely. No password creates a
-#:                 file-restore path. Raising this would not grant authority, it
-#:                 would grant a lie: the action still cannot be taken back.
+#:   CAPABILITY -- the code cannot do the thing safely. Raising this would not
+#:                 grant authority, it would grant a lie: the action still
+#:                 cannot be taken back. No password creates a missing reversal.
+#:
+#: The original worked example here was file restore -- "no password creates a
+#: file-restore path". That example EXPIRED on 2026-08-30, when the restore path
+#: and its undo handler were built and `malware_file_quarantine` became a
+#: threshold. Kept in the record because it is the clearest illustration of the
+#: distinction, and because it demonstrates the intended lifecycle: a capability
+#: ceiling is a statement of fact about the code, so it is expected to be
+#: RETIRED when the code changes, not defended. No entry in this map is
+#: currently "capability"; that is the correct state, not an oversight.
 #:
 #: Only THRESHOLD ceilings are overridable. This is the same principle as the
 #: undo-handler gate in `execute_proposal` -- authentication establishes WHO you
@@ -501,10 +510,28 @@ CEILING_KIND = {
     "ip_quarantine_external":  "threshold",
     "ip_block_permanent":      "threshold",
     "ip_action_internal":      "threshold",
-    # Pinned by a MISSING RESTORE PATH, not by caution -- see the comment on
-    # ACTION_CLASS_CEILINGS. Becomes "threshold" the day a restore function and
-    # an undo handler exist, and not one moment before.
-    "malware_file_quarantine": "capability",
+    # WAS "capability", pinned by a MISSING RESTORE PATH. Both conditions the
+    # old comment named -- "a restore function and an undo handler" -- were met
+    # on 2026-08-30: `malware_detection._restore_file()` and the
+    # `_undo_file_quarantine` handler it registers. The label is therefore now
+    # THRESHOLD, because "capability" would assert the code cannot reverse this,
+    # which is false, and a false entry here is worse than a missing one --
+    # `ceiling_kind()` treats missing as restrictive, but a wrong "capability"
+    # silently makes a real capability unreachable.
+    #
+    # ⚠ THIS CHANGED THE LABEL, NOT THE LEVEL. `ACTION_CLASS_CEILINGS` keeps
+    # this class at L1_RECOMMEND deliberately. Flipping the kind makes the
+    # ceiling OVERRIDABLE by someone in charge; it does not grant authority, and
+    # nothing acts differently until a human raises it on purpose.
+    #
+    # ⚠ AND THE REVERSAL IS CONDITIONAL, which no other threshold class here is.
+    # `_restore_file()` refuses when the original path has been re-occupied,
+    # when its parent directory is gone, or when the row predates mode capture.
+    # Every other reversible class in this map can always be taken back; this
+    # one usually can. That is the specific fact to weigh before raising the
+    # hard ceiling, and it is why raising it was deliberately left as its own
+    # decision rather than folded into this correction.
+    "malware_file_quarantine": "threshold",
     "alert_disposition":       "threshold",
     # THRESHOLD, and the reasoning matters because at L4 the label looks vacuous.
     #
@@ -4178,9 +4205,17 @@ def automation_readiness(action_classes=None, surface_key=None, level=None) -> l
         if blocked_by_capability:
             out.append({"action_class": ac, "will_act": False,
                         "reason": "capability_ceiling", "level": eff_level,
-                        "detail": "no restore path available - this action is "
-                                  "capped at L%d by a missing capability in the "
-                                  "product, and no password can lift it" % hard})
+                        # Generalised 2026-08-30. This used to say "no restore
+                        # path available", which described malware_file_quarantine
+                        # specifically -- the only capability ceiling that ever
+                        # existed. That class is now a threshold, so the ONLY way
+                        # to reach this branch is an action class missing from
+                        # CEILING_KIND, which `ceiling_kind()` treats as
+                        # capability on purpose. Naming file restore here would
+                        # now misdescribe every case that can actually reach it.
+                        "detail": "this action is capped at L%d by a missing "
+                                  "capability in the product, and no password "
+                                  "can lift it" % hard})
         elif not undo_ok and eff_level >= L2_ACT_REVERSIBLE:
             out.append({"action_class": ac, "will_act": False,
                         "reason": "no_undo_handler", "level": eff_level,

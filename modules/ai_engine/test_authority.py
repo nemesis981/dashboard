@@ -123,7 +123,11 @@ def main():
     eq("'ask_before' forces L1 despite an earned L3", r["level"], ai.L1_RECOMMEND)
 
     print("\n-- the hard ceiling is not negotiable --")
-    # malware_file_quarantine has no restore path, so it is pinned at L1 in code.
+    # malware_file_quarantine is pinned at L1 in code. That was a
+    # missing-capability pin until 2026-08-30 (no restore path existed); restore
+    # and its undo handler now exist, so the L1 is a deliberate authority
+    # threshold instead. Either way the HARD CEILING is what this asserts, and
+    # it holds regardless of which kind it is.
     # Over-promote it to L4 in the DB: the ceiling must still hold.
     _promote(conn, "malware_file_quarantine", 4, 1)
     r = ai.effective_ceiling("malware_file_quarantine")
