@@ -38,6 +38,11 @@ if _amgr_npfa not in _sys_npfa.path:
     _sys_npfa.path.insert(0, _amgr_npfa)
 import prompt_fields as _pf                      # noqa: E402  (NPFA/1, ADR 0025)
 
+_HERE_AD = _os_npfa.path.dirname(_os_npfa.path.abspath(__file__))
+if _HERE_AD not in _sys_npfa.path:
+    _sys_npfa.path.insert(0, _HERE_AD)
+import dns_exfil                                 # noqa: E402  (DNS tunnelling scorer)
+
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
     analyze as ai_analyze,
@@ -331,6 +336,35 @@ def _init_db() -> None:
             reported_at      REAL NOT NULL
         );
 
+        -- Per-(client, registrable domain) DNS channel baseline. This table IS the
+        -- false-positive suppression: a tunnel is judged as a CHANNEL accumulated
+        -- over time, never as a query, because no single query is diagnostic.
+        -- Measured on the build host before this was written: 90 legitimate
+        -- A-queries carried a label of >=25 characters in one 40 MB sample.
+        --
+        -- `distinct_names` is a running sum of PER-CYCLE distinct counts, so it is
+        -- an UPPER BOUND on lifetime distinct names, not an exact count -- an exact
+        -- one would mean storing every name ever seen, unbounded. The bound is
+        -- sound for the only thing it is used for: the distinct/queries RATIO is
+        -- preserved under summation (a CDN reusing few names keeps a low ratio in
+        -- every cycle and therefore in the sum; a tunnel minting a new name per
+        -- message keeps a ratio near 1 in both). Stated here rather than left to be
+        -- rediscovered as a bug.
+        CREATE TABLE IF NOT EXISTS anomaly_dns_channels (
+            client_ip      TEXT NOT NULL,
+            domain         TEXT NOT NULL,
+            first_seen     REAL NOT NULL,
+            last_seen      REAL NOT NULL,
+            queries        INTEGER NOT NULL DEFAULT 0,
+            distinct_names INTEGER NOT NULL DEFAULT 0,
+            observations   INTEGER NOT NULL DEFAULT 0,
+            entropy_sum    REAL NOT NULL DEFAULT 0,
+            encoded_sum    REAL NOT NULL DEFAULT 0,
+            maxlab_sum     REAL NOT NULL DEFAULT 0,
+            rrtypes        TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (client_ip, domain)
+        );
+
     """)
         # Idempotent migration: actor attribution seam (readiness Tier B).
         existing = {row[1] for row in conn.execute("PRAGMA table_info(anomaly_incidents)").fetchall()}
@@ -493,6 +527,7 @@ def _detection_cycle() -> None:
 
     now = time.time()
     by_domain: dict = {}
+    by_channel: dict = {}   # (client, registrable domain) -> exfil accumulator
 
     with open(EVE_LOG, "rb") as f:
         f.seek(eve_offset)
@@ -508,17 +543,45 @@ def _detection_cycle() -> None:
             dns = d.get("dns", {})
             if dns.get("type") != "request":
                 continue
-            qtype = dns.get("queries", [{}])[0].get("rrtype", "")
-            if qtype not in _QTYPES:
-                continue
+            # ── THE FULL RECORD IS EXTRACTED BEFORE ANY FILTERING ────────────
+            # This is the fix for the ingest-level data loss, and the ordering is
+            # the whole point. Previously the FIRST thing this loop did was drop
+            # every record type except A/AAAA and collapse the name to its last
+            # two labels -- so TXT/NULL/CNAME/MX (the classic tunnelling carriers)
+            # and the entire subdomain (which IS the exfiltration payload) were
+            # gone before anything could score them. The telemetry was always in
+            # eve.json; it was discarded here, on read.
+            #
+            # Two consumers now read one extraction:
+            #   * the exfil analyser -- ALL record types, FULL FQDN;
+            #   * the shipped novelty detector -- A/AAAA and root domain,
+            #     SEMANTICS DELIBERATELY UNCHANGED.
+            # Widening the shipped detector's own filter would be a second,
+            # unrelated change to live scoring in the same commit (more domains,
+            # more baseline rows, different incident volume). One variable at a
+            # time: its narrowing is now a scoping choice made by that detector,
+            # not data destroyed for everyone at ingest.
+            queries_list = dns.get("queries") or [{}]
+            # `.get("queries", [{}])[0]` raised IndexError on a record carrying an
+            # EMPTY queries list -- an exception that escaped to the cycle handler
+            # and killed the whole detection pass, not just the record. `or [{}]`
+            # covers the empty-list case the default argument cannot.
+            q0 = queries_list[0] if queries_list else {}
+            qtype = (q0.get("rrtype") or "").upper()
+            rrname = q0.get("rrname") or ""
 
             src_ip = d.get("src_ip", "")
-            rrname = dns.get("queries", [{}])[0].get("rrname", "")
             domain = _root_domain(rrname)
             if not domain or not src_ip:
                 continue
             ts = _parse_ts(d.get("timestamp", "")) or now
 
+            # Consumer 2 -- exfiltration. Sees everything.
+            _accumulate_channel(by_channel, src_ip, domain, rrname, qtype)
+
+            # Consumer 1 -- the shipped novelty detector. Unchanged.
+            if qtype not in _QTYPES:
+                continue
             ent = by_domain.setdefault(domain, {"clients": {}, "count": 0})
             ent["clients"].setdefault(src_ip, []).append(ts)
             ent["count"] += 1
@@ -528,7 +591,7 @@ def _detection_cycle() -> None:
     _set_state("eve_offset", str(new_offset))
     _set_state("eve_inode",  str(cur_inode))
 
-    if not by_domain:
+    if not by_domain and not by_channel:
         return
 
     device_names = _load_device_names()
@@ -564,6 +627,14 @@ def _detection_cycle() -> None:
                         ]
                         ai_queue.append((inc_id, domain, signals["incident_type"],
                                          final_score, signals, dev_list))
+        # Exfiltration pass. Deliberately INSIDE the same connection/transaction
+        # scope as the novelty pass, and deliberately AFTER it: a failure here
+        # must not leave the novelty pass half-committed, and both describe the
+        # same window of traffic.
+        try:
+            _exfil_cycle(conn, by_channel, device_names, now)
+        except Exception:
+            log.exception("anomaly_detection: DNS exfiltration pass failed")
         _expire_recurrence(conn, now)
         conn.commit()
     finally:
@@ -597,6 +668,123 @@ def _detection_cycle() -> None:
                     _auto_report_abuseipdb(inc_id, domain, itype, score)
                 except Exception:
                     log.exception("anomaly_detection: AbuseIPDB reporting failed for %s", domain)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DNS exfiltration / tunnelling
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _accumulate_channel(acc, src_ip, domain, rrname, qtype):
+    """Fold one query into this cycle's (client, domain) channel accumulator.
+
+    Sums rather than per-query verdicts, because the unit of judgement is the
+    channel. A name that does not sit under its own registrable domain is SKIPPED
+    rather than counted with an empty subdomain -- `split_name` returning None
+    means "could not parse", which must not be folded in as though it were a real
+    observation of zero-length payload.
+    """
+    sub, _root = dns_exfil.split_name(rrname, domain)
+    if sub is None:
+        return
+    feats = dns_exfil.name_features(sub)
+    ent = acc.setdefault((src_ip, domain), {
+        "queries": 0, "names": set(), "rrtypes": set(),
+        "entropy_sum": 0.0, "encoded_sum": 0.0, "maxlab_sum": 0.0,
+    })
+    ent["queries"] += 1
+    ent["names"].add(rrname.rstrip(".").lower())
+    if qtype:
+        ent["rrtypes"].add(qtype)
+    ent["entropy_sum"] += feats["entropy"]
+    ent["encoded_sum"] += feats["encoded_ratio"]
+    ent["maxlab_sum"] += feats["max_label_len"]
+
+
+def _exfil_cycle(conn, by_channel, device_names, now):
+    """Merge this cycle's channels into the baseline, then score them.
+
+    FAILS CLOSED on a broken scorer: if the self-test cannot show that the scorer
+    still tells a tunnel from a CDN, this pass raises rather than proceeding to
+    report that nothing was found. A tunnel detector is silent on a healthy
+    network, so "no findings" from a broken scorer is indistinguishable from "no
+    findings" from a working one -- which is precisely why the premise is proven
+    on every cycle rather than at import.
+    """
+    if not by_channel:
+        return
+    ok, detail = dns_exfil.selftest()
+    if not ok:
+        raise RuntimeError("dns_exfil selftest failed: %s" % detail)
+
+    for (client_ip, domain), cyc in by_channel.items():
+        row = conn.execute(
+            "SELECT first_seen, queries, distinct_names, observations, "
+            "       entropy_sum, encoded_sum, maxlab_sum, rrtypes "
+            "FROM anomaly_dns_channels WHERE client_ip=? AND domain=?",
+            (client_ip, domain)).fetchone()
+
+        cyc_distinct = len(cyc["names"])
+        if row is None:
+            first_seen = now
+            queries = cyc["queries"]
+            distinct = cyc_distinct
+            observations = 1
+            entropy_sum = cyc["entropy_sum"]
+            encoded_sum = cyc["encoded_sum"]
+            maxlab_sum = cyc["maxlab_sum"]
+            rrtypes = set(cyc["rrtypes"])
+        else:
+            first_seen = row[0]
+            queries = row[1] + cyc["queries"]
+            distinct = row[2] + cyc_distinct
+            observations = row[3] + 1
+            entropy_sum = row[4] + cyc["entropy_sum"]
+            encoded_sum = row[5] + cyc["encoded_sum"]
+            maxlab_sum = row[6] + cyc["maxlab_sum"]
+            rrtypes = set(filter(None, (row[7] or "").split(","))) | set(cyc["rrtypes"])
+
+        conn.execute("""
+            INSERT INTO anomaly_dns_channels(
+                client_ip, domain, first_seen, last_seen, queries, distinct_names,
+                observations, entropy_sum, encoded_sum, maxlab_sum, rrtypes)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(client_ip, domain) DO UPDATE SET
+                last_seen=excluded.last_seen, queries=excluded.queries,
+                distinct_names=excluded.distinct_names, observations=excluded.observations,
+                entropy_sum=excluded.entropy_sum, encoded_sum=excluded.encoded_sum,
+                maxlab_sum=excluded.maxlab_sum, rrtypes=excluded.rrtypes
+        """, (client_ip, domain, first_seen, now, queries, distinct, observations,
+              entropy_sum, encoded_sum, maxlab_sum, ",".join(sorted(rrtypes))))
+
+        stats = {
+            "queries": queries,
+            "distinct_names": distinct,
+            "observations": observations,
+            "age_seconds": max(0.0, now - first_seen),
+            "mean_entropy": entropy_sum / queries if queries else 0.0,
+            "mean_encoded_ratio": encoded_sum / queries if queries else 0.0,
+            "mean_max_label": maxlab_sum / queries if queries else 0.0,
+            "rrtypes": sorted(rrtypes),
+        }
+        verdict = dns_exfil.score_channel(stats)
+        if verdict["verdict"] != dns_exfil.SUSPICIOUS:
+            continue
+
+        # NAMESPACED TARGET. `offending_target` carries a PARTIAL unique index for
+        # open incidents, so a bare domain here would MERGE a tunnelling finding
+        # into an unrelated novelty incident for the same domain -- two different
+        # detectors silently sharing one row. The prefix keeps the shipped merge
+        # semantics untouched while reusing the whole downstream (dashboard rows,
+        # close, recurrence) for free.
+        target = "dns-tunnel:%s" % domain
+        signals = dict(verdict["signals"])
+        signals["incident_type"] = "dns_exfiltration"
+        signals["score"] = verdict["score"]
+        signals["reason"] = verdict["reason"]
+        signals["channel_queries"] = queries
+        signals["channel_distinct_names"] = distinct
+        data = {"clients": {client_ip: [now]}, "count": cyc["queries"]}
+        _create_or_update_incident(conn, target, data, signals, device_names, now)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
