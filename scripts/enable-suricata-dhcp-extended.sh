@@ -138,7 +138,20 @@ if ! suricata -T -c "$YAML" -l "$TESTLOG" >"$TESTLOG/out" 2>&1; then
 edit) — restored $backup, nothing reloaded"
 fi
 
-systemctl reload suricata || systemctl restart suricata
+# ⚠ RESTART, NOT RELOAD — and this was a real defect, caught by real output.
+# The first version ran `systemctl reload suricata || systemctl restart suricata`.
+# The reload SUCCEEDS, so the restart never runs — and Suricata's reload path
+# (SIGUSR2) reloads RULES, not eve-log OUTPUT configuration. MEASURED 2026-08-30:
+# the flip was applied at 10:34, the reload reported success, and DHCP ACKs
+# logged at 10:37 still carried no `routers`/`dns_servers`, because the running
+# process had been up since Aug 28 and was still using the config it read then.
+# Everything reported success and nothing changed — the exact shape this repo
+# keeps cataloguing.
+#
+# A restart briefly interrupts IDS coverage, which is why it is called out rather
+# than hidden: an eve-log output change cannot take effect without it.
+systemctl restart suricata
 echo "OK: dhcp extended logging enabled and Suricata reloaded"
-echo "Verify with real output (a config that parsed is not proof events changed shape):"
+echo "VERIFY WITH REAL OUTPUT — a config that parsed and a service that restarted"
+echo "are both still short of proof that logged events changed shape:"
 echo "  grep -m1 '\"event_type\":\"dhcp\"' /var/log/suricata/eve.json | python3 -m json.tool"
