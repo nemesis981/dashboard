@@ -6595,7 +6595,8 @@ def _render_agent_devices_html() -> str:
     return "".join(h)
 
 
-_TUNNEL_IFACES = ["tun0", "tun1", "wg0", "wg1", "nordlynx", "proton0"]
+# _TUNNEL_IFACES removed 2026-08-30 -- a hardcoded interface-NAME list was
+# the wrong shape; see detect_vpn_tunnels().
 
 def get_vpn_status():
     now = time.monotonic()
@@ -6670,36 +6671,344 @@ def get_vpn_status():
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
         pass
 
-    # Fallback: check tunnel interfaces via `ip addr show`
+    # Fallback: KIND-MATCHED tunnel discovery, shared with the dashboard card.
+    #
+    # Replaced a hardcoded `_TUNNEL_IFACES` name list on 2026-08-30. That list
+    # missed tun2, wg-mullvad and every non-default WireGuard name -- reporting
+    # "Disconnected" while a tunnel was up -- and it was a SECOND detector beside
+    # the one the dashboard card uses, free to disagree with it on one screen.
     try:
-        ip_r = subprocess.run(["ip", "addr", "show"], capture_output=True, text=True, timeout=5)
-        if ip_r.returncode == 0:
-            for iface in _TUNNEL_IFACES:
-                if re.search(rf'^\d+: {re.escape(iface)}:', ip_r.stdout, re.MULTILINE):
-                    vpn_ip = None
-                    for line in ip_r.stdout.splitlines():
-                        if f" {iface} " in line or f" {iface}:" in line:
-                            pass
-                        if "inet " in line:
-                            m = re.search(r'inet (\d+\.\d+\.\d+\.\d+)', line)
-                            if m:
-                                vpn_ip = m.group(1)
-                    if iface == "nordlynx":
-                        provider, proto = "NordVPN", "WireGuard"
-                    elif iface.startswith("wg"):
-                        provider, proto = "WireGuard VPN", "WireGuard"
-                    elif iface == "proton0":
-                        provider, proto = "ProtonVPN", "WireGuard"
-                    else:
-                        provider, proto = "Unknown Provider", "OpenVPN"
-                    result.update({"provider": provider, "status": "Connected",
-                                   "vpn_ip": vpn_ip, "protocol": proto,
-                                   "server_location": f"via {iface}"})
-                    return _cache(result)
+        _tuns = detect_vpn_tunnels()
+        if _tuns:
+            _t = _tuns[0]
+            result.update({
+                # None, not "Unknown Provider". The provider is genuinely
+                # undeterminable from a generic tun0, and the DISPLAY layer says
+                # so in words the user can act on. A data layer inventing a name
+                # is what produced "Unknown Provider - Connected".
+                "provider": _t["provider"],
+                "status": "Connected",
+                "vpn_ip": _t["vpn_ip"],
+                "protocol": _t["protocol"],
+                "server_location": "via %s" % _t["iface"],
+            })
+            return _cache(result)
     except Exception:
-        pass
+        log.debug("vpn: kind-matched fallback failed", exc_info=True)
 
     return _cache(result)
+
+
+def vpn_display_name_key(iface):
+    """Settings key holding the user's label for one tunnel.
+
+    PER-INTERFACE, not global. A single global label is simpler and is wrong the
+    moment a second tunnel exists — and multiple simultaneous VPNs is exactly the
+    case that makes a derived name unreliable in the first place. Keying by
+    interface now costs nothing and avoids a migration later.
+    """
+    return "vpn_display_name:%s" % iface
+
+
+def detect_vpn_tunnels():
+    """Every live tunnel on this host, as a list. Never raises.
+
+    ⚠ KIND-MATCHED, NEVER NAME-MATCHED. This replaces a hardcoded
+    `_TUNNEL_IFACES = ["tun0","tun1","wg0","wg1","nordlynx","proton0"]`, which
+    missed `tun2`, `wg-mullvad`, and every non-default WireGuard name — showing
+    "Disconnected" while a tunnel was up. `vpn_dns_guard` already solves this
+    properly by matching the kernel link KIND, and CLAUDE.md is explicit that
+    vendor WireGuard builds use arbitrary device names. Reusing that rather than
+    maintaining a second, weaker list beside it.
+
+    ⚠ vpn_dns_guard IS IMPORTED LAZILY, deliberately: it runs
+    `logging.basicConfig()` at module scope, so importing it at module scope here
+    would create a log file as a side effect of importing the dashboard. The
+    forkb work hit exactly this and documented it.
+
+    Returns [{iface, kind, provider, protocol, vpn_ip, user_named}], newest
+    detection semantics: `provider` is None when it genuinely cannot be
+    determined, and the CALLER decides how to say so. Returning a string like
+    "Unknown Provider" here would push a display decision into the data layer.
+    """
+    out = []
+    try:
+        import json as _json
+        from core import vpn_dns_guard as _vg      # lazy: see above
+        raw = subprocess.run(["ip", "-d", "-j", "link", "show"],
+                             capture_output=True, text=True, timeout=5)
+        if raw.returncode != 0:
+            return out
+        links = _json.loads(raw.stdout or "[]")
+    except Exception:
+        log.exception("vpn: could not enumerate links")
+        return out
+
+    for link in links:
+        iface = link.get("ifname") or ""
+        if not iface or iface == "lo":
+            continue
+        # Tailscale is NOT a user VPN and gets its own row — see
+        # get_tailscale_status(). Folding it in here is what made the old single
+        # "VPN" line ambiguous.
+        if iface.startswith("tailscale"):
+            continue
+        kind = ((link.get("linkinfo") or {}).get("info_kind") or "")
+        if not kind and os.path.exists("/sys/class/net/%s/tun_flags" % iface):
+            kind = "tun"                       # same sysfs fallback vpn_dns_guard uses
+        if kind not in _vg.TUNNEL_KINDS:
+            continue
+        if (link.get("operstate") or "").upper() == "DOWN":
+            continue
+
+        out.append({
+            "iface": iface,
+            "kind": kind,
+            "provider": _vpn_provider_for(iface, kind),
+            "protocol": "WireGuard" if kind == "wireguard" else "OpenVPN/tun",
+            "vpn_ip": _iface_ipv4(iface),
+        })
+    return out
+
+
+def _iface_ipv4(iface):
+    """First IPv4 on an interface, or None. None is a real answer."""
+    try:
+        import json as _json
+        r = subprocess.run(["ip", "-j", "-4", "addr", "show", iface],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        for entry in _json.loads(r.stdout or "[]"):
+            for a in entry.get("addr_info", []) or []:
+                if a.get("family") == "inet" and a.get("local"):
+                    return a["local"]
+    except Exception:
+        log.debug("vpn: could not read address for %s", iface, exc_info=True)
+    return None
+
+
+def _vpn_provider_for(iface, kind):
+    """A provider name ONLY when it can be established. None otherwise.
+
+    ⚠ THE HARD PART IS REFUSING TO GUESS, and the guesses are tempting because
+    the evidence is right there. Measured on this box 2026-08-30, all three of
+    these are present while PIA is DISCONNECTED:
+      * `/etc/iproute2/rt_tables` holds piavpnrt/piavpnOnlyrt/piavpnWgrt/
+        piavpnFwdrt — proof PIA is INSTALLED, not that it is the live tunnel;
+      * `pia-client` and `pia-daemon` are running — same problem;
+      * a process matching /proton/i exists and is "Proton Mail Bet", an EMAIL
+        CLIENT. A substring match on process names would label this host's VPN
+        "ProtonVPN" because of a mail app.
+    Any of those would produce a confident, wrong label for a user who has PIA
+    installed but is currently on Mullvad. A wrong name is worse than no name: it
+    is not correctable by the user until they notice it is lying.
+
+    So only two classes of evidence are accepted:
+      1. a vendor CLI reporting on its OWN live connection (handled by
+         get_vpn_status(), which runs first and wins);
+      2. an interface name that the vendor's own client CREATES, which is
+         therefore evidence about THIS tunnel rather than about the host.
+    `tun0`/`wg0` are generic and deliberately yield None.
+    """
+    if iface == "nordlynx":
+        return "NordVPN"
+    if iface == "proton0":
+        return "ProtonVPN"
+    if iface.startswith("mullvad"):
+        return "Mullvad"
+    return None
+
+
+def get_tailscale_status():
+    """Tailscale up/down — a SEPARATE concern from the user's VPN.
+
+    Tailscale is Nemesis's own management network; a commercial VPN is the user's
+    privacy tunnel. The dashboard previously showed neither distinctly (Tailscale
+    was not displayed at all), so a single "VPN" line was read as covering both.
+    They are reported independently now.
+
+    Returns {running, hostname, ip, error}. `error` is set rather than raising —
+    a status widget must never take the dashboard down.
+    """
+    out = {"running": False, "hostname": None, "ip": None, "error": None}
+    try:
+        import json as _json
+        r = subprocess.run(["tailscale", "status", "--json"],
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            out["error"] = "tailscale status exited %d" % r.returncode
+            return out
+        data = _json.loads(r.stdout or "{}")
+        self_node = data.get("Self") or {}
+        # BackendState is the authoritative up/down; presence of a Self node is
+        # not enough (it exists while stopped).
+        out["running"] = (data.get("BackendState") == "Running")
+        name = (self_node.get("DNSName") or "").rstrip(".")
+        out["hostname"] = name or None
+        ips = self_node.get("TailscaleIPs") or []
+        out["ip"] = ips[0] if ips else None
+    except FileNotFoundError:
+        out["error"] = "tailscale is not installed"
+    except Exception as exc:                                 # noqa: BLE001
+        out["error"] = str(exc)[:120]
+        log.debug("tailscale status unavailable", exc_info=True)
+    return out
+
+
+def _vpn_label_for(t):
+    """The display name for one tunnel: user label, else detected, else unnamed.
+
+    ONE definition of the precedence rule, used by BOTH the Network Paths card
+    and the System Status one-line summary. Duplicating it would let the two
+    disagree about the same tunnel on the same screen, which is the class of
+    defect this whole rebuild exists to remove.
+    """
+    try:
+        label = (database.get_setting(vpn_display_name_key(t["iface"])) or "").strip()
+    except Exception:
+        label = ""
+    return label or t.get("provider") or "VPN (unnamed)"
+
+
+def render_network_paths_html():
+    """One row per live tunnel, plus a SEPARATE Tailscale row.
+
+    ⚠ PRECEDENCE: A USER LABEL ALWAYS WINS over auto-detection, including when
+    detection is confident. Detection can be confidently wrong (a host with two
+    providers installed), and a name the user cannot override is a name they
+    cannot correct. The label is the authority; detection is the default.
+
+    Fail-soft: any failure yields an empty string. A status widget must never be
+    able to take the dashboard down.
+    """
+    try:
+        tunnels = detect_vpn_tunnels()
+        ts = get_tailscale_status()
+    except Exception:
+        log.exception("dashboard: network-paths card unavailable")
+        return ""
+
+    rows = ""
+    for t in tunnels:
+        iface = t["iface"]
+        try:
+            label = (database.get_setting(vpn_display_name_key(iface)) or "").strip()
+        except Exception:
+            label = ""
+        if label:
+            name, source = html.escape(label), "your label"
+        elif t["provider"]:
+            name, source = html.escape(t["provider"]), "detected"
+        else:
+            # NOT "Unknown Provider" — that reads as a failure. The provider is
+            # genuinely undeterminable from a generic tun0/wg0 (see
+            # _vpn_provider_for), and the useful thing to tell the user is that
+            # they can name it, not that something went wrong.
+            name, source = "VPN (unnamed)", "name it in Settings"
+        rows += (
+            '<p><span style="color:#00ff88">●</span> <strong>%s</strong> — Connected'
+            '<span style="color:#888;font-size:0.82em"> · %s · %s%s</span></p>'
+            % (name, html.escape(iface), source,
+               (" · " + html.escape(t["vpn_ip"])) if t["vpn_ip"] else ""))
+
+    if not rows:
+        rows = ('<p><span style="color:#888">○</span> No VPN tunnel detected'
+                '<span style="color:#888;font-size:0.82em"> · your traffic is not '
+                'going through a privacy VPN</span></p>')
+
+    # Tailscale, deliberately its OWN row and visually distinct. It is Nemesis's
+    # management network, not a privacy VPN, and showing one blended "VPN" line
+    # is what made this section ambiguous.
+    if ts["error"]:
+        ts_row = ('<p><span style="color:#ffaa00">●</span> <strong>Tailscale</strong> — '
+                  'status unavailable<span style="color:#888;font-size:0.82em"> · %s</span></p>'
+                  % html.escape(str(ts["error"])))
+    elif ts["running"]:
+        ts_row = ('<p><span style="color:#00d4ff">●</span> <strong>Tailscale</strong> — '
+                  'Connected<span style="color:#888;font-size:0.82em"> · remote access '
+                  'to this dashboard%s</span></p>'
+                  % ((" · " + html.escape(ts["ip"])) if ts["ip"] else ""))
+    else:
+        ts_row = ('<p><span style="color:#ff4444">●</span> <strong>Tailscale</strong> — '
+                  'Not running<span style="color:#888;font-size:0.82em"> · remote access '
+                  'to this dashboard is down</span></p>')
+
+    return ('<div class="card">'
+            '<h2>🔒 Network Paths</h2>'
+            '<div style="color:#bbb;font-size:0.85em;margin-bottom:8px">'
+            'Your privacy VPN and Nemesis\'s own remote-access network are '
+            'separate things, shown separately.</div>'
+            '%s<hr style="border:none;border-top:1px solid #333;margin:8px 0">%s'
+            '</div>' % (rows, ts_row))
+
+
+def render_vpn_naming_settings_html():
+    """Settings: let the operator name each detected tunnel.
+
+    Only lists tunnels that are CURRENTLY UP. Naming an interface that is not
+    present would invite labelling something that may never come back, and the
+    label is keyed on the interface name.
+    """
+    try:
+        tunnels = detect_vpn_tunnels()
+    except Exception:
+        log.exception("settings: vpn naming card unavailable")
+        return ""
+    if not tunnels:
+        return ('<div class="settings-card"><h2>🔒 VPN Names</h2>'
+                '<div style="color:#bbb;font-size:0.85em">No VPN tunnel is '
+                'currently connected. Connect one and reload to name it.</div></div>')
+
+    rows = ""
+    for t in tunnels:
+        iface = t["iface"]
+        try:
+            cur = (database.get_setting(vpn_display_name_key(iface)) or "")
+        except Exception:
+            cur = ""
+        detected = t["provider"] or "could not be determined"
+        rows += (
+            '<div style="margin-bottom:12px">'
+            '<div style="color:#ccc;font-size:0.9em"><code>%s</code>'
+            '<span style="color:#888;font-size:0.85em"> · %s · auto-detected: %s</span></div>'
+            '<input type="text" id="vpnname-%s" value="%s" placeholder="e.g. PIA, Work VPN" '
+            'style="width:260px;margin-top:4px">'
+            '<button onclick="vpnSaveName(\'%s\')" style="margin-left:8px">Save</button>'
+            '</div>'
+            % (html.escape(iface), html.escape(t["protocol"]), html.escape(detected),
+               html.escape(iface), html.escape(cur), html.escape(iface)))
+
+    return ('<div class="settings-card"><h2>🔒 VPN Names</h2>'
+            '<div style="color:#bbb;font-size:0.85em;margin-bottom:10px">'
+            'Nemesis can only identify some VPNs automatically. A generic '
+            '<code>tun0</code> or <code>wg0</code> could be any provider, so you '
+            'can name it yourself. <strong>Your name always wins</strong> over '
+            'auto-detection.</div>%s'
+            '<script src="/static/vpn-name.js"></script></div>' % rows)
+
+
+@app.route("/api/vpn/name", methods=["POST"])
+def api_vpn_name():
+    """Set (or clear) the user's label for one tunnel. Admin-only.
+
+    POST, not GET: it writes. An empty value CLEARS the label and falls back to
+    auto-detection, which is the only way back once a name is set.
+    """
+    data = request.get_json(silent=True) or {}
+    iface = str(data.get("iface") or "").strip()
+    # Interface names are the key, so they are validated rather than trusted: a
+    # crafted value would otherwise write an arbitrary settings key.
+    if not iface or not re.match(r"^[A-Za-z0-9_.-]{1,32}$", iface):
+        return jsonify({"ok": False, "error": "invalid interface name"}), 400
+    name = str(data.get("name") or "").strip()[:64]
+    try:
+        database.set_setting(vpn_display_name_key(iface), name,
+                             actor=_current_actor_label())
+    except Exception:
+        log.exception("vpn: could not save display name for %s", iface)
+        return jsonify({"ok": False, "error": "could not save"}), 500
+    return jsonify({"ok": True, "iface": iface, "name": name})
 
 
 def get_vpn_split_tunnel_apps():
@@ -10536,6 +10845,8 @@ def settings_page():
     {_render_agent_devices_html()}
 
     {_render_admin_approval_pairing_html()}
+
+    {render_vpn_naming_settings_html()}
 
     <div id="moduleRestartBanner" style="display:none;background:#2a1800;border:1px solid #ffaa00;border-radius:8px;padding:12px 16px;margin-bottom:16px;align-items:center;gap:12px;flex-wrap:wrap">
         <span class="tier-text"
@@ -16341,7 +16652,21 @@ def dashboard():
     vpn_provider = vpn.get("provider") or "VPN"
     _vpn_color_map = {"connected": "#00ff88", "connecting": "#ffaa00", "reconnecting": "#ffaa00"}
     vpn_color = _vpn_color_map.get(vpn_status_str.lower(), "#ff4444")
-    vpn_label = f"{vpn_provider} — {vpn_status_str}" if vpn.get("provider") else f"VPN — {vpn_status_str}"
+    # ONE detection path, deliberately. This line and the Network Paths card
+    # previously came from two different detectors (a hardcoded interface-name
+    # list here, kind-matching there) and could therefore disagree on the same
+    # screen. Both now read `detect_vpn_tunnels()`; this is the one-line summary,
+    # the card is the detail.
+    _tuns = detect_vpn_tunnels()
+    if not _tuns:
+        vpn_summary_label = "Not connected"
+        vpn_color = "#ff4444"
+    elif len(_tuns) == 1:
+        vpn_summary_label = "%s — Connected" % _vpn_label_for(_tuns[0])
+        vpn_color = "#00ff88"
+    else:
+        vpn_summary_label = "%d tunnels — Connected" % len(_tuns)
+        vpn_color = "#00ff88"
 
     alerts_html = render_alerts_html(get_active_alerts())
     devices_html = render_devices_html(get_network_devices())
@@ -16571,6 +16896,7 @@ def dashboard():
     </div>
 
     <div class="grid">
+        {render_network_paths_html()}
         <!-- Proposals awaiting a human decision. Renders NOTHING when the queue is
              empty, deliberately: an always-present empty card trains people to stop
              looking, and this one matters exactly when it is not empty. Placed first
@@ -16593,7 +16919,7 @@ def dashboard():
             <p><span class="tier-text" data-beginner="ClamAV Antivirus:" data-intermediate="ClamAV:" data-pro="ClamAV:">ClamAV:</span> <span class="{"running" if clamav_status == "Running" else "stopped"}">{clamav_status}</span></p>
             <p><span class="tier-text" data-beginner="VPN (encrypts your traffic):" data-intermediate="VPN:" data-pro="VPN:">VPN:</span> <span id="vpnStatusText" onclick="openVpnModal()"
                 style="color:{vpn_color};cursor:pointer;text-decoration:underline dotted"
-                title="Click for details">{html.escape(vpn_label)}</span></p>
+                title="Click for details">{html.escape(vpn_summary_label)}</span></p>
             <p style="font-size:0.8em">CPU: {system_status.get("cpu", "N/A")}</p>
             <p style="font-size:0.8em">Memory: {system_status.get("memory", "N/A")}</p>
             <p style="font-size:0.8em">Disk: {system_status.get("disk", "N/A")}</p>

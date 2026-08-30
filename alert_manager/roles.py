@@ -472,6 +472,10 @@ ROUTE_MINIMUMS = {
     # (5 consecutive approvals earn a level), so approving is not merely acting on
     # one alert — it is teaching the ladder, and that must not be delegable to a
     # role that cannot raise authority directly.
+    # Naming a VPN is configuration, not a read — admin for the write. The
+    # value is rendered into the dashboard for every viewer, so it is not a
+    # personal preference.
+    "api_vpn_name":                                    (_A, _A),
     "api_ai_proposals":                                (_V, _A),
     "api_ai_proposal_respond":                         (_A, _A),
     "api_ai_proposal_execute":                         (_A, _A),
