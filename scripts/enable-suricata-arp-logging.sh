@@ -80,7 +80,13 @@ awk '
     }
     { print }
 ' "$YAML" > "$tmp"
-cp -a "$tmp" "$YAML"
+# ⚠ NOT `cp -a`. mktemp creates 0600, and -a would copy that mode onto the live
+# config -- which is exactly what happened on 2026-08-30, silently changing
+# /etc/suricata/suricata.yaml from 0644 to 0600. Plain `cp` to an EXISTING file
+# copies content only and leaves the destination's mode and owner alone, which is
+# the required behaviour here. (-a stays correct for the BACKUP and the RESTORE
+# paths below, where preserving the source's attributes is the point.)
+cp "$tmp" "$YAML"
 
 # GATE 1 -- the edit took. An awk that matched nothing exits 0 and yields a valid
 # file, which is indistinguishable from success.
