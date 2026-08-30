@@ -8144,12 +8144,106 @@ def _do_alert_disposition(proposal):
         return False, "execution failed: %s" % str(exc)[:200]
 
 
+def _do_ip_block_permanent(proposal, context=None):
+    """Apply a permanent deny for an approved `ip_block_permanent` proposal.
+
+    The FORWARD half of `_undo_ip_block`, written as its mirror deliberately —
+    same credential requirement, same firewall-before-database ordering, same
+    read-back. Chosen as ADR 0026 §D3 A2's first candidate because it is
+    genuinely rare: measured 2026-08-30, the `quarantines` table held 2 rows
+    across its whole history (2026-08-02..08-05, none in the ~25 days since)
+    against 22 disposition-shaped alerts in the same database. A per-action
+    approval ceremony is proportionate at that rate and would be routed around at
+    the other.
+
+    ⚠ REQUIRES AN ADMIN CREDENTIAL, and that is the helper's rule, not a choice
+    made here. `nemesis_fwd`'s PEER_POLICY grants the `dashboard` peer `deny_ip`
+    with `require_credential: True`; the unattended `alert-watcher` peer is the
+    one that may block without one. Executing a proposal happens inside an
+    authenticated admin session, so the credential exists — but it is refused
+    explicitly rather than reached around, exactly as the undo does.
+
+    ⚠ ORDERING: FIREWALL FIRST, DATABASE ONLY IF IT SUCCEEDED. The mirror of the
+    undo's reasoning: recording a block as active while no ufw rule exists is the
+    state an operator would most confidently misread during an incident — the
+    dashboard would show the address contained while traffic still flowed.
+
+    Returns (ok, detail), never raises.
+    """
+    ip = (proposal.get("row_id") or "").strip()
+    if not ip:
+        return False, "proposal carries no IP to block"
+    ctx = context or {}
+    actor = ctx.get("actor") or _actor()
+    session_id = ctx.get("session_id") or _fw_session_id()
+    credential = ctx.get("credential") or _fw_credential()
+    if not credential:
+        return False, ("applying a permanent block requires an administrator "
+                       "credential; execute from a signed-in dashboard session")
+
+    try:
+        ufw_deny_append(ip, actor, session_id, credential)
+    except ValueError as exc:
+        # `ufw_deny_append` refuses an invalid address, and `_guard_never_block`
+        # refuses a protected one. Both are correct refusals, not faults.
+        return False, "refused: %s" % str(exc)[:200]
+    except FirewallError as exc:
+        return False, "firewall refused the block: %s" % str(exc)[:200]
+    except Exception as exc:                                 # noqa: BLE001
+        log.exception("proposal: permanent block failed for %s", ip)
+        return False, "block failed: %s" % str(exc)[:200]
+
+    # READ BACK, do not assume — the mirror of the undo's own confirmation step.
+    # A block reported applied but absent from the ruleset is the failure this
+    # catches, and it is the one most likely to be believed.
+    verified = None
+    try:
+        verified = any(
+            (b.get("ip") if isinstance(b, dict) else str(b)) == ip
+            for b in (list_blocked(actor, session_id, credential) or []))
+        if not verified:
+            return False, ("block reported success but %s is NOT present in the "
+                           "ruleset - not recording it as applied" % ip)
+    except Exception:                                        # noqa: BLE001
+        # Could not verify. The firewall call DID succeed, so this is a partial,
+        # not a failure — say which, rather than claiming a clean application.
+        log.exception("proposal: could not read back the ruleset after blocking %s", ip)
+
+    detail = "%s permanently blocked" % ip
+    if verified is None:
+        detail += " (applied, but the ruleset could not be read back to confirm)"
+    try:
+        conn = _dm_conn()
+        # `expires_at` is NOT NULL in the schema but a permanent block has no
+        # expiry. The sentinel is the far-future timestamp the existing permanent
+        # path already relies on, so the expiry sweep can never reclaim it —
+        # writing `now` here would have the sweep lift it on its next pass.
+        _far = (datetime.now() + timedelta(days=36500)).isoformat()
+        conn.execute(
+            "INSERT INTO quarantines (ip, rule_id, expires_at, created_at, status, actor) "
+            "VALUES (?,?,?,?, 'active', ?)",
+            (ip, str(proposal.get("surface_key") or "ai-proposal"), _far,
+             datetime.now().isoformat(), actor))
+        conn.commit()
+        conn.close()
+        detail += " and recorded active"
+    except Exception:                                        # noqa: BLE001
+        # The RULE IS IN PLACE and the record is not. Loud, and reported as a
+        # partial success: claiming failure would invite a retry that would
+        # re-apply an already-applied block, and claiming success would hide a
+        # container the UI cannot see.
+        log.exception("proposal: %s was blocked but the quarantines row failed", ip)
+        return True, detail + " — WARNING: the block is applied but was NOT recorded; reconcile manually"
+    return True, detail
+
+
 #: Forward executors by action class. `execute_proposal()` takes the executor as a
 #: parameter, so SOMETHING has to choose it — and letting an HTTP caller name the
 #: executor would be the whole security model inverted. This registry is the
 #: server's own answer to "what does approving this actually do".
 _PROPOSAL_EXECUTORS = {
     "alert_disposition": _do_alert_disposition,
+    "ip_block_permanent": _do_ip_block_permanent,
 }
 
 

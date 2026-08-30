@@ -29,7 +29,7 @@ import tempfile
 import traceback
 
 _PASS, _FAIL = [], []
-EXPECTED_CHECKS = 29
+EXPECTED_CHECKS = 36
 
 
 def check(label, cond, detail=""):
@@ -185,6 +185,48 @@ check("  ...and says nothing matched rather than claiming success",
       "no pending alert matched" in ((r3.get_json() or {}).get("error") or ""), r3.get_json())
 check("CONTROL: a failed execution leaves the proposal NOT executed",
       ai.get_proposal(pid3)["executed"] == 0)
+
+
+print("\n== ip_block_permanent: the second forward executor ==")
+check("it is registered in the executor table",
+      "ip_block_permanent" in dashboard._PROPOSAL_EXECUTORS)
+# NEGATIVE CONTROL: the registry must not have become a catch-all -- a class with
+# no executor must still be absent, or "registered" proves nothing.
+check("CONTROL: an unbuilt class is still absent from the registry",
+      "ip_quarantine_external" not in dashboard._PROPOSAL_EXECUTORS)
+
+_exec_fn = dashboard._PROPOSAL_EXECUTORS["ip_block_permanent"]
+
+# Driven inside a REQUEST CONTEXT, because that is where it really runs: the
+# execute route calls it, and its credential fallback (`ctx.get("credential") or
+# _fw_credential()`) reads the request — exactly as the undo handler's does.
+# Calling it bare would test a shape production never uses.
+_rctx = app.test_request_context(json={})
+_rctx.push()
+
+# NO CREDENTIAL -> explicit refusal, not a silent reach-around. nemesis_fwd's
+# PEER_POLICY grants the dashboard peer deny_ip with require_credential=True, so
+# an uncredentialed attempt would be denied helper-side anyway and would surface
+# as a mysterious firewall error.
+ok, detail = _exec_fn({"row_id": "198.51.100.7", "surface_key": "alert"},
+                      context={"actor": "t", "session_id": "s", "credential": None})
+check("refuses without an admin credential", not ok, detail)
+check("  ...and says so actionably rather than failing obscurely",
+      "credential" in (detail or "").lower(), detail)
+
+ok2, detail2 = _exec_fn({"row_id": "", "surface_key": "alert"},
+                        context={"actor": "t", "session_id": "s", "credential": "c"})
+check("refuses a proposal carrying no IP", not ok2, detail2)
+
+# The firewall layer's own guards must NOT be re-implemented here -- an invalid
+# address must be refused by ufw_deny_append/_guard_never_block, and reported.
+ok3, detail3 = _exec_fn({"row_id": "not-an-ip", "surface_key": "alert"},
+                        context={"actor": "t", "session_id": "s", "credential": "c"})
+check("an invalid address is refused (the firewall layer's guard, surfaced)",
+      not ok3, detail3)
+check("CONTROL: the refusal came from the guard, not from a missing credential",
+      "credential" not in (detail3 or "").lower(), detail3)
+_rctx.pop()
 
 
 print("\n== TOTALS ==")
