@@ -1418,7 +1418,21 @@ third time.
 Filed 2026-07-29 during L3 Fork B Piece 2 scoping. **Not to be chased now** — recorded so it
 is not rediscovered from scratch, and because it is a hard precondition for L3 Fork B work.
 
-**State.** PIA is installed and its policy-routing rules are live (4 `piavpn*` rules in `ip rule`,
+**⚠ STALE, corrected 2026-08-31 — do not trust the "State" paragraph below as current.** PIA is
+**Connected**, not Disconnected — `piactl get connectionstate` confirmed live 2026-08-31, and
+`install.sh`'s own comment gating Fork B's PIA-up support on this entry was corrected the same
+day (`50d0874`; see `docs/architecture/0005-dns-firewall-device-auth-architecture.md` §8.1).
+**This does NOT mean the original compatibility question is resolved** — tonight's testing
+(Fork B split-tunnel rig, `firewall-enforcement-engine/forkb-splittunnel-rig/`, private mirror,
+commit `c5b2bf8`) exercised PIA-connected NAT/routing behavior specifically and found no
+killswitch-related failures in that scope, but nobody has gone back and confirmed whether the
+*original* "Nemesis threw errors while PIA was active" symptom (whatever it was — never
+recorded) still reproduces now that PIA is reconnected. **Left open, not closed**, pending that
+specific re-check. The DNS-killswitch-interaction question below (`vpn-dns-guard` vs. PIA) is
+also still unconfirmed either way.
+
+**State, as originally filed 2026-07-29 (now stale per the correction above — kept for
+history).** PIA is installed and its policy-routing rules are live (4 `piavpn*` rules in `ip rule`,
 a `piavpn.POSTROUTING` chain in nat), but the client is deliberately left **Disconnected** —
 confirmed directly via `piactl get connectionstate`, not inferred from iptables counters, which are
 cumulative and misleading. The operator turned it off because Nemesis threw errors while it was
