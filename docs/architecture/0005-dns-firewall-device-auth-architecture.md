@@ -1,14 +1,20 @@
 # ADR 0005 — DNS Root-Cause Correction + Firewall-Engine / Device-Auth Architecture
 
-- **Status:** Proposed (architecture thread captured; direction decided, design NOT yet
-  specified — no code changed)
-- **Date:** 2026-06-27
+- **Status:** Proposed (architecture thread captured 2026-06-27; the firewall-rules engine
+  itself remains undesigned). **No longer "no code changed"** — §1's connectivity-watcher fix
+  (`d33f0b8`) and §8's chokepoint-exception code (Gateway Mode's `gateway_switch` op, Fork B's
+  documented install-time NAT exception) both landed under this ADR's authority. **§1's own
+  root-cause diagnosis was itself corrected 2026-08-30** — read that section in full, not just
+  this summary block, before citing this ADR's PIA diagnosis.
+- **Date:** 2026-06-27 (original), corrected 2026-08-30 (§1), extended 2026-08-31 (§8)
 - **Affects:** Pi-hole DNS listening posture, the planned firewall-rules engine, device
   identity/auth, agent enrollment + hardware binding, tamper response, multi-user/commercial
   layer, the forward build sequence
 - **Supersedes:** the root-cause diagnosis in
   [0002-vpn-aware-dns-routing](0002-vpn-aware-dns-routing.md) (the upstream-blocking
-  hypothesis). ADR 0002 is kept as historical record with the correction noted.
+  hypothesis) — **but see §1: this ADR's own replacement diagnosis was later refuted by
+  measurement, and the honest framing is "contested, then resolved," not a clean supersession
+  either way.** ADR 0002 is kept as historical record with the correction noted.
 - **Depends on:** [0001-database-and-module-architecture](0001-database-and-module-architecture.md)
 - **Related:** [0004-scan-task-orchestration](0004-scan-task-orchestration.md)
   (same convergence pattern — a foundational primitive that many features ride on);
@@ -21,40 +27,102 @@
 
 ---
 
-## 1. Corrected root cause (supersedes ADR 0002)
+## 1. Corrected root cause (history: ADR 0002 → this ADR's original diagnosis → corrected
+2026-08-30)
 
-ADR 0002 diagnosed the PIA/Pi-hole DNS failure as **upstream-blocking** (the killswitch
-dropping Pi-hole's forwarding to a public resolver) and shipped `core/vpn_dns_guard.py` to
-reconcile `dns.upstreams` onto a tunnel-reachable resolver. **That diagnosis is wrong.**
+**⚠ REWRITTEN 2026-08-30 — this section's own prior diagnosis (client-refusal-by-source,
+below-for-history) was itself refuted by direct measurement on production, with PIA
+connected.** The honest arc, preserved rather than silently overwritten: ADR 0002 diagnosed
+the PIA/Pi-hole DNS failure as **upstream-blocking** and shipped `core/vpn_dns_guard.py` to
+reconcile `dns.upstreams` onto a tunnel-reachable resolver. This ADR then superseded that
+root-cause diagnosis with **client-refusal-by-source**, believing the guard "solves the
+WRONG problem." A month later, PIA was still parked as unresolved — and re-measuring the
+"decisive experiment" that this ADR's diagnosis rested on found **it could not have measured
+what it claimed to.**
 
-**The upstream path is NOT the failure. PROVEN:**
-- The guard's own verify loop returns **NOERROR every 20 s** while running.
-- `dig @TUN_DNS` (the tunnel DNS) **resolves**.
-- So Pi-hole *can* reach an upstream and *does* resolve cache-misses.
+### What was actually measured, 2026-08-30, PIA connected, on production
 
-**The real cause is CLIENT-REFUSAL-BY-SOURCE, not upstream-blocking.** Pi-hole is
-configured `dns.listeningMode = ALL`, `dns.interface = enp131s0`. When PIA comes up it
-changes the **host's source IP** for locally-originated traffic to the **tunnel IP**.
-Pi-hole then **REFUSES the local host's own queries** because they now arrive from a source
-it does not treat as permitted.
+- **No source-dependence.** Loopback and tunnel sources were refused *identically* — the
+  entire basis of the client-refusal-by-source claim did not reproduce.
+- **Pi-hole was not refusing the client at all.** It answered a locally-answerable name with
+  NOERROR from the same source, in the same instant it refused a cache-miss from that source.
+- **`listeningMode = "ALL"`** — Pi-hole's own docs define this as *"Permit all origins"* — was
+  unchanged across all 15 rotated config backups spanning 2026-06-27 → 2026-08-07, including
+  the two bracketing the original diagnosis. Config drift is ruled out, not assumed.
+- **EDE = 23 (Network Error)** on every refusal — the *upstream* code, not EDE 18
+  (Prohibited), which is what a source-policy rejection would show and was never observed.
+- **The original "decisive experiment" could not have distinguished the cases it claimed
+  to.** `ip route get 127.0.0.1` resolves to `src 127.0.0.1` regardless of tunnel state, so
+  `dig @127.0.0.1` and `dig @127.0.0.1 -b 127.0.0.1` used the **same source address** in both
+  arms. The 1 ms REFUSED this ADR read as source-based rejection was real, but the experiment
+  never actually varied the one thing it claimed to test.
 
-**Decisive experiment — same query, two source addresses:**
-```
-dig @127.0.0.1 <name>                 (tunnel source)   -> REFUSED / EDE-23, in ~1 ms
-dig @127.0.0.1 <name> -b 127.0.0.1    (loopback source) -> NOERROR
-```
-A 1 ms REFUSED is Pi-hole **actively rejecting the client by source address**, not a
-network/upstream timeout. Binding the query to the loopback source makes it succeed
-immediately. The variable is the **source IP of the client**, nothing upstream.
+**The guard itself, re-examined:** its own log (not journald — see the trap noted below) shows
+it detecting the tunnel, discovering a tunnel-reachable resolver, baselining pre-VPN
+upstreams, applying, **verifying the fix actually resolves**, and restoring cleanly on
+disconnect with a readback match. Full contract, performed correctly.
 
-**Consequence for the shipped fix:** `vpn-dns-guard.service` (the upstream reconciler)
-**works correctly but solves the WRONG problem.** It reconciles a layer that was never
-broken. See the PUNCHLIST entry for the keep/disable decision (deferred to this ADR's work).
+**Retracted: `vpn-dns-guard.service` does NOT solve the wrong problem — it is correct and
+load-bearing.** This ADR's original text called it a reconciler for "a layer that was never
+broken." That claim is what caused nobody to look at the guard again for a month while PIA
+sat parked — declaring a working component irrelevant is precisely how the real defect (§1a
+below) went unnoticed.
 
-**Current workaround on this box:** run **VPN-off** until the real fix is built. **No
-interim config fix applied** — deliberately, to avoid (a) the **open-resolver risk** of
-loosening Pi-hole's client-acceptance posture, and (b) **tracked debt** from an ad-hoc patch
-the future firewall engine would have to reconcile. Diagnose before you patch.
+**Where this leaves ADR 0002:** this is **not** simply reinstating ADR 0002's diagnosis as
+settled. What was measured 2026-08-30 is consistent with an upstream/tunnel-reachability
+shaped problem — the same general shape ADR 0002 named — but arrived at through direct
+measurement of THIS ADR's own refuted claim, not by re-litigating ADR 0002's original case.
+ADR 0002 remains superseded (root-cause) in the historical record; the honest framing is
+**contested, then resolved by measurement**, with both prior diagnoses' reasoning preserved
+rather than erased.
+
+⚠ **A trap that cost a wrong conclusion during this re-investigation, worth recording so it
+isn't repeated:** `journalctl -u vpn-dns-guard` shows nothing, because the guard logs to a
+file (`logging.basicConfig(filename=...)`, `LogsDirectory=nemesis/vpn-dns-guard`). An empty
+journal is the expected output whether the guard is working perfectly or not running at all.
+Computing `LOG_PATH` outside the unit resolves to an in-tree fallback file that looked
+convincingly like a service that had died three weeks earlier. "The guard did not engage" was
+reported on that basis and had to be retracted.
+
+### 1a. The actual defect (fixed, `d33f0b8`)
+
+**The DNS layer was never the defect.** The real bug was in the connectivity watcher:
+`modules/diagnostics/watcher.py` already probed the VPN and **recorded `vpn_connected=1`
+into the same `diagnostics_connectivity_samples` row as a false verdict** — then never
+passed that value into its own classification (`classify()`/`_note()`). The exculpating
+evidence sat beside the wrong answer, unused.
+
+Measured consequence: connecting PIA raised a MEDIUM `action=investigate` alert ("ipv6
+keytest failed") with a `LOCAL_FAIL` escalation from one blocked raw-egress sample, while
+`routing_ok`/`dns_ok`/`api_ok` were `1` on every sample — a correctly functioning VPN,
+misread as a fault. Same failure shape as an earlier IPv4-only-link fix, on a fourth input;
+the existing IPv6-expectation check structurally could not cover it, since it verifies a
+global IPv6 *address* exists — the address stays on the interface while the tunnel blocks
+the traffic itself.
+
+**Fixed by `tunnel_carries_egress()`** (`modules/diagnostics/watcher.py`) — classifies by
+whether a tunnel-KIND interface carries whole-space routes (not by the previously-recorded,
+previously-ignored `vpn_connected` flag, which is true whenever ANY provider is connected and
+would have silently suppressed genuine faults too). Confirmed by a 6-minute supervised window
+(0 alerts, vs. 2 from the prior code) and 12/12 real-kernel topologies (OpenVPN, WireGuard,
+full vs. split tunnel, exit-node). Deployed and verified live via the service's own log
+showing the new field's first appearance (`tunnelled=0` alongside `vpn=1` — the exact
+discrimination the code previously got wrong).
+
+**⚠ Known limitation, not fixed by this change, not a regression:** the tunnel-coverage
+check itself is set-membership (default route / `/1` straddle / `2000::/3`), and a VPN
+covering the address space via many large non-matching prefixes would still misclassify.
+Filed as its own PUNCHLIST item (`[MEDIUM] Tunnel-coverage detection is set-membership...`)
+— needs prefix-coverage arithmetic and an operator ruling, not a patch to this ADR.
+
+**Residual, disclosed, not fixed by design:** a **~34–60 s DNS gap after each PIA connect**
+while the guard reacts (20 s poll interval + 8 s debounce). Real, transient, self-healing.
+Tightening it is a separate, optional decision, not a defect in the guard's contract.
+
+**Current status: PIA is safe to run connected.** The interim "run VPN-off" workaround this
+ADR previously recorded is no longer necessary — the diagnosis it was protecting against was
+wrong, the guard was never broken, and the actual defect (a misclassifying connectivity
+watcher) is fixed and deployed.
 
 ---
 
