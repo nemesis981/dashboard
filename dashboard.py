@@ -5917,7 +5917,14 @@ def email_enroll_complete():
     # of four). Only the outer whitespace a copy-paste picks up is removed.
     secret = secret.strip()
 
-    if not code or not _es_providers.is_known(provider):
+    # ⛔ is_connectable, NOT is_known. The table now contains entries that exist
+    # so the UI can explain them and which CANNOT be connected to (Outlook.com /
+    # Hotmail is OAuth2-only -- see providers.HOTMAIL). is_known() is True for
+    # those. Accepting one here would store an app password for a mailbox that
+    # can never be read and surface later as an authentication failure, which
+    # reads to the owner as "you typed it wrong" rather than "this provider is
+    # not supported yet".
+    if not code or not _es_providers.is_connectable(provider):
         _audit(action="email_enroll_rejected", ip=ip)
         return _enroll_reject()
 
