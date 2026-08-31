@@ -283,6 +283,125 @@ def api_enroll_create():
     })
 
 
+def api_set_account_scanning():
+    """Switch scanning ON or OFF for ONE enrolled mailbox. POST ONLY. ADMIN ONLY.
+
+    THIS IS THE CONSENT GATE, AND IT IS WHY BOTH DIRECTIONS ARE ADMIN-ONLY.
+    Enrollment deliberately stores a mailbox with `enabled=0`: adding a mailbox
+    and beginning to READ A PERSON'S MAIL are two different consents, and this
+    route is the second one. Turning it ON starts reading correspondence.
+    Turning it OFF is detection-disabling -- the same reasoning that makes
+    lan_integrity's pin route admin-only. Neither direction is a low-stakes
+    toggle, so neither is delegated below admin.
+
+    ⚠ REFUSES TO ENABLE A MAILBOX WHOSE CREDENTIAL CANNOT BE RESOLVED.
+    Without that check this route would happily set `enabled=1` on an account
+    whose app password was never stored or whose store is unreadable. The
+    supervisor would then spawn a watcher that fails and parks in CONFIG_ERROR,
+    and the admin would be told "scanning enabled" by a route that had just
+    guaranteed it could not scan. Refusing here converts a silent, deferred
+    failure into an immediate, specific one -- and it distinguishes "this mailbox
+    has no stored credential" from "the credential store is unreadable", which
+    have different fixes and would otherwise both surface as a dead watcher.
+    """
+    # ⚠ CSRF CONTROL. FIRST GATE, BEFORE ANY PARSING. Same control and same
+    # reasoning as api_release above: POST alone is insufficient because an HTML
+    # form can POST cross-origin, but a form cannot produce a JSON content-type
+    # and a cross-origin fetch that sets the header is blocked by CORS preflight.
+    # Do not remove it on the grounds that the type checks below already reject a
+    # forged form POST -- they do, but only incidentally, and a later convenience
+    # change reading request.form would silently remove the protection.
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "JSON content-type required"}), 415
+
+    payload = request.get_json(silent=True) or {}
+    address = payload.get("address")
+    enabled = payload.get("enabled")
+    mailbox = payload.get("mailbox", "INBOX")
+
+    if not isinstance(address, str) or not address.strip() or len(address) > 320:
+        return jsonify({"ok": False, "error": "address (string) required"}), 400
+    # STRICT bool. Accepting "false"/0/"" here would make the string "false"
+    # ENABLE scanning, since every non-empty string is truthy -- a typo in a
+    # caller turning surveillance on rather than off.
+    if not isinstance(enabled, bool):
+        return jsonify({"ok": False,
+                        "error": "enabled must be true or false (boolean)"}), 400
+    if not isinstance(mailbox, str) or not mailbox.strip() or len(mailbox) > 128:
+        return jsonify({"ok": False, "error": "mailbox must be a short string"}), 400
+    address, mailbox = address.strip(), mailbox.strip()
+
+    acct = writes.get_account(address, mailbox)
+    if acct is None:
+        # Not created here. Enabling a mailbox that was never enrolled is a
+        # caller error, and inventing the row would register a mailbox with no
+        # credential and no owner behind an endpoint whose job is a toggle.
+        return jsonify({"ok": False,
+                        "error": "no such enrolled mailbox"}), 404
+
+    if enabled:
+        from modules.email_security import credential_store as cs  # noqa: PLC0415
+        try:
+            cs.get_secret(acct.get("credential_ref"))
+        except cs.CredentialMissing:
+            return jsonify({
+                "ok": False, "error": "no stored credential for this mailbox",
+                "detail": ("The mailbox is registered but its enrollment never "
+                           "completed. Send the owner a new enrollment link "
+                           "rather than enabling it."),
+            }), 409
+        except cs.CredentialUnavailable as exc:
+            # DISTINCT from the above on purpose: this affects EVERY mailbox and
+            # is a deployment fault, not an incomplete enrollment.
+            log.error("email_security: credential store unreadable: %s", exc)
+            return jsonify({
+                "ok": False, "error": "credential store unreadable",
+                "detail": ("This is a server configuration problem affecting "
+                           "every mailbox, not a problem with this one."),
+            }), 503
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("email_security: credential check failed: %s", exc)
+            return jsonify({"ok": False,
+                            "error": "could not verify the stored credential"}), 500
+
+    try:
+        affected = writes.set_account_enabled(address, enabled, mailbox=mailbox)
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("email_security: set_account_enabled failed: %s", exc)
+        return jsonify({"ok": False, "error": "could not update the mailbox"}), 500
+
+    # Reconcile the RUNNING watchers. Without this the row changes and nothing
+    # else does until the module restarts -- see MailboxSupervisor.refresh.
+    # A refresh failure is reported, never swallowed: the DB write succeeded, so
+    # claiming plain success would tell the admin scanning had started when it
+    # had not.
+    refreshed, refresh_error = None, None
+    try:
+        import modules_loader                                 # noqa: PLC0415
+        inst = modules_loader.get_loaded_modules().get(MODULE_NAME)
+        sup = getattr(inst, "_supervisor", None) if inst is not None else None
+        if sup is not None:
+            refreshed = sup.refresh()
+    except Exception as exc:                                  # noqa: BLE001
+        refresh_error = type(exc).__name__
+        log.exception("email_security: supervisor refresh failed")
+
+    body = {"ok": True, "address": address, "mailbox": mailbox,
+            "enabled": enabled, "updated": affected,
+            "watchers": refreshed}
+    if refreshed is None:
+        # HONEST, not reassuring. The bit is set; whether anything is now
+        # watching is a different question and the caller must be able to tell.
+        body["scanning_active"] = False
+        body["detail"] = (
+            "Saved, but the running module was not reconciled%s. Scanning "
+            "starts when the module is next started."
+            % (" (%s)" % refresh_error if refresh_error else ""))
+    else:
+        body["scanning_active"] = bool(enabled)
+    return jsonify(body)
+
+
 def routes():
     """Route table for `Module.get_routes()`.
 
@@ -294,5 +413,9 @@ def routes():
          {"methods": ["GET"]}),
         ("/api/email-security/release", api_release, {"methods": ["POST"]}),
         ("/api/email-security/enroll/create", api_enroll_create,
+         {"methods": ["POST"]}),
+        # The consent gate: begins or ends reading a person's mail. POST-only,
+        # and admin on both axes in ROUTE_MINIMUMS.
+        ("/api/email-security/account/scanning", api_set_account_scanning,
          {"methods": ["POST"]}),
     ]

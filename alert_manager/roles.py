@@ -443,6 +443,11 @@ ROUTE_MINIMUMS = {
     # sub_admin may hold it. GET is unused; both slots are admin so a stray GET
     # cannot become a read side-channel.
     "module_email_security_api_enroll_create":   (_A, _A),
+    # Switching scanning on BEGINS READING A PERSON'S MAIL; switching it off is
+    # detection-disabling. Enrollment deliberately leaves a mailbox disabled
+    # because adding one and reading it are two separate consents -- this route
+    # is the second consent, so neither direction is delegated below admin.
+    "module_email_security_api_set_account_scanning": (_A, _A),
 
     # ai_engine §4.5 review surface — "what your AI has learned" (DESIGN-L4 §4).
     # ADMIN ON BOTH VERBS, INCLUDING READ, and that is deliberate:

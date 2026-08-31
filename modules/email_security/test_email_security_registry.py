@@ -107,6 +107,16 @@ _A = roles.ROLE_ADMIN
 check("enroll/create is admin on both axes (it mints a bearer credential)",
       roles.ROUTE_MINIMUMS.get("module_email_security_api_enroll_create"),
       (_A, _A))
+# The consent gate. Enabling BEGINS READING A PERSON'S MAIL; disabling is
+# detection-disabling. Pinned explicitly rather than left to the aggregate check
+# above, because a future edit that relaxed just this one to sub_admin would
+# still satisfy "every declared route has an entry" and would be exactly the
+# delegation this route must not have.
+check("account/scanning is admin on both axes (it is the consent gate)",
+      roles.ROUTE_MINIMUMS.get("module_email_security_api_set_account_scanning"),
+      (_A, _A))
+check("  ...and it is a real declared route, not an orphan entry",
+      "module_email_security_api_set_account_scanning" in declared)
 
 print("\n%d passed, %d failed" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)

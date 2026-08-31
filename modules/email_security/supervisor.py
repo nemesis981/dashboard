@@ -144,6 +144,78 @@ class MailboxSupervisor:
         log.info("email_security: supervisor started %d watcher(s)", started)
         return started
 
+    def refresh(self) -> dict:
+        """Reconcile running watchers against the CURRENT enabled set.
+
+        ⚠ WITHOUT THIS, TOGGLING `enabled` IS A LIE UNTIL THE NEXT RESTART.
+        `start()` reads the enabled accounts once. An admin who switches scanning
+        ON would get a row saying `enabled=1`, an API reply saying success, and
+        NO WATCHER -- and because `status()` reports the SUPERVISOR's states, the
+        mailbox would not even appear as a problem. It would simply be absent:
+        enabled, unwatched, and invisible. That is precisely the silent
+        non-coverage this module's status() exists to refuse, arriving through
+        the one door that looks like it turns scanning on.
+
+        Returns {"started": n, "stopped": n} -- counts, so a caller can report
+        what actually happened rather than assuming it worked.
+
+        A watcher in a TERMINAL state for an account that is still enabled is
+        left alone: nothing about it has changed, and silently respawning it
+        would hide a permanent fault behind a restart loop. Toggling the account
+        off and on is the deliberate "try again", and that path works because the
+        off pass removes the watcher entirely.
+        """
+        with self._lock:
+            if not self._started:
+                # Module stopped. Reconciling would resurrect watchers the
+                # lifecycle deliberately tore down.
+                return {"started": 0, "stopped": 0}
+
+        accounts = self._account_loader()
+        want = {a.get("id"): a for a in accounts}
+
+        with self._lock:
+            have = set(self._watchers)
+        to_start = [want[i] for i in want if i not in have]
+        to_stop = [i for i in have if i not in want]
+
+        stopped = []
+        for acct_id in to_stop:
+            with self._lock:
+                w = self._watchers.pop(acct_id, None)
+            if w is None:
+                continue
+            w.stop_event.set()
+            if w.client is not None:
+                try:
+                    w.client.close()      # unblocks a socket read promptly
+                except Exception:         # noqa: BLE001
+                    pass
+            stopped.append(w)
+
+        started = 0
+        for acct in to_start:
+            w = _Watcher(acct)
+            with self._lock:
+                self._watchers[acct.get("id")] = w
+            t = threading.Thread(
+                target=self._watch, args=(w,),
+                name="email-watch-%s" % (acct.get("id"),), daemon=True)
+            w.thread = t
+            t.start()
+            started += 1
+
+        # Joined AFTER the new ones are launched so a slow shutdown does not
+        # delay scanning starting on a mailbox someone just switched on.
+        for w in stopped:
+            if w.thread is not None:
+                w.thread.join(timeout=5.0)
+
+        if started or stopped:
+            log.info("email_security: supervisor refreshed (+%d, -%d)",
+                     started, len(stopped))
+        return {"started": started, "stopped": len(stopped)}
+
     def stop(self, timeout: float = 10.0) -> None:
         """Signal every watcher to stop and wait briefly. Idempotent.
 
