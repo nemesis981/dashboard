@@ -5522,3 +5522,52 @@ where `_safe_detail(exc)` is already computed and is already written to the in-m
 state. The data exists; it just never reaches the row. Doing so also gives `status()` a durable
 answer across restarts — today watcher state is in-memory only, so a restart erases every record
 of why a mailbox stopped being scanned.
+
+### [HIGH] `integrity_watch` files a duplicate ticket every 66 seconds — 606 and counting, pinning the header light permanently RED (found 2026-08-31)
+**Live and ongoing.** 606 open tickets titled *"File integrity status is unavailable"*, first
+`2026-08-30T17:05:47`, most recent `2026-08-31T04:08:11` — **one every 66 seconds, ~1317/day**.
+They are **605 of the 673 open tickets** on the box, and the header status light's count is the
+same number (`open_tickets` dominates `_header_status_data`'s total; the rest is 2 CRITICAL +
+4 MEDIUM real alerts and zero malware findings).
+
+**ROOT CAUSE — the UNREADABLE branch returns before the dedup check, with a NULL signature.**
+`alert_manager/integrity_watch.py:84`:
+```python
+if status is None:
+    return UNREADABLE, None, "integrity status file is missing or unreadable"
+```
+`assess()` is explicitly designed to dedup — its docstring says *"an hourly checker reporting the
+same tampering does not file a ticket every hour -- one incident, one ticket"* — and it works for
+the other two paths: `STALE` returns the stable signature `"stale"`, and `FILE_TICKET` computes a
+content signature, both of which hit `if last_signature is not None and sig == last_signature`.
+**`UNREADABLE` returns above that check and hands back `None`,** so `poll_once` stores `None` as
+`last_signature` and the suppression can never engage on the next cycle.
+
+So the ONE branch with no suppression is the one that fires when the feature is **not deployed** —
+i.e. the default state of every install that has not stood up the root-owned checker.
+`/var/lib/nemesis-integrity/status.json` does not exist here, nor does its parent directory.
+Poller: `core_module/diagnostics_watcher/diagnostics_watcher.py:266`.
+
+**⚠ THE REAL HARM IS NOT THE ROW COUNT — IT IS THAT THIS CODEBASE ALREADY LEARNED THIS LESSON.**
+`_header_status_data`'s own comment, written 2026-08-02 when `canary_trips` was split by severity,
+says: *"any unreviewed finding, of any severity, pinned it RED forever ... a light that is
+permanently red communicates nothing."* That fix worked, and the light is now pinned RED again by
+a different route. **It is currently masking 2 CRITICAL and 4 MEDIUM real alerts**, and it trains
+the operator to ignore the one global health indicator.
+
+**FIX — two parts, and the first is small:**
+1. **Give `UNREADABLE` a stable signature** (e.g. `"unreadable"`, exactly as `STALE` uses
+   `"stale"`) and move the dedup check above the early returns so all three ticket-filing paths
+   share it. One incident, one ticket — which is what the docstring already promises.
+2. **Decide what a missing status file should MEAN.** ⚠ Do NOT simply suppress it: `read_status`'s
+   own docstring is explicit that an absent file *"is exactly what an attacker deleting it
+   produces, and it is also what a not-yet-deployed checker produces -- indistinguishable here"*.
+   The honest options are to deploy the checker, or to record "never deployed" as a distinct
+   installed-state so first-run absence is not reported as a possible tamper. Suppressing it
+   without that distinction would delete a real signal.
+3. **Clean up the 605 existing rows** — state-changing, so it needs a snapshot and operator
+   go-ahead; not done here (Rule 1).
+
+*Found while investigating the operator's recurring `[header-status] poll -> red (NNN)` console
+log. Worth noting the `(NNN)` is the ITEM COUNT, not a poll counter — it was read as the latter,
+which is why a climbing number looked benign.*
