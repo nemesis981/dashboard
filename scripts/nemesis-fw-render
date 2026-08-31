@@ -308,6 +308,74 @@ if [ -n "$GW_LAN_IFACE" ] && [ -n "$GW_LAN_CIDR" ]; then
     echo "    }"
 fi
 
+# ── L3 Tier 2 steering chain (ADR 0019 Amendment 01) ─────────────────────────
+#
+# ⚠ THIS FIXES A REAL BUG, and the bug is this file's own doing. The steer chain
+# used to be installed OUT OF BAND by nft_steering.py, while this renderer emits
+# `delete table` and rebuilds from scratch — so every healthy re-render silently
+# DESTROYED steering, and the watcher re-renders on any ufw drift. Amendment 01
+# §5.1 only ever considered a BROKEN renderer; a working one was the actual
+# hazard. Emitting the chain here makes steering DERIVED, so a re-render
+# regenerates it instead of wiping it.
+#
+# ⚠ THE TABLE STAYS DERIVED. This reads INTENT (a port and destinations), never
+# ruleset text. If the state file held nft text, this would be splicing
+# caller-supplied rules into a privileged ruleset — precisely the "independently
+# populated" the constraint forbids, and an injection primitive besides. The
+# rules below are constructed HERE from validated primitives.
+#
+# ⚠ FAILS CLOSED TO NO STEERING, which is the safe direction: traffic then flows
+# UNSTEERED (uninspected) rather than being redirected into a gate we could not
+# describe. Malformed intent is refused loudly and the rest of the table still
+# renders — a steering problem must not cost the block rules.
+#
+# ⚠ NO VERDICTS, EVER. Only `redirect to :port`. The charset below cannot express
+# drop/accept/reject or a statement separator, so a steering rule cannot alter
+# what this table drops — which is the property that makes Amendment 01 safe
+# under ENFORCING mode (see the 2026-08-31 re-confirmation; the original
+# comparison-based argument expired at cutover).
+STEER_STATE="${NEMESIS_FW_STEER_STATE:-/var/lib/nemesis/fw-steer.state}"
+if [ -r "$STEER_STATE" ]; then
+    _steer_port=""
+    _steer_dests=""
+    _steer_bad=0
+    while IFS=' ' read -r _k _v _rest; do
+        case "$_k" in
+            ''|'#'*) continue ;;
+            port)
+                # Reject anything non-numeric, out of range, or with trailing junk.
+                case "$_v" in ''|*[!0-9]*) _steer_bad=1; continue ;; esac
+                [ -n "$_rest" ] && { _steer_bad=1; continue; }
+                if [ "$_v" -lt 1 ] || [ "$_v" -gt 65535 ]; then _steer_bad=1; continue; fi
+                _steer_port="$_v"
+                ;;
+            dest)
+                # Same charset nft_steering._validate_destination enforces:
+                # deliberately narrower than "valid address" — it cannot express an
+                # nft keyword, a newline, or a statement separator whatever else it is.
+                case "$_v" in ''|*[!0-9a-fA-F:./]*) _steer_bad=1; continue ;; esac
+                [ -n "$_rest" ] && { _steer_bad=1; continue; }
+                _steer_dests="$_steer_dests $_v"
+                ;;
+            *) _steer_bad=1 ;;
+        esac
+    done < "$STEER_STATE"
+
+    if [ "$_steer_bad" = "1" ]; then
+        # LOUD, and no steering. A silently-skipped malformed intent would look
+        # identical to "no steering configured".
+        echo "nemesis-fw-render: REFUSING to emit steering — $STEER_STATE contains unparseable or out-of-range intent. Traffic will flow UNSTEERED. Fix the file; nothing else in this table is affected." >&2
+    elif [ -n "$_steer_port" ] && [ -n "$_steer_dests" ]; then
+        echo "    chain steer {"
+        echo "        type nat hook prerouting priority dstnat; policy accept;"
+        for _d in $_steer_dests; do
+            echo "        ip daddr $_d tcp dport 443 redirect to :$_steer_port comment \"nemesis-tier2-steer\""
+        done
+        echo "    }"
+        echo "nemesis-fw-render: steering ACTIVE — $(echo $_steer_dests | wc -w) destination(s) -> :$_steer_port" >&2
+    fi
+fi
+
 cat <<'NFT'
 }
 NFT
