@@ -5664,19 +5664,94 @@ that varies. Both produce the same outcome — a real condition rendered as an u
 and the second kind is harder to spot because the suppression code looks correct. **Worth a
 sweep for other `title`-keyed auto-tickets that interpolate a measured value.**
 
-**2. The readings themselves may be a REAL hardware problem, and that must not get lost behind
-the noise complaint.** Nine tickets report CPU at **100.0°C**, with a cluster of 90-100°C
-readings across 2026-08-16/17 and GPU at 87-90°C. Most recent thermal ticket is
-`2026-08-31T00:57` (86°C), so it is not purely historical. Either the machine genuinely throttles
-at 100°C under load, or a sensor is misreporting — **and the two have very different
-consequences.** Nobody has checked which. This box is the operator's daily driver AND the
-appliance.
+**2. ~~The readings themselves may be a REAL hardware problem~~ — ANSWERED 2026-08-31 (Window 3,
+read-only investigation). The readings are REAL; the hardware is NOT faulty.** Keeping the
+question recorded because part 1 below depends on the answer.
 
-**Suggested order when picked up:** confirm whether the readings are real (compare against
-`sensors`, check for throttling in the kernel log) BEFORE reworking the ticket shape — if the
-hardware is genuinely hitting 100°C, the tickets are doing their job and the fix is cooling, not
-deduplication.
-*Found while cleaning up the integrity_watch duplicates; not investigated (Rule 1).*
+- **Real, not a sensor fault.** The values form a continuous distribution (86,87,88,89,90,92,93,
+  94,95,97,98,99,100) — a stuck sensor yields one value. Source is `coretemp`/`Package id 0`
+  (per `hw_map.json`), a kernel MSR read independent of the flaky `dell_ddv` path, and there is
+  no clamp in `hw_monitor.py`. Live cross-check: `coretemp` and `dell_ddv` agree exactly.
+  Temps correlate tightly with load (samples ≥99°C avg GPU 83.0°C/82.6W/23.6GB RAM; samples
+  <70°C avg 43.1°C/40.8W/13.6GB) — a gaming/GPU signature.
+- **Not a cooling failure, and not an emergency.** CPU is an Intel Core Ultra 9 285K
+  (`crit=105°C`, `high=85°C`); 100°C is the thermal-management target, below critical. Peaks
+  were TRANSIENT: in hours containing 11 samples ≥95°C the hourly *average* was 65-72°C, i.e.
+  oscillation, not heat that could not escape (a cooling failure raises the average). Zero
+  kernel thermal emergencies ever logged; `core_throttle_count=0` and `package_throttle_count=42`
+  totalling **18 milliseconds** over 2d16h. Measured live under an actual running game: stable
+  74-75°C, CPU fan 3498 RPM.
+- **Not recurring.** Essentially confined to 2026-08-16/17 (94 and 55 samples ≥85°C). Every
+  other day shows 1-4 isolated spikes; worst since is a single 98°C on 08-27.
+- **Caveat, stated rather than glossed:** `100.0` is probably `≥100` — 52 samples sit at exactly
+  100.0 vs 30 at 99.0 with nothing above, a saturation shape. True peaks may have been slightly
+  higher. Nothing approached the 105°C critical trip.
+- **The cooling-response question could NOT be answered** — see the telemetry blind-spot item
+  below, which is the reason.
+
+**So for part 1: the tickets were reporting a real condition.** The fix is the ticket SHAPE
+(dedup keyed on a varying value), not cooling. Reworking the shape is now unblocked.
+*Found while cleaning up the integrity_watch duplicates; investigated 2026-08-31.*
+
+### [MEDIUM] `ambient_temp` alert threshold is semantically wrong for the sensor it actually reads (found 2026-08-31)
+**The "Ambient" sensor is not ambient.** `hw_map.json` maps `ambient_temp` to
+`dell_ddv-virtual-0` / `temp2_input` / label `Ambient`. Measured across 20,109 non-null samples:
+**min 62.0°C, mean 69.7°C, max 86.0°C.** That is a chassis/board/VRM sensor, not room air — room
+air at 69.7°C would be an emergency in itself.
+
+The alert threshold is **85°C**, i.e. only ~15°C above this sensor's own *average*, and **6%
+of all samples (1219/20109) already sit at ≥80°C** in normal operation. On 2026-08-25 it duly
+produced `Auto: Ambient temperature 86.0°C exceeds 85.0°C` — **correct by threshold, meaningless
+by semantics.**
+
+**Why this matters beyond one ticket:** this is the roadmap's §2.2 cry-wolf class
+(`diagnostics-and-access-master-plan.md`) showing up in the hardware alert path rather than the
+diagnostics page — an alert that fires in a normal state trains the operator to ignore the
+channel, which is exactly what you do not want on the one channel that would report a genuine
+thermal event.
+
+**Fix direction (not done — audit only):** either re-derive the threshold from this sensor's
+measured baseline (mean 69.7 / max 86 suggests something near 90-95°C is the real "abnormal"
+line), or relabel the metric so it is not presented as ambient air, or both. **Do not simply
+raise the number without deciding which sensor it is** — the label is what made the threshold
+look reasonable in the first place. Related: the per-degree ticket-shape problem above.
+
+### [MEDIUM] Fan/ambient/NVMe telemetry goes blind exactly at peak thermal load (found 2026-08-31)
+**The monitoring loses its cooling-response data at the only moment that data matters.** All fan
+RPMs, `ambient_temp` and `nvme_temp` come from the `dell_ddv-virtual-0` adapter. Measured
+availability against CPU temperature, whole history:
+
+| CPU temp band | samples | `dell_ddv` available |
+|---|---|---|
+| 95-100°C | 124 | **0 (0.0%)** |
+| 85-94°C | 51 | 8 (15.7%) |
+| 70-84°C | 2565 | 2492 (97.2%) |
+| <70°C | 18689 | 17609 (94.2%) |
+
+At ≥95°C it is **0-for-124**; rows from the 08-16 peak carry `cpu_temp=100.0` alongside
+`ambient_temp=NULL`, `nvme_temp=NULL`, `fans_json='[]'`.
+
+**It tracks heat, not load — this was tested, not assumed.** Holding CPU temp <70°C and
+splitting by GPU power: high GPU load (≥80W) → **100.0% available across 953 samples**; medium →
+100.0%; low → 96.7%. So a busy machine does not break `dell_ddv`; a *hot* one does. Consistent
+with the Dell EC becoming unresponsive under thermal stress — **inference, not measurement,
+labelled as such.**
+
+**Consequence, concretely:** the 2026-08-16/17 investigation could confirm the temperatures were
+real but **could not determine whether the fans were responding**, because there is no fan data
+for any sample above 95°C. A genuine fan-control failure and a normal boost-to-target excursion
+would look identical in what we store. (Contributing evidence pointed to the benign reading —
+transient peaks, hourly averages of 65-72°C, negligible throttle time — but that is inference
+around the gap, not a reading from inside it.)
+
+**Fix direction (not done — audit only):** the honest options are (a) read fans/ambient from a
+path that does not depend on the Dell EC where one exists, (b) retry/backoff on `dell_ddv` reads
+so a transient EC timeout does not silently drop the whole sample, and/or (c) **record the
+dropout explicitly** — a stored "sensor unavailable" marker distinct from "no data" so a future
+investigation can tell a missing reading from a failed one. (c) is the cheapest and is worth
+doing regardless of the others. **Note the existing behaviour is already the correct FAIL-SHAPE**
+— NULL/`[]`, not a fabricated `0 RPM`, which would have been far worse: a fan reading of 0 during
+a thermal event would have looked like a dead fan and sent someone opening the case.
 
 ### [FIXED — 2026-08-31, pending push] Submit-to-Support ships device PII with no IP/MAC/hostname/email redaction
 **Was:** `docs/roadmap/diagnostics-and-access-master-plan.md` §2.1, that doc's own named ★ TOP
