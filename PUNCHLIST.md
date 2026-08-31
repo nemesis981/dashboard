@@ -5459,3 +5459,42 @@ state (the route already returns `watcher_state` and a reason precisely so a UI 
 **Sequencing note:** (2) and (3) are the minimum for anyone other than the operator to use this
 feature at all; (1) is the quality-of-life improvement on top. Doing (1) first would mean
 building a bulk flow that still has to be driven from a console.
+
+### [MEDIUM] Deploy has no "which services must restart for which files" checklist — cost a live enrollment failure (found 2026-08-31)
+**Confirmed live, not theoretical.** Two fresh, valid enrollment codes were rejected on first
+use with the generic *"not valid, has already been used, or has expired"*. Root cause was NOT
+the codes: `nemesis-fwd` was still running the build from **Fri 2026-08-28 17:08** while
+`alert_manager/nemesis_fwd.py` had been modified **2026-08-31 00:53**. Its journal shows the
+exact refusal at both failure timestamps:
+```
+fwd: denied (bad_request): unknown op: 'write_email_secret'
+```
+The deploy restarted `dashboard` and nothing else. The `email_security` build touches BOTH
+processes: the dashboard serves the routes, and the privileged helper owns the credential write.
+
+**Why the deploy verification passed anyway — this is the generalisable part.** Every check run
+after the restart exercised only dashboard-side routes: `/email/enroll` 200, the module route
+404→302, the migration columns. **Not one of them crossed the socket into `nemesis-fwd`.** So a
+thorough-looking verification confirmed a half-deployed system, and the first thing to exercise
+the other half was a real user with a real credential. Post-deploy checks must exercise at least
+one call per PROCESS the change touches, not per route.
+
+**The misleading symptom is its own finding.** The failure surfaced to the operator as the
+unauthenticated route's identical-reject message — deliberately indistinguishable between
+invalid/expired/already-used, which is correct for an anonymous caller and actively harmful
+here: it pointed at the code, and the code was perfect. Server-side, `email_enroll_code_ok`
+followed 88s later by `email_enroll_rejected` (with `used_at` still NULL) localised it
+immediately. **The audit trail was what solved this, not the UI.**
+
+**Fix, in rough order of value:**
+1. A deploy checklist mapping changed files → services needing restart. `alert_manager/` is the
+   trap: `nemesis_fwd.py` and `fw_client.py` live beside `database.py` and `roles.py`, but
+   `nemesis_fwd.py` is the ONLY one loaded by a different long-running privileged process.
+2. Better: a startup version/build stamp per service, and a dashboard check that flags any
+   helper whose stamp predates the running code. The mtime-vs-`ExecMainStartTimestamp`
+   comparison used to diagnose this is exactly what a machine should do continuously.
+3. Consider having `fw_client` distinguish `unknown op` from other `Denied` reasons on the
+   dashboard side and log it loudly — it means a version skew between two of our own processes,
+   which is never a normal condition and is currently indistinguishable from a refusal.
+*Diagnosed and fixed in-session (helper restarted, verified by timestamp + PID + zero recurrences);
+the checklist/stamp work above is NOT done.*
