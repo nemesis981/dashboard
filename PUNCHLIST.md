@@ -5356,3 +5356,50 @@ exactly what to write and is refused.
    bug fix.
 *Found by read-only root-cause investigation after a live failure; nothing changed in that pass
 (Rule 1).*
+
+### [FUTURE] Project: migrate off snap packages on the appliance/dev box where a real alternative exists (operator-requested 2026-08-31)
+**Scoping only — deliberately NOT started.** Operator wants to move off snaps broadly on this
+box, not just Tailscale: confinement and performance are a recurring annoyance. Captured here
+with a real inventory so the work can be sequenced rather than re-discovered. **Candidate for
+graduation to a roadmap stub by Window 2** (Rule 7: project ideas start as a roadmap stub; this
+is parked in PUNCHLIST because Window 3 does not author roadmap entries).
+
+**Why it is a project and not a chore:** snap confinement has already caused one confirmed
+production failure — see the HIGH Tailscale/MagicDNS entry above, where strict confinement stops
+`tailscaled` writing `/etc/resolv.conf` and breaks every tailnet-only link opened from the box.
+That is a *functional* argument, distinct from the performance/annoyance one, and it is the
+reason Tailscale goes first.
+
+**Inventory (measured 2026-08-31): 19 snaps, 4.5 GB under `/var/lib/snapd/snaps`.**
+
+*Real migration candidates — user-facing apps:*
+| snap | apt/other alternative | notes |
+|---|---|---|
+| `tailscale` 1.92.5 | **apt 1.102.3, repo already configured** | already scoped, HIGH, blocking. Do first. |
+| `code` (VS Code) | **no apt candidate** — needs `packages.microsoft.com` repo | real alternative, repo not configured |
+| `steam` | apt `1:1.0.0.85~ds-2build1` (multiverse) | Valve's own deb is the vendor-preferred path |
+| `firefox` | ⚠ **apt `firefox` is `1:1snap1-0ubuntu8` — a TRANSITIONAL package that installs the snap.** Real alternative is Mozilla's own apt repo | **do not assume "apt has firefox" means a non-snap Firefox** — this is exactly the trap that wastes an afternoon |
+| `claude-ai-desktop` | third-party publisher (`simonlinuxcraft`); no apt equivalent expected | likely stays a snap |
+
+*Not candidates — bases/platform, removed automatically once nothing needs them:*
+`bare`, `core20`, `core24`, `gnome-46-2404`, `gtk-common-themes`, `mesa-2404`,
+`gaming-graphics-core24`, `snapd`.
+
+*Not candidates — Ubuntu desktop plumbing; removing may degrade the desktop:*
+`desktop-security-center`, `firmware-updater`, `prompting-client`, `snap-store`,
+`snapd-desktop-integration`.
+
+**Sequencing by risk (the point of this entry):**
+1. **Tailscale** — highest value, already root-caused, and the only one with a confirmed
+   functional failure. ⚠ Rule 13: host-level network change on the daily driver, and admin access
+   rides the tailnet — VM rehearsal first, revert proven by reading live state back.
+2. **VS Code, Steam** — low risk, no service depends on them, fully reversible.
+3. **Firefox** — medium: it is the operator's browser and holds the dashboard session; migrating
+   it means profile migration, which is where data actually gets lost. Do it deliberately, not
+   as part of a batch.
+4. **Everything else** — leave alone unless a specific problem appears. Removing Ubuntu's desktop
+   plumbing snaps to reduce a count is a cost with no stated benefit.
+
+**Explicitly out of scope until decided:** removing `snapd` itself. That is a different and much
+larger decision than "prefer debs for these five apps", and nothing here requires it.
+**Do not batch these.** Each migration is independently reversible; a batch is not.
