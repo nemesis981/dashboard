@@ -4788,6 +4788,24 @@ across 4 usernames**, all `curl/8.18.0` from loopback, none with a real account 
 **Plus one that needs its own decision:** `lockverify` has **6 rows AND a real row in `users`** —
 a test account left in the accounts table, which is a different and arguably more interesting
 finding than the log rows.
+
+> **✅ RE-VERIFIED 2026-08-31 (Window 3, operator-asked). Confirmed a TEST ARTIFACT, and
+> confirmed DORMANT — so it is a cleanup item, not a live exposure.**
+> Evidence, read from the live DB read-only: `users` row `id=13`, `role=admin`,
+> **`is_active=0`**, created `2026-08-01T17:35:40`, last login `2026-08-01T17:58:49` — a
+> 23-minute window. Every one of its 6 `login_events` rows is `curl/8.18.0` from `127.0.0.1`,
+> never a browser. The 2026-08-03 rows are a textbook lockout exercise: two `bad_password`
+> (tier 0) → `lockout_tier_1` → another `bad_password` at tier 1. The name says what it was
+> for. Zero `user_capability_unlocks`.
+> **Why it is dormant rather than a standing admin credential — verified in code, not assumed:**
+> `is_active` is enforced at three independent sites — the login path checks it *before* the
+> password comparison (`dashboard.py:2178`), Flask-Login's `is_active` property gates session
+> loading (`dashboard.py:683`), and `nemesis_fwd` refuses any peer whose row is not
+> `is_active` **and** `role == "admin"` (`nemesis_fwd.py:575`). So it cannot log in and cannot
+> drive a privileged op.
+> **Still worth removing:** it is an unexplained `role=admin` row carrying a real password hash,
+> and "inactive" is one accidental `is_active=1` away from being a live admin account nobody
+> remembers creating. Deleting it is a live-data change — snapshot first, per Rule 6.
 **Genuine user data that must NOT be swept:** the operator's own account (`<operator-user>`, 158
 rows) and two near-miss typo variants of it (1 row each, real failed logins). Those are genuine
 authentication history — and note they are *mistyped* versions of a real username, so a sweep
