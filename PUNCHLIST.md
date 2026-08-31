@@ -5460,6 +5460,50 @@ state (the route already returns `watcher_state` and a reason precisely so a UI 
 feature at all; (1) is the quality-of-life improvement on top. Doing (1) first would mean
 building a bulk flow that still has to be driven from a console.
 
+---
+
+> **⚠ REVISED 2026-08-31 (operator clarification) — (1) IS MUCH SMALLER THAN SCOPED, AND A
+> DIFFERENT GAP TOOK ITS PLACE.**
+>
+> **Proton is already covered by tonight's SINGLE enrollment.** All ~10 of the operator's Proton
+> addresses are ALIASES on ONE Proton account, across two attached custom domains. Proton Mail
+> Bridge exposes that account as one IMAP login, so the single credential enrolled tonight
+> already receives mail for every alias through the same INBOX. No second account, no second
+> credential, no repeat of the flow.
+>
+> **Batch enrollment therefore remains a real need only for GENUINELY SEPARATE accounts** — two
+> distinct Gmail accounts, a work mailbox on another provider, a second household member. It is
+> NOT the Proton multi-address case, which was the example that originally motivated it. Scope
+> (1) accordingly; the 5-enrollments-per-5-minutes rate-limit constraint above still applies,
+> just to a much rarer situation.
+>
+> **THE REAL GAP IS PER-MESSAGE ALIAS ATTRIBUTION, and it is currently total. Verified:**
+> - `email_message_verdicts` has **no recipient column at all** — it stores `sender_hash` and
+>   nothing about who the mail was addressed TO.
+> - `mime_parse` DOES capture `"to"` (`mime_parse.py:134`), so the data exists at parse time —
+>   but `fast_check` never reads it (grep for `to` in that module returns nothing), and
+>   `signals_json` persists `FastCheckResult.to_dict()` = `{signals, auth, problems}` only. **The
+>   recipient is parsed and then discarded.**
+> - `api_quarantine_list` returns no recipient field, so the UI could not show it even if stored.
+>
+> With one inbox now receiving mail for ~5 active addresses across 2 domains, a verdict that
+> cannot say WHICH address was targeted loses the single most useful triage signal — e.g. "every
+> phish this week hit the address only used for one vendor" is exactly the kind of finding this
+> feature should surface, and it is currently unanswerable.
+>
+> **⚠ AND `To:` IS THE WRONG HEADER FOR THIS — do not just persist the one already parsed.**
+> `To:` is what the SENDER wrote. For an aliased mailbox the reliable answer is the DELIVERY
+> header — `Delivered-To`, `X-Original-To`, or `Envelope-To` — which records the address the
+> server actually delivered to. `To:` can name a mailing list, a different alias, or be absent
+> entirely on a BCC. Storing `To:` and labelling it "delivered to" would be a plausible-looking
+> value from the wrong source, which is the shape this repo's standing SHAPE check exists to
+> catch. Capture the delivery header(s), fall back to `To:` explicitly labelled as a guess, and
+> record NULL rather than inventing an attribution when neither is present.
+>
+> **Revised sizing:** this is smaller than batch enrollment and worth more — one migration adding
+> a recipient column, capturing the delivery header in `mime_parse`, persisting it in
+> `record_verdict`, and surfacing it in `api_quarantine_list`.
+
 ### [MEDIUM] Deploy has no "which services must restart for which files" checklist — cost a live enrollment failure (found 2026-08-31)
 **Confirmed live, not theoretical.** Two fresh, valid enrollment codes were rejected on first
 use with the generic *"not valid, has already been used, or has expired"*. Root cause was NOT
