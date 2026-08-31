@@ -180,3 +180,82 @@ def resolve(provider, *, discovery=None, manual=None) -> dict:
     out = from_discovery(discovery)
     out.update(source="discovered", provider=CUSTOM)
     return out
+
+
+#: The trust anchor for a custom mailbox whose real authserv-id nobody has
+#: confirmed yet. RFC 2606 reserved, so it can never equal a real header's
+#: authserv-id: fast_check finds a mismatch, returns WITHOUT parsing the
+#: verdicts, and header_trusted stays False.
+#:
+#: ⛔ NOT DERIVED FROM THE ACCOUNT'S HOST, and that was a deliberate rejection
+#: rather than an omission (2026-08-31). A host-derived value is guessable
+#: (imap./mail.<domain>), and a self-hosted MTA that adds no
+#: Authentication-Results header of its own leaves the SENDER'S forged header
+#: topmost -- so a derived anchor would match the forgery and trust it. An
+#: unmatchable sentinel cannot be forged into; a guessable name can.
+CUSTOM_AUTHSERV_UNCONFIRMED = "custom-authserv-id-unconfirmed.invalid"
+
+
+def for_account(account: dict) -> dict:
+    """Effective connection + trust facts for a STORED account row.
+
+    ONE resolution point, because there were two and they disagreed about what
+    a custom provider even is: `supervisor._build_client` and the scan callback
+    both called `providers.get(row["provider"])`, which raises for anything not
+    in the table. The callback swallowed that and scanned nothing -- a mailbox
+    that looked enrolled, looked enabled, and silently never read a message.
+
+    THE ROW WINS FOR TRANSPORT, THE TABLE WINS FOR PRIVILEGE. Host, port and
+    tls_mode come from the row when set (the row is what enrollment actually
+    recorded, and a later providers.py edit must not silently redirect or
+    downgrade an existing mailbox). `allow_self_signed` is the exception and is
+    taken ONLY from the provider table: it is a privilege, Proton's loopback
+    Bridge is the only thing that legitimately needs it, and a row-settable
+    version would let an enrollment grant itself certificate-checking-off.
+    """
+    prov = None
+    key = (account.get("provider") or "").strip() or providers.DEFAULT_PROVIDER
+    if providers.is_connectable(key):
+        prov = providers.get(key)
+    else:
+        # Custom, or a provider that has since been removed/unsupported. Either
+        # way the row is all there is, and nothing here may grant a privilege.
+        key = CUSTOM
+
+    row_tls = (account.get("tls_mode") or "").strip() or None
+    tls = row_tls or (prov["tls_mode"] if prov else None)
+    if tls not in (providers.TLS_IMPLICIT, providers.TLS_STARTTLS):
+        # Fail loudly rather than defaulting. A wrong TLS mode is not a
+        # cosmetic error: defaulting to STARTTLS on a mailbox that needs
+        # implicit TLS would attempt a plaintext connect, and defaulting the
+        # other way fails the handshake. The caller records CONFIG_ERROR, which
+        # is visible, instead of a connection that "just does not work".
+        raise SettingsError(
+            "This mailbox has no usable TLS mode recorded (provider %r). It "
+            "needs to be re-enrolled." % key)
+
+    host = account.get("imap_host") or (prov["imap_host"] if prov else None)
+    port = account.get("imap_port") or (prov["imap_port"] if prov else None)
+    if not host or not port:
+        raise SettingsError(
+            "This mailbox has no server address recorded. It needs to be "
+            "re-enrolled.")
+
+    # NULL on the row means "not confirmed", which falls back to the provider's
+    # value -- itself an unmatchable sentinel for every provider whose real id
+    # has not been confirmed. So the default everywhere is "trust nothing".
+    authserv = (account.get("authserv_id") or "").strip() or None
+    if not authserv:
+        authserv = (prov.get("authserv_id") if prov
+                    else CUSTOM_AUTHSERV_UNCONFIRMED)
+
+    return {
+        "imap_host": host,
+        "imap_port": int(port),
+        "tls_mode": tls,
+        # Privilege: table only, never the row. False for custom, always.
+        "allow_self_signed": bool(prov["allow_self_signed"]) if prov else False,
+        "loopback_only": bool(prov["loopback_only"]) if prov else False,
+        "provider": key,
+        "authserv_id": authserv,
+    }

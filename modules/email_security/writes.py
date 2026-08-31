@@ -84,7 +84,8 @@ def get_account(address: str, mailbox: str = "INBOX"):
 def add_account(address: str, imap_host: str, credential_ref: str, *,
                 mailbox: str = "INBOX", provider: str = "gmail",
                 imap_port: int = 993, enabled: bool = False,
-                owner_user_id: int | None = None) -> None:
+                owner_user_id: int | None = None,
+                tls_mode: str | None = None) -> None:
     """Register (or re-register) one mailbox. Disabled unless asked otherwise.
 
     `credential_ref` NAMES a key in /etc/nemesis.env -- it is never the password
@@ -104,6 +105,13 @@ def add_account(address: str, imap_host: str, credential_ref: str, *,
         MODULE_NAME, "email_accounts",
         {"address": address, "provider": provider, "imap_host": imap_host,
          "imap_port": imap_port, "mailbox": mailbox,
+         # Recorded on the ROW so a self-hosted mailbox has a transport at all
+         # (providers.get("custom") raises) and so a later provider-table edit
+         # cannot silently downgrade an existing mailbox's TLS. NOT
+         # allow_self_signed -- that stays a provider-table privilege and is
+         # deliberately not settable from an enrollment. See
+         # settings_resolve.for_account().
+         "tls_mode": tls_mode,
          "credential_ref": credential_ref, "enabled": 1 if enabled else 0,
          "created_at": _now(), "created_actor": dm.current_actor(),
          # ⚠ WAS NEVER WRITTEN UNTIL 2026-08-31, and the enrollment route's own
@@ -124,8 +132,58 @@ def add_account(address: str, imap_host: str, credential_ref: str, *,
         # the caller (see get_account), not here -- this function has no way to
         # know whether the caller is authorised, and a guess either direction
         # would be wrong.
+        # `tls_mode` IS updatable -- a re-enrollment that moves a mailbox to a
+        # different transport must actually move it, or the row would keep a
+        # stale mode and fail the handshake.
+        #
+        # `authserv_id` is deliberately ABSENT from both the values and this
+        # list, and the two halves matter separately: absent from values means a
+        # NEW row starts NULL, which resolves to an unmatchable sentinel and
+        # trusts nothing (fail closed). Absent from the update list means an
+        # admin's CONFIRMED anchor survives an ordinary re-enrollment, which is
+        # right -- rotating an app password does not change who signs the
+        # provider's Authentication-Results header. ⚠ Moving a mailbox to a
+        # different PROVIDER is the case that invalidates it; clear it
+        # explicitly with set_account_authserv_id(None) if that happens.
         update=["provider", "imap_host", "imap_port", "credential_ref",
-                "enabled", "owner_user_id"])
+                "enabled", "owner_user_id", "tls_mode"])
+
+
+def set_account_authserv_id(address: str, authserv_id, *,
+                            mailbox: str = "INBOX") -> int:
+    """Record (or clear) the CONFIRMED Authentication-Results identity.
+
+    THE ONLY WAY THIS VALUE IS EVER SET, and it is set from OBSERVATION, never
+    derivation. The workflow it completes:
+
+      1. A mailbox scans with an unconfirmed anchor, so fast_check finds a
+         mismatch and refuses to read the header's verdicts.
+      2. The mismatch is recorded as `authserv_id_mismatch:<the real id>` in
+         email_message_verdicts.auth_problems -- that record exists precisely
+         so the true value can be read off a real message.
+      3. An admin reads it, confirms it belongs to the provider, and calls this.
+
+    ⛔ DO NOT DERIVE THIS FROM THE ACCOUNT'S IMAP HOST. Considered and rejected
+    2026-08-31: an IMAP hostname is guessable, and a self-hosted MTA that adds
+    no Authentication-Results header of its own leaves the SENDER'S forged
+    header topmost -- so a derived anchor would match the forgery and cause it
+    to be trusted. The unconfirmed sentinel cannot be matched by any real
+    header. "We do not know" must resolve to "trust nothing", not to a
+    plausible guess.
+
+    Passing None CLEARS it, returning the mailbox to the fail-closed default.
+    """
+    value = (authserv_id or "").strip() or None
+    dm = get_data_manager()
+    conn = dm.connect(MODULE_NAME)
+    try:
+        cur = conn.execute(
+            "UPDATE email_accounts SET authserv_id = ? "
+            " WHERE address = ? AND mailbox = ?", (value, address, mailbox))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
 
 
 def set_account_enabled(address: str, enabled: bool, *,

@@ -29,7 +29,7 @@ from modules.email_security import providers as P            # noqa: E402
 from modules.email_security import settings_resolve as S     # noqa: E402
 
 
-EXPECTED_CHECKS = 48
+EXPECTED_CHECKS = 69
 
 _results = []
 
@@ -172,6 +172,84 @@ def main():
     check("what the owner typed wins over what was detected",
           both["imap_host"], "typed.example.net")
     check("...and the source says so", both["source"], "manual")
+
+    print("\nfor_account(): one resolution point for a STORED row")
+    known = S.for_account({"provider": "gmail", "imap_host": "imap.gmail.com",
+                           "imap_port": 993, "tls_mode": "implicit"})
+    check("known provider resolves", known["imap_host"], "imap.gmail.com")
+    check("...tls from the row", known["tls_mode"], "implicit")
+    check("...provider key preserved", known["provider"], "gmail")
+    check("proton keeps its self-signed PRIVILEGE (table, not row)",
+          S.for_account({"provider": "proton", "imap_host": "127.0.0.1",
+                         "imap_port": 1143,
+                         "tls_mode": "starttls"})["allow_self_signed"], True)
+
+    custom_row = {"provider": "custom", "imap_host": "mail.example.com",
+                  "imap_port": 993, "tls_mode": "implicit"}
+    cust = S.for_account(custom_row)
+    check("a CUSTOM row resolves at all (it used to raise KeyError)",
+          cust["imap_host"], "mail.example.com")
+    check("...provider normalises to 'custom'", cust["provider"], S.CUSTOM)
+    check("...and self-signed is FALSE for custom, always",
+          cust["allow_self_signed"], False)
+    # allow_self_signed is a privilege and must not be grantable by the row.
+    check("a row CANNOT grant itself allow_self_signed",
+          S.for_account(dict(custom_row, allow_self_signed=True))
+          ["allow_self_signed"], False)
+    check("a row cannot grant itself loopback_only either",
+          S.for_account(dict(custom_row, loopback_only=True))
+          ["loopback_only"], False)
+
+    print("\nauthserv_id: the trust anchor, and it is NEVER falsy")
+    check("custom with no confirmed id -> the unmatchable sentinel",
+          cust["authserv_id"], S.CUSTOM_AUTHSERV_UNCONFIRMED)
+    check("...and that sentinel is RFC 2606 .invalid (cannot be a real id)",
+          S.CUSTOM_AUTHSERV_UNCONFIRMED.endswith(".invalid"), True)
+    check("known provider with no row value -> the PROVIDER's id",
+          known["authserv_id"], "mx.google.com")
+    check("an unconfirmed provider still yields a sentinel, not None",
+          S.for_account({"provider": "yahoo",
+                         "imap_host": "imap.mail.yahoo.com",
+                         "imap_port": 993,
+                         "tls_mode": "implicit"})["authserv_id"].endswith(
+                             ".invalid"), True)
+    check("a CONFIRMED row value wins (the admin-observed real id)",
+          S.for_account(dict(custom_row,
+                             authserv_id="mx.example.com"))["authserv_id"],
+          "mx.example.com")
+    check("an empty-string row value does NOT become falsy -- "
+          "falsy would make fast_check trust ANY header",
+          bool(S.for_account(dict(custom_row, authserv_id=""))["authserv_id"]),
+          True)
+    check("...it falls back to the sentinel",
+          S.for_account(dict(custom_row, authserv_id="  "))["authserv_id"],
+          S.CUSTOM_AUTHSERV_UNCONFIRMED)
+    # THE property, stated as one assertion over every shape a row can take.
+    _rows = [{"provider": p, "imap_host": "h.example.com", "imap_port": 993,
+              "tls_mode": "implicit", "authserv_id": a}
+             for p in ("gmail", "proton", "yahoo", "icloud", "fastmail",
+                       "custom", "", "since-removed")
+             for a in (None, "", "   ")]
+    check("NO row shape yields a falsy authserv_id",
+          [r for r in _rows if not S.for_account(r)["authserv_id"]], [])
+
+    print("\nfor_account(): fails LOUDLY rather than defaulting")
+    check("a row with no usable tls_mode raises, it does not guess",
+          _refused(lambda: S.for_account({"provider": "custom",
+                                          "imap_host": "mail.example.com",
+                                          "imap_port": 993})), True)
+    check("a row with a junk tls_mode raises",
+          _refused(lambda: S.for_account(dict(custom_row,
+                                              tls_mode="whatever"))), True)
+    check("a custom row with no host raises",
+          _refused(lambda: S.for_account({"provider": "custom",
+                                          "imap_port": 993,
+                                          "tls_mode": "implicit"})), True)
+    check("a row naming a provider REMOVED from the table falls back to "
+          "custom rather than raising",
+          S.for_account({"provider": "some-old-provider",
+                         "imap_host": "mail.example.com", "imap_port": 993,
+                         "tls_mode": "implicit"})["provider"], S.CUSTOM)
 
     print("\nCONTROL: the refusal helper can distinguish pass from fail")
     check("CONTROL a valid call is NOT reported as refused",

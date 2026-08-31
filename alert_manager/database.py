@@ -1904,6 +1904,38 @@ def init_email_security_tables():
         for _col in ("owner_user_id", "enrolled_by_user_id"):
             if _col not in _acct_cols:
                 c.execute("ALTER TABLE email_accounts ADD COLUMN %s INTEGER" % _col)
+        # ── Per-account transport + trust identity (Tier 3 custom domains) ───
+        #
+        # `tls_mode` USED TO COME FROM providers.py AT CONNECT TIME, and that is
+        # why a self-hosted mailbox could not exist: providers.get("custom")
+        # raises by design, so both the client build AND the scan callback threw
+        # on any account that was not one of the known providers -- the callback
+        # swallowing it and scanning nothing at all. Host and port already lived
+        # on the row for the documented reason that a provider-table edit must
+        # not silently redirect an existing mailbox; tls_mode simply had not
+        # followed them yet.
+        #
+        # `authserv_id` IS A TRUST ANCHOR, NOT A SETTING, and it is NULL by
+        # design. fast_check believes the topmost Authentication-Results header
+        # only if its authserv-id matches this value, so:
+        #   NULL  -> fall back to the provider's value, which for every
+        #            unconfirmed provider is an RFC 2606 `.invalid` sentinel
+        #            that can NEVER match. Nothing is trusted. Fails closed.
+        #   set   -> an ADMIN has read the real id off a received message (it is
+        #            recorded as `authserv_id_mismatch:<id>` in
+        #            email_message_verdicts.auth_problems for exactly this
+        #            purpose) and confirmed it.
+        #
+        # ⛔ IT IS DERIVED FROM NOTHING. Deriving it from the account's own IMAP
+        # host was considered and REJECTED 2026-08-31: the IMAP hostname is
+        # guessable (imap./mail.<domain>), and a self-hosted MTA that adds no
+        # Authentication-Results header of its own leaves the sender's forged
+        # header topmost -- so a derived value would MATCH a forgery and flip
+        # header_trusted to True. The sentinel cannot be matched by any real
+        # header; a guessable name can. Observation, never derivation.
+        for _col in ("tls_mode", "authserv_id"):
+            if _col not in _acct_cols:
+                c.execute("ALTER TABLE email_accounts ADD COLUMN %s TEXT" % _col)
 
         # ── Enrollment requests (ADR 0028 D11.5 Option C, ruled 2026-08-29) ──
         #

@@ -397,9 +397,19 @@ class MailboxSupervisor:
             return
 
         try:
-            authserv = providers.get(
-                w.account.get("provider") or providers.DEFAULT_PROVIDER
-            ).get("authserv_id")
+            # Same resolution point as _build_client. This used to call
+            # providers.get() directly, which raises for a custom provider --
+            # and the handler below swallowed it, so a self-hosted mailbox
+            # scanned NOTHING while reporting a healthy connected watcher.
+            #
+            # The anchor is NULL-on-row -> provider value -> unmatchable
+            # sentinel. "We have not confirmed this provider's identity" and
+            # "this is a custom domain" both end at a value no real header can
+            # equal, so fast_check finds a mismatch and refuses to read the
+            # verdicts. Never a falsy value, which would make it trust ANY
+            # Authentication-Results header, including a forged one.
+            from . import settings_resolve                        # noqa: PLC0415
+            authserv = settings_resolve.for_account(w.account)["authserv_id"]
             result = fast_check.check(parsed, expect_authserv_id=authserv)
         except Exception as exc:                                 # noqa: BLE001
             log.error("email_security: check failed for account %s uid %s: %s",
@@ -475,7 +485,8 @@ def _load_enabled_accounts() -> list:
     try:
         cur = conn.execute(
             "SELECT id, address, provider, imap_host, imap_port, mailbox, "
-            "       credential_ref FROM email_accounts WHERE enabled=1")
+            "       credential_ref, tls_mode, authserv_id "
+            "  FROM email_accounts WHERE enabled=1")
         cols = [d[0] for d in cur.description]
         return [dict(zip(cols, r)) for r in cur.fetchall()]
     finally:
@@ -491,22 +502,28 @@ def _build_client(account: dict, on_message):
     an authentication error and send someone to check a password that was never
     stored.
     """
-    from . import credential_store, imap_idle, providers         # noqa: PLC0415
+    from . import credential_store, imap_idle                    # noqa: PLC0415
+    from . import settings_resolve                                # noqa: PLC0415
 
-    prov = providers.get(account.get("provider") or providers.DEFAULT_PROVIDER)
+    # ONE resolution point, shared with the scan callback. Previously this and
+    # the callback each did providers.get(row["provider"]) independently, which
+    # raises for a custom/self-hosted mailbox -- here it surfaced as
+    # CONFIG_ERROR, there it was swallowed and the message silently not scanned.
+    cfg = settings_resolve.for_account(account)
     secret = credential_store.get_secret(account["credential_ref"])
 
     return imap_idle.ImapIdleClient(
         account["address"], secret,
-        # The ACCOUNT's stored host/port win over the provider defaults: the row
-        # is what enrollment actually recorded, and a provider table edited later
-        # must not silently redirect an existing mailbox somewhere else.
-        host=account.get("imap_host") or prov["imap_host"],
-        port=int(account.get("imap_port") or prov["imap_port"]),
+        # Transport comes from the ROW (what enrollment actually recorded, so a
+        # later providers.py edit cannot redirect or downgrade an existing
+        # mailbox); allow_self_signed comes from the provider TABLE only,
+        # because it is a privilege and not a setting. See for_account().
+        host=cfg["imap_host"],
+        port=cfg["imap_port"],
         mailbox=account.get("mailbox") or "INBOX",
         on_message=on_message,
-        tls_mode=prov["tls_mode"],
-        allow_self_signed=prov["allow_self_signed"],
-        provider=prov["key"],
+        tls_mode=cfg["tls_mode"],
+        allow_self_signed=cfg["allow_self_signed"],
+        provider=cfg["provider"],
         strip_inner_whitespace=prov.get("strip_inner_whitespace", True),
     )
