@@ -222,7 +222,7 @@ _LOCKOUT_TIERS = ((3, 5), (5, 15), (10, 60))
 
 # Operations that only READ firewall state. Everything else is a write and can
 # never be satisfied from cache.
-READ_OPS = {"list_blocked", "list_rules"}
+READ_OPS = {"list_blocked", "list_rules", "list_port_grants"}
 # Keep this set exactly equal to the write ops that EXIST in OPS below. `add_rule`
 # and `remove_rule` were listed here until 2026-07-29 without ever being
 # implemented, appearing in OPS, or being granted to any peer — a declared-but-
@@ -233,7 +233,7 @@ READ_OPS = {"list_blocked", "list_rules"}
 # of every ufw chain), so there is no route op for these names to become.
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
              "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
-             "gateway_switch"}
+             "gateway_switch", "request_port", "release_port"}
 # `failsafe_revert` carries no session credential BECAUSE the admin may be unable
 # to log in -- the firewall change under test can be what broke their path to the
 # dashboard. The revert TOKEN is the credential, validated inside
@@ -297,6 +297,13 @@ AUDIT_ACTION = {
     # (forwarding + source-NAT), which is neither a firewall rule change nor
     # a service lifecycle event, and wants to be findable as its own thing.
     "gateway_switch":    "net_gateway_switch",
+    # port_ rather than fw_: the broker is its own surface and its
+    # events must be prefix-filterable on their own. Amendment 01 §5.3
+    # taught this -- folding a frequent new class into firewall-tamper
+    # alerting duplicates one subsystem's bounding with another's noise.
+    "request_port":      "port_request",
+    "release_port":      "port_release",
+    "list_port_grants":  "port_list",
     "restart_dashboard": "svc_restart_dashboard",
     # mem_ rather than fw_ or svc_: this is neither a firewall operation nor a
     # service lifecycle one. Filing it under fw_* would mislead anyone reading
@@ -370,7 +377,12 @@ PEER_POLICY = {
                 # private IPv4. It is NOT a general forwarding or NAT primitive.
                 # No unattended peer has it, and none should: there is no
                 # scenario where an automated watcher should re-role the box.
-                "gateway_switch"},
+                "gateway_switch",
+                # Port broker. Dashboard ONLY: unattended peers have no
+                # human to weigh a grant and no business opening a
+                # listening port. Enforced again in port_policy's own
+                # peer check, deliberately -- two independent refusals.
+                "request_port", "release_port", "list_port_grants"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -2082,6 +2094,231 @@ def op_gateway_switch(params):
     return result
 
 
+# ── Port broker: issuing what the evaluator decided ──────────────────────────
+#
+# Step 2 of the two-step build (operator, 2026-08-31): the evaluator decides, this
+# issues. `port_policy` is PURE and cannot reach the network; everything
+# privileged lives here, and this file supplies it the true state it cannot read.
+#
+# ⚠ ufw, NOT THE RAW TABLE, AND THAT IS MEASURED. On a VM with a ts-input-shaped
+# blanket ACCEPT at INPUT position 1: `ufw allow` reached the listener, a
+# raw-table PREROUTING ACCEPT did NOT (raw only skips conntrack; it does not
+# bypass filter INPUT, so the packet still met ufw's -P INPUT DROP). This is the
+# OPPOSITE of op_deny_port_on_interface, which uses the raw table precisely
+# because ts-input's ACCEPT made a ufw deny unreachable. Same two mechanisms,
+# opposite correct answers, because a DENY must run before ufw and an ALLOW must
+# run inside it. Do not "unify" them.
+#
+# ⚠ ts-input measured 0 packets throughout, because it matches `-i tailscale0`
+# and LAN-arriving traffic never reaches it. The deny case broke on tailscale0;
+# this one is on the LAN. Different interface, different outcome.
+#
+# ⚠ GRANTS ARE PERSISTENT (operator decision). No lease, no expiry: a renewal that
+# fails would close a port under a running service. The registry is therefore the
+# ONLY record of what is open, which is why list_port_grants exists from day one --
+# a surface nobody can enumerate cannot be audited.
+
+#: Interfaces a port may be OPENED on. A SEPARATE list from DENY_IFACE_ALLOWED,
+#: deliberately: those govern where we may DROP (tailscale0), and reusing them
+#: would silently make "somewhere we may deny" mean "somewhere we may open",
+#: which are different powers with different blast radii. Default is the Gateway
+#: Mode LAN interface only, read from config -- never the uplink, and never a
+#: hardcoded guess. An empty list means the broker grants nothing, which is the
+#: correct behaviour for an unconfigured box.
+def _port_grant_ifaces():
+    # ⚠ _read_env_values returns (values, READABLE) -- not a dict. The second
+    # element exists precisely because `{}` conflates "absent" with "unreadable",
+    # and here those must NOT be conflated: an unreadable env means we do not know
+    # which interface is the LAN, and granting a port on an interface we cannot
+    # identify is the failed-read-as-default defect with a network surface.
+    # Unreadable therefore yields NO interfaces, i.e. the broker grants nothing.
+    env, readable = _read_env_values(NEMESIS_ENV_PATH, ("NEMESIS_GW_LAN_IFACE",))
+    if not readable:
+        log.warning("fwd: cannot read %s -- port broker will grant NOTHING until "
+                    "the LAN interface can be determined", NEMESIS_ENV_PATH)
+        return []
+    lan = env.get("NEMESIS_GW_LAN_IFACE")
+    extra = [x for x in os.environ.get("NEMESIS_PORT_IFACES", "").split(",") if x]
+    return sorted({x for x in ([lan] if lan else []) + extra if x})
+
+
+PORT_GRANTS_PATH = os.environ.get("NEMESIS_PORT_GRANTS",
+                                  "/var/lib/nemesis/port-grants.json")
+
+#: CORE-REVIEWED hand-placed grants. THIRD-PARTY modules are never auto-granted;
+#: they need an entry here, added by someone who can weigh it. This is the same
+#: doctrine as dashboard.py's _AUTH_EXEMPT: the module system must not hand a
+#: dangerous capability to authors outside core review via a manifest key.
+#:
+#: Adding an entry is a security decision. Each one must name the module, the
+#: exact port/iface/proto, and why.
+HAND_PLACED_PORT_GRANTS = [
+    # L3 Tier 2 inspection gate. Steered traffic is redirected to this port on the
+    # LAN interface; without it the redirect lands on a closed port and every
+    # steered connection fails. Evaluated by port_policy before being placed here.
+    # {"module": "core.tier2_gate", "iface": "<lan-iface>", "port": 8443,
+    #  "proto": "tcp"},
+]
+
+
+def _load_port_grants():
+    """Registry of live grants. A read failure is EMPTY-AND-LOUD, never silent."""
+    try:
+        with open(PORT_GRANTS_PATH) as fh:
+            data = json.load(fh)
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception as exc:                                 # noqa: BLE001
+        # Do NOT treat an unreadable registry as "no grants": that would let a
+        # corrupt file silently re-grant a port already held by someone else, and
+        # conflict detection would be evaluating against a world that is not real.
+        raise Denied("io_failed",
+                     "port grant registry %s is unreadable (%r) -- refusing to "
+                     "evaluate against unknown state" % (PORT_GRANTS_PATH, exc))
+
+
+def _save_port_grants(grants):
+    """Atomic write. A torn registry is a lost record of what is open."""
+    tmp = PORT_GRANTS_PATH + ".tmp"
+    os.makedirs(os.path.dirname(PORT_GRANTS_PATH), exist_ok=True)
+    with open(tmp, "w") as fh:
+        json.dump(grants, fh, indent=2)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, PORT_GRANTS_PATH)
+
+
+def _current_denies():
+    """(iface, port, proto) currently DROPped by this helper's deny op.
+
+    Derived from the same allowlists the deny op is bounded by, so the two cannot
+    disagree about what a deny even is.
+    """
+    out = []
+    for iface in sorted(DENY_IFACE_ALLOWED):
+        for port in sorted(DENY_PORT_ALLOWED):
+            rule = ["-i", iface, "-p", "tcp", "--dport", str(port), "-j", "DROP"]
+            rc, _o, _e = _run_iptables(IPTABLES_BIN, "-t", "raw", "-C",
+                                       "PREROUTING", *rule)
+            if rc == 0:
+                out.append((iface, port, "tcp"))
+    return out
+
+
+def _port_policy():
+    import port_policy                                       # noqa: PLC0415
+    return port_policy
+
+
+def _lan_cidr_or_none():
+    """The gateway LAN CIDR, or None when it cannot be determined.
+
+    Returns None for BOTH absent and unreadable, which is safe here only because
+    the evaluator refuses a request whose LAN is unknown. If that check were ever
+    relaxed, this collapse would become a real hole -- noted so the coupling is
+    visible rather than incidental.
+    """
+    env, readable = _read_env_values(NEMESIS_ENV_PATH, ("NEMESIS_GW_LAN_CIDR",))
+    if not readable:
+        log.warning("fwd: cannot read %s -- treating gateway LAN as UNKNOWN; "
+                    "port requests will be refused", NEMESIS_ENV_PATH)
+        return None
+    return env.get("NEMESIS_GW_LAN_CIDR")
+
+
+def op_request_port(params):
+    """Evaluate a port request and, if granted, open it via ufw.
+
+    ⚠ THE DECISION IS ALWAYS AUDITED, GRANT OR DENY. A surface with no logged
+    denials is indistinguishable from one nobody attacked -- the same requirement
+    the _AUTH_EXEMPT hardening checklist places on every exempt route. The audit
+    row carries which check refused, not merely that something did.
+    """
+    pp = _port_policy()
+    p = params or {}
+    req = pp.Request(module=p.get("module"), tier=p.get("tier"),
+                     port=p.get("port"), iface=p.get("iface"),
+                     source_cidr=p.get("source_cidr"),
+                     purpose=p.get("purpose"), proto=(p.get("proto") or "tcp"),
+                     peer="dashboard")
+    grants = _load_port_grants()
+    decision = pp.evaluate(req, {
+        "allowed_ifaces": _port_grant_ifaces(),
+        # Same tuple contract. An unreadable env yields lan_cidr=None, and
+        # port_policy's source_within_lan check REFUSES on a missing LAN rather
+        # than passing -- so unknown fails closed by construction, not by luck.
+        "lan_cidr": _lan_cidr_or_none(),
+        "existing_denies": _current_denies(),
+        "existing_grants": grants,
+        "hand_placed": HAND_PLACED_PORT_GRANTS,
+    })
+    result = decision.as_dict()
+    log.info("fwd: port request %s -> %s", req.as_dict(), decision.summary())
+
+    if not decision.allowed:
+        # Refusals are a RESULT, not an exception: the caller needs the trail.
+        return result
+
+    already = [g for g in grants
+               if (g.get("iface"), g.get("port"), g.get("proto"))
+               == (req.iface, req.port, req.proto)
+               and g.get("module") == req.module]
+    if already:
+        result["idempotent"] = True
+        return result
+
+    rc, out, err = _run_ufw("allow", "from", req.source_cidr, "to", "any",
+                            "port", str(req.port), "proto", req.proto)
+    if rc != 0:
+        raise Denied("io_failed", "ufw allow failed (rc=%d): %s"
+                     % (rc, (err or out or "").strip()[:200]))
+    grants.append({"module": req.module, "iface": req.iface, "port": req.port,
+                   "proto": req.proto, "source_cidr": req.source_cidr,
+                   "purpose": req.purpose, "tier": req.tier,
+                   "granted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+    _save_port_grants(grants)
+    result["issued"] = True
+    return result
+
+
+def op_release_port(params):
+    """Release a grant. ONLY its owner may. Removes the rule, then the record."""
+    p = params or {}
+    module, iface = p.get("module"), p.get("iface")
+    proto = (p.get("proto") or "tcp")
+    try:
+        port = int(p.get("port"))
+    except (TypeError, ValueError):
+        raise Denied("bad_request", "port must be an integer")
+
+    grants = _load_port_grants()
+    mine = [g for g in grants
+            if g.get("module") == module and g.get("iface") == iface
+            and g.get("port") == port and g.get("proto") == proto]
+    if not mine:
+        # NOT an error: releasing something you do not hold is a no-op. But it must
+        # not remove somebody else's rule, which is why the match includes module.
+        return {"released": False, "reason": "no such grant held by %r" % (module,)}
+
+    rc, out, err = _run_ufw("delete", "allow", "from", mine[0].get("source_cidr"),
+                            "to", "any", "port", str(port), "proto", proto)
+    if rc != 0:
+        raise Denied("io_failed", "ufw delete failed (rc=%d): %s"
+                     % (rc, (err or out or "").strip()[:200]))
+    _save_port_grants([g for g in grants if g not in mine])
+    return {"released": True, "module": module, "port": port}
+
+
+def op_list_port_grants(_params):
+    """Enumerate every live grant. Exists from day one: a surface nobody can
+    enumerate cannot be audited, which is how the old static allowlist became the
+    only visible record of the port surface."""
+    return {"grants": _load_port_grants(),
+            "hand_placed": HAND_PLACED_PORT_GRANTS,
+            "registry": PORT_GRANTS_PATH}
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
     "reclaim_shm": op_reclaim_shm,
@@ -2099,6 +2336,9 @@ OPS = {
     "failsafe_revert": op_failsafe_revert,
     "write_email_secret": op_write_email_secret,
     "gateway_switch": op_gateway_switch,
+    "request_port": op_request_port,
+    "release_port": op_release_port,
+    "list_port_grants": op_list_port_grants,
 }
 
 
