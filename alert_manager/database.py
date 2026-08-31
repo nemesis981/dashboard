@@ -1925,6 +1925,35 @@ def init_email_security_tables():
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_enroll_owner "
                   "ON email_enrollment_requests(owner_user_id)")
+
+        # ── Credential slot sequence (ADR 0028 D11.5 Option C, 2026-08-31) ──
+        #
+        # Allocates the N in `EMAIL_SEC_APPPW_<N>`, the key naming this mailbox's
+        # app password in /etc/nemesis-email-secrets.env.
+        #
+        # A SEQUENCE RATHER THAN max(existing)+1, and the difference is a real
+        # bug rather than a style preference. Two household members completing
+        # their enrollment links at the same moment would both read the same
+        # max, both pick the same slot, and the second write would SILENTLY
+        # OVERWRITE the first person's credential -- leaving a mailbox whose
+        # stored password authenticates someone else's account. `next_sequence`
+        # (ADR 0006) allocates with no read-modify-write window, which is the
+        # same reasoning that produced the tickets_seq fix.
+        #
+        # NOT the account row's id: the slot must be known BEFORE the account row
+        # exists, because the credential is written first and the row records
+        # which slot holds it.
+        #
+        # Monotonic, never reused. A slot freed by a removed mailbox stays
+        # retired rather than being handed to the next enrollment -- reuse would
+        # mean a stale credential file entry could be inherited by a different
+        # person's mailbox.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS email_credential_seq (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                next_number INTEGER NOT NULL
+            )
+        """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_verdicts_sender "
                   "ON email_message_verdicts(account_id, sender_hash)")
 

@@ -187,6 +187,33 @@ def create_enrollment_request(token_hash: str, owner_user_id: int, *,
         update=None)
 
 
+def allocate_credential_slot() -> int:
+    """Atomically reserve the next `EMAIL_SEC_APPPW_<N>` slot. Returns N.
+
+    ⚠ NOT `max(existing) + 1`, AND THE DIFFERENCE IS A REAL BUG, NOT A STYLE
+    CHOICE. Two household members completing their enrollment links at the same
+    moment would both read the same maximum, both pick the same slot, and the
+    second write would SILENTLY OVERWRITE the first person's app password --
+    leaving a mailbox whose stored credential belongs to somebody else's account.
+    Nothing about that failure is visible at write time; it surfaces later as an
+    unexplained auth failure on a mailbox nobody touched.
+
+    `next_sequence` (ADR 0006) allocates with no read-modify-write window. It is
+    the same primitive, for the same reason, as the `tickets_seq` v0 fix.
+
+    Allocation is MONOTONIC AND SLOTS ARE NEVER REUSED. A slot freed by a removed
+    mailbox stays retired rather than being handed to the next enrollment: reuse
+    would let a stale entry left in the credential file be inherited by a
+    different person's mailbox.
+
+    The caller must convert this to a key with `credential_store.slot_ref()`,
+    which enforces the same 0-999 range the privileged writer's regex allows.
+    Exhausting the range raises there rather than producing a key the writer
+    would refuse after the enrollment code has already been spent.
+    """
+    return get_data_manager().next_sequence(MODULE_NAME, "email_credential_seq")
+
+
 def consume_enrollment_request(token_hash: str, now_iso: str) -> bool:
     """ATOMICALLY consume one enrollment request. True only if THIS call won it.
 
