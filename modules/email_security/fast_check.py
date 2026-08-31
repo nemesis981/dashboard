@@ -304,28 +304,58 @@ def signals(parsed) -> dict:
 
     forms = 0
     anchors: list = []
+    #: Set to the exception type name when the HTML could not be parsed. NOT a
+    #: bool: the type is what tells a reader whether this was a malformed body,
+    #: a MemoryError on a huge one, or a defect in _Extract.
+    html_failed = None
     if html:
         try:
             p = _Extract()
             p.feed(html)
             forms, anchors = p.forms, p.anchors
-        except Exception:                                      # noqa: BLE001
-            # A malformed HTML body is normal, not exceptional. Recorded by the
-            # caller via `problems`; the signal simply does not fire.
-            pass
+        except Exception as exc:                               # noqa: BLE001
+            # ⛔ A FAILED PARSE MUST NOT LOOK LIKE A CLEAN ONE.
+            #
+            # This used to `pass`, with a comment claiming the caller recorded
+            # it via `problems`. It did not -- `signals()` has no problems
+            # channel and its caller only records something when signals()
+            # RAISES, which this handler prevented. So the failure was recorded
+            # nowhere and `has_form` returned {fired: False, substrate: True}:
+            # byte-identical to "we parsed the body and there was no form".
+            # A phishing form in a body the parser choked on scored clean, and
+            # `substrate` -- the field whose entire purpose is to separate "did
+            # not fire" from "was not tested" -- asserted the opposite of the
+            # truth. Confirmed by reproduction 2026-08-31 before this fix.
+            html_failed = type(exc).__name__
 
     shortener = any(_host(h) in SHORTENERS for h, _ in anchors) or \
         any(_host(u) in SHORTENERS for u in urls)
 
-    return {
-        "has_form": {"fired": forms > 0, "substrate": bool(html)},
+    out = {
+        # substrate is False when the parse failed: the body existed but the
+        # signal was NOT tested against it.
+        "has_form": {"fired": forms > 0,
+                     "substrate": bool(html) and html_failed is None},
         "urgent_subject": {
             "fired": any(w in subject.lower() for w in URGENT_WORDS),
             "substrate": bool(subject),
         },
+        # `urls` come from mime_parse, not from this parser, so a failed HTML
+        # parse leaves the url half genuinely tested and the anchor half not.
+        # substrate stays honest on its own (anchors is empty), but `fired` can
+        # be a FALSE NEGATIVE -- a shortener present only in an <a href> was
+        # never looked at -- so the problem is attached here too.
         "url_shortener": {"fired": shortener,
                           "substrate": bool(urls or anchors)},
     }
+    if html_failed:
+        # Attached INSIDE the affected signals rather than as a new top-level
+        # key: `_canary()` iterates this dict's values and reads v["fired"] on
+        # each, so a value of a different shape would break the self-test that
+        # runs on every import.
+        out["has_form"]["problem"] = "html_parse_failed:%s" % html_failed
+        out["url_shortener"]["problem"] = "html_parse_failed:%s" % html_failed
+    return out
 
 
 def check(parsed, resolver=None,
@@ -343,6 +373,14 @@ def check(parsed, resolver=None,
 
     try:
         out.signals = signals(parsed)
+        # A signal that could not be TESTED reports its reason inside itself
+        # (see signals()). Lift those onto the result's problems list, which is
+        # what the rest of the pipeline actually reads -- without this the
+        # degradation is visible only to someone inspecting signals_json by eye.
+        for _name, _sig in (out.signals or {}).items():
+            _problem = isinstance(_sig, dict) and _sig.get("problem")
+            if _problem:
+                out.problems.append("signal:%s:%s" % (_name, _problem))
     except Exception as exc:                                   # noqa: BLE001
         out.problems.append("signals_failed:%s" % type(exc).__name__)
         out.signals = {}
@@ -397,6 +435,33 @@ def selftest() -> tuple[bool, str]:
         if not p[name]["fired"]:
             return False, "canary: %s did not fire on a message that should trip it" % name
 
+    # A FAILED HTML PARSE MUST NOT BE INDISTINGUISHABLE FROM A CLEAN ONE.
+    # This is the canary for the bug fixed 2026-08-31: the swallow used to
+    # leave substrate=True, so a phishing form in an unparseable body reported
+    # exactly like a body with no form in it. Checked here, on every import,
+    # rather than only in the suite -- the same reasoning as the rest of these.
+    class _Boom(_Extract):
+        def feed(self, data):
+            raise ValueError("canary: forced parse failure")
+
+    _saved, globals()["_Extract"] = _Extract, _Boom
+    try:
+        broke = signals(pos)
+    finally:
+        globals()["_Extract"] = _saved
+    if broke["has_form"]["substrate"]:
+        return False, ("canary: a FAILED html parse still reported "
+                       "has_form.substrate=True -- untested reads as tested")
+    if not broke["has_form"].get("problem"):
+        return False, ("canary: a failed html parse recorded no problem, so "
+                       "the degradation is invisible to the caller")
+    # ...and the control for that control: a HEALTHY parse must still report
+    # substrate True and carry no problem, or the two checks above would pass
+    # for the trivial reason that nothing ever has substrate.
+    if not p["has_form"]["substrate"] or p["has_form"].get("problem"):
+        return False, ("canary: a healthy parse did not report substrate=True "
+                       "without a problem -- the parse-failure canary is vacuous")
+
     # A forged Authentication-Results must NOT be trusted.
     forged = parse_authentication_results(
         ["evil.example; spf=pass dkim=pass dmarc=pass"])
@@ -407,5 +472,6 @@ def selftest() -> tuple[bool, str]:
     if not good.header_trusted or good.spf != "pass" or good.dkim != "fail":
         return False, "canary: a legitimate Authentication-Results was misread"
 
-    return True, ("8 canaries pass (3 must-fire, 3 must-not-fire, "
+    return True, ("11 canaries pass (3 must-fire, 3 must-not-fire, "
+                  "parse-failure not mistaken for clean +2 and its control, "
                   "forged-header rejected, genuine header read)")

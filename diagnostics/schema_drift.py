@@ -101,16 +101,30 @@ def _repo_root():
 
 
 def _resolve_db():
-    """Shared DB location, via the canonical resolver. Same idiom as the other
-    DB-reading checks in this package (alert_summary/anomaly_state)."""
+    """(path, problem). `problem` is None only when the CANONICAL resolver ran.
+
+    ⛔ THE SILENT FALLBACK THIS REPLACES COULD AUDIT THE WRONG DATABASE, and
+    the failure was invisible in the output. `except: return legacy` handed
+    back `alert_manager/alerts.db` — the pre-2026-07-27 location. Measured on
+    this box 2026-08-31: that path still exists as a **0-byte file**, SQLite
+    opens a 0-byte file as a perfectly valid EMPTY database, and the live DB
+    has 99 tables. So a failed `nemesis_paths` import produced a confident
+    verdict that every declared table was missing, computed against a database
+    nobody meant to read, with nothing in the output naming which file it was.
+
+    Returning the problem instead of swallowing it lets the caller refuse to
+    produce a verdict at all — "assert the source identity, not just the
+    value", which is exactly the class of bug this whole check exists to find
+    in other people's code.
+    """
     root = _repo_root()
     legacy = os.path.join(root, "alert_manager", "alerts.db")
     try:
         sys.path.insert(0, os.path.join(root, "alert_manager"))
         import nemesis_paths
-        return nemesis_paths.db_path(legacy)
-    except Exception:
-        return legacy
+        return nemesis_paths.db_path(legacy), None
+    except Exception as exc:                                 # noqa: BLE001
+        return legacy, "%s: %s" % (type(exc).__name__, exc)
 
 
 # ── DDL extraction ───────────────────────────────────────────────────────────
@@ -417,7 +431,26 @@ def _produce(detail):
     summary = "Schema matches the code"
     sections.append(_section("canary self-test", _OK, detail))
 
-    db_path = _resolve_db()
+    db_path, resolve_problem = _resolve_db()
+    if resolve_problem:
+        # REFUSE, do not fall back. A verdict computed against an unverified
+        # database is worse than no verdict: it looks authoritative and the
+        # reader has no way to tell which file produced it. Same reasoning the
+        # canary harness above applies to a failed self-test.
+        return {
+            "id": META["id"], "name": META["name"], "icon": META["icon"],
+            "status": "error",
+            "summary": "Could not determine which database to check",
+            "output": "\n".join(sections + [
+                _section("database location", _PROBE_FAILED,
+                         "the canonical path resolver is unavailable (%s), so "
+                         "this check cannot confirm WHICH database it would "
+                         "read. Refusing rather than falling back to the "
+                         "pre-relocation path, which on some installs still "
+                         "exists as an empty file and would report every table "
+                         "as missing." % resolve_problem)]),
+        }
+
     try:
         live = live_schema(db_path)
     except Exception as e:                                   # noqa: BLE001
@@ -439,7 +472,13 @@ def _produce(detail):
 
     sections.append(_section(
         "tables examined", _OK,
-        "%d live, %d declared in the repo" % (result["checked"], len(declared))))
+        # THE PATH IS NAMED DELIBERATELY. Both the live and the pre-relocation
+        # database are called `alerts.db`, so a basename cannot tell a reader
+        # which one produced this verdict -- and reading the wrong one was a
+        # real defect here (see _resolve_db). Neither path is user-specific, so
+        # naming it in full carries nothing Rule 8 excludes.
+        "%d live, %d declared in the repo (read from %s)"
+        % (result["checked"], len(declared), db_path)))
 
     if result["orphans"]:
         status = _DRIFT

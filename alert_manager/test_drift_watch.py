@@ -4,7 +4,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import drift_watch as W
 
 _f=[]; _n=0
-EXPECTED=14
+EXPECTED=22
 def check(l,g,w):
     global _n; _n+=1; ok=g==w
     print("  %-62s %s"%(l,"PASS" if ok else "FAIL got=%r want=%r"%(g,w)))
@@ -48,6 +48,48 @@ def fails(**k): raise RuntimeError("db down")
 filed3,sig3 = W.poll_once("prev", opener=mk(BAD), ticket_fn=fails)
 check("nothing filed", filed3, 0)
 check("signature NOT advanced, so it retries", sig3, "prev")
+
+print("\n[a silent failure is a failure nobody sees -- these must be SAID OUT LOUD]")
+# Regression guard for the 2026-08-31 fix. Before it, drift_watch imported only
+# hashlib and json -- no logger at all -- so a corrupt or permission-denied fact
+# file produced (0, last_signature), the caller stored the signature and moved on,
+# and the drift reporter was permanently blind while looking exactly like a system
+# with no drift. Behaviour is unchanged; the point is that it is now observable.
+import logging
+_cap = io.StringIO()
+_h = logging.StreamHandler(_cap)
+W.log.addHandler(_h); W.log.setLevel(logging.DEBUG)
+
+def _logged(fn):
+    """Text logged by one call, isolated from the other cases."""
+    _cap.truncate(0); _cap.seek(0)
+    fn()
+    return _cap.getvalue()
+
+def _denied(*a, **k): raise PermissionError("permission denied")
+def _absent(*a, **k): raise FileNotFoundError("not yet written")
+
+out = _logged(lambda: W.poll_once("s", opener=_denied))
+check("an unreadable fact file is LOGGED", "present but unreadable" in out, True)
+check("...and names the cause", "PermissionError" in out, True)
+check("...and says reporting is blind", "BLIND" in out, True)
+
+out = _logged(lambda: W.read_fact(opener=lambda *a, **k: io.StringIO('{"x":1}')))
+check("json with no verdict key is LOGGED", "no 'verdict' key" in out, True)
+
+out = _logged(lambda: W.poll_once("prev", opener=mk(BAD), ticket_fn=fails))
+check("a ticket that cannot be filed is LOGGED", "could NOT be filed" in out, True)
+check("...and says the drift is real but unreported", "unreported" in out, True)
+
+# CONTROL 1: an ABSENT file is a legitimate state, not a failure, and must stay
+# quiet -- otherwise every install logs a warning until the checker first runs.
+out = _logged(lambda: W.poll_once("s", opener=_absent))
+check("CONTROL an ABSENT fact file logs NOTHING", out.strip(), "")
+
+# CONTROL 2: the capture works at all. Without this, every check above would pass
+# for a healthy file too, because the harness would simply never see anything.
+out = _logged(lambda: W.poll_once("s", opener=_denied))
+check("CONTROL the log capture is not always-empty", bool(out.strip()), True)
 
 print()
 if _n!=EXPECTED: print("SUITE DRIFT: ran %d expected %d"%(_n,EXPECTED)); sys.exit(1)
