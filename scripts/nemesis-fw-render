@@ -338,6 +338,7 @@ STEER_STATE="${NEMESIS_FW_STEER_STATE:-/var/lib/nemesis/fw-steer.state}"
 if [ -r "$STEER_STATE" ]; then
     _steer_port=""
     _steer_dests=""
+    _steer_devices=""
     _steer_bad=0
     while IFS=' ' read -r _k _v _rest; do
         case "$_k" in
@@ -357,6 +358,23 @@ if [ -r "$STEER_STATE" ]; then
                 [ -n "$_rest" ] && { _steer_bad=1; continue; }
                 _steer_dests="$_steer_dests $_v"
                 ;;
+            device)
+                # PER-DEVICE selection (Step 4). Selects by SOURCE -- whose
+                # traffic is inspected -- where `dest` selects by destination.
+                # The build sequence calls for "per-device, not per-flow", and
+                # a source selector is what makes the unit a device, not a flow.
+                #
+                # CHARSET ONLY HERE. Whether the address lies INSIDE the
+                # gateway's own LAN is checked by nft_steering (Python, where
+                # ipaddress makes containment trivial). That split is
+                # deliberate: this is the INJECTION boundary and must be cheap
+                # and total; containment is a CORRECTNESS check and belongs
+                # where it can be done properly. The absence of a containment
+                # test here is not an oversight.
+                case "$_v" in ''|*[!0-9a-fA-F:./]*) _steer_bad=1; continue ;; esac
+                [ -n "$_rest" ] && { _steer_bad=1; continue; }
+                _steer_devices="$_steer_devices $_v"
+                ;;
             *) _steer_bad=1 ;;
         esac
     done < "$STEER_STATE"
@@ -365,14 +383,20 @@ if [ -r "$STEER_STATE" ]; then
         # LOUD, and no steering. A silently-skipped malformed intent would look
         # identical to "no steering configured".
         echo "nemesis-fw-render: REFUSING to emit steering — $STEER_STATE contains unparseable or out-of-range intent. Traffic will flow UNSTEERED. Fix the file; nothing else in this table is affected." >&2
-    elif [ -n "$_steer_port" ] && [ -n "$_steer_dests" ]; then
+    elif [ -n "$_steer_port" ] && { [ -n "$_steer_dests" ] || [ -n "$_steer_devices" ]; }; then
         echo "    chain steer {"
         echo "        type nat hook prerouting priority dstnat; policy accept;"
+        # DEVICE rules first. Both selectors may be present; redirect is
+        # terminating for this chain, so a packet matching either is
+        # redirected once and ordering is readability, not correctness.
+        for _v in $_steer_devices; do
+            echo "        ip saddr $_v tcp dport 443 redirect to :$_steer_port comment \"nemesis-tier2-steer-device\""
+        done
         for _d in $_steer_dests; do
             echo "        ip daddr $_d tcp dport 443 redirect to :$_steer_port comment \"nemesis-tier2-steer\""
         done
         echo "    }"
-        echo "nemesis-fw-render: steering ACTIVE — $(echo $_steer_dests | wc -w) destination(s) -> :$_steer_port" >&2
+        echo "nemesis-fw-render: steering ACTIVE — $(echo $_steer_devices | wc -w) device(s), $(echo $_steer_dests | wc -w) destination(s) -> :$_steer_port" >&2
     fi
 fi
 
