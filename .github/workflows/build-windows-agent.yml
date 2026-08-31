@@ -29,7 +29,18 @@ jobs:
         # pystray/pillow/six are the tray exe's deps. `six` is listed even though
         # pystray declares it: it appears in no import of ours, so a future trim of
         # this line has to delete it deliberately rather than not notice it.
-        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer pythonnet pydivert pystray pillow six
+        #
+        # `pywintrace` provides the module imported as `etw` (the names differ, so
+        # searching this line for "etw" finds nothing). Track C's connection
+        # collector imports it inside EtwSource.start(); without it the frozen agent
+        # records E-AGENT-120 and silently collects no connection events while every
+        # other surface reports healthy.
+        #
+        # ⚠ THIS LIST AND nemesis_agent/requirements.txt ARE TWO SOURCES OF TRUTH AND
+        # HAVE ALREADY DRIFTED (this one has pydivert and no watchdog; that one has
+        # watchdog and no pydivert). Add to BOTH or the venv install and the shipped
+        # exe disagree about what the agent needs.
+        run: python -m pip install --upgrade pip pyinstaller pywin32 psutil requests cryptography plyer pythonnet pydivert pystray pillow six pywintrace
 
       - name: Fetch ClamAV binaries (best-effort, no definitions)
         continue-on-error: true   # a download hiccup must NOT fail the exe build
