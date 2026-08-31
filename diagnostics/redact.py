@@ -345,6 +345,18 @@ def redact(text: str) -> str:
     # 5. Email addresses.
     text = _EMAIL_PATTERN.sub("[REDACTED]", text)
 
+    # 6. Key-shaped strings not already caught above (an unknown API key, or
+    #    one whose value changed since the env file was last read). Runs last,
+    #    as a catch-all: everything before this is a more specific, more
+    #    confident match. KNOWN, ACCEPTED OVER-REDACTION RISK, not introduced
+    #    by wiring this in — the roadmap doc flagged it before this pattern
+    #    was ever active: a bare 32+ char base64-ish run also matches a
+    #    legitimate long hash (a SHA-256 hex digest, a git commit hash) with
+    #    no way to tell the two apart from the string alone. Fail-closed-on-
+    #    ambiguity, same family as the IPv4/version-string tradeoff above —
+    #    see test_redact.py for both pinned explicitly.
+    text = _KEY_PATTERN.sub("[REDACTED]", text)
+
     return text
 
 

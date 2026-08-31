@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.dirname(_HERE))       # repo root, for package import
 import redact as R                               # noqa: E402
 
 
-EXPECTED_CHECKS = 32
+EXPECTED_CHECKS = 35
 
 _results = []
 
@@ -193,6 +193,28 @@ def main():
         check("a version string that IS valid IPv4 syntax is redacted "
               "(accepted tradeoff, not a bug)",
               "3.26.0.1" not in out_ver, True)
+
+        # ── _KEY_PATTERN: wired up this commit, was previously dead code ─────
+        print("\n_KEY_PATTERN now actually runs (was defined, never applied)")
+        out_key1 = R.redact("key: sk-ant-abc123DEF456ghi789JKL012mno345PQR")
+        check("an sk-ant- prefixed key is redacted",
+              "sk-ant-" not in out_key1, True)
+        out_key2 = R.redact(
+            "token: aGVsbG8gd29ybGQgdGhpcyBpcyBhIHRlc3Q=")
+        check("a 32+ char base64-ish run is redacted",
+              "aGVsbG8" not in out_key2, True)
+        # Documented, accepted tradeoff (flagged in the roadmap doc BEFORE
+        # this pattern was ever active, not discovered after the fact): a
+        # legitimate long hash has no way to be told apart from a key by the
+        # string alone. Confirmed against all 17 live checks on this box —
+        # none currently emit anything this pattern catches, so the risk is
+        # real but not presently exercised in practice.
+        out_hash = R.redact(
+            "sha256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca4959"
+            "91b7852b85")
+        check("a legitimate SHA-256 hex digest is ALSO redacted "
+              "(accepted tradeoff, not a bug)",
+              "e3b0c442" not in out_hash, True)
 
     finally:
         restore_names()
