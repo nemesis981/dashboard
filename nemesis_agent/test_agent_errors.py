@@ -159,12 +159,25 @@ def main():
               "agent_gui.py",
               # privileged-IPC subsystem (step 3b): the SYSTEM service and the
               # session-side client record their own auth/start failures.
-              "privservice.py", "privclient.py"):
+              "privservice.py", "privclient.py",
+              # Track C (2026-08-31). Both were absent from this list AND
+              # referenced the catalog zero times, so the coverage check could
+              # not have caught their gap: a file that is never scanned cannot
+              # be reported as unwired. Adding the files and adding the codes
+              # are two separate acts and both were needed.
+              "consent.py", "conn_collector.py"):
         try:
             src += io.open(os.path.join(HERE, f), encoding="utf-8").read()
         except OSError:
             pass
-    wired = set(re.findall(r'(?:record|report_gui_error)\("(E-AGENT-\d{3})"', src))
+    # `_record_error` is the module-local best-effort wrapper consent.py and
+    # conn_collector.py call (lazy-importing agent_errors so a consent gate can
+    # never fail because its telemetry could not load). It is a real recording
+    # site, so the scan must see it -- named EXPLICITLY rather than loosening
+    # the pattern to anything containing "record", which would start matching
+    # comparisons and comments.
+    wired = set(re.findall(
+        r'(?:record|report_gui_error|_record_error)\("(E-AGENT-\d{3})"', src))
     catalog = set(ae.E_AGENT_CODES)
     check("no phantom codes (declared but never recorded)", sorted(catalog - wired), [])
     check("no undeclared codes (recorded but not in catalog)", sorted(wired - catalog), [])

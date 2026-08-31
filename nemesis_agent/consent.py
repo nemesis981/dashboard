@@ -170,6 +170,20 @@ STATE_ABSENT  = "absent"
 STATE_CORRUPT = "corrupt"
 
 
+def _record_error(code, context=None):
+    """Best-effort telemetry. NEVER raises, and never blocks a consent decision.
+
+    Lazy import on purpose: consent.py is imported by small entry points that
+    have no reason to pull the error catalog in, and a consent gate must not
+    fail because its telemetry could not load. agent_errors.record() aggregates
+    by code, so calling this from a hot path cannot grow memory.
+    """
+    try:
+        import agent_errors                                    # noqa: PLC0415
+        agent_errors.record(code, context)
+    except Exception:                                          # noqa: BLE001
+        pass
+
 def _read_record():
     """Return (record_or_None, state). NEVER raises, NEVER partially trusts.
 
@@ -182,9 +196,11 @@ def _read_record():
             rec = json.load(f)
     except FileNotFoundError:
         return None, STATE_ABSENT
-    except Exception:            # noqa: BLE001 — unreadable/corrupt: fail closed
+    except Exception as exc:     # noqa: BLE001 — unreadable/corrupt: fail closed
+        _record_error("E-AGENT-122", "read failed: %s" % type(exc).__name__)
         return None, STATE_CORRUPT
     if not isinstance(rec, dict):
+        _record_error("E-AGENT-122", "record is not an object")
         return None, STATE_CORRUPT
 
     schema = rec.get("record_schema")
@@ -194,6 +210,7 @@ def _read_record():
         # that exists at all means the user said yes. Connections on; the four
         # items v1 never governed take the new default.
         if rec.get("granted") is not True:
+            _record_error("E-AGENT-122", "v1 record without granted=True")
             return None, STATE_CORRUPT
         return ({"record_schema": _RECORD_SCHEMA,
                  "disclosure_version": rec.get("disclosure_version"),
@@ -205,15 +222,18 @@ def _read_record():
     if schema != _RECORD_SCHEMA:
         # An unrecognised schema is NOT forward-compatible. Guessing at a newer
         # record's meaning is how a refusal gets read as permission.
+        _record_error("E-AGENT-122", "unrecognised record_schema %r" % (schema,))
         return None, STATE_CORRUPT
 
     tel = rec.get("telemetry")
     if not isinstance(tel, dict):
+        _record_error("E-AGENT-122", "telemetry block missing or not an object")
         return None, STATE_CORRUPT
     for k, v in tel.items():
         if k not in ITEM_KEYS or not isinstance(v, bool):
             # A key we do not know, or a non-boolean, means this file was written
             # by something we do not understand. Refuse the whole record.
+            _record_error("E-AGENT-122", "unknown or non-boolean telemetry key")
             return None, STATE_CORRUPT
     return rec, STATE_OK
 
@@ -385,9 +405,15 @@ def revoke(device_id=None, actor="device-user"):
     dev = device_id or (rec or {}).get("device_id")
     try:
         set_enabled(ITEM_CONNECTIONS, False, device_id=dev, actor=actor)
-    except OSError:
+    except OSError as exc:
         # Could not write the tombstone. Do NOT report success — the gate is still
         # open, and telling a user collection stopped when it has not is worse
         # than telling them it failed.
+        #
+        # Recorded as well as returned: the caller sees revoked=False, but until
+        # 2026-08-31 nothing survived that call, so a revocation that silently
+        # failed left collection running with no trace anywhere.
+        _record_error("E-AGENT-123", "tombstone write failed: %s"
+                                     % type(exc).__name__)
         return {"revoked": False, "device_id": dev, "purge_required": False}
     return {"revoked": True, "device_id": dev, "purge_required": bool(dev)}

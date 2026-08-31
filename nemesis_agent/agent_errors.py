@@ -245,7 +245,40 @@ E_AGENT_CODES = {
                     "but the ETW source could not be started, so no connection "
                     "events will be reported from this endpoint. Distinct from a "
                     "clean no-op: the collector was asked to run and could not.",
-                    "medium")
+                    "medium"),
+
+    # ── Track C, agent side (2026-08-31) ─────────────────────────────────
+    # consent.py and conn_collector.py referenced this catalog ZERO times
+    # while it carried 37 codes: every dropped connection record and every
+    # corrupt-consent fail-closed lived only in a stats counter nobody drains
+    # or a status() field nobody polls.
+    "E-AGENT-121": ("Connection events dropped",
+                    "One or more connection records could not be emitted, so "
+                    "they are MISSING from what this endpoint reports. Counted "
+                    "rather than logged per event because a flapping source "
+                    "would flood; the kind (close/network/dns/dispatch) is in "
+                    "the context. Distinct from the collector failing to START "
+                    "(E-AGENT-120): here it IS running and losing data, which "
+                    "looks identical to a quiet endpoint.",
+                    "medium"),
+    "E-AGENT-122": ("Consent record unreadable",
+                    "The local consent record could not be read or parsed, so "
+                    "the gate fails CLOSED and every telemetry item is switched "
+                    "off. That is the correct direction, but it means this "
+                    "device silently stops reporting ANYTHING and is "
+                    "indistinguishable from a device that is simply quiet. A "
+                    "corrupt record does not heal on its own; it needs "
+                    "re-consent.",
+                    "high"),
+    "E-AGENT-123": ("Consent revocation could not be written",
+                    "A revocation was requested and the tombstone could NOT be "
+                    "persisted, so collection is STILL RUNNING while the user "
+                    "believes it stopped. The agent correctly reports failure "
+                    "rather than claiming success, but nothing else records "
+                    "that the request was lost. Agent-side twin of the "
+                    "server's E-CONSENT-003, which its own catalog calls the "
+                    "code that matters most.",
+                    "high")
 }
 
 _MAX_CONTEXT = 300               # hard cap on a context string (bounded input)

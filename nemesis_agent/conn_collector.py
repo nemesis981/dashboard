@@ -46,6 +46,21 @@ DNS_CACHE_TTL_SECONDS = 600
 DNS_CACHE_MAX = 4096
 
 
+def _record_error(code, context=None):
+    """Best-effort telemetry. NEVER raises into the collector.
+
+    Lazy import so the collector keeps working on an endpoint where the error
+    catalog is unavailable, and because a telemetry helper must never be the
+    reason connection collection stops. agent_errors.record() AGGREGATES by
+    code, which is what makes it safe to call from these hot paths -- a
+    flapping source cannot flood or grow memory.
+    """
+    try:
+        import agent_errors                                    # noqa: PLC0415
+        agent_errors.record(code, context)
+    except Exception:                                          # noqa: BLE001
+        pass
+
 class DnsCache:
     """IP → most-recently-observed name, with expiry and a hard size cap.
 
@@ -523,6 +538,7 @@ class EtwSource:
                 self._emit_closed(k, st)
             except Exception:                                # noqa: BLE001
                 self.stats["close_emit_errors"] += 1
+                _record_error("E-AGENT-121", "close")
         if ready:
             self.stats["close_emitted"] += len(ready)
         return len(ready)
@@ -549,6 +565,7 @@ class EtwSource:
                     self._emit_closed(k, st)
                 except Exception:                            # noqa: BLE001
                     self.stats["close_emit_errors"] += 1
+                    _record_error("E-AGENT-121", "close")
         if stale:
             self.stats["flow_expired"] += len(stale)
         return len(stale)
@@ -629,6 +646,7 @@ class EtwSource:
                             self._emit_closed(fkey, prior)
                         except Exception:                    # noqa: BLE001
                             self.stats["close_emit_errors"] += 1
+                            _record_error("E-AGENT-121", "close")
                     else:
                         # An open for a flow that never closed — the previous
                         # connection's close was missed entirely. Counted, and its
@@ -742,6 +760,7 @@ class EtwSource:
             self.stats["data"] += 1
         except Exception:                                    # noqa: BLE001
             self.stats["network_errors"] += 1
+            _record_error("E-AGENT-121", "network")
 
     def _on_dns(self, event):
         try:
@@ -761,6 +780,7 @@ class EtwSource:
             self.stats["dns_observed"] += 1
         except Exception:                                    # noqa: BLE001
             self.stats["dns_errors"] += 1
+            _record_error("E-AGENT-121", "dns")
 
     def _on_process(self, event):
         """Keep the pid->identity map current. NEVER raises, never emits.
@@ -856,6 +876,7 @@ class EtwSource:
                 self.stats["unattributed_provider"] += 1
         except Exception:                                    # noqa: BLE001
             self.stats["dispatch_errors"] += 1
+            _record_error("E-AGENT-121", "dispatch")
 
     def start(self):
         """Open the session. Falls back to the MEASURED providers if the
@@ -912,6 +933,7 @@ class EtwSource:
             self.flush_closed(force=True)
         except Exception:                                    # noqa: BLE001
             self.stats["close_emit_errors"] += 1
+            _record_error("E-AGENT-121", "close")
         for j in self._jobs:
             try:
                 j.stop()
