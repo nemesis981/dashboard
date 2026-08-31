@@ -60,6 +60,107 @@ def _conn():
     return get_data_manager().connect("lan_integrity")
 
 
+# ── E-LANINT-* error codes ──────────────────────────────────────────────────
+#
+# WHY A DETECTOR NEEDS THESE MORE THAN MOST CODE. Every failure below makes
+# this module see LESS while continuing to report normally. A detector that
+# reports "nothing found" because it is blind is worse than one that is simply
+# absent, because the empty result is read as reassurance. None of these was
+# countable or durable before 2026-08-31 -- several were not even logged.
+#
+# Granularity follows the same rule as E-EMAIL-*: one code per
+# operator-actionable distinction. "The ARP source is unreadable" and "the
+# gateway list is unreadable" are separate because the first disables ARP
+# detection outright and the second silently DOWNGRADES a gateway takeover
+# from critical to high -- different consequences, different urgency.
+
+#: The detector is not seeing what it is supposed to see.
+_CLASS_BLIND = "lanint-detector-blind"
+
+#: It still sees, but reports a weaker signal than the truth.
+_CLASS_DEGRADED = "lanint-detector-degraded"
+
+#: /proc/net/arp unreadable. Its own docstring calls this "the only ARP source
+#: available until Suricata's arp logger is enabled", so a permission or mount
+#: failure disables ARP detection ENTIRELY -- and `return []` is
+#: indistinguishable from an empty ARP cache.
+E_ARP_SOURCE_UNREADABLE = "E-LANINT-001"
+
+#: /proc/net/route unreadable. Does not blind the detector, but the gateway set
+#: is what raises a binding change to CRITICAL, so a takeover degrades to a
+#: plain high-severity finding with nothing recording why.
+E_GATEWAY_LIST_UNREADABLE = "E-LANINT-002"
+
+#: rogue_dhcp.selftest() failed: the detector cannot prove it distinguishes a
+#: rogue server from the legitimate one, so the cycle refuses to report.
+#: Correctly fails closed -- this code makes the refusal countable. Analogue of
+#: DHCP's E_HEALTH_UNMEASURABLE.
+E_ROGUE_SELFTEST_FAILED = "E-LANINT-003"
+
+#: The ARP pass raised. arp_watch raises deliberately when ITS self-test fails;
+#: the handler caught that and logged, so a proven-broken ARP detector kept
+#: running and the cycle carried on reporting.
+E_ARP_PASS_FAILED = "E-LANINT-004"
+
+#: Suricata's eve.json could not be read. DHCP detection is blind for the
+#: cycle. The existing handling is already correct in SHAPE (an explicit error
+#: state, never "no events") -- the code adds durability and a count.
+E_EVE_UNREADABLE = "E-LANINT-005"
+
+#: The whole poll cycle raised. Everything this module detects is down.
+E_CYCLE_FAILED = "E-LANINT-006"
+
+#: An API route failed. Low severity individually; recorded because these
+#: returned a 500 with NO log line at all, so a route failing repeatedly left
+#: no trace anywhere.
+E_ROUTE_FAILED = "E-LANINT-007"
+
+_ERR_CODES = {
+    E_ARP_SOURCE_UNREADABLE:  ("ARP source /proc/net/arp unreadable; ARP "
+                               "detection is disabled and an empty result is "
+                               "indistinguishable from an empty cache",
+                               "HIGH", _CLASS_BLIND),
+    E_GATEWAY_LIST_UNREADABLE: ("Gateway list unreadable; a gateway takeover "
+                                "will be reported as a plain binding change "
+                                "instead of CRITICAL",
+                                "MEDIUM", _CLASS_DEGRADED),
+    E_ROGUE_SELFTEST_FAILED:  ("rogue-DHCP self-test failed; the detector "
+                               "cannot prove it works and refused to report "
+                               "this cycle",
+                               "HIGH", _CLASS_BLIND),
+    E_ARP_PASS_FAILED:        ("ARP pass failed; ARP findings for this cycle "
+                               "are missing", "HIGH", _CLASS_BLIND),
+    E_EVE_UNREADABLE:         ("Suricata eve.json unreadable; rogue-DHCP "
+                               "detection is blind for this cycle",
+                               "HIGH", _CLASS_BLIND),
+    E_CYCLE_FAILED:           ("LAN-integrity detection cycle failed; nothing "
+                               "was detected this interval", "HIGH", None),
+    E_ROUTE_FAILED:           ("A lan_integrity API route failed", "LOW", None),
+}
+
+_recorder = None
+
+
+def _record(code, context=None):
+    """Record one occurrence. NEVER raises into the caller.
+
+    Deferred recorder construction, same reason as diagnostics/redact.py: this
+    module is imported in contexts where the shared DB path is not registered
+    yet, and importing a module must never touch the database.
+    """
+    global _recorder
+    try:
+        if _recorder is None:
+            import nemesis_errors                            # noqa: PLC0415
+            _recorder = nemesis_errors.make_recorder(
+                "lan_integrity", _conn, _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:                                        # noqa: BLE001
+        log.warning("lan_integrity: could not record %s", code, exc_info=True)
+        return None
+
+
+
 @contextmanager
 def _db():
     """Connection scope that GUARANTEES close(), even when a statement raises.
@@ -215,6 +316,7 @@ def _tail_cycle() -> dict:
         summary["error"] = "selftest failed: %s" % detail
         _set_state("selftest_ok", "0")
         log.error("lan_integrity: %s", summary["error"])
+        _record(E_ROGUE_SELFTEST_FAILED, {"detail": str(detail)[:200]})
         return summary
     _set_state("selftest_ok", "1")
 
@@ -223,6 +325,7 @@ def _tail_cycle() -> dict:
     except OSError as exc:
         # An unreadable log is an explicit failure state, never "no events".
         summary["error"] = "eve.json unreadable: %s" % exc
+        _record(E_EVE_UNREADABLE, {"phase": "stat", "error": str(exc)})
         _set_state("last_error", summary["error"])
         return summary
 
@@ -265,6 +368,7 @@ def _tail_cycle() -> dict:
     except OSError as exc:
         summary["error"] = "eve.json read failed: %s" % exc
         _set_state("last_error", summary["error"])
+        _record(E_EVE_UNREADABLE, {"phase": "read", "error": str(exc)})
         return summary
 
     _set_state("eve_offset", new_offset)
@@ -287,8 +391,13 @@ def _tail_cycle() -> dict:
             with _db() as conn:
                 summary["arp_findings"] = _arp_cycle(conn, arp_observations, now)
                 conn.commit()
-        except Exception:
+        except Exception as exc:
             log.exception("lan_integrity: ARP pass failed")
+            # arp_watch RAISES deliberately when its own self-test fails. This
+            # handler caught that, so a detector that had proven itself broken
+            # kept running and the cycle carried on reporting.
+            _record(E_ARP_PASS_FAILED,
+                    {"error": "%s: %s" % (type(exc).__name__, exc)})
         _bump_state("arp_events_total", len([o for o in arp_observations
                                              if o.get("source") == "suricata_arp"]))
 
@@ -364,7 +473,12 @@ def _gateways(path="/proc/net/route"):
                     continue
                 # little-endian hex, as the kernel writes it
                 out.add(".".join(str(int(gw[i:i + 2], 16)) for i in (6, 4, 2, 0)))
-    except OSError:
+    except OSError as exc:
+        # Not blinding, but DOWNGRADING: the gateway set is what raises a
+        # binding change to CRITICAL, so without it a gateway takeover is
+        # reported as an ordinary high-severity finding.
+        _record(E_GATEWAY_LIST_UNREADABLE,
+                {"path": path, "error": "%s: %s" % (type(exc).__name__, exc)})
         return set()
     return out
 
@@ -373,7 +487,14 @@ def _read_proc_arp(path="/proc/net/arp"):
     try:
         with open(path, "r", encoding="utf-8") as fh:
             return arp_watch.parse_proc_arp(fh.read())
-    except OSError:
+    except OSError as exc:
+        # ⛔ `[]` IS INDISTINGUISHABLE FROM AN EMPTY ARP CACHE, and this is the
+        # ONLY ARP source this module has. Silently returning it disabled ARP
+        # detection permanently while the module went on reporting healthy
+        # cycles. The empty list is kept -- callers depend on the shape -- but
+        # the failure is no longer invisible.
+        _record(E_ARP_SOURCE_UNREADABLE,
+                {"path": path, "error": "%s: %s" % (type(exc).__name__, exc)})
         return []
 
 
@@ -538,8 +659,10 @@ class Module(NemesisModule):
                 elif summary["findings"]:
                     log.warning("lan_integrity: %d rogue-DHCP finding(s) this cycle",
                                 summary["findings"])
-            except Exception:
+            except Exception as exc:
                 log.exception("lan_integrity: cycle error")
+                _record(E_CYCLE_FAILED,
+                        {"error": "%s: %s" % (type(exc).__name__, exc)})
             self._stop_evt.wait(POLL_INTERVAL)
 
 
@@ -564,6 +687,12 @@ def _api_status():
             "extended_logging":  _extended_dhcp_logging_enabled(),
         })
     except Exception as e:
+        # Returned a 500 with NO log line at all until 2026-08-31, so a route
+        # failing repeatedly left no trace anywhere. `_api_pin` and
+        # `_api_close` are STATE-CHANGING, which makes their silence worse.
+        log.exception("lan_integrity: _api_status failed")
+        _record(E_ROUTE_FAILED, {"route": "_api_status",
+                                  "error": "%s: %s" % (type(e).__name__, e)})
         return jsonify({"error": str(e)}), 500
 
 
@@ -579,6 +708,12 @@ def _api_servers():
              "observed_count": r[3], "pinned": bool(r[4]), "last_message": r[5]}
             for r in rows]})
     except Exception as e:
+        # Returned a 500 with NO log line at all until 2026-08-31, so a route
+        # failing repeatedly left no trace anywhere. `_api_pin` and
+        # `_api_close` are STATE-CHANGING, which makes their silence worse.
+        log.exception("lan_integrity: _api_servers failed")
+        _record(E_ROUTE_FAILED, {"route": "_api_servers",
+                                  "error": "%s: %s" % (type(e).__name__, e)})
         return jsonify({"error": str(e)}), 500
 
 
@@ -610,6 +745,12 @@ def _api_pin():
             conn.commit()
         return jsonify({"success": True, "server_ip": server_ip, "pinned": bool(pinned)})
     except Exception as e:
+        # Returned a 500 with NO log line at all until 2026-08-31, so a route
+        # failing repeatedly left no trace anywhere. `_api_pin` and
+        # `_api_close` are STATE-CHANGING, which makes their silence worse.
+        log.exception("lan_integrity: _api_pin failed")
+        _record(E_ROUTE_FAILED, {"route": "_api_pin",
+                                  "error": "%s: %s" % (type(e).__name__, e)})
         return jsonify({"error": str(e)}), 500
 
 
@@ -627,6 +768,12 @@ def _api_findings():
              "client_mac": r[5], "assigned_ip": r[6], "reason": r[7], "status": r[8]}
             for r in rows]})
     except Exception as e:
+        # Returned a 500 with NO log line at all until 2026-08-31, so a route
+        # failing repeatedly left no trace anywhere. `_api_pin` and
+        # `_api_close` are STATE-CHANGING, which makes their silence worse.
+        log.exception("lan_integrity: _api_findings failed")
+        _record(E_ROUTE_FAILED, {"route": "_api_findings",
+                                  "error": "%s: %s" % (type(e).__name__, e)})
         return jsonify({"error": str(e)}), 500
 
 
@@ -646,6 +793,12 @@ def _api_close():
             conn.commit()
         return jsonify({"success": True})
     except Exception as e:
+        # Returned a 500 with NO log line at all until 2026-08-31, so a route
+        # failing repeatedly left no trace anywhere. `_api_pin` and
+        # `_api_close` are STATE-CHANGING, which makes their silence worse.
+        log.exception("lan_integrity: _api_close failed")
+        _record(E_ROUTE_FAILED, {"route": "_api_close",
+                                  "error": "%s: %s" % (type(e).__name__, e)})
         return jsonify({"error": str(e)}), 500
 
 

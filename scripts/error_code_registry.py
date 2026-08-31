@@ -53,6 +53,10 @@ REGISTERED_NAMESPACES = frozenset({
     # classes and fail-closed refusals lived only in logs and in-memory state,
     # so a restart erased every record that a mailbox had ever failed.
     "EMAIL",        # modules/email_security/errors.py
+    # Added 2026-08-31: the LAN-integrity detector had no catalog at all, and
+    # every failure in it makes the detector see LESS while still reporting --
+    # an empty result read as reassurance.
+    "LANINT",       # modules/lan_integrity/module.py
 })
 
 #: Style 1 -- a catalog dict key:   "E-NS-001": ("desc", "HIGH", "class")
