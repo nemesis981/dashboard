@@ -296,6 +296,10 @@ ROUTE_MINIMUMS = {
     "api_backup_schedule":            (_A, _A),
     "api_backup_create":              (_A, _A),
     "api_restart":                    (_A, _A),
+    # Re-roles the box's network stack (forwarding + source-NAT). Admin on both
+    # methods, and the helper additionally demands a fresh credential -- a
+    # session alone is not enough to change what the box IS on the network.
+    "api_gateway_switch":             (_A, _A),
     "api_ram_recovery_clean":         (_A, _A),   # destroys state
 
     # ── Admin: modules ───────────────────────────────────────────────────────

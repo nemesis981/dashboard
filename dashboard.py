@@ -10858,9 +10858,15 @@ def settings_page():
         _gw_env = _read_nemesis_env()
         _gw_iface = _gw_env.get("NEMESIS_GW_LAN_IFACE") or None
         _gw_cidr = _gw_env.get("NEMESIS_GW_LAN_CIDR") or None
+        _gw_mode = (_gw.MODE_GATEWAY if (_gw_iface and _gw_cidr)
+                    else _gw.MODE_BRIDGED)
         gateway_role_html = _gw.render_capability_table(
-            _gw.MODE_GATEWAY if (_gw_iface and _gw_cidr) else _gw.MODE_BRIDGED,
-            _gw_iface, _gw_cidr)
+            _gw_mode, _gw_iface, _gw_cidr)
+        # The control that actually flips it. Inside the SAME fail-soft try as the
+        # table above, deliberately: a settings page that 500s because a toggle
+        # could not render is a worse outcome than a settings page without the
+        # toggle. Behaviour is in /static/gateway-mode.js, never in an f-string.
+        gateway_role_html += _gw.render_switch_control(_gw_mode, _gw_iface, _gw_cidr)
     except Exception:
         log.exception("settings: gateway capability table unavailable")
         gateway_role_html = ""
@@ -10872,6 +10878,7 @@ def settings_page():
     <script src="/static/tier.js"></script>
     <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
+    <script src="/static/gateway-mode.js"></script>
     <script src="/static/nemesis-idle-lock.js"></script>
     <style>
         body {{ font-family: Arial, sans-serif; background: #1a1a2e; color: #eee;
@@ -14338,6 +14345,44 @@ def _update_nemesis_env(updates: dict) -> list:
         _actor(), _fw_session_id(), _fw_credential(),
     )
     return list(result.get("updated") or [])
+
+
+@app.route("/api/gateway/switch", methods=["POST"])
+def api_gateway_switch():
+    """Enable or disable Gateway Mode. Admin only, POST only, fresh credential.
+
+    POST rather than GET is load-bearing, not style: this re-roles the box's
+    network stack, and a GET-as-write is CSRF-triggerable from a plain <img> tag
+    under default SameSite=Lax cookies -- the exact defect the standing
+    route-level security audit was created after finding three times.
+
+    This route decides NOTHING about whether the switch is safe. It forwards
+    intent; nemesis-fwd validates that the interface exists on this box and that
+    the CIDR is private IPv4, runs the transaction, and rolls back on failure. A
+    check here would be bypassed by the very compromise the helper contains.
+    """
+    import fw_client
+    data = request.get_json(silent=True) or {}
+    enable = data.get("enable")
+    if not isinstance(enable, bool):
+        return jsonify({"error": "enable must be true or false",
+                        "kind": "bad_request"}), 400
+
+    iface = (data.get("iface") or "").strip() or None
+    cidr = (data.get("cidr") or "").strip() or None
+
+    try:
+        result = fw_client.gateway_switch(
+            enable, iface, cidr, _actor(), _fw_session_id(), _fw_credential())
+    except FirewallError as exc:
+        return _fw_error_response(exc)
+
+    # A refusal or a failed-and-rolled-back switch is a RESULT, not an exception:
+    # the helper reports which step failed and whether the prior state was
+    # measurably restored. Surface that verbatim rather than flattening it to
+    # "failed" -- "rolled back and restored" and "rolled back, NOT restored" call
+    # for very different operator responses.
+    return jsonify(result), (200 if result.get("ok") else 409)
 
 
 @app.route("/api/config/current")

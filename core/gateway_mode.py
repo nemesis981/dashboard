@@ -289,6 +289,47 @@ def render_capability_table(current_mode=MODE_BRIDGED, iface=None, cidr=None):
 SNAT_PRESENT, SNAT_ABSENT = "snat_present", "snat_absent"
 
 
+def render_switch_control(current_mode=MODE_BRIDGED, iface=None, cidr=None):
+    """The operator-facing control that actually flips the mode.
+
+    STATIC MARKUP ONLY -- every attribute below is a literal, and the only
+    interpolated values are escaped. The behaviour lives in
+    /static/gateway-mode.js, deliberately: this module renders from Python
+    strings, and an apostrophe inside embedded JS is the single most common
+    defect in this codebase. Giving this function no JS to hold means it cannot
+    hit that bug, which is the same reasoning render_capability_table records.
+
+    Rendering the control does NOT mean the caller may use it. The route is
+    admin-only and nemesis-fwd demands a fresh password on top of that; this is
+    a form, not a permission.
+    """
+    enabled = current_mode == MODE_GATEWAY
+    iface_v = _html.escape(str(iface)) if iface else ""
+    cidr_v = _html.escape(str(cidr)) if cidr else ""
+    out = ["<div class='card'><h3>Switch network role</h3>"]
+    if enabled:
+        out.append("<p class='muted'>Gateway Mode is ACTIVE. Disabling stops "
+                   "forwarding first, then removes the NAT rule.</p>")
+        out.append("<button type='button' class='btn' "
+                   "onclick=\"gwSwitch(false)\">Disable Gateway Mode</button>")
+    else:
+        out.append("<p class='muted'>Give the interface facing your LAN and that "
+                   "network subnet. The interface must exist on this box, and the "
+                   "subnet must be a private IPv4 range &mdash; both are checked "
+                   "by the privileged helper, not by this page.</p>")
+        out.append("<label class='muted' for='gwIface'>LAN interface</label>"
+                   "<input id='gwIface' type='text' placeholder='eth1' value='%s'>"
+                   % iface_v)
+        out.append("<label class='muted' for='gwCidr'>LAN subnet (CIDR)</label>"
+                   "<input id='gwCidr' type='text' placeholder='192.168.10.0/24' "
+                   "value='%s'>" % cidr_v)
+        out.append("<button type='button' class='btn' "
+                   "onclick=\"gwSwitch(true)\">Enable Gateway Mode</button>")
+    out.append("<p id='gwStatus' class='muted'></p>")
+    out.append("</div>")
+    return "".join(out)
+
+
 def plan_switch(enable, iface=None, cidr=None):
     """Ordered (name, do, undo) steps for a switch in either direction.
 
