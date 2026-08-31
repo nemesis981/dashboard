@@ -187,6 +187,42 @@ def create_enrollment_request(token_hash: str, owner_user_id: int, *,
         update=None)
 
 
+def get_enrollment_request(token_hash: str):
+    """Read ONE enrollment request by token hash, or None. NEVER consumes it.
+
+    ⚠ THIS IS NOT AN ALTERNATIVE TO consume_enrollment_request AND MUST NOT BE
+    USED AS ONE. It exists so the owner-facing page can decide whether to render
+    the credential form for a code that has not been spent yet -- showing the
+    walkthrough is not a state change, and spending the code merely to display a
+    form would burn it for anyone who opens the link twice or abandons at the
+    password step.
+
+    THE AUTHORISATION IS STILL THE ATOMIC CONSUME, WHICH HAPPENS LATER AND
+    ELSEWHERE. A check here followed by an action later is a check-then-act
+    window by construction; that is acceptable ONLY because nothing is authorised
+    on the strength of this read. The real single-use enforcement lives in the
+    privileged helper's conditional UPDATE, where the predicates are in the WHERE
+    clause and two simultaneous completions cannot both win.
+
+    Pair with `enrollment.check_request(row, now)`, which is pure and classifies
+    the row into OK / NOT_FOUND / EXPIRED / ALREADY_USED.
+    """
+    conn = get_data_manager().connect(MODULE_NAME)
+    try:
+        cur = conn.execute(
+            "SELECT token_hash, owner_user_id, created_by, address_hint, "
+            "       created_at, expires_at, used_at, account_id "
+            "  FROM email_enrollment_requests WHERE token_hash = ?",
+            (token_hash,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+    finally:
+        conn.close()
+
+
 def allocate_credential_slot() -> int:
     """Atomically reserve the next `EMAIL_SEC_APPPW_<N>` slot. Returns N.
 

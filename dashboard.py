@@ -717,7 +717,15 @@ _AUTH_EXEMPT   = {"setup", "login", "login_recovery", "logout", "api_passphrase_
                   # the credential, it is deliberately NOT in the URL (werkzeug logs
                   # request paths to the journal), and it is consumed atomically by
                   # the email_security module rather than by this process.
+                  #
+                  # email_enroll_complete is the step that actually stores the
+                  # owner's app password. It is exempt for the SAME reason as its
+                  # siblings — the owner has no account — and it is not weaker
+                  # for it: the credential write is performed by nemesis_fwd,
+                  # which consumes the single-use code atomically before writing.
+                  # This process cannot write that file even if it wanted to.
                   "email_enroll_landing", "email_enroll_claim",
+                  "email_enroll_complete",
                   # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert link.
                   # These MUST be exempt: the whole point is that the admin may be
                   # unable to log in, because the firewall change under test can be
@@ -5672,9 +5680,13 @@ def _fw_revert_page(title, body, status=200):
 try:
     from modules.email_security import enrollment as _es_enrollment   # noqa: E402
     from modules.email_security import writes as _es_writes           # noqa: E402
+    from modules.email_security import providers as _es_providers     # noqa: E402
+    from modules.email_security import credential_store as _es_credentials  # noqa: E402
 except Exception:                                                     # noqa: BLE001
     _es_enrollment = None
     _es_writes = None
+    _es_providers = None
+    _es_credentials = None
 
 
 # ── ADR 0028 D11.5 Option C: owner-side email enrollment (PUBLIC) ────────────
@@ -5736,11 +5748,20 @@ def email_enroll_landing():
 
 @app.route("/email/enroll", methods=["POST"])
 def email_enroll_claim():
-    """PUBLIC (the code is the credential): claim one enrollment request.
+    """PUBLIC (the code is the credential): VALIDATE a code and show the form.
 
-    The code is consumed ATOMICALLY -- the used/expiry predicates live in the
-    UPDATE's WHERE clause, so two simultaneous posts cannot both succeed. See
-    modules/email_security/writes.consume_enrollment_request.
+    ⚠ THIS STEP NO LONGER SPENDS THE CODE (changed 2026-08-31). It used to, back
+    when accepting a code was the end of the flow; now the flow continues to
+    /email/enroll/complete, and burning the code merely to render a form would
+    lock out anyone who opens the link twice, mistypes their address, or gives up
+    at the password step -- an enrollment destroyed without ever completing.
+
+    The single-use guarantee is NOT weakened, because nothing is authorised here.
+    The code is consumed ATOMICALLY by nemesis_fwd during completion, where the
+    used/expiry predicates live in the UPDATE's WHERE clause so two simultaneous
+    completions cannot both win. A read here followed by that write is a
+    check-then-act window only if something is authorised on the read -- and
+    nothing is. See op_write_email_secret.
     """
     if _es_enrollment is None or _ENROLL_RATE is None:
         # Module absent: fail closed and say nothing about why.
@@ -5761,25 +5782,203 @@ def email_enroll_claim():
 
     now = datetime.now(timezone.utc)
     try:
-        claimed = _es_writes.consume_enrollment_request(
-            _es_enrollment.token_hash(code), now.isoformat(timespec="seconds"))
+        row = _es_writes.get_enrollment_request(_es_enrollment.token_hash(code))
+        state = _es_enrollment.check_request(row, now)
     except Exception:                                          # noqa: BLE001
         # Fail CLOSED on ambiguity. An unreadable row is not permission.
-        log.exception("email enrollment: consume failed")
+        log.exception("email enrollment: lookup failed")
         _audit(action="email_enroll_error", ip=ip)
         return _enroll_reject()
 
-    if not claimed:
+    if state != _es_enrollment.OK:
+        # invalid / expired / already-used are ONE answer to the caller. The
+        # distinction is logged internally and never rendered -- a
+        # distinguishable response confirms a code existed.
+        log.info("email enrollment: code refused (%s) from %s", state, ip)
         _audit(action="email_enroll_rejected", ip=ip)
         return _enroll_reject()
 
+    # ⚠ THE CODE IS DELIBERATELY *NOT* CONSUMED HERE. Rendering a form is not a
+    # state change, and spending the code to display one would burn it for anyone
+    # who opens the link twice, mistypes their address, or abandons at the
+    # password step -- leaving them locked out of an enrollment they never
+    # completed. The single-use guarantee is not weakened by this: nothing is
+    # authorised on the strength of this read, and the code is consumed
+    # ATOMICALLY by nemesis_fwd at completion, where the predicates live in the
+    # UPDATE's WHERE clause and two simultaneous completions cannot both win.
+    _audit(action="email_enroll_code_ok", ip=ip)
+    return _fw_revert_page("Connect your email account",
+                           _enroll_credential_form(code))
+
+
+def _enroll_credential_form(code, provider=None, error=None):
+    """The owner-facing walkthrough + credential form.
+
+    ⚠ EVERY INTERPOLATED VALUE IS html.escape()d, INCLUDING THE CODE. The code is
+    caller-supplied and lands in a hidden input; unescaped, a crafted value ends
+    the attribute and injects markup into a page served to the account owner. It
+    has already been matched against a database row by the time it reaches here,
+    which makes it *likely* well-formed and is NOT a reason to skip escaping.
+
+    No JavaScript at all, deliberately -- the same reasoning as the fw/revert
+    pages: a no-JS fallback that is never exercised is a control that silently
+    regresses. Provider selection is a plain radio group and the walkthroughs for
+    every provider are rendered together, so the page works with nothing but a
+    form POST.
+    """
+    esc_code = html.escape(code or "", quote=True)
+    blocks = []
+    for key, label in _es_providers.choices():
+        p = _es_providers.get(key)
+        checked = " checked" if (provider or _es_providers.DEFAULT_PROVIDER) == key else ""
+        steps = "".join("<li>%s</li>" % html.escape(s) for s in p["steps"])
+        blocks.append(
+            "<label style='display:block;margin:.6rem 0;font-weight:600'>"
+            "<input type=radio name=provider value='%s'%s> %s</label>"
+            "<ol style='color:#444;font-size:.95rem;margin:.2rem 0 1.2rem 1.2rem'>"
+            "%s</ol>" % (html.escape(key, quote=True), checked,
+                         html.escape(p["label"]), steps))
+
+    err = ""
+    if error:
+        err = ("<p style='background:#fdd;border-left:3px solid #c00;"
+               "padding:.6rem .8rem;margin-bottom:1rem'>%s</p>"
+               % html.escape(error))
+
+    return (
+        "<h2>Connect your email account</h2>"
+        + err +
+        "<p>Your code is valid. Choose your email provider, follow its steps, "
+        "then enter the app password it gives you.</p>"
+        "<form method=POST action='/email/enroll/complete'>"
+        "<input type=hidden name=code value='" + esc_code + "'>"
+        + "".join(blocks) +
+        "<label style='display:block;margin-top:1rem'>Your email address<br>"
+        "<input name=address type=email autocomplete=off required "
+        "style='width:100%;padding:.6rem;font-size:1rem'></label>"
+        "<label style='display:block;margin-top:1rem'>App password<br>"
+        "<input name=app_password type=password autocomplete=off required "
+        "spellcheck=false style='width:100%;padding:.6rem;font-family:monospace;"
+        "font-size:1rem'></label>"
+        "<button type=submit style='margin-top:1.2rem;padding:.7rem 1.2rem;"
+        "font-size:1rem'>Connect this mailbox</button></form>"
+        "<p style='margin-top:2rem;color:#555'>This password is stored on this "
+        "appliance so it can read your mail for threats. It is never shown to "
+        "whoever sent you this link. Scanning stays switched OFF until an "
+        "administrator turns it on.</p>")
+
+
+@app.route("/email/enroll/complete", methods=["POST"])
+def email_enroll_complete():
+    """PUBLIC (the code is the credential): store the owner's app password.
+
+    THIS PROCESS NEVER WRITES THE CREDENTIAL AND DELIBERATELY CANNOT. The
+    dashboard runs as nemesis-dash, which is in group `nemesis` and therefore has
+    READ but not write on the 0640 root:nemesis credential store. The write goes
+    to `nemesis_fwd`'s `write_email_secret`, which hashes the code, consumes it
+    ATOMICALLY against a single-use TTL-bounded row, and only then writes the
+    file. So a compromised dashboard forwards bytes it cannot forge and still
+    cannot store a credential without a valid unspent code -- the same property
+    `fw_revert_action` relies on, and strictly stronger than checking here.
+
+    THE OWNER COMES BACK FROM THE HELPER, NOT FROM THIS FORM. `owner_user_id` is
+    read out of the row the consume just won, so a caller cannot attribute a
+    mailbox to a different person than the admin addressed the code to.
+
+    ORDERING: credential first, account row second. If the row write fails, the
+    stored secret is an orphaned key that nothing references and nothing can use
+    -- harmless. The reverse order would leave an account row pointing at a slot
+    with no credential, which reads as a configured mailbox and fails later as an
+    authentication error against a password that was never stored.
+    """
+    if _es_enrollment is None or _ENROLL_RATE is None or _es_providers is None:
+        return _enroll_reject()
+
+    # remote_addr, NEVER X-Forwarded-For -- unauthenticated route, so the header
+    # is entirely caller-supplied. Same reasoning as email_enroll_claim.
+    ip = request.remote_addr or "unknown"
+    if not _ENROLL_RATE.check_and_count(ip, int(time.time())):
+        _audit(action="email_enroll_rate_limited", ip=ip)
+        return _enroll_reject()
+
+    code = (request.form.get("code") or "").strip()
+    provider = (request.form.get("provider") or "").strip()
+    address = (request.form.get("address") or "").strip()
+    secret = request.form.get("app_password") or ""
+    # NOT .strip()ed to empty-check only: an app password is copied from a
+    # provider page and may legitimately carry inner spaces (Gmail shows groups
+    # of four). Only the outer whitespace a copy-paste picks up is removed.
+    secret = secret.strip()
+
+    if not code or not _es_providers.is_known(provider):
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _enroll_reject()
+
+    # Input problems that are the OWNER'S to fix are shown as a form error rather
+    # than the blank rejection: they reveal nothing about whether a code exists
+    # (the code was already validated to reach this page), and rejecting them
+    # opaquely would strand someone who simply left a field blank.
+    if not address or "@" not in address or len(address) > 320:
+        return _fw_revert_page(
+            "Connect your email account",
+            _enroll_credential_form(code, provider,
+                                    "Enter the email address of the mailbox "
+                                    "you are connecting."), 400)
+    if not secret:
+        return _fw_revert_page(
+            "Connect your email account",
+            _enroll_credential_form(code, provider,
+                                    "Enter the app password from your provider."),
+            400)
+
+    prov = _es_providers.get(provider)
+    try:
+        slot = _es_writes.allocate_credential_slot()
+        ref = _es_credentials.slot_ref(slot)
+    except Exception:                                          # noqa: BLE001
+        log.exception("email enrollment: slot allocation failed")
+        _audit(action="email_enroll_error", ip=ip)
+        return _enroll_reject()
+
+    try:
+        import fw_client                                       # noqa: PLC0415
+        res = fw_client.write_email_secret(ref, secret, code, source_ip=ip)
+    except Exception as exc:                                   # noqa: BLE001
+        # Refusal and unavailability are reported identically ON PURPOSE: the
+        # caller learns only "it did not happen", never whether the code was
+        # invalid, expired, already spent, or the helper was simply down.
+        log.warning("email enrollment: credential write refused/unavailable "
+                    "from %s: %s", ip, exc)
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _enroll_reject()
+
+    # The code is spent from here on. Any failure below leaves an orphaned,
+    # unreferenced credential slot rather than a half-configured mailbox.
     _audit(action="email_enroll_claimed", ip=ip)
+    try:
+        _es_writes.add_account(
+            address, prov["imap_host"], ref,
+            provider=provider, imap_port=prov["imap_port"], enabled=False)
+    except Exception:                                          # noqa: BLE001
+        log.exception("email enrollment: account row write failed for slot %s", ref)
+        _audit(action="email_enroll_error", ip=ip)
+        return _fw_revert_page(
+            "Almost there",
+            "<h2>Your password was saved, but the mailbox was not registered</h2>"
+            "<p>Nothing is scanning yet. Tell whoever sent you this link that "
+            "the final step failed, and they can finish it from the "
+            "dashboard.</p>", 500)
+
+    log.info("email enrollment: mailbox registered (provider=%s, slot=%s, "
+             "owner=%s)", provider, ref, res.get("owner_user_id"))
     return _fw_revert_page(
-        "Code accepted",
-        "<h2>Code accepted</h2>"
-        "<p>The next step is creating an app password with your email provider, "
-        "which you enter yourself. That walkthrough is not built yet &mdash; your "
-        "code has been used and does not need to be kept.</p>")
+        "Mailbox connected",
+        "<h2>Your mailbox is connected</h2>"
+        "<p>Your app password has been stored on this appliance and your code "
+        "is now used up.</p>"
+        "<p><strong>Scanning has not started yet.</strong> An administrator "
+        "still has to switch it on for this mailbox &mdash; adding a mailbox "
+        "and beginning to read it are treated as two separate decisions.</p>")
 
 
 @app.route("/fw/revert", methods=["GET"])

@@ -36,7 +36,11 @@ roles_src = open(ROLES, encoding="utf-8").read()
 _exempt_block = re.search(r"_AUTH_EXEMPT\s*=\s*\{.*?\}", src, re.S).group(0)
 EXEMPT = set(re.findall(r'"([a-z_]+)"', _exempt_block))
 
-ENDPOINTS = ("email_enroll_landing", "email_enroll_claim")
+ENDPOINTS = ("email_enroll_landing", "email_enroll_claim",
+             # The step that actually stores the owner's app password. Exempt for
+             # the same reason as its siblings; the write itself is performed by
+             # nemesis_fwd after it consumes the single-use code.
+             "email_enroll_complete")
 
 
 def test_exempt_and_real():
@@ -111,8 +115,85 @@ def test_failure_is_audited_not_only_success():
     print("\n[a route with no logged failures looks identical to an unattacked one]")
     claim_body = re.search(r"def email_enroll_claim\(\):.*?\n\n\n", src, re.S).group(0)
     for action in ("email_enroll_rate_limited", "email_enroll_rejected",
+                   "email_enroll_error", "email_enroll_code_ok"):
+        check("claim audits %s" % action, action in claim_body, True)
+    done = re.search(r"def email_enroll_complete\(\):.*?\n\n\n", src, re.S).group(0)
+    for action in ("email_enroll_rate_limited", "email_enroll_rejected",
                    "email_enroll_error", "email_enroll_claimed"):
-        check("audits %s" % action, action in claim_body, True)
+        check("complete audits %s" % action, action in done, True)
+
+
+def test_claim_does_not_consume_the_code():
+    """Showing a form is not a state change.
+
+    If claim went back to consuming, a code would be burned by merely OPENING
+    the link -- so anyone who mistyped their address or closed the tab would be
+    locked out of an enrollment they never completed. The single-use guarantee
+    does not depend on this; it lives in the helper's atomic consume.
+    """
+    print("\n[claim VALIDATES; only completion spends the code]")
+    claim_body = re.search(r"def email_enroll_claim\(\):.*?\n\n\n", src, re.S).group(0)
+    check("claim does NOT call consume_enrollment_request",
+          "consume_enrollment_request" in claim_body, False)
+    check("claim uses the READ-ONLY lookup instead",
+          "get_enrollment_request" in claim_body, True)
+    check("  and classifies it with the pure checker",
+          "check_request" in claim_body, True)
+
+
+def test_dashboard_never_writes_the_credential_itself():
+    """The load-bearing property of the whole design.
+
+    The dashboard is modelled as potentially compromised. It must reach the
+    credential store ONLY through nemesis_fwd, which consumes the single-use code
+    before writing. A direct write here would bypass that entirely -- and would
+    also simply fail at runtime, since the file is 0640 root:nemesis and the
+    dashboard is not root. Both reasons point the same way.
+    """
+    print("\n[the credential write goes through the privileged helper, always]")
+    done = re.search(r"def email_enroll_complete\(\):.*?\n\n\n", src, re.S).group(0)
+    check("completion calls fw_client.write_email_secret",
+          "fw_client.write_email_secret" in done, True)
+    # USE, not MENTION: assert on an actual open()-for-write, not on the path
+    # string appearing in prose. A grep for the path matches the comment
+    # explaining why the path is never opened here.
+    check("dashboard.py never opens the secrets file for writing",
+          bool(re.search(r"open\(\s*[^)]*EMAIL_SECRETS|open\(\s*['\"]/etc/nemesis-email-secrets",
+                         src)), False)
+    check("  nor imports the writer-side module",
+          "import nemesis_fwd" in src, False)
+
+
+def test_completion_is_post_only_and_takes_no_token_in_the_url():
+    print("\n[completion: POST-only, code in the body]")
+    check("complete is POST-only",
+          bool(re.search(r'@app\.route\("/email/enroll/complete",\s*methods=\["POST"\]\)'
+                         r'\s*\ndef email_enroll_complete', src)), True)
+    check("no <code> path converter anywhere on the enroll routes",
+          bool(re.search(r'@app\.route\("/email/enroll[^"]*<', src)), False)
+    done = re.search(r"def email_enroll_complete\(\):.*?\n\n\n", src, re.S).group(0)
+    check("reads the code from the FORM BODY",
+          bool(re.search(r'request\.form\.get\("code"\)', done)), True)
+    check("reads the client address from request.remote_addr",
+          "request.remote_addr" in done, True)
+    check("  never READS a forwarded-for header (use, not mention)",
+          bool(re.search(r'headers\s*(\.get\s*\(|\[)\s*["\']X-Forwarded-For', done)), False)
+    check("the owner is taken from the HELPER's reply, not the form",
+          bool(re.search(r'request\.form\.get\("owner', done)), False)
+
+
+def test_the_hidden_code_is_escaped():
+    """The code is caller-supplied and lands in a hidden input attribute."""
+    print("\n[interpolated values are escaped]")
+    form = re.search(r"def _enroll_credential_form\(.*?\n\n\n", src, re.S).group(0)
+    check("the code is html.escape()d before interpolation",
+          "html.escape(code" in form, True)
+    check("  with quote=True, so it cannot end the attribute",
+          bool(re.search(r"html\.escape\(code[^)]*quote=True", form)), True)
+    check("provider keys and labels are escaped too",
+          form.count("html.escape(") >= 4, True)
+    check("no JavaScript on the owner-facing page",
+          "<script" in form, False)
 
 
 if __name__ == "__main__":
@@ -123,6 +204,10 @@ if __name__ == "__main__":
     test_token_never_in_the_url()
     test_identical_rejection()
     test_failure_is_audited_not_only_success()
+    test_claim_does_not_consume_the_code()
+    test_dashboard_never_writes_the_credential_itself()
+    test_completion_is_post_only_and_takes_no_token_in_the_url()
+    test_the_hidden_code_is_escaped()
     print()
     if _fail:
         print("FAILED (%d)" % len(_fail))

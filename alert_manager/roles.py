@@ -589,7 +589,10 @@ UNAUTHENTICATED = frozenset({
     # EXCLUSIVE and roles.py's import-time canary enforces it ("no endpoint is
     # in two categories at once"). Listing them in both, as a first attempt did,
     # fails at import. Same shape as the ADR 0019 failsafe endpoint above.
-    "email_enroll_landing", "email_enroll_claim",
+    # email_enroll_complete stores the owner's app password. Unauthenticated for
+    # the same reason as its siblings, and not weaker for it: nemesis_fwd -- not
+    # the dashboard -- consumes the single-use code and performs the write.
+    "email_enroll_landing", "email_enroll_claim", "email_enroll_complete",
     # ADR 0019 Amendment 03 §4 — the lockout-failsafe revert endpoint.
     #
     # NO SESSION BY DESIGN, and this is the one entry where that is the POINT

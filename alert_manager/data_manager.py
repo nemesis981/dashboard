@@ -163,10 +163,32 @@ NAMESPACES = {
     # pass all 27 checks and surface only in production as a WOULD DENY log line
     # with the write silently not happening. test_email_writes.py therefore
     # exercises the real allowed()/check_write() path directly.
+    #
+    # ⚠ `email_enrollment_requests` WAS MISSING FROM THIS TUPLE UNTIL 2026-08-31,
+    # and the consequence was exactly what the warning above predicts. The table
+    # shipped with canonical DDL, a writer (writes.create_enrollment_request), a
+    # consumer, an admin API route and a passing test suite -- and every attempt
+    # to mint an enrollment link raised AccessDenied, caught by
+    # views.api_enroll_create's `except Exception` and returned as a bare 500
+    # "could not create request". So ADR 0028 D11.5 Option C could never complete
+    # its FIRST step in production, while every test stayed green: the enrollment
+    # core's own suite is pure (no DB at all) and test_email_writes.py exercised
+    # only the four tables that were already listed.
+    #
+    # The lesson is the one this file already states and is worth restating with
+    # a second instance behind it: adding a table to the DDL and adding it to
+    # this grant are two separate acts, and nothing in the codebase couples them.
+    # A new `email_`-prefixed table needs an entry HERE, in the same change.
     "email_security":     {"tables": ("email_accounts",
                                       "email_message_verdicts",
                                       "email_attachment_detonations",
-                                      "email_link_detonations")},
+                                      "email_link_detonations",
+                                      "email_enrollment_requests",
+                                      # Slot allocation for the credential file
+                                      # (ADR 0028 D11.5 Option C). Written via
+                                      # next_sequence, which is a WRITE and needs
+                                      # the grant like any other.
+                                      "email_credential_seq")},
 
     # An EMPTY table grant, and that is the whole point. The lookup tool owns no
     # tables: it shells out to dig/whois, returns the answer to the operator, and
