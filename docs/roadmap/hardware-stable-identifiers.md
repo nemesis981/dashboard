@@ -1,7 +1,14 @@
 # Hardware Stable Identifiers — build-ready design of record
 
-- **Status:** **BUILD-NOW (Windows + Linux, full quality, both tested).** Mac = interface +
-  type-vocabulary only (drop-in later, no collector now). Android/iOS = still parked/future.
+- **Status:** SHIPPED, 2026-06-30 — `daf273f` (Windows + Linux, full quality, both tested).
+  `nemesis_agent/hwid.py` implements the composite fingerprint (`collect_signals_windows/
+  linux/macos`, `match_fingerprint`); `core_module/hw_monitor/hw_monitor.py:338-451` carries
+  the `hw_stable_id`/`hw_fp_confidence`/`hw_signal_hashes` migration. Mac = interface +
+  type-vocabulary only (drop-in later, no collector). Android/iOS = still parked/future.
+  Header found stale by `roadmap-state-audit-2026-08-31.md` — that audit's own first-pass
+  investigation initially misread this file as unbuilt too (wrong grep terms, not missing
+  code) before a direct check against the shipping commit corrected it. Header itself
+  never updated from "BUILD-NOW" until now. Corrected here.
 - **Date promoted:** 2026-06-30 (from parked). Dependency of
   [installer-unified-v1.0.6](installer-unified-v1.0.6.md); powers the TOFU lock + review-card
   "same device?" check in [ADR 0011](../architecture/0011-enrollment-security-model.md), and

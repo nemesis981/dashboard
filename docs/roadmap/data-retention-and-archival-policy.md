@@ -1,9 +1,17 @@
 # Roadmap — Data retention and archival policy
 
-- **Status:** Design approved 2026-08-03 (operator). Implementation not yet started.
-  Candidate to graduate to a numbered ADR once building starts and the design gets
-  pressure-tested against real code — see [0006-data-manager](../architecture/0006-data-manager.md)
-  for the related, already-shipped decision this extends.
+- **Status:** PARTIAL. Item 1 below (`dm_operation_log` archive-then-coalesce) shipped
+  `3066205 feat(data-manager): archive-then-coalesce for dm_operation_log (piece 5)` —
+  rows with a non-NULL actor are never touched/coalesced, archive-then-modify ordering
+  verified. The broader Tier A infinite-retention exemption, tar.gz-backup-machinery
+  reuse, and the retention-triggered disk-space monitor described below remain unbuilt.
+  Header found stale by `roadmap-state-audit-2026-08-31.md` — this doc's tally lineage
+  had it right since the 2026-08-06 baseline, but this header itself was never corrected.
+  Corrected here. Candidate to graduate to a numbered ADR once the remaining scope is
+  built and pressure-tested against real code — see
+  [0006-data-manager](../architecture/0006-data-manager.md) for the related, already-shipped
+  decision this extends.
+- **Original design approval, 2026-08-03 (operator).**
 
 ## What
 

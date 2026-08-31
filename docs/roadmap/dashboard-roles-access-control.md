@@ -11,6 +11,15 @@ shipping) — corrected here. Six GET-that-act routes needing POST conversion re
 separate, already-tracked hardening item (PUNCHLIST), not a gap in whether RBAC exists.
 Design of record for the dashboard permission model below remains accurate background.
 
+**Addendum, 2026-08-31 (roadmap-state-audit-2026-08-31.md):** the SUB-ADMIN + per-capability
+learning-gate tier below — this doc's own §"Build phasing" step 3, explicitly deferred as
+"post-trip" at line ~136 below — has since shipped too: `aa189ac` (`user_capability_unlocks`
+schema), `a425d4b` (capability quiz loader/validator/grader), `a7ed8a7` (unlock lifecycle),
+`role.js:37` has `sub_admin` wired into `RANK`, and `core/admin_approval_gate.py` (the
+key-pair-style authorization gate) exists. The "Net" line below and the "Do NOT build now"
+line at the end of Build phasing are both stale as a result — kept in place as the original
+design record, corrected by this addendum rather than rewritten.
+
 **Rule 8:** placeholders only — no real IPs/hosts/accounts/keys.
 
 > Capture only — no code, no build. Foundational: this is the access-control model the sensitive
@@ -40,7 +49,8 @@ multi-user-ready rule):
 - **No per-capability permission storage** exists yet (no `user_permissions` / learning-unlock
   table). `device_user_permissions` is referenced as a commercial-tier future (ADR 0007), not built.
 
-**Net:** the two-value seam is there; the tiering, enforcement, learning gate, and key-pair
+**Net (as of design time, 2026-07-02 — SHIPPED since, see the 2026-08-31 addendum above):**
+the two-value seam is there; the tiering, enforcement, learning gate, and key-pair
 authorization are all to-build. Confirm this still holds at build time.
 
 ## Role model (three-layer; start simpler, grow into it)
@@ -133,4 +143,6 @@ machinery now — commercial-tier).
 3. Layer in **SUB-ADMIN + the per-capability learning gate** (needs the AI-tutorials plan).
 4. Add finer admin granularity (e.g. approve-but-not-push) **only if a real need emerges.**
 
-**Do NOT build now.** Post-trip. Graduate to an ADR (or ADR 0007 addendum) + build spec when scheduled.
+**Do NOT build now — as of design time, 2026-07-02. SHIPPED since, see the 2026-08-31
+addendum at the top of this file.** Post-trip. Graduate to an ADR (or ADR 0007 addendum) +
+build spec when scheduled.

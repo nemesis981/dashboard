@@ -1,8 +1,15 @@
 # Idle-lock / walk-away protection — design
 
-- **Status:** Design approved 2026-08-01 (operator: 15-min default, no disable switch in v1,
-  add an `audit_log` row on the lock transition). Implementation not yet started. Queued
-  2026-07-31, designed 2026-08-01.
+- **Status:** SHIPPED, 2026-08-01 (same day as design approval) — `219c282` (enforcement),
+  `0e15c22` (in-page overlay + DOM-interaction heartbeat), `0573b79` (view-only health
+  summary on the lock screen). Live in `dashboard.py`: `_IDLE_TIMEOUT_SECONDS`/
+  `_SESSION_MAX_SECONDS` config, `_IDLE_LOCK_ALLOWED` allowlist, `session_idle_locked`
+  audit-log row, dedicated re-auth flow (`dashboard.py:3359`), `static/nemesis-idle-lock.js`
+  live on the settings page. Header found stale by `roadmap-state-audit-2026-08-31.md` —
+  this doc's own tally lineage had it right since the 2026-08-06 baseline, but this header
+  itself was never corrected until now, a full month after shipping. Corrected here.
+- **Original design approval, 2026-08-01 (operator: 15-min default, no disable switch in v1,
+  add an `audit_log` row on the lock transition).** Queued 2026-07-31, designed 2026-08-01.
 - **Addendum 2026-08-01:** the absolute session cap (`SESSION_MAX_HOURS`, default 8h, full
   logout rather than confine) was approved by the operator mid-session, after this doc's
   initial draft — not unapproved scope creep during implementation; noted here so the written
