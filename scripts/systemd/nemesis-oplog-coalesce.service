@@ -1,0 +1,32 @@
+[Unit]
+Description=Nemesis dm_operation_log archive-then-coalesce (bounds automated-writer growth)
+After=network.target
+
+[Service]
+Type=oneshot
+# nemesis-dash, NOT root: this writes the shared alerts.db (nemesis-dash:nemesis-db
+# 0660) and the archive dir (2770 root:nemesis-db, setgid). The DB's own writer is
+# the correct identity; root is neither needed nor wanted. Same group that every
+# other DB-writing service uses.
+User=nemesis-dash
+Group=nemesis-db
+ExecStart=/opt/nemesis/scripts/nemesis-oplog-coalesce
+Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
+# PYTHONPATH mirrors the dashboard service: alert_manager (data_manager lives here)
+# plus the hw_monitor path some siblings import.
+Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_monitor
+# The job touches ONLY the DB dir (db + wal/shm siblings + the archives/ subdir).
+# ProtectSystem=strict makes everything else read-only; ReadWritePaths re-opens the
+# one directory it legitimately writes.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nemesis
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# No capability is needed: DB and archive access is by group ownership, not
+# privilege. An empty bounding set means a compromised coalescer cannot escalate
+# to touch anything outside the DB dir its group already grants.
+CapabilityBoundingSet=
+# A non-zero exit is a REAL finding (1 = coalesce refused, live table untouched;
+# 2 = could not start). It must stay visible in the journal and systemctl status.
+# Do NOT add SuccessExitStatus to quieten it.

@@ -1,0 +1,17 @@
+[Unit]
+Description=Periodic Nemesis dm_operation_log coalesce
+
+[Timer]
+# Daily is ample: the cutoff is 7 days, so a day's delay changes nothing about what
+# is eligible, and coalescing 55 rows (a steady-state day) vs a backlog costs the
+# same seconds either way. OnBootSec catches a box that was off at the scheduled
+# time; Persistent=true runs a missed occurrence at next boot.
+OnBootSec=15min
+OnCalendar=daily
+Persistent=true
+# Spread load off any exact-midnight cron convergence with other maintenance.
+RandomizedDelaySec=30min
+Unit=nemesis-oplog-coalesce.service
+
+[Install]
+WantedBy=timers.target

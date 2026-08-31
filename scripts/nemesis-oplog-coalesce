@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Scheduled entrypoint for dm_operation_log archive-then-coalesce.
+
+Thin wrapper around DataManager.archive_and_coalesce_op_log(), which does the
+real, verified work (archive -> verify -> only-then-modify, human-actor rows never
+touched). This exists so systemd invokes ONE stable path and the journal carries
+the outcome.
+
+⚠ RUNS AS A nemesis-db-GROUP USER, NOT ROOT. The coalescer writes the shared DB
+(group nemesis-db) and the archive dir (2770 root:nemesis-db, setgid). Root is
+neither needed nor wanted -- an empty capability set plus group-only DB access is
+the least privilege that does the job.
+
+Exit codes: 0 ok (including "nothing eligible") · 1 the coalesce reported an error
+(archive verify failed, self-test failed -- live table left untouched by design) ·
+2 could not even start (import/DB-open failure). A non-zero exit is a real finding
+and must stay visible in the journal; do not quieten it.
+"""
+import os
+import sys
+
+sys.path.insert(0, "/opt/nemesis/alert_manager")
+sys.path.insert(0, "/opt/nemesis/core_module/hw_monitor")
+
+DB = os.environ.get("NEMESIS_DB_PATH", "/var/lib/nemesis/alerts.db")
+
+
+def main():
+    try:
+        import data_manager
+    except Exception as exc:                                 # noqa: BLE001
+        print("oplog-coalesce: cannot import data_manager: %r" % exc, file=sys.stderr)
+        return 2
+    try:
+        dm = data_manager.DataManager(DB)
+        result = dm.archive_and_coalesce_op_log()
+    except Exception as exc:                                 # noqa: BLE001
+        print("oplog-coalesce: run failed: %r" % exc, file=sys.stderr)
+        return 2
+    print("oplog-coalesce: %s" % result)
+    # A reported error means the archive/verify path refused and left the live
+    # table untouched -- a real finding, surfaced as a non-zero exit.
+    return 0 if result.get("status") == "ok" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
