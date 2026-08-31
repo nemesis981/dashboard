@@ -21,14 +21,55 @@ _EXEC_EXTS_UNIX = {".sh", ".py", ".pl", ".rb", ".elf", ""}
 _seen_files = set()
 
 
+def _consent():
+    """The gate module, imported lazily so this module still imports without it.
+
+    Frozen and unfrozen import shapes differ (same dance as conn_collector).
+    """
+    try:
+        import consent                                   # noqa: PLC0415
+    except ImportError:                                  # pragma: no cover
+        from .. import consent                           # type: ignore  # noqa: PLC0415
+    return consent
+
+
 def collect(platform_name: str) -> dict:
-    return {
-        "top_processes":                  _top_processes(),
-        "network_connections":            _network_connections(),
-        "login_events":                   _login_events(platform_name),
-        "new_files_in_suspicious_locations": _new_suspicious_files(platform_name),
-        "usb_events":                     _usb_events(platform_name),
-    }
+    """Collect the security-telemetry block, item by item, each behind its toggle.
+
+    ⚠ AN ITEM THAT IS OFF IS OMITTED ENTIRELY — not sent as an empty list.
+    Sending `"usb_events": []` would be indistinguishable, server-side, from "this
+    device saw no USB activity", which is a different fact and one the server
+    already acts on (it diffs USB and login sets against previous state). Omitting
+    the key is the only shape that says "not collected" rather than "nothing
+    happened". Verified safe before relying on it: every server-side read goes
+    through `security.get(...)` with a default (`hw_monitor.py:2256,2535,2546`), so
+    a missing key is tolerated rather than a KeyError.
+
+    ⚠ AND FAILING TO IMPORT THE GATE MEANS COLLECT NOTHING.
+    If `consent` cannot be imported we do not fall back to collecting — a gate that
+    is missing must not read as a gate that said yes.
+    """
+    try:
+        c = _consent()
+    except Exception as exc:                             # noqa: BLE001
+        log.warning("security: consent gate unavailable, collecting nothing: %s", exc)
+        return {}
+
+    out = {}
+    if c.collection_allowed(c.ITEM_TOP_PROCESSES):
+        out["top_processes"] = _top_processes()
+    if c.collection_allowed(c.ITEM_CONNECTIONS):
+        # The legacy poll-based collector. Rides the SAME item as the event-driven
+        # one deliberately: they are two mechanisms for one kind of data, and a
+        # user who switched connection recording off must not keep the poll path.
+        out["network_connections"] = _network_connections()
+    if c.collection_allowed(c.ITEM_LOGIN_EVENTS):
+        out["login_events"] = _login_events(platform_name)
+    if c.collection_allowed(c.ITEM_NEW_FILES):
+        out["new_files_in_suspicious_locations"] = _new_suspicious_files(platform_name)
+    if c.collection_allowed(c.ITEM_USB_EVENTS):
+        out["usb_events"] = _usb_events(platform_name)
+    return out
 
 
 def _top_processes():

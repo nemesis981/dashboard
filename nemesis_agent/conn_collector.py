@@ -318,7 +318,7 @@ def collection_permitted():
     tempted to hand-roll a consent check, and so the consent version used to
     stamp records comes from the same read that authorised collection.
     """
-    return consent.collection_allowed(), consent.consent_version()
+    return consent.collection_allowed(consent.ITEM_CONNECTIONS), consent.consent_version()
 
 
 # --------------------------------------------------------------------------- #

@@ -698,7 +698,7 @@ def _start_behavioral_monitor(conf):
     except Exception as exc:                                 # noqa: BLE001
         log.warning("behavioral: modules unavailable, not starting: %s", exc)
         return
-    if not _consent.collection_allowed():
+    if not _consent.collection_allowed(_consent.ITEM_BEHAVIORAL):
         log.info("behavioral: monitoring enabled but consent not granted -- not tailing")
         return
     try:
@@ -778,7 +778,7 @@ def _sysmon_tail(poll_interval):
     backoff = 0
     while _running:
         try:
-            if not _consent.collection_allowed():
+            if not _consent.collection_allowed(_consent.ITEM_BEHAVIORAL):
                 _wake.wait(poll_interval)
                 continue
             records, after = _sc.read_new_events(_run_ps, after_record_id=after)
@@ -819,7 +819,7 @@ def _behavioral_tail(path):
                     line = line.strip()
                     if not line:
                         continue
-                    if not _consent.collection_allowed():
+                    if not _consent.collection_allowed(_consent.ITEM_BEHAVIORAL):
                         continue           # revoked mid-session -> stop ingesting
                     try:
                         alert = _json.loads(line)
