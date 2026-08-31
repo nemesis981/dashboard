@@ -98,7 +98,7 @@ def main():
     res = cc.grant(DEV, granted_by="operator", conn=conn)
     st = cc.status(DEV, conn=conn)
     check(6, "grant records consent and opens the gate",
-          st["consented"] and st["consent_version"] == 1
+          st["consented"] and st["consent_version"] == cc.CURRENT_CONSENT_VERSION
           and st["consent_basis"] == "individual", str(res)[:56])
 
     check(7, "status of an unknown device is explicit, not a fake grant",
@@ -136,8 +136,11 @@ def main():
                                     "..", "core_module", "hw_monitor"))
     import hw_monitor as hm
     v = hm._server_consent_version(conn, DEV)
+    # Assert against the CONSTANT, not a literal. This pair was hardcoded to 1 and
+    # broke the moment the disclosure version moved to 2 (2026-08-31) -- the test was
+    # pinning an incidental value, not the property it meant to pin.
     check(11, "hw_monitor's ingest gate now returns a version (gate OPEN)",
-          v == 1, "version=%r" % v)
+          v == cc.CURRENT_CONSENT_VERSION, "version=%r" % v)
     check(12, "CONTROL: gate still CLOSED for an unconsented device",
           hm._server_consent_version(conn, "never-seen") is None)
 
@@ -182,7 +185,7 @@ def main():
     st2 = cc.status(DEV, conn=conn)
     check(19, "re-grant clears revoked_at and reopens the gate",
           st2["consented"] and st2["revoked_at"] is None
-          and hm._server_consent_version(conn, DEV) == 1)
+          and hm._server_consent_version(conn, DEV) == cc.CURRENT_CONSENT_VERSION)
     check(20, "re-grant does NOT resurrect purged data",
           counts(conn, DEV) == (0, 0, 0), str(counts(conn, DEV)))
 

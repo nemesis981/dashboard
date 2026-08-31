@@ -6905,7 +6905,12 @@ def _render_agent_devices_html() -> str:
         try:
             import conn_consent as _cc                        # noqa: PLC0415
             _cov = _cc.coverage_state(r["device_id"])
-            _covered = (_cov == _cc.COVERAGE_COVERED)
+            # COLLECTING_STATES, not == COVERAGE_COVERED. Since the 2026-08-31 move
+            # to disclosure-and-toggle there are THREE collecting states (explicitly
+            # on, on-by-default, and on-with-a-stale-disclosure). Comparing against
+            # the single constant would paint two of them amber and label them as a
+            # problem, when they are the normal healthy case.
+            _covered = _cov in _cc.COLLECTING_STATES
             _colour = "#4caf50" if _covered else "#ffcc00"
             consent_badge = (
                 '<div style="color:%s;font-size:0.8em;margin:4px 0">%s</div>'
@@ -6914,7 +6919,7 @@ def _render_agent_devices_html() -> str:
             # The lookup itself failed. Say that, rather than rendering nothing —
             # an absent badge would be indistinguishable from a covered device.
             consent_badge = ('<div style="color:#ffcc00;font-size:0.8em;margin:4px 0">'
-                             'NOT COVERED &mdash; consent state unreadable</div>')
+                             'NOT COLLECTED &mdash; consent state unreadable</div>')
         _ck_label, _ck_note = _agent_checkin_state(r["agent_last_seen"])
         checkin_label = html.escape(_ck_label)
         checkin_note = (

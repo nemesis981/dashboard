@@ -53,7 +53,10 @@ from database import CONSENT_BASES, CONSENT_BASIS_EMPLOYER, CONSENT_BASIS_INDIVI
 #: mismatch here does not leak data — it silently rejects everything, which
 #: looks like an agent that has stopped reporting. Checked by the test suite
 #: against the agent constant so the two cannot drift unnoticed.
-CURRENT_CONSENT_VERSION = 1
+# Must equal nemesis_agent/consent.py's DISCLOSURE_VERSION -- a cross-check in
+# test_conn_consent.py pins them together, and it caught this being left at 1
+# when the agent moved to 2 for the 2026-08-31 disclosure rewrite.
+CURRENT_CONSENT_VERSION = 2
 
 #: The namespace these writes run under. NOT `dashboard`: revocation must DELETE
 #: from `conn_events` and the seen-set, and granting the web-facing process
@@ -239,21 +242,35 @@ def status(device_id, conn=None):
 # decided about lawful basis, a device whose connection telemetry is NOT being
 # collected must SAY so rather than simply be absent.
 
-COVERAGE_COVERED      = "covered"        # consent live at the current version
-COVERAGE_WITHDRAWN    = "withdrawn"      # consent revoked; history purged
-COVERAGE_NOT_ENROLLED = "not_enrolled"   # never consented; Track C never started
-COVERAGE_VERSION_STALE = "version_stale"  # consented, but at a superseded version
-COVERAGE_UNKNOWN      = "unknown"        # state could not be read
+# ⚠ SEMANTICS CHANGED 2026-08-31 with the move from opt-in to disclosure-and-toggle.
+# Under opt-in, "no record" meant NOT collecting. Under the disclosure model it means
+# collecting BY DEFAULT -- the opposite. Leaving the old label in place would have put
+# "NOT COVERED" on every device that is actually being collected from, which is a
+# reassuring-sounding lie in the more dangerous direction.
+COVERAGE_COVERED      = "covered"        # explicitly on at the current disclosure
+COVERAGE_DEFAULT_ON   = "default_on"     # no record -> collecting by default (NEW)
+COVERAGE_WITHDRAWN    = "withdrawn"      # explicitly turned off; history purged
+COVERAGE_NOT_ENROLLED = "not_enrolled"   # defensive: not-on for no stated reason
+COVERAGE_VERSION_STALE = "version_stale"  # collecting, but disclosure text has moved on
+COVERAGE_UNKNOWN      = "unknown"        # state could not be read -> fail closed, OFF
+
+#: The states in which data IS being collected. Named as a set rather than compared
+#: against one constant because there are now three of them, and the self-test below
+#: needs to distinguish "collecting" from "covered" -- they stopped being synonyms.
+COLLECTING_STATES = frozenset({COVERAGE_COVERED, COVERAGE_DEFAULT_ON,
+                               COVERAGE_VERSION_STALE})
 
 #: Short user-facing label per state. Deliberately NONE of them is empty: an
 #: empty label renders as a blank cell, which is how "not covered" became
 #: indistinguishable from "fine" in the first place.
 COVERAGE_LABELS = {
     COVERAGE_COVERED:       "connection telemetry: collected",
-    COVERAGE_WITHDRAWN:     "NOT COVERED — consent withdrawn",
-    COVERAGE_NOT_ENROLLED:  "NOT COVERED — no consent on record",
-    COVERAGE_VERSION_STALE: "NOT COVERED — consent predates the current disclosure",
-    COVERAGE_UNKNOWN:       "NOT COVERED — consent state unreadable",
+    COVERAGE_DEFAULT_ON:    "connection telemetry: collected (on by default)",
+    COVERAGE_VERSION_STALE: "connection telemetry: collected — disclosure updated "
+                            "since this device was configured",
+    COVERAGE_WITHDRAWN:     "NOT COLLECTED — turned off on the device",
+    COVERAGE_NOT_ENROLLED:  "NOT COLLECTED — off for no recorded reason",
+    COVERAGE_UNKNOWN:       "NOT COLLECTED — consent state unreadable",
 }
 
 
@@ -274,7 +291,8 @@ def coverage_state(device_id, conn=None) -> str:
     except Exception:                                        # noqa: BLE001
         return COVERAGE_UNKNOWN
     if st.get("reason") == "no record":
-        return COVERAGE_NOT_ENROLLED
+        # Disclosure model: a device nobody has configured is collecting.
+        return COVERAGE_DEFAULT_ON
     if st.get("revoked_at"):
         return COVERAGE_WITHDRAWN
     if not st.get("consented"):
@@ -283,6 +301,8 @@ def coverage_state(device_id, conn=None) -> str:
         # would be exactly the wrong direction.
         return COVERAGE_NOT_ENROLLED
     if not st.get("version_current"):
+        # Still collecting -- a stale disclosure no longer stops collection, it means
+        # the user is owed the new text. See nemesis_agent/consent.py's note.
         return COVERAGE_VERSION_STALE
     return COVERAGE_COVERED
 
@@ -290,7 +310,7 @@ def coverage_state(device_id, conn=None) -> str:
 def coverage_label(state) -> str:
     """User-facing text. An unrecognised state is reported, never blanked."""
     return COVERAGE_LABELS.get(
-        state, "NOT COVERED — unrecognised consent state (%s)" % (state,))
+        state, "NOT COLLECTED — unrecognised consent state (%s)" % (state,))
 
 
 def _selftest_coverage_states() -> None:
@@ -307,17 +327,27 @@ def _selftest_coverage_states() -> None:
             raise AssertionError(
                 "coverage self-test: state %r has an empty label; a blank cell is "
                 "how 'not covered' became indistinguishable from 'fine'" % state)
-        if state != COVERAGE_COVERED and "NOT COVERED" not in label:
+        collecting = state in COLLECTING_STATES
+        says_not = "NOT COLLECTED" in label
+        if collecting and says_not:
             raise AssertionError(
-                "coverage self-test: non-covered state %r does not say so (%r)"
+                "coverage self-test: state %r IS collecting but its label says it is "
+                "not (%r) -- a label that under-reports collection understates what "
+                "is being gathered about a person" % (state, label))
+        if not collecting and not says_not:
+            raise AssertionError(
+                "coverage self-test: non-collecting state %r does not say so (%r)"
                 % (state, label))
-    if "NOT COVERED" in COVERAGE_LABELS[COVERAGE_COVERED]:
+    # Every collecting state must be labelled, or a device being collected from
+    # renders with the unrecognised-state fallback and reads as not collected.
+    for state in COLLECTING_STATES:
+        if state not in COVERAGE_LABELS:
+            raise AssertionError(
+                "coverage self-test: collecting state %r has no label" % (state,))
+    # An unrecognised state must still report as not-collected rather than "".
+    if "NOT COLLECTED" not in coverage_label("some_future_state"):
         raise AssertionError(
-            "coverage self-test: the COVERED state claims not to be covered")
-    # An unrecognised state must still produce a not-covered label rather than "".
-    if "NOT COVERED" not in coverage_label("some_future_state"):
-        raise AssertionError(
-            "coverage self-test: an unrecognised state did not report as uncovered")
+            "coverage self-test: an unrecognised state did not report as uncollected")
 
 
 _selftest_coverage_states()
