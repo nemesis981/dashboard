@@ -47,7 +47,7 @@ instruction.
 
 ---
 
-## Current state (last live check: 2026-08-30, Window 2 Morning Status)
+## Current state (last live check: 2026-08-31, Window 2 Morning Status)
 
 ### Production box (`sudo -n -l`, `getent group`, `id <user>`) — CONFIRMED CLEAN
 - No broad `(ALL) NOPASSWD:` grants. (The class revoked 2026-08-19 — `systemctl restart
@@ -67,15 +67,20 @@ instruction.
   classification (clean / narrowly-scoped / expected) is tracked here.
 
 ### `<user>`'s `pihole` group membership — STILL OPEN, unchanged
-Confirmed live 2026-08-30 (`getent group pihole` → `<user>` is a member). Same standing
+Confirmed live 2026-08-31 (`getent group pihole` → `<user>` is a member). Same standing
 note as every prior check going back weeks: for
 `~/work/nemesis-internal/tools/pihole-cardinality.py`. **Worth its own revoke decision
 once that tool's current use is done — not urgent, but genuinely open, not forgotten.**
 
 ### `<user>`'s `nemesis-db` / `nemesis-fw` group memberships — expected, not flagged
 Operator's own product-operation groups (DB access, firewall chokepoint). Confirmed live
-2026-08-30. Not a revocation candidate — this is the intended operator access model, not
-an incidentally-granted elevated permission.
+2026-08-31. Not a revocation candidate — this is the intended operator access model, not
+an incidentally-granted elevated permission. **New this check:** `nemesis-fw` group now also
+lists `nemesis-alertw,nemesis-dash` as members alongside `paul` (`getent group nemesis-fw` →
+`nemesis-fw:x:971:paul,nemesis-alertw,nemesis-dash`) — service accounts, not operator-elevated
+access; consistent with the firewall chokepoint needing write access from those two services.
+Not flagged as a concern, noted because it's a change in the group's membership list since the
+last time this file was written (service accounts weren't previously called out here).
 
 *(Rule 8: `<user>` above is a placeholder for the operator's real production-box account —
 not written literally in this public-repo file.)*
@@ -94,8 +99,8 @@ fleet VMs; this entry is carried forward from the last time it was actually chec
   (e.g. folded into Window 3's VM-fleet closeout sweep instead). Flagging again here
   rather than letting it silently drop a second time.
 
-### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 2 consecutive sessions
-`ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-08-30, same result
+### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 3 consecutive sessions
+`ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-08-31, same result
 as prior sessions that attempted this check. Genuinely unable to verify from this
 session's privilege level, not a skipped check — flagged per CLAUDE.md's explicit
 instruction to note this rather than silently omit it. No live root-level check of this
@@ -109,3 +114,10 @@ rule), needs a session with root access to actually `ls` it.
   Full live re-check of the production box (clean). Gateway-VM and polkit-rules entries
   carried forward from last actual verification, explicitly marked as such rather than
   re-asserted as current.
+- **2026-08-31** (Window 2): re-checked live. Production box still clean, same grant set
+  (verbatim `sudo -n -l` compared line-for-line against the prior session's output — no
+  additions, no removals). `nemesis-fw` group membership noted for the first time
+  (service accounts `nemesis-alertw`/`nemesis-dash`, not operator-elevated). Polkit rules
+  still unreadable from this session (3rd consecutive session). Gateway-VM entry not
+  re-checked (out of scope for the production-box Morning Status per its own open question,
+  §ln93 above — still unresolved).
