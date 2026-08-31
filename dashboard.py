@@ -5682,11 +5682,13 @@ try:
     from modules.email_security import writes as _es_writes           # noqa: E402
     from modules.email_security import providers as _es_providers     # noqa: E402
     from modules.email_security import credential_store as _es_credentials  # noqa: E402
+    from modules.email_security import settings_resolve as _es_settings  # noqa: E402
 except Exception:                                                     # noqa: BLE001
     _es_enrollment = None
     _es_writes = None
     _es_providers = None
     _es_credentials = None
+    _es_settings = None
 
 
 # ── ADR 0028 D11.5 Option C: owner-side email enrollment (PUBLIC) ────────────
@@ -5807,37 +5809,144 @@ def email_enroll_claim():
     # ATOMICALLY by nemesis_fwd at completion, where the predicates live in the
     # UPDATE's WHERE clause and two simultaneous completions cannot both win.
     _audit(action="email_enroll_code_ok", ip=ip)
+    # The row carries the settings discovered ADMIN-SIDE at mint time. Passing
+    # it here is what makes tier 2 possible without this unauthenticated route
+    # performing any lookup of its own.
     return _fw_revert_page("Connect your email account",
-                           _enroll_credential_form(code))
+                           _enroll_credential_form(code, row=row))
 
 
-def _enroll_credential_form(code, provider=None, error=None):
-    """The owner-facing walkthrough + credential form.
+def _enroll_credential_form(code, provider=None, error=None, row=None,
+                            form=None):
+    """The owner-facing walkthrough + credential form. Tiers 0-3.
 
     ⚠ EVERY INTERPOLATED VALUE IS html.escape()d, INCLUDING THE CODE. The code is
     caller-supplied and lands in a hidden input; unescaped, a crafted value ends
     the attribute and injects markup into a page served to the account owner. It
     has already been matched against a database row by the time it reaches here,
     which makes it *likely* well-formed and is NOT a reason to skip escaping.
+    The DISCOVERED values are escaped for a stronger reason still: they came from
+    a third party's DNS or from Mozilla's ISPDB, so they are the least trusted
+    strings on the page.
 
     No JavaScript at all, deliberately -- the same reasoning as the fw/revert
     pages: a no-JS fallback that is never exercised is a control that silently
-    regresses. Provider selection is a plain radio group and the walkthroughs for
-    every provider are rendered together, so the page works with nothing but a
-    form POST.
+    regresses. Every tier is therefore rendered TOGETHER rather than revealed by
+    script, and provider selection is a plain radio group.
+
+    THE FOUR TIERS:
+      0  what this is and what an app password is, before any choice is asked
+      1  the provider buttons, each linking to that provider's OWN instructions
+      2  settings detected at mint time, shown for confirmation (they prefill
+         tier 3's fields, which is what makes "confirm" and "edit" the same
+         control with no JavaScript)
+      3  manual entry, for a domain nothing knows about
+
+    Tier 3 is a NORMAL path, not a rare fallback: autodiscovery genuinely finds
+    nothing for most custom domains (measured -- see the autodiscover module).
     """
     esc_code = html.escape(code or "", quote=True)
+    form = form or {}
+    row = row or {}
+    selected = provider or _es_providers.DEFAULT_PROVIDER
+
+    def _v(name, default=""):
+        """A previously submitted value, re-escaped for redisplay."""
+        return html.escape(str(form.get(name) or default), quote=True)
+
+    # ── Tier 0 ───────────────────────────────────────────────────────────────
+    tier0 = "".join(
+        "<p style='margin:.5rem 0'><strong>%s.</strong> %s</p>"
+        % (html.escape(head), html.escape(body))
+        for head, body in _es_providers.TIER0_INTRO)
+
+    # ── Tier 1 ───────────────────────────────────────────────────────────────
     blocks = []
-    for key, label in _es_providers.choices():
+    for key, label, supported in _es_providers.display_choices():
         p = _es_providers.get(key)
-        checked = " checked" if (provider or _es_providers.DEFAULT_PROVIDER) == key else ""
-        steps = "".join("<li>%s</li>" % html.escape(s) for s in p["steps"])
-        blocks.append(
-            "<label style='display:block;margin:.6rem 0;font-weight:600'>"
-            "<input type=radio name=provider value='%s'%s> %s</label>"
-            "<ol style='color:#444;font-size:.95rem;margin:.2rem 0 1.2rem 1.2rem'>"
-            "%s</ol>" % (html.escape(key, quote=True), checked,
-                         html.escape(p["label"]), steps))
+        esc_key = html.escape(key, quote=True)
+        url, doc_label = _es_providers.doc_link(key)
+        if supported:
+            checked = " checked" if selected == key else ""
+            blocks.append(
+                "<label style='display:block;margin:.5rem 0'>"
+                "<input type=radio name=provider value='%s'%s> "
+                "<strong>%s</strong></label>"
+                "<p style='margin:.1rem 0 .9rem 1.6rem;color:#444;font-size:.95rem'>"
+                "<a href='%s' target=_blank rel='noopener noreferrer'>%s</a>"
+                " &mdash; opens %s&#39;s own page.</p>"
+                % (esc_key, checked, html.escape(label),
+                   html.escape(url or "", quote=True),
+                   html.escape(doc_label or "Instructions"),
+                   html.escape(label)))
+        else:
+            # Shown, disabled, and EXPLAINED. A provider that is simply missing
+            # reads as a broken product; one that says why reads as an answer.
+            blocks.append(
+                "<label style='display:block;margin:.5rem 0;color:#888'>"
+                "<input type=radio disabled> <strong>%s</strong></label>"
+                "<p style='margin:.1rem 0 .9rem 1.6rem;color:#888;font-size:.95rem'>"
+                "%s</p>"
+                % (html.escape(label),
+                   html.escape(p.get("unsupported_reason") or
+                               "Not supported yet.")))
+
+    blocks.append(
+        "<label style='display:block;margin:.5rem 0'>"
+        "<input type=radio name=provider value='custom'%s> "
+        "<strong>Other &mdash; my own mail server</strong></label>"
+        "<p style='margin:.1rem 0 .9rem 1.6rem;color:#444;font-size:.95rem'>"
+        "Choose this if your email is not in the list above, then fill in the "
+        "server settings below.</p>"
+        % (" checked" if selected == "custom" else ""))
+
+    # ── Tier 2 ───────────────────────────────────────────────────────────────
+    # The detected values PREFILL tier 3 rather than living in their own
+    # controls. With no JavaScript that is what lets one set of fields serve
+    # both "confirm what we found" and "correct it".
+    d_host = row.get("disc_host")
+    d_port = row.get("disc_port")
+    d_tls = row.get("disc_tls")
+    if d_host:
+        tier2 = (
+            "<p style='background:#eef7ee;border-left:3px solid #4a4;"
+            "padding:.6rem .8rem;margin:1rem 0'>We already looked up the "
+            "settings for this address and found <strong>%s</strong> on port "
+            "<strong>%s</strong>. They are filled in below &mdash; check they "
+            "look right, or change them.</p>"
+            % (html.escape(str(d_host)), html.escape(str(d_port or ""))))
+    elif row.get("disc_at"):
+        # Ran and found nothing. Saying so is better than silence: it tells the
+        # reader the blank fields are expected rather than a page that failed.
+        tier2 = ("<p style='color:#555;margin:1rem 0'>We could not look up the "
+                 "settings for this address automatically, which is normal for "
+                 "many domains. Enter them from your provider below.</p>")
+    else:
+        tier2 = ""
+
+    # ── Tier 3 ───────────────────────────────────────────────────────────────
+    host_val = _v("imap_host", d_host or "")
+    port_val = _v("imap_port", d_port or 993)
+    tls_val = str(form.get("tls_mode") or d_tls or "implicit")
+    tier3 = (
+        "<fieldset style='margin:1rem 0;padding:.8rem;border:1px solid #ccc'>"
+        "<legend style='font-size:.95rem;color:#444'>Server settings "
+        "(only needed for &ldquo;Other&rdquo;)</legend>"
+        "<label style='display:block'>IMAP server<br>"
+        "<input name=imap_host value='%s' autocomplete=off spellcheck=false "
+        "placeholder='imap.example.com' "
+        "style='width:100%%;padding:.5rem'></label>"
+        "<label style='display:block;margin-top:.6rem'>Port<br>"
+        "<input name=imap_port value='%s' inputmode=numeric "
+        "style='width:8rem;padding:.5rem'></label>"
+        "<label style='display:block;margin-top:.6rem'>Security<br>"
+        "<select name=tls_mode style='padding:.5rem'>"
+        "<option value='implicit'%s>SSL/TLS (usually port 993)</option>"
+        "<option value='starttls'%s>STARTTLS (usually port 143)</option>"
+        "</select></label></fieldset>"
+        % (host_val, port_val,
+           " selected" if tls_val == "implicit" else "",
+           " selected" if tls_val == "starttls" else ""))
 
     err = ""
     if error:
@@ -5847,15 +5956,17 @@ def _enroll_credential_form(code, provider=None, error=None):
 
     return (
         "<h2>Connect your email account</h2>"
-        + err +
-        "<p>Your code is valid. Choose your email provider, follow its steps, "
-        "then enter the app password it gives you.</p>"
+        + err + tier0 +
+        "<hr style='margin:1.2rem 0;border:0;border-top:1px solid #ddd'>"
         "<form method=POST action='/email/enroll/complete'>"
         "<input type=hidden name=code value='" + esc_code + "'>"
-        + "".join(blocks) +
-        "<label style='display:block;margin-top:1rem'>Your email address<br>"
-        "<input name=address type=email autocomplete=off required "
-        "style='width:100%;padding:.6rem;font-size:1rem'></label>"
+        "<label style='display:block;margin-bottom:1rem'>Your email address<br>"
+        "<input name=address type=email autocomplete=off required value='" +
+        _v("address") + "' style='width:100%;padding:.6rem;font-size:1rem'>"
+        "</label>"
+        "<p style='font-weight:600;margin-bottom:.2rem'>Who provides this "
+        "email?</p>"
+        + "".join(blocks) + tier2 + tier3 +
         "<label style='display:block;margin-top:1rem'>App password<br>"
         "<input name=app_password type=password autocomplete=off required "
         "spellcheck=false style='width:100%;padding:.6rem;font-family:monospace;"
@@ -5898,7 +6009,8 @@ def email_enroll_complete():
     # the failure it would then produce is a 500 on an unauthenticated route
     # rather than the identical rejection every other path returns.
     if (_es_enrollment is None or _ENROLL_RATE is None or _es_providers is None
-            or _es_writes is None or _es_credentials is None):
+            or _es_writes is None or _es_credentials is None
+            or _es_settings is None):
         return _enroll_reject()
 
     # remote_addr, NEVER X-Forwarded-For -- unauthenticated route, so the header
@@ -5917,14 +6029,18 @@ def email_enroll_complete():
     # of four). Only the outer whitespace a copy-paste picks up is removed.
     secret = secret.strip()
 
-    # ⛔ is_connectable, NOT is_known. The table now contains entries that exist
-    # so the UI can explain them and which CANNOT be connected to (Outlook.com /
-    # Hotmail is OAuth2-only -- see providers.HOTMAIL). is_known() is True for
-    # those. Accepting one here would store an app password for a mailbox that
-    # can never be read and surface later as an authentication failure, which
-    # reads to the owner as "you typed it wrong" rather than "this provider is
-    # not supported yet".
-    if not code or not _es_providers.is_connectable(provider):
+    # ⛔ is_connectable, NOT is_known -- plus the explicit `custom` sentinel.
+    # The table contains entries that exist so the UI can explain them and which
+    # CANNOT be connected to (Outlook.com / Hotmail is OAuth2-only -- see
+    # providers.HOTMAIL). is_known() is True for those. Accepting one here would
+    # store an app password for a mailbox that can never be read and surface
+    # later as an authentication failure, which reads to the owner as "you typed
+    # it wrong" rather than "this provider is not supported yet".
+    #
+    # `custom` is accepted as a KEY here and validated for real below, once the
+    # enrollment row (and with it the discovered settings) has been loaded.
+    if not code or not (_es_providers.is_connectable(provider)
+                        or provider == _es_settings.CUSTOM):
         _audit(action="email_enroll_rejected", ip=ip)
         return _enroll_reject()
 
@@ -6010,7 +6126,29 @@ def email_enroll_complete():
             "Ask whoever sent you this link to sort it out &mdash; your code has "
             "not been used and still works.</p>", 409)
 
-    prov = _es_providers.get(provider)
+    # ── Resolve WHERE this mailbox connects, and refuse if that is unsafe ────
+    # A known provider's built-in settings win outright; `custom` falls back to
+    # what the owner typed, then to what was discovered at mint time. The
+    # refusals (loopback/private literals, non-standard ports, unknown TLS
+    # modes) live in settings_resolve because this route is UNAUTHENTICATED --
+    # see that module's header for why an unconstrained host field here would be
+    # a port-scanning primitive with a credential attached.
+    try:
+        conn_cfg = _es_settings.resolve(
+            provider, discovery=_row,
+            manual={"imap_host": request.form.get("imap_host"),
+                    "imap_port": request.form.get("imap_port"),
+                    "tls_mode": request.form.get("tls_mode")}
+            if provider == _es_settings.CUSTOM else None)
+    except _es_settings.SettingsError as exc:
+        # Shown as a form error: this is the OWNER'S input to fix, and the
+        # message is written for them. It reveals nothing about any code.
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _fw_revert_page(
+            "Connect your email account",
+            _enroll_credential_form(code, provider, str(exc), row=_row,
+                                    form=request.form), 400)
+
     try:
         slot = _es_writes.allocate_credential_slot()
         ref = _es_credentials.slot_ref(slot)
@@ -6041,9 +6179,13 @@ def email_enroll_complete():
         # returned, logged, and then dropped, leaving the column NULL while the
         # docstring above claimed it was set.
         _es_writes.add_account(
-            address, prov["imap_host"], ref,
-            provider=provider, imap_port=prov["imap_port"], enabled=False,
-            owner_user_id=res.get("owner_user_id"))
+            address, conn_cfg["imap_host"], ref,
+            provider=provider, imap_port=conn_cfg["imap_port"], enabled=False,
+            owner_user_id=res.get("owner_user_id"),
+            # Stored on the ROW so a custom mailbox has a transport at all
+            # (providers.get("custom") raises) and so a later provider-table
+            # edit cannot silently downgrade this mailbox's TLS.
+            tls_mode=conn_cfg["tls_mode"])
     except Exception:                                          # noqa: BLE001
         log.exception("email enrollment: account row write failed for slot %s", ref)
         _audit(action="email_enroll_error", ip=ip)

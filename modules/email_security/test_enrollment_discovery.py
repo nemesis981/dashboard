@@ -159,8 +159,28 @@ check("the ADMIN mint route calls autodiscover",
 check("dashboard.py (which owns the UNAUTHENTICATED /email/enroll routes) "
       "never calls autodiscover.discover",
       "autodiscover.discover(" not in _dash_src)
-check("...and does not import autodiscover at all",
-      "autodiscover" not in _dash_src)
+# ⚠ CHECK THE IMPORT SYNTAX, NOT THE BARE WORD. This assertion used to be
+# `"autodiscover" not in _dash_src` and it FAILED the moment a docstring in
+# dashboard.py mentioned the autodiscover module by name in prose -- the
+# codebase's standing "a grep for a term matches the note explaining the term"
+# trap, hit live 2026-08-31. The security property is that dashboard.py cannot
+# CALL it, which means it must not import it; prose naming it is harmless and
+# in fact useful. Weakening this to "not in" would have been the wrong fix in
+# both directions: it flags harmless comments and would still miss
+# `from modules.email_security import autodiscover as x`.
+_import_forms = [
+    "import autodiscover",                       # bare / aliased
+    "from . import autodiscover",
+    "from modules.email_security import autodiscover",
+    "email_security.autodiscover",               # attribute access
+]
+_found_imports = [f for f in _import_forms if f in _dash_src]
+# NOTE: this file's check() takes a truthy CONDITION, not (got, want) -- an
+# empty list is falsy, so passing the list itself reports a correct result as a
+# failure. Different suites in this repo use both shapes.
+check("...and does not IMPORT or reference it as a module either "
+      "(checked as import syntax, not as a bare word)",
+      not _found_imports, _found_imports)
 check("the mint route wraps discovery so a lookup failure cannot break minting",
       "autodiscovery failed" in _views_src)
 
