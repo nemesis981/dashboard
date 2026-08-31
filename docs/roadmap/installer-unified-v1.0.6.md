@@ -2,9 +2,14 @@
 
 - **Status:** **PARTIAL / building.** v1.0.7 self-onboards end-to-end (proven on a real
   clone over live Tailscale) — commits `2e27a60` (Phase-1 delivery foundation) + `a21b782`
-  (self-onboard / pre-auth-key join). Two before-trip fixes remain (auto_approve default,
-  double-enroll). This doc + [ADR 0011](../architecture/0011-enrollment-security-model.md)
-  remain the single authority every subsequent build prompt references.
+  (self-onboard / pre-auth-key join). **Both named before-trip fixes shipped same day,
+  `c9f0a2f` (2026-07-01):** `auto_approve` now defaults to 0 with an explicit opt-in
+  checkbox, and the frozen installer persists the server-assigned `device_id` on first
+  enrollment so the agent's `ensure_enrolled()` finds it on next boot instead of filing a
+  second pending row ~11s later (the double-enroll bug). Header found stale by Window 1's
+  audit review, 2026-08-31 — corrected here. This doc +
+  [ADR 0011](../architecture/0011-enrollment-security-model.md) remain the single
+  authority every subsequent build prompt references.
 - **Date:** 2026-06-30
 - **Resolves audit findings:** PL-3 (Tailscale onboarding), PL-4 (installer Tailscale
   inconsistency), PL-8 (dashboard serves legacy Python installer), and the 272MB→~30MB
