@@ -5571,3 +5571,41 @@ the operator to ignore the one global health indicator.
 *Found while investigating the operator's recurring `[header-status] poll -> red (NNN)` console
 log. Worth noting the `(NNN)` is the ITEM COUNT, not a poll counter — it was read as the latter,
 which is why a climbing number looked benign.*
+
+### [MEDIUM] Thermal tickets: the reading is IN THE TITLE, so each degree is its own "incident" — 48 open, peaks at 100°C (found 2026-08-31)
+**Two separate things here, and they should not be conflated.** Both flagged for a fresh look;
+neither investigated tonight (found at ~04:30 while cleaning up an unrelated ticket flood).
+
+**1. The duplicate-per-observation pattern — same shape as the integrity_watch bug fixed in
+`b8fccb2` earlier the same night.** 48 thermal tickets, all still open, spanning
+`2026-08-05` .. `2026-08-31`. The temperature VALUE is embedded in the title:
+```
+Auto: CPU temperature 100.0°C exceeds 85.0°C     x9
+Auto: CPU temperature  97.0°C exceeds 85.0°C     x4
+Auto: CPU temperature  87.0°C exceeds 85.0°C     x4
+Auto: GPU temperature    88°C exceeds 85.0°C     x3
+```
+So "CPU is over temperature" is not one incident — it is a *new* ticket for every distinct
+reading, and a repeat for every recurrence of that same reading. At least 10 distinct CPU values
+appear (100, 99, 98, 97, 95, 94, 93, 92, 90, 89…). Any dedup keyed on title cannot collapse
+these, because the title is different every time the fan speed changes.
+
+**This is worth stating as a general lesson, not a one-off:** the integrity flood came from a
+dedup that could not fire; this one comes from a dedup that *can* fire but is keyed on a value
+that varies. Both produce the same outcome — a real condition rendered as an unbounded stream —
+and the second kind is harder to spot because the suppression code looks correct. **Worth a
+sweep for other `title`-keyed auto-tickets that interpolate a measured value.**
+
+**2. The readings themselves may be a REAL hardware problem, and that must not get lost behind
+the noise complaint.** Nine tickets report CPU at **100.0°C**, with a cluster of 90-100°C
+readings across 2026-08-16/17 and GPU at 87-90°C. Most recent thermal ticket is
+`2026-08-31T00:57` (86°C), so it is not purely historical. Either the machine genuinely throttles
+at 100°C under load, or a sensor is misreporting — **and the two have very different
+consequences.** Nobody has checked which. This box is the operator's daily driver AND the
+appliance.
+
+**Suggested order when picked up:** confirm whether the readings are real (compare against
+`sensors`, check for throttling in the kernel log) BEFORE reworking the ticket shape — if the
+hardware is genuinely hitting 100°C, the tickets are doing their job and the fix is cooling, not
+deduplication.
+*Found while cleaning up the integrity_watch duplicates; not investigated (Rule 1).*
