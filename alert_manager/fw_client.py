@@ -197,6 +197,28 @@ def write_env(values, username, session_id, password):
     return _request("write_env", {"values": values}, username, session_id, password)
 
 
+def gateway_switch(enable, iface, cidr, username, session_id, password):
+    """Enable or disable Gateway Mode. Transactional, with verified rollback.
+
+    Sends INTENT only -- `enable` plus, when enabling, the LAN interface and its
+    CIDR. Every check that matters (the interface exists on the box, the CIDR is
+    private IPv4, the canonical spelling) is the helper's, for the same reason
+    write_env states: a check performed here is one a compromised dashboard skips.
+
+    The whole switch is ONE op deliberately. It is a transaction that rolls back
+    in reverse order on any failed step; splitting it across three calls would put
+    that transaction across three round-trips, where a crash in between leaves a
+    half-applied state with nothing left to undo it.
+
+    Returns the helper's result dict: {"ok", "phase", "reason", ...}. A failure is
+    a returned result, not an exception -- `phase` says how far it got and
+    `restored` says whether the box was measurably put back.
+    """
+    return _request("gateway_switch",
+                    {"enable": bool(enable), "iface": iface, "cidr": cidr},
+                    username, session_id, password)
+
+
 def write_email_secret(key, value, token, source_ip=None):
     """Write ONE email app password, authorised by an enrollment code.
 

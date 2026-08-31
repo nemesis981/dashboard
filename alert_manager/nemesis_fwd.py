@@ -40,6 +40,7 @@ import errno
 import grp
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -59,6 +60,12 @@ from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
+# core/ is a SIBLING of alert_manager/, and is not importable as a package from
+# here -- gateway_mode is imported flat, the same way vpn_dns_guard does it.
+_CORE = os.path.join(os.path.dirname(_HERE), "core")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
+import gateway_mode  # noqa: E402
 import nemesis_paths  # noqa: E402
 import nemesis_timestamp  # noqa: E402
 import data_manager  # noqa: E402
@@ -225,7 +232,8 @@ READ_OPS = {"list_blocked", "list_rules"}
 # tunnel-sourced forwarded traffic at all (Tailscale's ts-forward ACCEPTs it ahead
 # of every ufw chain), so there is no route op for these names to become.
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
-             "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie"}
+             "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
+             "gateway_switch"}
 # `failsafe_revert` carries no session credential BECAUSE the admin may be unable
 # to log in -- the firewall change under test can be what broke their path to the
 # dashboard. The revert TOKEN is the credential, validated inside
@@ -285,6 +293,10 @@ AUDIT_ACTION = {
     # cause. It wants to be findable as such when reading or prefix-filtering the
     # audit trail.
     "write_email_secret": "email_write_secret",
+    # net_ rather than fw_ or svc_: this changes the box's network ROLE
+    # (forwarding + source-NAT), which is neither a firewall rule change nor
+    # a service lifecycle event, and wants to be findable as its own thing.
+    "gateway_switch":    "net_gateway_switch",
     "restart_dashboard": "svc_restart_dashboard",
     # mem_ rather than fw_ or svc_: this is neither a firewall operation nor a
     # service lifecycle one. Filing it under fw_* would mislead anyone reading
@@ -350,7 +362,15 @@ PEER_POLICY = {
                 # destination is a SEPARATE file from /etc/nemesis.env, and every
                 # call must present an unspent enrollment code that this helper
                 # -- not the dashboard -- validates and consumes.
-                "write_email_secret"},
+                "write_email_secret",
+                # Granted to the dashboard alone. It changes the box's network
+                # ROLE, so it is the most consequential op here -- and it is
+                # bounded by validation this helper performs, not the caller:
+                # the interface must EXIST on this box and the CIDR must be
+                # private IPv4. It is NOT a general forwarding or NAT primitive.
+                # No unattended peer has it, and none should: there is no
+                # scenario where an automated watcher should re-role the box.
+                "gateway_switch"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -1734,6 +1754,185 @@ def op_failsafe_revert(params):
     return {"reverted": True, "change_id": change_id}
 
 
+# ── Gateway Mode switch ───────────────────────────────────────────────────────
+#
+# The transaction lives in core/gateway_mode.py and is exercised by fixtures and
+# by a live-kernel VM test. What lives HERE is the privileged executor it takes
+# by injection -- the half that actually writes /etc/nemesis.env, renders the
+# ruleset, and moves net.ipv4.ip_forward. Until now that executor existed ONLY
+# inside core/vmtests/test_gateway_switch_e2e.py, so `switch()` had no production
+# caller and the mode could not be flipped by an operator at all.
+#
+# ⚠ WHY THE WHOLE SWITCH IS ONE OP AND NOT THREE.
+# `switch()` is transactional: on a failed step it undoes the completed steps in
+# REVERSE order and then re-verifies that the box is back where it started.
+# Splitting its three steps into three client-driven ops would stretch that
+# transaction across three IPC round-trips, where a dashboard crash between two
+# of them leaves a half-applied state with nothing still running that knows how
+# to roll it back -- the exact failure the transaction exists to prevent.
+#
+# ⚠ NEMESIS_FW_ENFORCE IS DELIBERATELY NOT SET HERE.
+# The VM test passes NEMESIS_FW_ENFORCE=0 because it renders the observe-only
+# form on purpose. Production must not: the renderer defaults to ENFORCE=1, and
+# inheriting the test's override would quietly re-render the WHOLE enforcement
+# table observe-only as a side effect of a gateway toggle. Copying that executor
+# verbatim is the obvious way to build this and it is wrong.
+
+NEMESIS_FW_RENDER = "/opt/nemesis/scripts/nemesis-fw-render"
+NFT_BIN = "/usr/sbin/nft"
+SYSCTL_BIN = "/usr/sbin/sysctl"
+GW_RENDER_OUT = "/run/nemesis-gateway.nft"
+
+#: Interface names the kernel can actually hold: anchored, length-bounded, and
+#: free of every character that means anything to a shell or to nft. The renderer
+#: interpolates this value into the emitted ruleset, so a permissive pattern here
+#: is a ruleset-injection primitive, not a cosmetic validation.
+GW_IFACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,14}$")
+
+
+def _validate_gateway_params(params):
+    """(enable, iface, cidr) or raise Denied.
+
+    EVERY check is helper-side, for the reason _validate_env_updates gives: the
+    caller is explicitly modelled as potentially compromised, so a check it
+    performs is a check an attacker simply skips.
+    """
+    params = params or {}
+    enable = params.get("enable")
+    if not isinstance(enable, bool):
+        raise Denied("bad_request", "enable must be a boolean")
+    if not enable:
+        # Disabling needs no interface or CIDR: plan_switch's disable path clears
+        # config rather than matching against it.
+        return False, None, None
+
+    iface = params.get("iface")
+    if not isinstance(iface, str) or not GW_IFACE_RE.match(iface):
+        raise Denied("bad_request", "invalid interface name")
+    # Must EXIST. This is also the strongest available anti-injection check: a
+    # name the kernel does not have cannot be smuggled into the rendered ruleset,
+    # whatever the regex above may have let through.
+    if not os.path.isdir("/sys/class/net/%s" % iface):
+        raise Denied("bad_request", "no such interface: %s" % iface)
+
+    cidr = params.get("cidr")
+    if not isinstance(cidr, str):
+        raise Denied("bad_request", "cidr must be a string")
+    try:
+        net = ipaddress.ip_network(cidr, strict=True)
+    except ValueError as exc:
+        raise Denied("bad_request", "invalid CIDR: %s" % exc)
+    if net.version != 4:
+        raise Denied("bad_request", "gateway CIDR must be IPv4")
+    if not net.is_private:
+        # Masquerading a range we do not own would translate other people's
+        # addresses. Refuse rather than render it.
+        raise Denied("bad_request",
+                     "refusing a non-private gateway CIDR (%s)" % net)
+    # Return the CANONICAL form, not the caller's spelling.
+    return True, iface, str(net)
+
+
+def _gw_collect():
+    """Live state on all four axes. Keys are switch()'s contract, not ours."""
+    try:
+        with open(gateway_mode.SYSCTL_DROPIN) as fh:
+            dropin = fh.read()
+    except OSError:
+        dropin = ""
+    live = subprocess.run([SYSCTL_BIN, "-n", "net.ipv4.ip_forward"],
+                          capture_output=True, text=True, timeout=10).stdout.strip()
+    snat = subprocess.run([NFT_BIN, "list", "chain", "inet", "nemesis_enforce",
+                           "gateway_snat"], capture_output=True, text=True,
+                          timeout=10)
+    env = _read_env_values(NEMESIS_ENV_PATH,
+                           ("NEMESIS_GW_LAN_IFACE", "NEMESIS_GW_LAN_CIDR"))
+    return {"iface": env.get("NEMESIS_GW_LAN_IFACE") or None,
+            "cidr": env.get("NEMESIS_GW_LAN_CIDR") or None,
+            "dropin": dropin,
+            "live": live,
+            "snat": "masquerade" in snat.stdout}
+
+
+def _read_env_values(path, keys):
+    """Read selected keys out of an env-style file. Missing file -> {}."""
+    out = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.split("#", 1)[0].strip()
+                for key in keys:
+                    if line.startswith(key + "="):
+                        out[key] = line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return out
+
+
+def _gw_run(action):
+    """Execute one action tuple. Returns True/False -- never raises past here.
+
+    A raise would escape switch()'s rollback (it branches on a False return), so
+    a genuine failure has to come back as False for the completed steps to be
+    undone. Failing loudly to the CALLER still happens: switch() reports the
+    failed step and whether the rollback restored the prior state.
+    """
+    verb, a, _b = action
+    try:
+        if verb == "config_set":
+            _merge_write_env_file(NEMESIS_ENV_PATH,
+                                  {"NEMESIS_GW_LAN_IFACE": a,
+                                   "NEMESIS_GW_LAN_CIDR": _b})
+            return True
+        if verb == "config_clear":
+            _merge_write_env_file(NEMESIS_ENV_PATH,
+                                  {"NEMESIS_GW_LAN_IFACE": "",
+                                   "NEMESIS_GW_LAN_CIDR": ""})
+            return True
+        if verb == "render_apply":
+            # No shell, and no NEMESIS_FW_ENFORCE override -- see the note above.
+            r = subprocess.run([NEMESIS_FW_RENDER, "render", "-o", GW_RENDER_OUT],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                log.error("fwd: gateway render failed rc=%d: %s",
+                          r.returncode, (r.stderr or "").strip()[:400])
+                return False
+            # The rendered file emits `delete table inet nemesis_enforce` itself,
+            # so applying it is idempotent and needs no separate flush.
+            r = subprocess.run([NFT_BIN, "-f", GW_RENDER_OUT],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                log.error("fwd: gateway nft apply failed rc=%d: %s",
+                          r.returncode, (r.stderr or "").strip()[:400])
+            return r.returncode == 0
+        if verb == "fwd":
+            if a == 1:
+                with open(gateway_mode.SYSCTL_DROPIN, "w") as fh:
+                    fh.write(gateway_mode.DROPIN_CONTENT)
+                os.chmod(gateway_mode.SYSCTL_DROPIN, 0o644)
+                return subprocess.run([SYSCTL_BIN, "--system"],
+                                      capture_output=True, timeout=30).returncode == 0
+            if os.path.exists(gateway_mode.SYSCTL_DROPIN):
+                os.remove(gateway_mode.SYSCTL_DROPIN)
+            subprocess.run([SYSCTL_BIN, "--system"], capture_output=True, timeout=30)
+            return subprocess.run([SYSCTL_BIN, "-w", "net.ipv4.ip_forward=0"],
+                                  capture_output=True, timeout=30).returncode == 0
+    except OSError as exc:
+        log.error("fwd: gateway action %r failed: %s", verb, exc)
+        return False
+    log.error("fwd: gateway action %r is not a known verb", verb)
+    return False
+
+
+def op_gateway_switch(params):
+    """Enable or disable Gateway Mode, transactionally, with verified rollback."""
+    enable, iface, cidr = _validate_gateway_params(params)
+    result = gateway_mode.switch(enable, iface, cidr, _gw_run, _gw_collect)
+    log.info("fwd: gateway_switch enable=%s ok=%s phase=%s: %s",
+             enable, result.get("ok"), result.get("phase"), result.get("reason"))
+    return result
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
     "reclaim_shm": op_reclaim_shm,
@@ -1750,6 +1949,7 @@ OPS = {
     "reassert_port_deny_on_interface": op_reassert_port_deny_on_interface,
     "failsafe_revert": op_failsafe_revert,
     "write_email_secret": op_write_email_secret,
+    "gateway_switch": op_gateway_switch,
 }
 
 
