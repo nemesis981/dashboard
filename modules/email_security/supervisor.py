@@ -42,6 +42,8 @@ import json
 import logging
 import threading
 
+from . import errors as _errors
+
 log = logging.getLogger("nemesis.email_security.supervisor")
 
 #: Per-account watcher states. Distinct values because the fixes differ, and a
@@ -126,6 +128,8 @@ class MailboxSupervisor:
             # An unreadable account table is an explicit failure, never "no
             # mailboxes" -- the same rule Module._configured_account_count keeps.
             log.exception("email_security: cannot load accounts")
+            _errors.record(_errors.E_ACCOUNT_LOAD_FAILED,
+                           context={"error": _safe_detail(exc)})
             with self._lock:
                 self._started = False
             raise
@@ -318,6 +322,21 @@ class MailboxSupervisor:
             w.detail = _safe_detail(exc)
             log.error("email_security: watcher for account %s cannot start: %s",
                       w.account.get("id"), w.detail)
+            # The build failure is NOT one undifferentiated CONFIG_ERROR at the
+            # ledger: a credential-store fault affects EVERY mailbox and a
+            # missing credential affects exactly this one, and those have
+            # unrelated fixes. The watcher state stays CONFIG_ERROR either way
+            # -- it describes this mailbox, which genuinely is unscanned.
+            from . import credential_store as _cs                # noqa: PLC0415
+            if isinstance(exc, _cs.CredentialUnavailable):
+                code = _errors.E_CREDENTIAL_STORE_UNREADABLE
+            elif isinstance(exc, _cs.CredentialMissing):
+                code = _errors.E_CREDENTIAL_MISSING
+            else:
+                code = _errors.E_TRANSPORT_CONFIG
+            _errors.record(code, context={"account_id": w.account.get("id"),
+                                          "phase": "build_client",
+                                          "error": w.detail})
             return
 
         w.client = client
@@ -337,12 +356,20 @@ class MailboxSupervisor:
                       "this mailbox is NO LONGER BEING SCANNED until the "
                       "credential is replaced: %s",
                       w.account.get("id"), w.detail)
+            _errors.record(_errors.E_AUTH_FAILED,
+                           context={"account_id": w.account.get("id"),
+                                    "error": w.detail})
         except imap_idle.ImapConfigError as exc:
             w.state = CONFIG_ERROR
             w.detail = _safe_detail(exc)
             log.error("email_security: transport misconfigured for account %s -- "
                       "not retried, mailbox NOT being scanned: %s",
                       w.account.get("id"), w.detail)
+            # The cert/handshake/STARTTLS distinction lives in `error`, not in
+            # separate codes -- the operator's action is the same either way.
+            _errors.record(_errors.E_TRANSPORT_CONFIG,
+                           context={"account_id": w.account.get("id"),
+                                    "error": w.detail})
         except Exception as exc:                                 # noqa: BLE001
             # A bug, not a configuration problem. Distinguished so nobody is
             # sent to check a password over what is actually a defect here.
@@ -350,6 +377,9 @@ class MailboxSupervisor:
             w.detail = _safe_detail(exc)
             log.exception("email_security: watcher for account %s crashed",
                           w.account.get("id"))
+            _errors.record(_errors.E_WATCHER_CRASHED,
+                           context={"account_id": w.account.get("id"),
+                                    "error": w.detail})
         finally:
             try:
                 client.close()
@@ -394,6 +424,10 @@ class MailboxSupervisor:
             # so a regression there cannot take the watcher down with it.
             log.error("email_security: parse failed for account %s uid %s: %s",
                       account_id, uid, type(exc).__name__)
+            _errors.record(_errors.E_SCAN_FAILED,
+                           context={"account_id": account_id, "uid": uid,
+                                    "phase": "parse",
+                                    "error": type(exc).__name__})
             return
 
         try:
@@ -414,6 +448,10 @@ class MailboxSupervisor:
         except Exception as exc:                                 # noqa: BLE001
             log.error("email_security: check failed for account %s uid %s: %s",
                       account_id, uid, type(exc).__name__)
+            _errors.record(_errors.E_SCAN_FAILED,
+                           context={"account_id": account_id, "uid": uid,
+                                    "phase": "check",
+                                    "error": type(exc).__name__})
             return
 
         headers = getattr(parsed, "headers", {}) or {}

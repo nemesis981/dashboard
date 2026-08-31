@@ -553,6 +553,24 @@ _ERR_CODES = {
     "E-FWD-001": ("account lockout_until unparseable; treated as locked (fail "
                   "closed), previously fell through as unlocked",
                   "HIGH", "fail-open-auth"),
+    # ⚠ AN E-EMAIL CODE RECORDED FROM HERE, ON PURPOSE. The rejection happens
+    # inside this privileged helper, which imports NOTHING from modules/ by
+    # design, so the code is declared here rather than in
+    # modules/email_security/errors.py -- one declaration site, or the registry
+    # collision guard would correctly reject it as a duplicate.
+    #
+    # Until 2026-08-31 this branch had NO log call at all. Invalid, expired and
+    # already-used are collapsed into one caller-facing answer (correct -- that
+    # collapse is the anti-oracle the enrollment design requires) and were then
+    # recorded NOWHERE. The _AUTH_EXEMPT checklist requires "log the distinction
+    # internally, never expose it"; it was exposed to nobody AND logged to
+    # nobody, so the distinction was destroyed rather than protected. This is
+    # the sole authority for writing an email credential from an
+    # unauthenticated request.
+    "E-EMAIL-010": ("privileged helper refused an enrollment consume (invalid, "
+                    "expired or already used); the internal reason is in "
+                    "context and is never returned to the caller",
+                    "MEDIUM", None),
 }
 _recorder = None
 
@@ -1509,6 +1527,15 @@ def op_write_email_secret(params):
                 # Distinguishing them would confirm to an unauthenticated guesser
                 # that a code existed, which is the oracle the enrollment route's
                 # identical-reject rule exists to deny.
+                #
+                # RECORDED INTERNALLY, which is the half that was missing. The
+                # reason string below never travels to the caller -- it exists so
+                # a burst of refusals is countable and so an operator can tell
+                # "someone is probing this endpoint" from "one person mistyped
+                # their code once".
+                _errors_record("E-EMAIL-010",
+                               {"reason": "no matching unspent unexpired row",
+                                "source_ip": params.get("source_ip")})
                 raise Denied("peer_denied", "enrollment code not valid")
             row = conn.execute(
                 "SELECT owner_user_id, address_hint FROM email_enrollment_requests "

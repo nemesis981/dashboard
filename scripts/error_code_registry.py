@@ -48,6 +48,11 @@ REGISTERED_NAMESPACES = frozenset({
     # it rather than the check being loosened.
     "NETPROBE",     # modules/netprobe/module.py (81ca877)
     "RBAC",         # dashboard.py role gate (91833d9)
+    # Added 2026-08-31: the email-security pipeline had ZERO structured errors
+    # across 20 files -- its terminal watcher states, credential exception
+    # classes and fail-closed refusals lived only in logs and in-memory state,
+    # so a restart erased every record that a mailbox had ever failed.
+    "EMAIL",        # modules/email_security/errors.py
 })
 
 #: Style 1 -- a catalog dict key:   "E-NS-001": ("desc", "HIGH", "class")

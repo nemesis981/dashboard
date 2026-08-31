@@ -45,6 +45,7 @@ from flask import jsonify, request
 from modules import get_data_manager
 
 from . import autodiscover, enrollment, writes
+from . import errors as _errors
 
 log = logging.getLogger("nemesis.email_security.views")
 
@@ -368,6 +369,9 @@ def api_set_account_scanning():
         try:
             cs.get_secret(acct.get("credential_ref"))
         except cs.CredentialMissing:
+            _errors.record(_errors.E_CREDENTIAL_MISSING,
+                           context={"address": address, "mailbox": mailbox,
+                                    "phase": "enable_scanning"})
             return jsonify({
                 "ok": False, "error": "no stored credential for this mailbox",
                 "detail": ("The mailbox is registered but its enrollment never "
@@ -378,6 +382,11 @@ def api_set_account_scanning():
             # DISTINCT from the above on purpose: this affects EVERY mailbox and
             # is a deployment fault, not an incomplete enrollment.
             log.error("email_security: credential store unreadable: %s", exc)
+            # EVERY mailbox is affected, not just this one -- the severity in
+            # the catalog reflects that, and it is why this is not the same
+            # code as a missing per-mailbox credential.
+            _errors.record(_errors.E_CREDENTIAL_STORE_UNREADABLE,
+                           context={"address": address, "error": str(exc)})
             return jsonify({
                 "ok": False, "error": "credential store unreadable",
                 "detail": ("This is a server configuration problem affecting "
