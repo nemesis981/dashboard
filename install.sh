@@ -51,6 +51,13 @@ CFG_PIHOLE_PASSWORD=""
 CFG_ANTHROPIC_INPUT_PRICE="3.00"
 CFG_ANTHROPIC_OUTPUT_PRICE="15.00"
 CFG_DASHBOARD_PASSWORD=""
+# Network role. "1" = bridged/monitoring (default, inert), "2" = gateway.
+# Declared here so BOTH install modes have them defined: the config-first path
+# never runs the guided prompt, and an undefined value would silently become an
+# empty gateway config rather than an explicit bridged one.
+CFG_NET_ROLE="1"
+CFG_GW_LAN_IFACE=""
+CFG_GW_LAN_CIDR=""
 
 # Auto-detected in preflight
 DETECTED_IFACE=""
@@ -273,6 +280,70 @@ guided_mode() {
     prompt CFG_IPINFO_TOKEN "IPinfo token" ""
     echo ""
 
+    # ── What kind of network is this? ────────────────────────────────────────
+    #
+    # Captured at install time because it is the question an operator can answer
+    # on day one and cannot easily answer later from the dashboard alone: only
+    # they know whether this box IS the router for a network behind it, or is
+    # sitting on somebody else's network watching it.
+    #
+    # ⚠ ANSWERING "gateway" HERE DOES NOT TURN FORWARDING ON.
+    # It records the LAN interface and subnet so the renderer can reproduce a
+    # source-NAT rule from persisted config. net.ipv4.ip_forward stays 0 until an
+    # admin explicitly switches the mode on from Settings, which requires a fresh
+    # admin password and runs the verified, rollback-capable transaction in
+    # core/gateway_mode.py. An installer must never silently re-role a machine's
+    # network stack -- and an unattended install must never do it by defaulting.
+    #
+    # ⚠ EOF-SAFE. `prompt` uses a bare `read -r`, so a non-interactive install
+    # gets an empty answer and takes the default -- which is BRIDGED, the
+    # inert one. The bounded retry below matters for the same reason: an
+    # unattended run must not spin on a validation loop it can never satisfy.
+    echo -e "  ${CYAN}${BOLD}── Network role ──────────────────────────────────────────────────────${NC}"
+    echo ""
+    echo "  ${BOLD}What kind of network is this?${NC}"
+    echo ""
+    echo "    [1]  Bridged / monitoring  (default)"
+    echo "         This box sits on an existing network and watches it. Your"
+    echo "         existing router keeps doing the routing."
+    echo ""
+    echo "    [2]  Gateway"
+    echo "         This box IS the router for a network behind it. Traffic from"
+    echo "         that network passes through here on its way out."
+    echo ""
+    prompt CFG_NET_ROLE "Enter 1 or 2" "1"
+
+    CFG_GW_LAN_IFACE=""
+    CFG_GW_LAN_CIDR=""
+    if [[ "$CFG_NET_ROLE" == "2" ]]; then
+        local _tries=0
+        while (( _tries < 3 )); do
+            _tries=$(( _tries + 1 ))
+            echo ""
+            echo "  The LAN-facing interface is the one pointing at the network"
+            echo "  BEHIND this box — not the one facing your modem or uplink."
+            prompt CFG_GW_LAN_IFACE "LAN-facing interface" ""
+            prompt CFG_GW_LAN_CIDR  "That network subnet (CIDR)" ""
+
+            if [[ -z "$CFG_GW_LAN_IFACE" || -z "$CFG_GW_LAN_CIDR" ]]; then
+                warn "Both values are required for Gateway Mode."
+            elif [[ ! -d "/sys/class/net/$CFG_GW_LAN_IFACE" ]]; then
+                warn "No such interface on this box: $CFG_GW_LAN_IFACE"
+            elif ! [[ "$CFG_GW_LAN_CIDR" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9./]+$ ]]; then
+                warn "Gateway subnet must be a private IPv4 range (10/8, 172.16/12, 192.168/16)."
+            else
+                ok "Gateway Mode will be CONFIGURED (not yet active) for $CFG_GW_LAN_CIDR on $CFG_GW_LAN_IFACE"
+                break
+            fi
+
+            if (( _tries >= 3 )); then
+                warn "Falling back to Bridged. You can switch to Gateway later from Settings."
+                CFG_NET_ROLE="1"; CFG_GW_LAN_IFACE=""; CFG_GW_LAN_CIDR=""
+            fi
+        done
+    fi
+    echo ""
+
     # ── Confirm before installing ────────────────────────────────────────────
     echo -e "  ${CYAN}${BOLD}── Configuration Summary ─────────────────────────────────────────────${NC}"
     echo ""
@@ -281,6 +352,12 @@ guided_mode() {
     printf "  %-28s %s\n" "Network interface:"     "$DETECTED_IFACE"
     printf "  %-28s %s\n" "IP address:"            "$DETECTED_IP"
     printf "  %-28s %s\n" "Local subnet:"          "$DETECTED_SUBNET"
+    if [[ "$CFG_NET_ROLE" == "2" ]]; then
+        printf "  %-28s %s\n" "Network role:" "Gateway — configured, NOT yet active"
+        printf "  %-28s %s\n" "  LAN side:"    "$CFG_GW_LAN_CIDR on $CFG_GW_LAN_IFACE"
+    else
+        printf "  %-28s %s\n" "Network role:" "Bridged / monitoring"
+    fi
     echo ""
     printf "  %-28s %s\n" "Dashboard login:"       "nemesis / <password set>"
     printf "  %-28s %s\n" "Alert sender email:"    "${CFG_WATCHDOG_EMAIL:-<not set>}"
@@ -346,6 +423,22 @@ config_first_mode() {
 # Password for the web dashboard login (username is always 'nemesis').
 # This protects the dashboard via nginx HTTP basic auth.
 DASHBOARD_PASSWORD=
+
+# ── Network role ──────────────────────────────────────────────────────────────
+# What kind of network is this?
+#   bridged  — this box sits on an existing network and watches it (default).
+#   gateway  — this box IS the router for a network behind it.
+#
+# Setting "gateway" only RECORDS the LAN interface and subnet. It does NOT turn
+# on IP forwarding: that needs an admin to switch the mode on from Settings,
+# which requires a fresh admin password. An installer never re-roles a machine's
+# network stack on its own.
+#
+# GW_LAN_IFACE is the interface facing the network BEHIND this box, not the
+# uplink. GW_LAN_CIDR must be a private IPv4 range.
+NET_ROLE=bridged
+GW_LAN_IFACE=
+GW_LAN_CIDR=
 
 # ── Auto-detected network settings ───────────────────────────────────────────
 # Change these only if auto-detection picked the wrong interface or IP.
@@ -420,6 +513,20 @@ EOF
     [[ -n "$conf_ip" ]]    && DETECTED_IP="$conf_ip"
     [[ -n "$conf_subnet" ]] && DETECTED_SUBNET="$conf_subnet"
 
+    # Anything other than an explicit "gateway" is bridged. Fail toward the
+    # inert role: a typo must not produce a half-configured gateway.
+    if [[ "$(read_conf "NET_ROLE" "bridged")" == "gateway" ]]; then
+        CFG_NET_ROLE="2"
+        CFG_GW_LAN_IFACE=$(read_conf "GW_LAN_IFACE")
+        CFG_GW_LAN_CIDR=$(read_conf "GW_LAN_CIDR")
+        if [[ -z "$CFG_GW_LAN_IFACE" || -z "$CFG_GW_LAN_CIDR" ]]; then
+            warn "NET_ROLE=gateway but GW_LAN_IFACE/GW_LAN_CIDR are incomplete — using bridged."
+            CFG_NET_ROLE="1"; CFG_GW_LAN_IFACE=""; CFG_GW_LAN_CIDR=""
+        elif [[ ! -d "/sys/class/net/$CFG_GW_LAN_IFACE" ]]; then
+            warn "NET_ROLE=gateway names interface $CFG_GW_LAN_IFACE, which does not exist here — using bridged."
+            CFG_NET_ROLE="1"; CFG_GW_LAN_IFACE=""; CFG_GW_LAN_CIDR=""
+        fi
+    fi
     CFG_DASHBOARD_PASSWORD=$(read_conf "DASHBOARD_PASSWORD")
     CFG_WATCHDOG_EMAIL=$(read_conf "WATCHDOG_EMAIL")
     CFG_WATCHDOG_PASSWORD=$(read_conf "WATCHDOG_PASSWORD")
@@ -508,8 +615,8 @@ NEMESIS_NEVER_BLOCK=
 #
 # Example:  NEMESIS_GW_LAN_IFACE=eth1
 #           NEMESIS_GW_LAN_CIDR=192.168.10.0/24
-NEMESIS_GW_LAN_IFACE=
-NEMESIS_GW_LAN_CIDR=
+NEMESIS_GW_LAN_IFACE=${CFG_GW_LAN_IFACE}
+NEMESIS_GW_LAN_CIDR=${CFG_GW_LAN_CIDR}
 EOF
     ok "/etc/nemesis.env written"
 }
