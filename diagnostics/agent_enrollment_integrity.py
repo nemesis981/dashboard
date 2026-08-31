@@ -18,17 +18,24 @@ THE BUG CLASS THIS EXISTS FOR
 WHY IT REPORTS SHAPES, NOT IDENTIFIERS
     This is the diagnostic with the richest supply of exactly the data Rule 8
     exists to keep off the wire: device names, LAN and tailnet addresses, hardware
-    fingerprints. Two facts make that dangerous rather than merely untidy —
-    `diagnostics/redact.py` scrubs known SECRETS but does NOT touch IPs,
-    hostnames or MACs, and `/api/diagnostics/submit` mails the finished report to
-    an EXTERNAL support address.
+    fingerprints. `/api/diagnostics/submit` mails the finished report to an
+    EXTERNAL support address, so this check reports counts, group sizes and
+    short non-reversible tags ("fingerprint group A"), never the raw values —
+    belt and suspenders on top of `diagnostics/redact.py`, not instead of it.
 
-    So this check reports counts, group sizes and short non-reversible tags
-    ("fingerprint group A"), never the raw values. That is enough to know a
-    problem exists and how big it is; the Devices page is one click away for
-    anyone who needs to know WHICH device. A diagnostic that leaks the fleet's
-    addressing to answer a question the operator could answer on-screen is a bad
-    trade.
+    UPDATED (diagnostics-and-access-master-plan.md §2.1 fix): `redact.py` now
+    also scrubs known device/host names, IPs, MACs, LAN/mDNS/Tailscale FQDNs,
+    and emails — it previously covered only known SECRETS. It still does NOT
+    cover hardware fingerprints (opaque hashes, not address/name-shaped, so
+    the new pattern-based passes cannot recognise them), which is exactly what
+    this check's own values are — so the report-shapes-not-values design below
+    remains the operative protection for this specific diagnostic, not a
+    redundant one now that redact.py improved.
+
+    That is enough to know a problem exists and how big it is; the Devices
+    page is one click away for anyone who needs to know WHICH device. A
+    diagnostic that leaks the fleet's addressing to answer a question the
+    operator could answer on-screen is a bad trade.
 
 Read-only: opens the database read-only, writes nothing.
 """
@@ -64,9 +71,10 @@ META = {
                         "address collisions, approved rows with no key or no "
                         "contact, and terminal states missing their timestamp.",
         "pro": "Set-level integrity over agent_devices. Reports group sizes and "
-               "opaque tags only — never device names, addresses or fingerprints "
-               "(redact.py does not cover those and the report can be emailed "
-               "off-box).",
+               "opaque tags only — never device names, addresses or fingerprints. "
+               "redact.py now covers names/IPs/MACs/FQDNs/emails but not "
+               "hardware fingerprints, and the report can be emailed off-box, "
+               "so this check still avoids raw values as its own protection.",
     },
 }
 

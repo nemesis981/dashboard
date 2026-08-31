@@ -74,6 +74,15 @@ _ADDR_RE = re.compile(
     r"(?<![\w.\-])(?:" + _MAC + r"|" + _IPV6 + r"|" + _IPV4 + r")(?![\w.\-])"
 )
 
+#: Public alias of the pattern above, for a caller that needs to RECOGNISE an
+#: IP/MAC but not pseudonymize it (e.g. diagnostics/redact.py, which destroys
+#: matches with [REDACTED] rather than mapping them to a reversible token — see
+#: this module's docstring for why that is a different module, not a variant of
+#: this one). Reusing the compiled pattern itself, not copying its source,
+#: means the two callers cannot silently drift apart on what counts as an
+#: address. No behaviour change to this module.
+ADDR_RE = _ADDR_RE
+
 #: Names get their OWN token namespace. Addresses and names are different kinds
 #: of identifier and a reader (human or model) benefits from knowing which is
 #: which -- "device-A at host-B" says more than "host-A at host-B". It also means
@@ -130,6 +139,16 @@ def _scrubbable_names(names):
     return out
 
 
+#: Public alias — the generic/short-name exclusion and longest-first ordering
+#: are exactly what a plain-destroy caller needs too (redact.py): even without
+#: reversible tokens, replacing a SHORTER name first can still strand a
+#: distinguishing suffix ("Reception-Laptop" -> "[REDACTED]-Laptop"), which is
+#: a partial leak wearing a redacted label. Reusing this list is also what
+#: keeps "which names count as generic" (router, printer, ...) from being
+#: maintained twice and drifting.
+scrubbable_names = _scrubbable_names
+
+
 def _looks_like_mac(value: str) -> bool:
     return bool(re.fullmatch(_MAC, value))
 
@@ -156,6 +175,14 @@ def _is_real_address(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+#: Public alias — a caller applying `ADDR_RE` itself (rather than calling
+#: `pseudonymize()`) needs this same validation to get the same over-match
+#: protection: a regex match alone accepts version-number-shaped text
+#: ("build 1.2.3.4"); this rejects anything that does not actually parse as an
+#: address. See `pseudonymize()`'s own `_sub` for the reference usage.
+is_real_address = _is_real_address
 
 
 def _token_for(index: int) -> str:
