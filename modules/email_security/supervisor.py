@@ -525,5 +525,5 @@ def _build_client(account: dict, on_message):
         tls_mode=cfg["tls_mode"],
         allow_self_signed=cfg["allow_self_signed"],
         provider=cfg["provider"],
-        strip_inner_whitespace=prov.get("strip_inner_whitespace", True),
+        strip_inner_whitespace=cfg["strip_inner_whitespace"],
     )

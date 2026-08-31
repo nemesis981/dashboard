@@ -258,4 +258,15 @@ def for_account(account: dict) -> dict:
         "loopback_only": bool(prov["loopback_only"]) if prov else False,
         "provider": key,
         "authserv_id": authserv,
+        # A provider DISPLAY quirk, so table-sourced like the privileges above
+        # rather than row-sourced: only Gmail shows app passwords in
+        # space-separated groups, and whether a given provider does is a fact
+        # about that provider, not about this mailbox.
+        #
+        # ⚠ DEFAULTS TO FALSE FOR CUSTOM, which is the conservative direction.
+        # Stripping whitespace a provider actually considers part of the secret
+        # fails as "wrong password" with nothing pointing at the real cause, and
+        # for a self-hosted server nobody has checked which it is.
+        "strip_inner_whitespace": bool(
+            prov.get("strip_inner_whitespace", False)) if prov else False,
     }
