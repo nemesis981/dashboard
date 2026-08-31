@@ -5404,11 +5404,21 @@ reason Tailscale goes first.
 larger decision than "prefer debs for these five apps", and nothing here requires it.
 **Do not batch these.** Each migration is independently reversible; a batch is not.
 
-### [FUTURE] Email enrollment: support a LIST of accounts, and give the two admin actions a UI at all (operator-requested 2026-08-31)
+### [FUTURE — item 1 only; items 2+3 FOLDED INTO the active Tier 0-3 enrollment build] Email enrollment: support a LIST of accounts, and give the two admin actions a UI at all (operator-requested 2026-08-31)
 **Capture only — not built.** Groups the deferred email-security UI work into one place. ⚠ Note
 for whoever picks this up: the two UI gaps below had been raised in conversation during the
 2026-08-31 build but were **never actually filed** until now — they are new entries here, not
 cross-references to something already tracked.
+
+**⛔ RECLASSIFIED same day (operator decision, 2026-08-31, after using the console workaround live
+to enable Proton scanning):** items **2 and 3** are NOT deferred/future — they are now in scope
+for the SAME Tier 0-3 owner-facing enrollment build already underway (see the private Window 3
+handoff, "The enrollment flow build (Tiers 0-3)", remaining item 3 — the `_enroll_credential_form`
+rewrite). That build must ship admin-side controls for minting an enrollment link and toggling
+scanning, not just the owner-facing provider-selection walkthrough. Reason stated: the
+`fetch()`-from-devtools-console workaround (used live this session, twice) is not acceptable as a
+permanent operating mode. **Item 1 (multi-account) remains genuinely FUTURE** — the operator did
+not fold it in; it stays a separate, larger design question.
 
 **1. Multi-account enrollment (the operator's ask, and the substantive design work).**
 Today the flow is strictly one mailbox per code: `api_enroll_create` mints ONE code for ONE
