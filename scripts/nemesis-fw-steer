@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Privileged helper for the L3 Tier 2 steering chain. ADR 0019 Amendment 01.
+
+Two operations, and their ASYMMETRY is the entire design:
+
+    install  --state <file>   render -> apply -> rebaseline   (full path)
+    withdraw                  nft flush chain -> rebaseline   (ONE atomic op)
+
+⚠ WITHDRAW NEVER INVOKES THE RENDERER, AND THAT IS NOT AN OPTIMISATION.
+Piece 5's core guarantee is that steering withdrawal does not depend on the failing
+component. Routing withdrawal through render->apply would add three dependencies to
+the one operation that must never fail: a broken renderer would leave traffic pinned
+to a dead gate. Amendment 01 §5.1 states this as the PRIMARY RISK; `withdraw()` here
+uses `nft flush chain` and nothing else.
+
+⚠ THE CHAIN NAME IS ALLOWLISTED, NOT VALIDATED.
+This runs as root and issues `nft flush chain inet nemesis_enforce <chain>`. A
+caller-supplied chain name would let a bug or a compromised caller flush `input` --
+which holds every derived block rule. So the name is compared against a one-element
+allowlist; a pattern match would still admit `input`. There is exactly one chain
+this helper may touch.
+
+⚠ THE BASELINE HASH IS THE WATCHER'S OWN, NOT A REIMPLEMENTATION.
+`nemesis_fw_watch.table_hash()` / `write_expected()` are imported and called. A
+shell or local reimplementation of `normalise()` would be a SECOND definition of
+"what the table is", and the two would drift -- after which every legitimate
+steering change reads as tamper. One definition, imported.
+
+⚠ REBASELINING IS MANDATORY, NOT POLITE. `nemesis_fw_watch.verify()` hashes the
+table against a baseline only `write_expected()` updates. Without the rebaseline
+every install and every withdraw fires ERR_TAMPERED / "modified outside Nemesis" --
+a fail-safe that raises a tamper alert each time it works correctly is unusable.
+That is Amendment 01 §2's stated reason the in-table placement needed amending.
+
+⚠ THIS PROCESS NEVER OPENS alerts.db. `nemesis_fw_watch._audit_row` is a deliberate
+no-op for a measured reason (writing to the shared DB from a root process locked
+the dashboard out of its own database on 2026-08-01). Nothing here writes to it
+either; the audit trail for steering is the watcher's event stream.
+
+Exit codes: 0 ok · 2 not root · 3 bad usage · 4 render failed · 5 apply/flush
+failed · 6 rebaseline failed.
+"""
+import argparse
+import os
+import subprocess
+import sys
+
+sys.path.insert(0, "/opt/nemesis/alert_manager")
+
+RENDER = "/opt/nemesis/scripts/nemesis-fw-render"
+RENDER_OUT = "/run/nemesis-steer-render.nft"
+NFT = "/usr/sbin/nft"
+
+#: The ONLY chain this helper may flush. See the allowlist note above.
+ALLOWED_CHAIN = "steer"
+#: The ONLY state file it will hand the renderer, unless overridden for testing.
+DEFAULT_STATE = "/var/lib/nemesis/fw-steer.state"
+
+TABLE_FAMILY = "inet"
+TABLE_NAME = "nemesis_enforce"
+
+
+def _run(argv, **kw):
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True, timeout=60, **kw)
+        return p.returncode, p.stdout or "", p.stderr or ""
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, "", repr(e)
+
+
+def _require_root():
+    if os.geteuid() != 0:
+        # An explicit refusal, not a confusing nft permission error three steps
+        # later. "Could not" and "did not" must not look alike here.
+        print("nemesis-fw-steer: must run as root (nft requires it)", file=sys.stderr)
+        sys.exit(2)
+
+
+def _rebaseline(why):
+    """Record the new expected hash using the WATCHER's own definition."""
+    try:
+        import nemesis_fw_watch as w
+    except Exception as e:                                   # noqa: BLE001
+        print("nemesis-fw-steer: cannot import nemesis_fw_watch to rebaseline: %r"
+              % (e,), file=sys.stderr)
+        return False
+    h = w.table_hash()
+    if not h:
+        # Could not read the table. Do NOT write a baseline we did not compute --
+        # a wrong baseline turns every future verify into a false tamper alert.
+        print("nemesis-fw-steer: could not hash the table; baseline NOT updated",
+              file=sys.stderr)
+        return False
+    w.write_expected(h, why)
+    return True
+
+
+def cmd_install(args):
+    # ⚠ ARGUMENT VALIDATION BEFORE THE ROOT CHECK, DELIBERATELY.
+    # Validation is pure -- no side effects, no privileged reads -- so doing it
+    # first leaks nothing and costs nothing. What it buys is that the safety
+    # checks (the chain allowlist especially) are REACHABLE AND TESTABLE without
+    # privilege. With the root check first, the single most safety-critical branch
+    # in this file could only be exercised as root, which in practice means never.
+    state = args.state or DEFAULT_STATE
+    if not os.path.isabs(state):
+        print("nemesis-fw-steer: --state must be an absolute path", file=sys.stderr)
+        sys.exit(3)
+    if not os.path.isfile(state):
+        # The renderer treats a missing state file as "no steering" and would
+        # render a table WITHOUT the chain -- which for an install request is a
+        # silent no-op wearing a success exit code.
+        print("nemesis-fw-steer: state file %s does not exist; refusing to "
+              "'install' nothing" % state, file=sys.stderr)
+        sys.exit(3)
+
+    _require_root()
+    env = dict(os.environ, NEMESIS_FW_STEER_STATE=state)
+    rc, _out, err = _run([RENDER, "render", "-o", RENDER_OUT], env=env)
+    if rc != 0:
+        print("nemesis-fw-steer: render failed (rc=%d): %s" % (rc, err.strip()[:300]),
+              file=sys.stderr)
+        sys.exit(4)
+
+    # Prove the render actually contains the chain before applying it. Without
+    # this, malformed intent -> renderer refuses -> we apply a table with no steer
+    # chain and report success, which is the failed-read-as-default shape.
+    try:
+        with open(RENDER_OUT) as f:
+            rendered = f.read()
+    except OSError as e:
+        print("nemesis-fw-steer: cannot read rendered ruleset: %r" % (e,), file=sys.stderr)
+        sys.exit(4)
+    if ("chain %s {" % ALLOWED_CHAIN) not in rendered:
+        print("nemesis-fw-steer: render produced NO %s chain -- the intent in %s was "
+              "refused by the renderer (see its stderr). Nothing applied."
+              % (ALLOWED_CHAIN, state), file=sys.stderr)
+        sys.exit(4)
+
+    rc, _out, err = _run([NFT, "-f", RENDER_OUT])
+    if rc != 0:
+        print("nemesis-fw-steer: apply failed (rc=%d): %s" % (rc, err.strip()[:300]),
+              file=sys.stderr)
+        sys.exit(5)
+    if not _rebaseline("steering install"):
+        sys.exit(6)
+    print("nemesis-fw-steer: steering installed and baseline updated")
+    return 0
+
+
+def cmd_withdraw(args):
+    # Allowlist BEFORE the root check -- see cmd_install's note. This branch is the
+    # one that stands between a bug and flushing `input`, so it must be reachable
+    # in a test that does not require root.
+    chain = args.chain or ALLOWED_CHAIN
+    if chain != ALLOWED_CHAIN:
+        print("nemesis-fw-steer: refusing to flush chain %r -- this helper may only "
+              "touch %r" % (chain, ALLOWED_CHAIN), file=sys.stderr)
+        sys.exit(3)
+
+    _require_root()
+
+    # ONE atomic kernel operation. No render, no state file, no dependency on
+    # anything that may be the thing that failed.
+    rc, _out, err = _run([NFT, "flush", "chain", TABLE_FAMILY, TABLE_NAME, chain])
+    if rc != 0:
+        # IDEMPOTENT: a chain that does not exist is already withdrawn. The
+        # fail-safe may call this when steering was never installed, and treating
+        # that as failure would turn a correct no-op into a CRITICAL event.
+        rc2, out2, _e2 = _run([NFT, "list", "chain", TABLE_FAMILY, TABLE_NAME, chain])
+        if rc2 != 0:
+            if not _rebaseline("steering withdraw (chain already absent)"):
+                sys.exit(6)
+            print("nemesis-fw-steer: no %s chain present; already withdrawn" % chain)
+            return 0
+        print("nemesis-fw-steer: FLUSH FAILED (rc=%d): %s -- traffic may still be "
+              "steered into a failed gate" % (rc, err.strip()[:300]), file=sys.stderr)
+        sys.exit(5)
+
+    if not _rebaseline("steering withdraw"):
+        sys.exit(6)
+    print("nemesis-fw-steer: steering withdrawn and baseline updated")
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="nemesis-fw-steer")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p_i = sub.add_parser("install", help="render+apply+rebaseline from intent")
+    p_i.add_argument("--state", default=None)
+    p_w = sub.add_parser("withdraw", help="atomic chain flush + rebaseline")
+    p_w.add_argument("--chain", default=ALLOWED_CHAIN)
+    args = ap.parse_args()
+    return cmd_install(args) if args.cmd == "install" else cmd_withdraw(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)
