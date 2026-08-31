@@ -5836,3 +5836,38 @@ python3 -c "import sys; sys.path.insert(0,'/opt/nemesis/alert_manager'); import 
 the audit row now appears (and, ideally, a test asserting `WRITE_OPS` really does equal every
 write-shaped op in `OPS`, so this class of gap can't reopen silently — see the standing "every
 new branch needs a test that exercises it" practice).
+
+### [MEDIUM] Enrollment Tier 3: a manual hostname resolving to a private address is not blocked (filed 2026-08-31, by the code that has the gap)
+**Filed by the change that introduced the surface, not discovered later** —
+`modules/email_security/settings_resolve.py`'s header states this residual and points here, so
+this entry is what stops that statement from being a promise nobody kept.
+
+**The surface.** Tier 3 of the owner-facing enrollment page lets the account owner type an IMAP
+server name. `/email/enroll` is a hand-placed `_AUTH_EXEMPT` route, so anyone holding a valid
+single-use code can reach it. The appliance then makes an outbound IMAP connection to whatever
+was entered.
+
+**What IS blocked** (`validate_manual`, tested in `test_settings_resolve.py`): a literal
+loopback / private / link-local / multicast / reserved / unspecified address, any port outside
+`{143, 993}`, any TLS mode outside the two implemented, and anything not shaped like a hostname.
+Discovered (Tier 2) settings go through the *same* validation, deliberately — a domain can
+publish an SRV record pointing at loopback, and "we looked it up ourselves" is trust in the
+lookup, not in the answer.
+
+**What is NOT blocked, and why it was left:** `imap.attacker.example` resolving to `10.0.0.5`.
+Catching that requires resolving the name at validation time — and doing a DNS lookup on input
+from an unauthenticated route is precisely the attacker-chosen-lookup primitive that the
+admin-side autodiscovery split (`views.api_enroll_create`) exists to prevent. Closing one hole by
+opening the other is not a fix.
+
+**Why the risk is bounded rather than ignored:** reaching this needs a valid, unspent,
+TTL-bounded, admin-issued code; the connection is a single IMAP attempt to one of two ports;
+and nothing is echoed back to the caller beyond a generic connect/auth outcome. It is a weak
+oracle, not an open proxy.
+
+**Fix directions, none free:** (a) resolve at CONNECT time in the supervisor — where a lookup
+already happens anyway — and refuse a private answer there, which is the natural home and closes
+the rebinding variant too; (b) an allowlist of permitted mail domains, which defeats the purpose
+of Tier 3; (c) accept and document. **(a) is the recommended one** and is a small addition to
+`imap_idle`'s connect path rather than new machinery. Do not "fix" this by adding a lookup to
+`settings_resolve.py`.
