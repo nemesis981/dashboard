@@ -6166,3 +6166,47 @@ different module, still set-membership, still open.
 Full evidence chain (private mirror): `known-limitations/forkb-full-tunnel-decline-unreachable-
 2026-08-31.md`, `known-limitations/vpn-aware-verdict-REGRESSION-2026-08-30.md`,
 `handoff/2026-08-30-window1-handoff.md`.
+
+### [HIGH] A1/A2 admin approval: the WebAuthn ceremony has NEVER run against a real browser + physical key (self-disclosed 2026-08-30, filed 2026-08-31)
+
+**Complete and heavily tested, but not PROVEN for a real user** — and the gap
+between those two is the entire point of this entry. Surfaced by Window 2's
+completeness audit; the disclosure existed only inside commit `49b9a5b`'s message,
+where nothing routinely scans, and appeared nowhere in this file.
+
+**Verbatim from `49b9a5b`, so it is not softened in the retelling:**
+
+> ⚠ WHAT IS STILL NOT PROVEN, and it is the part to budget attention for. Every
+> claim to date stops at a SYNTHETIC authenticator; no browser code in this stack
+> has ever run. Not covered by any test here: the real WebAuthn ceremony, the SPKI
+> offset against a real key, whether `getPublicKey()` is available on the
+> operator's actual browser, and the full page render under a logged-in session
+> (the harness strips auth, so `current_user` is anonymous and an unrelated line
+> raises first). The first live run should be treated as a genuine integration
+> test, not a formality — an integration detail surfacing there is the expected
+> outcome, not a surprise.
+
+**Why HIGH rather than MEDIUM.** Admin approval is a SECURITY GATE — `9db1644`
+gates `ip_block_permanent` on it, `963cb5a` gates `restart`. A gate that has never
+completed its real ceremony is a gate whose failure mode under real conditions is
+unknown. Two outcomes are both bad and both plausible: it refuses a legitimate
+admin (an operator locked out of their own controls), or an integration detail is
+"fixed" under time pressure in a way that weakens the check.
+
+**Concretely untested, each independently able to break the ceremony:**
+- the real WebAuthn ceremony end to end (registration AND assertion)
+- the SPKI offset against a real key — synthetic authenticators are exactly where
+  an offset assumption survives unchallenged
+- `getPublicKey()` availability on the operator's actual browser (it is not
+  universal, and the fallback path has never run)
+- full page render under a genuinely logged-in session — the harness strips auth,
+  so `current_user` is anonymous and an unrelated line raises before the render is
+  reached. **A green suite here is not evidence the page renders for a real admin.**
+
+**What closing it requires:** a real browser, a real physical key, a real logged-in
+session. It cannot be closed by more synthetic tests, and it should not be closed
+by an assertion that the code looks right — the commit already says as much.
+
+**Do not let a green test suite retire this entry.** The suites pass today (a2
+39/0, admin_approval_routes 49/0, roles 158/0) and prove real things; none of them
+touch a browser.
