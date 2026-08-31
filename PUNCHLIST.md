@@ -5982,3 +5982,144 @@ flows — every sample had `bytes_sent`/`bytes_recv` null), `close_unmatched_flo
 of 15 closes, `flow_replaced_unclosed` 2, `close_duplicate` 2, `dns_no_results` 36
 against `dns_observed` 9 (so `resolved_name` was null throughout). The collector
 WORKS; the fidelity of what it produces is a separate, open question.
+
+### [MEDIUM] Error-code audit backlog: 5 shipped areas emit no E-XXX-### codes (filed 2026-08-31, from the cross-subsystem audit)
+**Queue, not a build.** Phases 1-3 of that audit are done (3 silent-failure bugs fixed `e3bc976`;
+the registry checker's 24-code blind spot fixed `87f0e11`; email-security wired to 10 E-EMAIL
+codes `a5f426d`). These five areas are what remains. Every citation below was **re-verified
+against live code before filing** — the audit was run by subagents and their findings were
+treated as inference until checked.
+
+**The shared consequence, stated once:** a failure with no code is not queryable, not countable,
+does not survive a restart, and cannot carry a `cause` via `add_cause`/`resolve_causes`. The
+reference implementations for what "wired" looks like are `diagnostics/redact.py` (small),
+`modules/dhcp/module.py` (16 codes grouped by `error_class`), and
+`alert_manager/conn_consent_errors.py` (typed errors raised low, recorded at the route).
+
+---
+
+**1. Admin-approval A1/A2 — ~108 KB of authentication code with no logger at all.**
+Measured: `core/admin_approval*.py` is **107,968 bytes across 8 files**; **0 of 8 import
+logging**; **0 declare `_ERR_CODES`**. Every rejection in the protocol layer is silent by
+construction — the only observability is the string that reaches the HTTP client.
+
+It already has its own 17-code vocabulary — `AAP-001..013` (`core/admin_approval.py:77`) and
+`GATE-001..004` (`core/admin_approval_gate.py:134`) — mirrored byte-for-byte into
+`nemesis_agent/admin_approval.py`. **That vocabulary is legitimate and should NOT be replaced:**
+it is a stable cross-language wire contract, and `admin_approval.py:71-75` says so.
+
+**The gap is the absence of a BRIDGE, not the vocabulary.** Nothing calls `record_error` when one
+is emitted, so `BAD_SIGNATURE` and `UV_NOT_ASSERTED` occurrences on the appliance are
+uncountable. `modules/dhcp/module.py:353-377` is the in-repo precedent for exactly this shape: a
+domain vocabulary delegating to `record_error_best_effort`. `AAP`/`GATE` are also absent from
+`REGISTERED_NAMESPACES`, so `scripts/error_code_registry.py` cannot see them (they are not
+`E-`-prefixed, so this is correct today — a bridge would introduce `E-APPROVAL-*` codes that
+map onto them).
+
+Highest-value sites: `core/admin_approval.py:273-279` (signature verification returns `False`
+with no log — its own comment says these "must not be silently swallowed into a pass", and then
+swallows them silently); `dashboard.py:9862-9864` (the spend route rejects malformed assertions
+with no log at all); `dashboard.py:9710-9711` (an action EXECUTED under a spent approval whose
+approval-log row failed to write — the audit-trail gap for an already-privileged action).
+
+---
+
+**2. Gateway Mode — no namespace, and two failed reads that become passing verdicts.**
+`core/gateway_mode.py` and `static/gateway-mode.js` have no catalog. `alert_manager/nemesis_fwd.py`
+HAS a working recorder (`_ERR_CODES` at `:552`, `_errors_record` at `:560`) and the gateway
+executor below it uses neither.
+
+Two are the "failed read as a legal value" shape and are the ones to fix first, because they fail
+toward the **passing** state on the disable path:
+- `nemesis_fwd.py:1841-1842` — `except OSError: dropin = ""`, no log. `""` feeds
+  `dropin_says_enabled("")` → `False` = "not persisted", which is the PASS condition when
+  disabling. An unreadable `/etc/sysctl.d/99-nemesis-gateway.conf` verifies as a clean disable.
+- `nemesis_fwd.py:1867-1868` — `except OSError: pass` → `_read_env_values()` returns `{}` →
+  `verify_state()` reads `configured=False`, again the passing state.
+
+Also: `nemesis_fwd.py:1843-1854` discards subprocess return codes for `sysctl` and `nft`, so any
+`nft` failure yields empty stdout → `snat=False` = SNAT_ABSENT, treated as correct when
+disabling. And `nemesis_fwd.py:1931-1932` reports the **"MANUAL RECOVERY NEEDED"** outcome
+(`core/gateway_mode.py:438-439`) at `log.info`.
+
+⚠ `core/gateway_mode.py` itself is **pure by design** — no I/O, no DB, every failure returned as
+an explicit result dict. It should NOT get a catalog; the recording belongs at the injected
+caller. Same division as `conn_consent`.
+
+---
+
+**3. Fork B / topology — no catalog in 3 core files, and one silent chain that fails permissive.**
+`_ERR_CODES` count in `core/vpn_dns_guard.py`, `core/forkb_policy_route.py`,
+`core/netfilter_drift.py`: **0 of 3**. `vpn_dns_guard.py` is a long-lived core service with ~15
+`log.error` sites and no catalog.
+
+**The one that matters most is a three-link silent chain that fails toward the permissive
+answer:** `vpn_dns_guard.py:137-138` (`except Exception: return 1, "", str(e)`) →
+`:143-148` (`return None` on rc!=0 or bad JSON) → `:164-170` (`except Exception: pass`, then
+`return ""`). `""` is load-bearing: `core/forkb_policy_route.py:208` documents that
+`'' or missing means PHYSICAL, not unknown`. So **any** failure of `ip -d -j link show`
+classifies an interface as physical-not-tunnel — the direction that lets
+`masquerade_egress_iface()` return an interface it should have refused. Same class as the
+`/1`-straddle bug `707bf2f` fixed, arriving by a different route, and producing no output at all.
+
+Also: `vpn_dns_guard.py:274-275` logs the masquerade REFUSAL — the security-relevant decision in
+this area — at `log.info`. `forkb_policy_route.py:548-549` returns "self-test failed, refusing to
+touch routing" as a dict field only.
+
+⚠ `core/netfilter_drift.py:63-70` is **already correct** and is not a finding: it returns `None`
+for every unreadable case, with the reasoning stated in place ("Returning a default here would be
+the whole bug"). It is the one file in this area that already fails the right way.
+
+---
+
+**4. `lan_integrity` — no catalog, and the ARP detector's only data source fails to `[]`.**
+`_ERR_CODES` in `modules/lan_integrity/*.py`: **0 files** (verified).
+
+- `module.py:376-377` — `_read_proc_arp`: `except OSError: return []`, no log. An empty list is
+  indistinguishable from "the ARP cache is empty". The module's own docstring (`:276-279`) says
+  `/proc/net/arp` is "the only ARP source available until Suricata's `arp` logger is enabled", so
+  a permission or mount failure silently disables ARP detection permanently.
+- `module.py:367-368` — `_gateways`: `except OSError: return set()`. Its docstring concedes the
+  consequence: a gateway takeover then "degrades to a plain binding change (high instead of
+  critical)". Nothing records that the downgrade happened.
+- `module.py:211-218` — rogue-DHCP self-test failure sets `selftest_ok=0` + `log.error`, no code.
+  This is the "the detector is lying" condition; DHCP gives that class its own code
+  (`E_HEALTH_UNMEASURABLE`).
+- Five routes end `except Exception as e: return jsonify({"error": str(e)}), 500` with no log —
+  including the state-changing pin/close routes.
+
+**Not a finding, for fairness:** `module.py:223` and `:265-266` handle an unreadable eve.json
+correctly, with an explicit failure state and the reasoning written in place.
+
+---
+
+**5. Track C consent — the SERVER side is reference-quality; the AGENT side has nothing.**
+`alert_manager/conn_consent_errors.py` is one of the best examples in the repo, and the dashboard
+route records its codes at 7 sites. The gaps are elsewhere:
+
+- **`nemesis_agent/consent.py` and `nemesis_agent/conn_collector.py` reference `agent_errors`
+  ZERO times** (verified against committed state) — while `nemesis_agent/agent_errors.py` carries
+  **37 E-AGENT codes** it never touches.
+- `conn_collector.py:454, 480, 560` — each dropped `close` is a **lost connection record**, the
+  telemetry Track C exists to collect, counted only into `self.stats["close_emit_errors"]`.
+  Same shape at `:670` (`network_errors`), `:689` (`dns_errors`), `:720` (`dispatch_errors`).
+  `agent_errors` already has a collector family (`E-AGENT-080`).
+- `consent.py:185-186` — a corrupt consent record returns `STATE_CORRUPT`, which turns **all six**
+  telemetry items off. Failing closed is right and documented; the problem is that the only trace
+  is a `status()` field nobody polls, so a device silently stops reporting everything and looks
+  like a quiet device.
+- `alert_manager/conn_consent.py:291-292` — `except Exception: return COVERAGE_UNKNOWN`.
+  **`E-CONSENT-006` is declared for exactly this** ("The consent state could not be read",
+  `conn_consent_errors.py:66`) and is never recorded at the one site it names.
+- `core_module/hw_monitor/hw_monitor.py:2229-2231` — the Clause 5 ingest gate rejects every event
+  from a device on a failed consent lookup, `log.exception` only, while that file HAS a live
+  recorder (`_errors_record`, `:3570`). Also `:2388-2389`, where a failed settings read silently
+  turns a configured 7-day retention into 30 — its sibling `reap_conn_seen` (`:2442-2443`) reads
+  the same key through `_setting_int`, which logs. Two routes to one setting, divergent posture.
+
+---
+
+**Suggested order if this is picked up:** (5) Track C's `E-CONSENT-006` first — a declared code
+with a call site waiting for it, near-zero design work. Then (4) `lan_integrity`, then (3) Fork
+B's silent chain (a real security-relevant fail-permissive), then (2) Gateway Mode, then (1) the
+admin-approval bridge, which is the largest and needs a namespace decision first.
