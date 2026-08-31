@@ -571,6 +571,26 @@ _ERR_CODES = {
                     "expired or already used); the internal reason is in "
                     "context and is never returned to the caller",
                     "MEDIUM", None),
+
+    # ── E-GATEWAY-*: the gateway executor ────────────────────────────────
+    # Declared HERE rather than in core/gateway_mode.py, which is PURE: it
+    # returns result dicts and does no I/O, so recording belongs at this
+    # caller. Same division as forkb_policy_route/vpn_dns_guard.
+    "E-GATEWAY-001": ("Gateway switch could not measure one or more axes, so "
+                      "the requested state could not be verified. Every failed "
+                      "read used to substitute a value that IS the pass "
+                      "condition when disabling",
+                      "HIGH", "gateway-switch-unverified"),
+    "E-GATEWAY-002": ("A gateway switch step failed to execute (render or "
+                      "ruleset apply); the switch was rolled back",
+                      "HIGH", "gateway-switch-failed"),
+    "E-GATEWAY-003": ("⛔ Gateway rollback did NOT restore the prior state -- "
+                      "MANUAL RECOVERY NEEDED. The box is in neither the old "
+                      "nor the requested state",
+                      "CRITICAL", "gateway-switch-failed"),
+    "E-GATEWAY-004": ("Every gateway step reported success and verification "
+                      "still failed; the box is not in the requested state",
+                      "HIGH", "gateway-switch-unverified"),
 }
 _recorder = None
 
@@ -1994,6 +2014,8 @@ def _gw_run(action):
             r = subprocess.run([NEMESIS_FW_RENDER, "render", "-o", GW_RENDER_OUT],
                                capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
+                _errors_record("E-GATEWAY-002",
+                               {"step": "render", "rc": r.returncode})
                 log.error("fwd: gateway render failed rc=%d: %s",
                           r.returncode, (r.stderr or "").strip()[:400])
                 return False
@@ -2002,6 +2024,8 @@ def _gw_run(action):
             r = subprocess.run([NFT_BIN, "-f", GW_RENDER_OUT],
                                capture_output=True, text=True, timeout=60)
             if r.returncode != 0:
+                _errors_record("E-GATEWAY-002",
+                               {"step": "nft_apply", "rc": r.returncode})
                 log.error("fwd: gateway nft apply failed rc=%d: %s",
                           r.returncode, (r.stderr or "").strip()[:400])
             return r.returncode == 0
@@ -2028,8 +2052,33 @@ def op_gateway_switch(params):
     """Enable or disable Gateway Mode, transactionally, with verified rollback."""
     enable, iface, cidr = _validate_gateway_params(params)
     result = gateway_mode.switch(enable, iface, cidr, _gw_run, _gw_collect)
-    log.info("fwd: gateway_switch enable=%s ok=%s phase=%s: %s",
-             enable, result.get("ok"), result.get("phase"), result.get("reason"))
+
+    # ⚠ RAISED FROM log.info. The highest-blast-radius outcome this product can
+    # produce -- "rolled back and NOT restored, MANUAL RECOVERY NEEDED" -- was
+    # reported at INFO and recorded nowhere. The three failure shapes are told
+    # apart because they need different responses: an unrestored rollback is a
+    # box to go and fix by hand, a verification failure is a box that is simply
+    # not in the requested state, and an unmeasured axis means nobody knows
+    # which it is.
+    if not result.get("ok"):
+        reason = str(result.get("reason") or "")
+        if result.get("phase") == "rollback" and not result.get("restored"):
+            code = "E-GATEWAY-003"           # manual recovery needed
+        elif "COULD NOT BE MEASURED" in reason:
+            code = "E-GATEWAY-001"           # unverifiable, not verified-bad
+        elif result.get("phase") == "verify":
+            code = "E-GATEWAY-004"
+        else:
+            code = "E-GATEWAY-002"
+        _errors_record(code, {"enable": bool(enable),
+                              "phase": result.get("phase"),
+                              "restored": result.get("restored"),
+                              "reason": reason[:300]})
+        log.error("fwd: gateway_switch enable=%s FAILED phase=%s: %s",
+                  enable, result.get("phase"), reason)
+    else:
+        log.info("fwd: gateway_switch enable=%s ok=True phase=%s: %s",
+                 enable, result.get("phase"), result.get("reason"))
     return result
 
 

@@ -61,6 +61,9 @@ REGISTERED_NAMESPACES = frozenset({
     # which is a stable cross-language contract mirrored into the agent -- this
     # is the BRIDGE that makes those refusals countable on the appliance.
     "APPROVAL",     # core/admin_approval_errors.py
+    # Added 2026-08-31, closing the audit backlog's two catalog builds.
+    "FORKB",        # core/vpn_dns_guard.py (forkb_policy_route is pure)
+    "GATEWAY",      # alert_manager/nemesis_fwd.py (gateway_mode is pure)
 })
 
 #: Style 1 -- a catalog dict key:   "E-NS-001": ("desc", "HIGH", "class")

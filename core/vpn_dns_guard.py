@@ -126,6 +126,89 @@ log = logging.getLogger("vpn_dns_guard")
 
 
 # --------------------------------------------------------------------------- #
+# E-FORKB-* error codes
+# --------------------------------------------------------------------------- #
+#
+# Recorded HERE rather than in forkb_policy_route.py, which is PURE: it returns
+# its outcomes as result dicts and must stay free of I/O. Same division applied
+# to gateway_mode.py, conn_consent.py and the email-security pure modules.
+#
+# ⛔ NOT RECORDED WHEN RUNNING AS ROOT, and that is not caution for its own
+# sake. This file is BOTH a long-lived daemon (User=nemesis-vpndns, which is in
+# the nemesis-db group and may write alerts.db) AND a CLI that install.sh
+# invokes as root (`--egress-iface`). A root process writing alerts.db creates
+# ROOT-OWNED WAL siblings that lock nemesis-dash out of its own database --
+# the exact hazard drift_watch.py's header documents and works around. So the
+# daemon records and the root CLI logs instead, which is the honest split
+# rather than a silent one.
+
+E_MASQ_KIND_UNDETERMINED = "E-FORKB-001"
+E_COMMAND_UNRUNNABLE     = "E-FORKB-002"
+E_RECONCILE_REFUSED      = "E-FORKB-003"
+E_RECONCILE_FAILED       = "E-FORKB-004"
+E_RECONCILE_CYCLE_ERROR  = "E-FORKB-005"
+
+#: Fork B is not doing what it was asked to do.
+_CLASS_FORKB_DEGRADED = "forkb-routing-degraded"
+
+_ERR_CODES = {
+    E_MASQ_KIND_UNDETERMINED: (
+        "Masquerade egress refused: an interface's link kind could not be "
+        "determined, and an undetermined kind reads as 'physical' to the "
+        "classifier. Refusing rather than risk NATing tailnet traffic outside "
+        "the VPN", "HIGH", _CLASS_FORKB_DEGRADED),
+    E_COMMAND_UNRUNNABLE: (
+        "A required command could not be RUN (missing binary, timeout or "
+        "permission); every routing decision downstream of it is degraded",
+        "MEDIUM", _CLASS_FORKB_DEGRADED),
+    E_RECONCILE_REFUSED: (
+        "Reconcile REFUSED to touch routing (self-test failed, or the bypass "
+        "table is not ours). Correct behaviour, recorded because a persistent "
+        "refusal means Fork B is not working", "HIGH", _CLASS_FORKB_DEGRADED),
+    E_RECONCILE_FAILED: (
+        "Reconcile ran and did not achieve the intended routing state "
+        "(teardown did not take, or the rule installed but is not winning)",
+        "HIGH", _CLASS_FORKB_DEGRADED),
+    E_RECONCILE_CYCLE_ERROR: (
+        "The reconcile cycle raised; Fork B routing was not evaluated this "
+        "interval", "HIGH", _CLASS_FORKB_DEGRADED),
+}
+
+_recorder = None
+
+
+def _record(code, context=None):
+    """Record one occurrence. NEVER raises, and NEVER writes as root.
+
+    See the block comment above for why the root path logs instead: it is the
+    install-time CLI, and a root write here would leave root-owned WAL files
+    that lock the dashboard out of alerts.db.
+    """
+    global _recorder
+    try:
+        if os.geteuid() == 0:
+            log.warning("[%s] %s | NOT RECORDED (running as root; a root write "
+                        "to alerts.db would leave root-owned WAL siblings)",
+                        code, context)
+            return None
+        if _recorder is None:
+            import sqlite3 as _sqlite3                        # noqa: PLC0415
+            sys.path.insert(0, os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "alert_manager"))
+            import nemesis_errors                             # noqa: PLC0415
+            import nemesis_paths                              # noqa: PLC0415
+            _recorder = nemesis_errors.make_recorder(
+                "vpn_dns_guard",
+                lambda: _sqlite3.connect(nemesis_paths.db_path(), timeout=5.0),
+                _ERR_CODES, logger=log)
+        return _recorder(code, context=context)
+    except Exception:                                          # noqa: BLE001
+        log.warning("vpn_dns_guard: could not record %s", code, exc_info=True)
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # Small shell helpers
 # --------------------------------------------------------------------------- #
 
@@ -140,6 +223,9 @@ def _run(cmd, timeout=6):
         # callers could not tell from "the command ran and said no".
         log.warning("vpn_dns_guard: %s could not run: %s",
                     cmd[0] if cmd else "?", e)
+        _record(E_COMMAND_UNRUNNABLE,
+                {"cmd": cmd[0] if cmd else "?",
+                 "error": "%s: %s" % (type(e).__name__, e)})
         return 1, "", str(e)
 
 
@@ -327,6 +413,8 @@ def masquerade_egress_iface():
                     "kind of %s, and an undetermined kind reads as 'physical' to "
                     "the classifier. Not guessing; a wrong answer here NATs "
                     "tailnet traffic outside the VPN.", ", ".join(sorted(undetermined)))
+        _record(E_MASQ_KIND_UNDETERMINED,
+                {"interfaces": sorted(undetermined)})
         return None
 
     topology, reason = classify_by_resolution(resolutions, kinds, TUNNEL_KINDS)
@@ -832,10 +920,25 @@ def main_loop():
                 # State has been stable long enough — safe to reconcile.
                 res = reconcile(ph)
                 if not res["ok"]:
-                    log.warning("reconcile reported failure: %s", res["action"])
+                    # `reason` carries the DETAIL (which teardown did not take,
+                    # which self-test failed). It was being discarded here, so
+                    # the one line an operator would find said only "abort".
+                    log.warning("reconcile reported failure: %s -- %s",
+                                res.get("action"), res.get("reason"))
+                    # A REFUSAL and a FAILURE are different events: refusing to
+                    # touch routing is correct behaviour that happens to mean
+                    # Fork B is not working, while a failure means it tried and
+                    # the routing state is not what was intended.
+                    _record(E_RECONCILE_REFUSED if res.get("action") == "abort"
+                            else E_RECONCILE_FAILED,
+                            {"action": res.get("action"),
+                             "reason": str(res.get("reason"))[:300],
+                             "topology": res.get("topology")})
                 _notify_connectivity(res)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             log.exception("reconcile cycle errored")
+            _record(E_RECONCILE_CYCLE_ERROR,
+                    {"error": "%s: %s" % (type(exc).__name__, exc)})
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 

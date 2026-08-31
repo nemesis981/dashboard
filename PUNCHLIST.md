@@ -5983,7 +5983,30 @@ of 15 closes, `flow_replaced_unclosed` 2, `close_duplicate` 2, `dns_no_results` 
 against `dns_observed` 9 (so `resolved_name` was null throughout). The collector
 WORKS; the fidelity of what it produces is a separate, open question.
 
-### [MEDIUM] Error-code audit backlog: 5 shipped areas emit no E-XXX-### codes (filed 2026-08-31, from the cross-subsystem audit)
+### [FIXED — 2026-08-31, pending push] Error-code audit backlog: 5 shipped areas emit no E-XXX-### codes
+**ALL FIVE AREAS DONE, plus the three bugs and the checker.** Commits: `e3bc976` (3
+silent-failure bugs), `87f0e11` (registry checker's 24-code blind spot), `a5f426d`
+(E-EMAIL x10), `c944b87` (E-CONSENT-006 asymmetry), `a754fa6` (E-LANINT x7), `702512f`
+(E-APPROVAL x5 bridge), `abe15de` (Fork B fail-permissive chain), `86002cb` (Gateway Mode
+unmeasured axes), and the two catalogs (E-FORKB x5, E-GATEWAY x4).
+
+Registry went from **81 codes / 16 namespaces** (of which 24 were invisible to the checker)
+to **137 codes / 24 namespaces**, CLEAN.
+
+⚠ **STILL OPEN, and deliberately NOT closed by this work:** Track C's AGENT-side gaps —
+`nemesis_agent/consent.py` and `conn_collector.py` still reference `agent_errors` zero times
+while `agent_errors.py` carries 37 E-AGENT codes. That is item 5's second half and is scoped
+to its own future pass; the server side is done.
+
+**Two audit claims were corrected during the work and are worth keeping:** `E-CONSENT-006`
+was NOT a phantom (it is recorded at `dashboard.py:5183`; the real gap was an asymmetry with
+`coverage_state`), and admin-approval's "108 KB with no logger" was real but partly correct
+by design — six of eight files are pure, and the actual defect was `dashboard.py` discarding
+a structured verdict it was already handed.
+
+*Original entry, kept for the detail it carries:*
+
+### [WAS MEDIUM] Error-code audit backlog: 5 shipped areas emit no E-XXX-### codes (filed 2026-08-31, from the cross-subsystem audit)
 **Queue, not a build.** Phases 1-3 of that audit are done (3 silent-failure bugs fixed `e3bc976`;
 the registry checker's 24-code blind spot fixed `87f0e11`; email-security wired to 10 E-EMAIL
 codes `a5f426d`). These five areas are what remains. Every citation below was **re-verified
