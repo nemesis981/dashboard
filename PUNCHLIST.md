@@ -6267,6 +6267,17 @@ credited. Recorded rather than quietly amended, because a filed finding that ove
 is exactly what makes the next reader distrust the ones that do not. The method fix below is
 unaffected — a public-only read still cannot see Piece F.
 
+⚠ **SECOND SELF-CORRECTION, 2026-08-31 (Window 3, found while scoping Piece G).** The Piece F
+claim above is also wrong, same shape as the Piece E miscount already corrected here:
+`leafstore.py` is a leaf-cert-minting cache (`host -> cert/key paths`, an LRU keyed by hostname
+for signing leaf certs off the harness CA — `mints`/`hits`/`evictions` counters confirm this),
+not Piece F's destination-trust cache (dest IP + cert fingerprint, bounded validity, sampled
+re-inspection). That mechanism has no implementation — no expiry, verdict, sampling, or
+fingerprint-keying logic anywhere in the file. So the undercount finding stands but Piece F
+should not be cited as evidence for it. Piece F is now being scoped for a real build (private
+mirror: `DESIGN-NOTE-2026-08-31-piece-f-scope.md`). Full detail and the private-repo correction:
+`~/work/nemesis-internal/audits/tls-framing-reconciliation-2026-08-31.md` (`026d0f6`).
+
 **Fix directions (not done — audit-first, and this needs an operator call because it touches the
 public/private boundary):**
 (a) Every roadmap doc that delegates detail privately carries an explicit machine-readable
