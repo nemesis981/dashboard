@@ -5664,26 +5664,48 @@ hardware is genuinely hitting 100°C, the tickets are doing their job and the fi
 deduplication.
 *Found while cleaning up the integrity_watch duplicates; not investigated (Rule 1).*
 
-### [HIGH] Submit-to-Support ships device PII with no IP/MAC/hostname/email redaction — still open (surfaced again 2026-08-31, roadmap-state-audit-2026-08-31.md)
-**Not a new finding — this is `docs/roadmap/diagnostics-and-access-master-plan.md` §2.1, that
-doc's own named ★ TOP PRIORITY (pre-wider-release) item, filed here for visibility because it
-was not previously tracked in PUNCHLIST and this audit confirmed it is still unfixed.** Full
-spec, effort estimate, and blocking analysis already live in that doc (§2.1, plus the ordering
-notes at its bottom: "small effort, high stakes, gates Submit," "independent, blocks nothing,
-blocks *wider* Submit use — do first") — this entry exists so it surfaces in the
-routinely-scanned punchlist instead of only inside a roadmap doc.
+### [FIXED — 2026-08-31, pending push] Submit-to-Support ships device PII with no IP/MAC/hostname/email redaction
+**Was:** `docs/roadmap/diagnostics-and-access-master-plan.md` §2.1, that doc's own named ★ TOP
+PRIORITY (pre-wider-release) item.
 
-**Confirmed live 2026-08-31:** `diagnostics/redact.py` (160 lines) implements only
-`_KEY_PATTERN` — secret-*value* redaction (API keys, tokens, passwords). No IP, MAC,
-hostname, or email pattern exists in the file. A `/api/diagnostics/submit` (or equivalent)
-payload sent through Submit-to-Support today carries those values in the clear.
+**Correction to this entry's own earlier "confirmed live" claim:** it said `redact.py`
+"implements only `_KEY_PATTERN`" for secret-value redaction. Rechecked during the fix (Window 3,
+2026-08-31): `_KEY_PATTERN` was defined but **never actually called anywhere in the file** —
+grepped the whole repo to confirm. Live redaction before this fix was narrower than even that
+entry stated: literal env-file secret values only, no pattern matching of any kind ran. Noted
+here so the earlier claim doesn't stand uncorrected in the same file.
 
-**Do not conflate with the separate, already-shipped PII work:** `alert_manager/
-nemesis_pseudonymize.py` covers AI-model exposure (source/destination IPs sent to an external
-LLM) and is explicitly a different scope with its own tests, per the roadmap doc's own
-scope-boundary note ("a secrets scrubber and a PII pseudonymizer have different — do NOT
-overload `redact.py`"). This item is specifically about the Submit-to-Support path, which
-`nemesis_pseudonymize.py` does not cover.
+**Fix, two commits (one-variable-at-a-time — the dead `_KEY_PATTERN` was a separate, adjacent
+bug found during the same investigation, not the thing this item was filed for):**
+- `109191d` — adds four redaction passes: known device/host names (read live from
+  devices/agent_devices), IP/MAC (pattern + validated), LAN/mDNS/Tailscale FQDN suffix
+  (`.local`/`.lan`/`.ts.net`, deliberately not a bare hostname regex), email. Reuses
+  `alert_manager/nemesis_pseudonymize.py`'s address pattern, address validator, and
+  name-filtering logic via three new public aliases (zero behavior change there, its own 67/67
+  tests still pass) rather than re-deriving them, so the two modules' answers to "what counts as
+  identifying" cannot drift apart.
+- `b3d4b25` — wires up the dead `_KEY_PATTERN`.
 
-**Status:** unresolved, gates wider Submit-to-Support use. See `diagnostics-and-access-
-master-plan.md` §2.1 for the full fix spec before starting.
+**Still two different scopes, now sharing detection logic rather than being unrelated:**
+`nemesis_pseudonymize.py` maps addresses/names to STABLE REVERSIBLE tokens for the AI chokepoint
+(relational reasoning must survive); `redact.py` DESTROYS matches with `[REDACTED]` because its
+output goes to a human outside the network with no way to reverse a token and no need to. The
+prior note that these must not be conflated is still correct about what each module DOES; it's
+no longer correct that they share nothing — they now share the same regex/validator/name-filter
+so "what counts as an address or identifying name" is answered once, not twice.
+
+**Verified against this box's real live data**, not just synthetic fixtures: all 17 diagnostic
+checks' actual current output, and the full simulated Submit-to-Support report body (35KB),
+carry zero IPs/MACs/emails after redaction. Also verified legitimate content survives —
+timestamps (including the specific near-miss where a colon-separated timestamp could
+pattern-match the IPv6 branch), temperatures, rule IDs, generic device words.
+
+**Two accepted, deliberate over-redaction tradeoffs, both pinned by their own test in
+`diagnostics/test_redact.py` (35/35):** a version-number string that also happens to be valid
+IPv4 syntax (e.g. `3.26.0.1`) is redacted — same fail-closed-on-ambiguity choice
+`nemesis_pseudonymize.py` already makes. A legitimate long hash (SHA-256 digest, git commit
+hash) is also caught by `_KEY_PATTERN` now that it's wired up — checked against all 17 live
+checks on this box, none currently emit anything it catches, so the risk is real but not
+presently exercised.
+
+**Status:** committed locally, not yet pushed — Window 2 to review/push per standard handoff.
