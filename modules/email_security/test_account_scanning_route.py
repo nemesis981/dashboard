@@ -212,5 +212,55 @@ sup.stop(timeout=2)
 check("refresh on a STOPPED supervisor does nothing (no resurrection)",
       sup.refresh(), {"started": 0, "stopped": 0})
 
+print("\n== 6. THE ROUTE ACTUALLY REACHES THE LIVE SUPERVISOR ==")
+# ⚠ THE ONE SEAM §4 AND §5 BOTH MISS. §4 proves the route is honest when it
+# CANNOT find a supervisor; §5 proves refresh() works when called directly.
+# Neither exercises the lookup BETWEEN them --
+# modules_loader.get_loaded_modules()[MODULE_NAME]._supervisor -- which is a
+# private attribute reached by name across a module boundary. A rename of
+# `_supervisor` would break scanning-on-toggle while every other assertion here
+# still passed, and the only symptom would be scanning_active:false in a reply
+# nobody reads closely.
+import modules_loader                                          # noqa: E402
+
+
+class _FakeModule:
+    def __init__(self, sup):
+        self._supervisor = sup
+
+
+_live_accounts = []
+live_sup = sup_mod.MailboxSupervisor(
+    client_factory=lambda a, cb: FakeClient(),
+    account_loader=lambda: list(_live_accounts))
+live_sup.start()
+
+_real_get_loaded = modules_loader.get_loaded_modules
+modules_loader.get_loaded_modules = lambda: {"email_security": _FakeModule(live_sup)}
+try:
+    _live_accounts.append({"id": 1, "address": "has@example.com",
+                           "provider": "gmail", "imap_host": "h",
+                           "imap_port": 993, "mailbox": "INBOX",
+                           "credential_ref": "EMAIL_SEC_APPPW_1"})
+    r = post({"address": "has@example.com", "enabled": True})
+    body = r.get_json() or {}
+    check("enabling succeeds with a live supervisor", r.status_code, 200)
+    check("  ⚠ the route RECONCILED it -- a watcher actually started",
+          body.get("watchers"), {"started": 1, "stopped": 0})
+    check("  ...so scanning_active is TRUE, and earned",
+          body.get("scanning_active"), True)
+    check("  ...and the supervisor really is watching it",
+          len(live_sup.states()), 1)
+
+    _live_accounts.clear()
+    r = post({"address": "has@example.com", "enabled": False})
+    body = r.get_json() or {}
+    check("disabling stops the watcher through the route",
+          body.get("watchers"), {"started": 0, "stopped": 1})
+    check("  ...and nothing is being watched", len(live_sup.states()), 0)
+finally:
+    modules_loader.get_loaded_modules = _real_get_loaded
+    live_sup.stop(timeout=2)
+
 print("\n%d passed, %d failed" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
