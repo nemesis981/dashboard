@@ -88,7 +88,8 @@ def account_row(address):
     try:
         cur = conn.execute(
             "SELECT address, provider, imap_host, imap_port, mailbox, "
-            "       credential_ref, enabled FROM email_accounts WHERE address=?",
+            "       credential_ref, enabled, owner_user_id "
+            "  FROM email_accounts WHERE address=?",
             (address,))
         row = cur.fetchone()
         return dict(zip([d[0] for d in cur.description], row)) if row else None
@@ -110,9 +111,12 @@ def enrol(provider_key, address, secret, *, owner=42):
     ref = cs.slot_ref(slot)
     res = fwd.op_write_email_secret(
         {"values": {ref: secret}, "token": code, "source_ip": "203.0.113.7"})
+    # owner_user_id comes from the row the consume WON -- mirroring what
+    # email_enroll_complete does. Passing it from the caller instead would make
+    # this test unable to catch the defect where it is dropped.
     writes.add_account(address, prov["imap_host"], ref,
                        provider=provider_key, imap_port=prov["imap_port"],
-                       enabled=False)
+                       enabled=False, owner_user_id=res.get("owner_user_id"))
     return code, ref, res
 
 
@@ -148,6 +152,11 @@ check("  credential_ref names the slot", g_row["credential_ref"], g_ref)
 check("  mailbox defaults to INBOX", g_row["mailbox"], "INBOX")
 check("  SCANNING IS OFF -- adding and reading are two consents",
       g_row["enabled"], 0)
+# ⚠ REGRESSION GUARD (audit, 2026-08-31). This column was uniformly NULL while
+# the route docstring claimed the owner came back from the helper and was stored.
+# It was returned, written to a log line, and dropped.
+check("  the OWNER from the consumed row is STORED, not just logged",
+      g_row["owner_user_id"], 42)
 
 print("\n== 2. PROTON: the same flow, different transport ==")
 p_code, p_ref, p_res = enrol("proton", "owner@proton.me", "bridge-generated-pw")
@@ -160,6 +169,7 @@ check("  imap_host is LOOPBACK (Bridge, not a Proton server)",
 check("  imap_port is Bridge's 1143", p_row["imap_port"], 1143)
 check("  credential_ref names its own slot", p_row["credential_ref"], p_ref)
 check("  SCANNING IS OFF here too", p_row["enabled"], 0)
+check("  the owner is recorded here too", p_row["owner_user_id"], 42)
 
 print("\n== 3. THE TWO ENROLLMENTS DID NOT COLLIDE ==")
 check("they were given DIFFERENT credential slots", g_ref != p_ref)

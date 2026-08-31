@@ -57,9 +57,34 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def get_account(address: str, mailbox: str = "INBOX"):
+    """One mailbox row, or None. Read-only.
+
+    Exists so an enrollment can refuse to TAKE OVER a mailbox that already
+    belongs to someone else -- see the route that calls it. `add_account`'s
+    upsert updates `credential_ref` and `enabled` in place, so without this check
+    one code holder can repoint another household member's mailbox at their own
+    credential slot and reset `enabled` to 0, silently stopping that person's
+    mail being scanned.
+    """
+    conn = get_data_manager().connect(MODULE_NAME)
+    try:
+        cur = conn.execute(
+            "SELECT id, address, mailbox, owner_user_id, credential_ref, enabled "
+            "  FROM email_accounts WHERE address=? AND mailbox=?",
+            (address, mailbox))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return dict(zip([d[0] for d in cur.description], row))
+    finally:
+        conn.close()
+
+
 def add_account(address: str, imap_host: str, credential_ref: str, *,
                 mailbox: str = "INBOX", provider: str = "gmail",
-                imap_port: int = 993, enabled: bool = False) -> None:
+                imap_port: int = 993, enabled: bool = False,
+                owner_user_id: int | None = None) -> None:
     """Register (or re-register) one mailbox. Disabled unless asked otherwise.
 
     `credential_ref` NAMES a key in /etc/nemesis.env -- it is never the password
@@ -80,11 +105,27 @@ def add_account(address: str, imap_host: str, credential_ref: str, *,
         {"address": address, "provider": provider, "imap_host": imap_host,
          "imap_port": imap_port, "mailbox": mailbox,
          "credential_ref": credential_ref, "enabled": 1 if enabled else 0,
-         "created_at": _now(), "created_actor": dm.current_actor()},
+         "created_at": _now(), "created_actor": dm.current_actor(),
+         # ⚠ WAS NEVER WRITTEN UNTIL 2026-08-31, and the enrollment route's own
+         # docstring claimed otherwise. The helper returns the authoritative
+         # owner from the consumed enrollment row precisely so it can be stored;
+         # it was being used only in a log line, leaving this column uniformly
+         # NULL while the code above it said the opposite. Harmless only while
+         # nothing authorises on it -- and it would have become a privilege
+         # boundary the moment any per-owner scoping was added on top of a column
+         # that is always NULL, with the docstring still asserting it was set.
+         "owner_user_id": owner_user_id},
         conflict_cols=("address", "mailbox"),
         # Explicit, and note what is ABSENT: created_at, created_actor.
+        #
+        # `owner_user_id` IS updatable, deliberately: a row predating this column
+        # has NULL there, and a legitimate re-enrollment by its real owner should
+        # populate it. Taking over a row owned by someone ELSE is prevented by
+        # the caller (see get_account), not here -- this function has no way to
+        # know whether the caller is authorised, and a guess either direction
+        # would be wrong.
         update=["provider", "imap_host", "imap_port", "credential_ref",
-                "enabled"])
+                "enabled", "owner_user_id"])
 
 
 def set_account_enabled(address: str, enabled: bool, *,
@@ -250,35 +291,22 @@ def allocate_credential_slot() -> int:
     return get_data_manager().next_sequence(MODULE_NAME, "email_credential_seq")
 
 
-def consume_enrollment_request(token_hash: str, now_iso: str) -> bool:
-    """ATOMICALLY consume one enrollment request. True only if THIS call won it.
-
-    ⚠ THE ATOMICITY IS THE SECURITY PROPERTY, NOT A PERFORMANCE DETAIL.
-    A read-then-write ("check says ok, so mark it used") has a window where two
-    simultaneous requests both read `used_at IS NULL` and BOTH proceed -- a
-    single-use token used twice, exactly what single-use exists to prevent. The
-    check and the consume must be ONE statement.
-
-    `rowcount == 1` means this caller consumed it; `0` means already used, expired
-    or never existed. The caller cannot distinguish those and MUST NOT try -- see
-    the identical-reject rule for unauthenticated routes.
-    """
-    dm = get_data_manager()
-    conn = dm.connect(MODULE_NAME)
-    try:
-        # `with conn:` is sqlite3's TRANSACTION manager -- commits on success,
-        # rolls back on exception. It does NOT close, hence the finally.
-        with conn:
-            cur = conn.execute(
-                "UPDATE email_enrollment_requests "
-                "   SET used_at = ?, actor = ? "
-                " WHERE token_hash = ? "
-                "   AND used_at IS NULL "
-                "   AND expires_at > ?",
-                (now_iso, dm.current_actor(), token_hash, now_iso))
-            return cur.rowcount == 1
-    finally:
-        conn.close()
+# ⛔ THERE IS DELIBERATELY NO consume_enrollment_request() HERE. DO NOT ADD ONE.
+#
+# There was one until 2026-08-31, and by then it had ZERO production callers and
+# had already DRIFTED from the copy that actually runs: it stamped
+# `dm.current_actor()` where the live consume stamps the literal
+# "token:email-enrollment". A future edit to this "documented" version would have
+# changed nothing while looking like it had -- exactly the hazard
+# `_merge_write_env_file`'s extraction comment argues against ("the copy is the
+# hazard"), applied to a security control rather than a file write.
+#
+# THE ONE REAL CONSUME LIVES IN `nemesis_fwd.op_write_email_secret`, and it has
+# to: the dashboard is modelled as potentially compromised, so the process that
+# validates and spends the single-use code must NOT be the web process. A
+# consume reachable from here would be a second, weaker path to the same
+# authority. See ADR 0028 D11.5 Option C and that function's docstring for the
+# atomicity argument, which is unchanged -- only its location is.
 
 
 def set_quarantine_state(account_id: int, uidvalidity: int, uid: int,

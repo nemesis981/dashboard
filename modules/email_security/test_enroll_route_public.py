@@ -182,6 +182,55 @@ def test_completion_is_post_only_and_takes_no_token_in_the_url():
           bool(re.search(r'request\.form\.get\("owner', done)), False)
 
 
+def test_no_resource_is_reserved_before_the_code_is_checked():
+    """⛔ REGRESSION GUARD for a real unauthenticated DoS (audit, 2026-08-31).
+
+    Slot allocation used to precede any check on the code. The allocator is a
+    monotonic sequence that never reuses and commits unconditionally, and the key
+    shape caps the keyspace at 1000 -- so anyone could POST a junk code, with no
+    session and no valid code, and permanently burn a slot. ~1000 requests killed
+    the feature for good, after which a household member holding a VALID code was
+    told their code was invalid.
+
+    Asserts the ORDER: the code is validated before allocate_credential_slot is
+    reached. A test that only checked "the route validates somewhere" would pass
+    against the broken version.
+    """
+    print("\n[nothing scarce is reserved before the code is validated]")
+    done = re.search(r"def email_enroll_complete\(\):.*?\n\n\n", src, re.S).group(0)
+    check("the route allocates a credential slot at all",
+          "allocate_credential_slot" in done, True)
+    check("  ...and validates the code first",
+          "get_enrollment_request" in done, True)
+    check("  ⚠ VALIDATION COMES BEFORE ALLOCATION (the actual bug)",
+          done.index("get_enrollment_request")
+          < done.index("allocate_credential_slot"), True)
+    check("  ...using the pure checker, not a hand-rolled comparison",
+          "check_request" in done, True)
+
+
+def test_the_mailbox_owner_is_recorded_and_not_taken_over():
+    """The two integrity defects the same audit found.
+
+    F2: the authoritative owner_user_id came back from the helper, was written to
+    a LOG LINE, and then dropped -- leaving the column NULL while the route's own
+    docstring claimed it was set.
+    F3: add_account upserts on (address, mailbox) updating credential_ref AND
+    enabled, so a code holder submitting someone else's address could repoint
+    that mailbox and reset enabled to 0.
+    """
+    print("\n[the owner is stored, and an existing mailbox is not hijacked]")
+    done = re.search(r"def email_enroll_complete\(\):.*?\n\n\n", src, re.S).group(0)
+    check("owner_user_id is PASSED to add_account, not merely logged",
+          bool(re.search(r"owner_user_id=res\.get\(\"owner_user_id\"\)", done)), True)
+    check("  ...sourced from the helper reply, never from the form",
+          bool(re.search(r'request\.form\.get\("owner', done)), False)
+    check("the route checks for an existing account row",
+          "get_account" in done, True)
+    check("  ...and refuses when it belongs to a different owner",
+          "409" in done, True)
+
+
 def test_the_hidden_code_is_escaped():
     """The code is caller-supplied and lands in a hidden input attribute."""
     print("\n[interpolated values are escaped]")
@@ -207,6 +256,8 @@ if __name__ == "__main__":
     test_claim_does_not_consume_the_code()
     test_dashboard_never_writes_the_credential_itself()
     test_completion_is_post_only_and_takes_no_token_in_the_url()
+    test_no_resource_is_reserved_before_the_code_is_checked()
+    test_the_mailbox_owner_is_recorded_and_not_taken_over()
     test_the_hidden_code_is_escaped()
     print()
     if _fail:

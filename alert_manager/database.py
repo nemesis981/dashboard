@@ -1908,7 +1908,9 @@ def init_email_security_tables():
         #
         # `used_at` is what makes it SINGLE-USE and `expires_at` bounds it in time;
         # both are ENFORCED in the UPDATE's WHERE clause (see
-        # writes.consume_enrollment_request), not merely recorded here.
+        # nemesis_fwd.op_write_email_secret -- the consume lives in the
+        # PRIVILEGED HELPER, not in the web process, because the dashboard is
+        # modelled as potentially compromised), not merely recorded here.
         c.execute("""
             CREATE TABLE IF NOT EXISTS email_enrollment_requests (
                 id             INTEGER PRIMARY KEY AUTOINCREMENT,

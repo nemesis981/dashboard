@@ -5921,22 +5921,87 @@ def email_enroll_complete():
         _audit(action="email_enroll_rejected", ip=ip)
         return _enroll_reject()
 
+    now = datetime.now(timezone.utc)
+
     # Input problems that are the OWNER'S to fix are shown as a form error rather
     # than the blank rejection: they reveal nothing about whether a code exists
     # (the code was already validated to reach this page), and rejecting them
     # opaquely would strand someone who simply left a field blank.
     if not address or "@" not in address or len(address) > 320:
+        # Audited like every other terminal path. An unaudited reject branch is
+        # a route a caller can drive repeatedly while appearing only as
+        # rate-limiter budget, which the _AUTH_EXEMPT checklist forbids.
+        _audit(action="email_enroll_rejected", ip=ip)
         return _fw_revert_page(
             "Connect your email account",
             _enroll_credential_form(code, provider,
                                     "Enter the email address of the mailbox "
                                     "you are connecting."), 400)
     if not secret:
+        _audit(action="email_enroll_rejected", ip=ip)
         return _fw_revert_page(
             "Connect your email account",
             _enroll_credential_form(code, provider,
                                     "Enter the app password from your provider."),
             400)
+
+    # ⛔ VALIDATE THE CODE BEFORE RESERVING ANYTHING. THIS ORDER IS THE FIX FOR A
+    # REAL UNAUTHENTICATED DENIAL OF SERVICE, found by the route audit
+    # 2026-08-31 and reproduced before being fixed.
+    #
+    # Slot allocation used to happen here, ahead of any check on the code. The
+    # allocator is a monotonic sequence that NEVER reuses a slot and commits
+    # unconditionally, and the key shape caps the keyspace at 1000. So anyone
+    # could POST a junk code and permanently burn a slot -- no session, no
+    # cookie, no valid code -- and ~1000 requests would exhaust the feature for
+    # good. Worse than the exhaustion was the aftermath: `slot_ref` then raises,
+    # is caught, and returns the generic rejection, so a household member with a
+    # perfectly valid unspent code is told their code is invalid. The only
+    # diagnostic points at the code, and the code is fine.
+    #
+    # This read is NOT the authorisation and must never become it -- the atomic
+    # consume inside nemesis_fwd still decides, and two simultaneous completions
+    # still cannot both win. It exists solely so an attacker without a usable
+    # code never reaches the allocator. A valid code that later loses the race
+    # can still burn one slot, which is bounded by real enrollment requests
+    # rather than by anyone with curl.
+    try:
+        _row = _es_writes.get_enrollment_request(_es_enrollment.token_hash(code))
+        if _es_enrollment.check_request(_row, now) != _es_enrollment.OK:
+            _audit(action="email_enroll_rejected", ip=ip)
+            return _enroll_reject()
+    except Exception:                                          # noqa: BLE001
+        log.exception("email enrollment: pre-check failed")
+        _audit(action="email_enroll_error", ip=ip)
+        return _enroll_reject()
+
+    # ⚠ REFUSE TO TAKE OVER SOMEONE ELSE'S MAILBOX. `add_account` upserts on
+    # (address, mailbox) and updates credential_ref AND enabled in place, so
+    # without this a code holder could submit a DIFFERENT household member's
+    # address and repoint their mailbox at a new credential slot while resetting
+    # enabled to 0 -- silently stopping that person's mail being scanned, with
+    # nothing in the row recording that it changed hands. The address is
+    # caller-supplied and is deliberately not trusted to be the caller's own.
+    try:
+        _existing = _es_writes.get_account(address)
+    except Exception:                                          # noqa: BLE001
+        log.exception("email enrollment: account lookup failed")
+        _audit(action="email_enroll_error", ip=ip)
+        return _enroll_reject()
+    _owner = (_row or {}).get("owner_user_id")
+    if (_existing is not None
+            and _existing.get("owner_user_id") is not None
+            and _existing.get("owner_user_id") != _owner):
+        # Shown as a form error, not the blank reject: it reveals nothing about
+        # any code (this one was already validated above) and stranding someone
+        # opaquely here would be worse than telling them to ask for help.
+        _audit(action="email_enroll_rejected", ip=ip)
+        return _fw_revert_page(
+            "Already connected",
+            "<h2>That mailbox is already connected</h2>"
+            "<p>This address is already set up by someone else on this system. "
+            "Ask whoever sent you this link to sort it out &mdash; your code has "
+            "not been used and still works.</p>", 409)
 
     prov = _es_providers.get(provider)
     try:
@@ -5963,9 +6028,15 @@ def email_enroll_complete():
     # unreferenced credential slot rather than a half-configured mailbox.
     _audit(action="email_enroll_claimed", ip=ip)
     try:
+        # owner_user_id comes from the row the helper's consume just WON, never
+        # from this form -- so a caller cannot attribute a mailbox to a person
+        # the admin never addressed the code to. Until 2026-08-31 this value was
+        # returned, logged, and then dropped, leaving the column NULL while the
+        # docstring above claimed it was set.
         _es_writes.add_account(
             address, prov["imap_host"], ref,
-            provider=provider, imap_port=prov["imap_port"], enabled=False)
+            provider=provider, imap_port=prov["imap_port"], enabled=False,
+            owner_user_id=res.get("owner_user_id"))
     except Exception:                                          # noqa: BLE001
         log.exception("email enrollment: account row write failed for slot %s", ref)
         _audit(action="email_enroll_error", ip=ip)
