@@ -1,14 +1,36 @@
 # Track C — connection-metadata tier: build plan
 
-- **Status:** **IN PROGRESS** — Requirement 0 and steps 2, 4 and 5 have shipped; the
-  header said "No code written yet" until 2026-08-25, which was false for roughly three
-  weeks. Landed so far: the collection consent gate (`ccf02aa`), the connection-event
-  schema (`e14e5a4`), schema v2 with server-side ingest and resolved-name provenance
-  (`180514a`), ETW classification corrected against measured provider behaviour
-  (`9a94244`), the destination seen-set (`4a82785`), the consent module and its
-  `/api/consent/<device_id>` routes (`8a671f2`, `080c90a`), and five-valued coverage
-  state (`6f93588`). The 10-file schema-v2 tranche previously recorded as "held
-  uncommitted" is committed. Remaining scope is unchanged; only the status was wrong.
+- **Status:** **PARTIAL — end-to-end functional on Windows and proven against a live ETW
+  session; Linux/macOS collection not built, so the poll path is retained there. Consent
+  model replaced 2026-08-31 (see REQUIREMENT 0).** Corrected 2026-08-31 from "IN
+  PROGRESS" per Window 1's closing handoff
+  (`handoff/2026-08-31-window1-to-window2-track-c-closing.md`, private mirror) — **do
+  NOT mark this SHIPPED.** Two things are genuinely open, both filed in PUNCHLIST:
+  process attribution is absent on the ETW path (`proc_name`/`proc_path`/`proc_signed`
+  never populated — the plan's own §Pieces calls these "the asymmetric win," so this is
+  not cosmetic), and Linux/macOS collection does not exist at all.
+
+  **Sequence status, verified against code 2026-08-31 (not headers):**
+
+  | # | Step | State |
+  |---|---|---|
+  | 1 | Consent gate (Requirement 0) | SHIPPED — but the MODEL was replaced, see REQUIREMENT 0 below |
+  | 2 | Schema | SHIPPED |
+  | 3 | Server ingest | SHIPPED + wired (`reap_conn_events()` called) |
+  | 4 | Windows collection | **SHIPPED AND PROVEN ON REAL HARDWARE 2026-08-31** |
+  | 5 | Buffer (Piece 3) | **SHIPPED 2026-08-31** — did not exist before |
+  | 6 | Novelty seen-set | SHIPPED + wired |
+  | 7 | Linux collection | **NOT BUILT** — no netlink/sock_diag, no eBPF |
+  | 8 | Retire dead path | **DONE ON WINDOWS ONLY 2026-08-31**; deliberately kept on Linux/macOS |
+
+  Landed so far (earlier history, kept for record): the collection consent gate
+  (`ccf02aa`), the connection-event schema (`e14e5a4`), schema v2 with server-side
+  ingest and resolved-name provenance (`180514a`), ETW classification corrected
+  against measured provider behaviour (`9a94244`), the destination seen-set
+  (`4a82785`), the consent module and its `/api/consent/<device_id>` routes
+  (`8a671f2`, `080c90a`), and five-valued coverage state (`6f93588`). The header said
+  "No code written yet" until 2026-08-25, which was false for roughly three weeks —
+  that mistake is not being repeated here.
 - **Size:** 6–9 sessions
 - **Scope:** metadata tier only. The first-N-bytes tier and any inline action are separate,
   later work.
@@ -46,6 +68,26 @@ snapshot at all. Event-driven collection is the only real fix.
 
 ## REQUIREMENT 0 — consent gate (build this first, and build it hard)
 
+**⚠ REVISED 2026-08-31 — the model below was REPLACED, deliberately, not eroded by drift.**
+This section originally specified **affirmative opt-in** (below, kept verbatim as the
+historical record). The operator replaced it 2026-08-31 with **disclosure-and-toggle**:
+security telemetry is ON by default, disclosed plainly, and every item is individually
+switchable off. The line two paragraphs down — *"it is the requirement most likely to be
+quietly weakened during implementation"* — predicted exactly this kind of change as a
+failure mode. **This is not that failure happening.** It is a deliberate reversal made
+with that warning in view, not silent drift: full reasoning is in
+`nemesis_agent/consent.py`'s module docstring (reuse it, don't re-derive it), including
+why the retrofit was safe (`conn_consent`/`conn_events`/`conn_seen_destinations` all held
+zero rows at the time of the change, verified before switching, so the original
+"data collected before consent cannot be un-collected" concern was moot in fact rather
+than waved away). Anyone tempted to read the toggle-based model below as an oversight
+should read this note and the plan's original reasoning together before changing
+anything back — that needs a **new** operator decision, not an assumption this one
+lapsed.
+
+**Original specification, 2026-07-30 (superseded above, kept for history — do not treat
+as current behavior):**
+
 **No collection occurs until the user affirmatively opts in. This is a gate on the collection
 code itself, not a settings toggle that happens to default to off.** Operator decision,
 2026-07-30. It is listed first because it is the requirement most likely to be quietly weakened
@@ -77,23 +119,29 @@ Concretely:
 **Acceptance:** with consent absent, an instrumented build produces zero connection events at the
 collector, zero payload fields, and zero server-side rows — verified by test, not by inspection.
 
-### Flagged for the operator — an inconsistency this creates
+### Resolved 2026-08-31 — was "flagged for the operator," now settled
 
 The agent **already** collects `top_processes`, `login_events`, `usb_events` and
 `new_files_in_suspicious_locations` with no comparable consent gate. If connection metadata
 warrants an explicit opt-in, it is hard to argue those do not. This plan does not change their
-behaviour — but the inconsistency is deliberate to surface, not an oversight to inherit. Worth a
-decision on whether the consent gate should cover the whole security-telemetry block.
+behaviour — but the inconsistency was deliberate to surface, not an oversight to inherit.
+
+**Answer: yes, the consent gate covers the whole security-telemetry block.** All six items
+(connections, running programs, sign-ins, USB devices, new files in drop locations, program
+behaviour) are now governed under the disclosure-and-toggle model above — each individually
+switchable off, none exempt. See `nemesis_agent/consent.py`'s `DISCLOSURE_TEXT` for the
+per-item disclosure. A product-wide "what we collect and why" doc (beyond this agent-scoped
+list) is tracked separately as a V2-finalization item in PUNCHLIST.
 
 ---
 
-## Operator decisions (2026-07-30)
+## Operator decisions (2026-07-30, "Default" row superseded 2026-08-31 — see REQUIREMENT 0)
 
 | # | Decision |
 |---|---|
 | Retention | **30 days**, user-configurable, disclosed clearly in the settings surface |
-| Privacy | Hard consent gate — see Requirement 0 |
-| Default | **Off**, opt-in **per device**, matching Tier 2's posture |
+| Privacy | Hard consent gate — see Requirement 0 (model revised 2026-08-31) |
+| Default | ~~Off, opt-in **per device**, matching Tier 2's posture~~ **Superseded 2026-08-31: ON by default, disclosed, individually switchable off per item (disclosure-and-toggle).** |
 | macOS | **Deferred to a second pass** — accepted |
 
 ---
