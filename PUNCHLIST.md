@@ -6235,3 +6235,57 @@ by an assertion that the code looks right — the commit already says as much.
 **Do not let a green test suite retire this entry.** The suites pass today (a2
 39/0, admin_approval_routes 49/0, roles 158/0) and prove real things; none of them
 touch a browser.
+
+### [MEDIUM] The roadmap audit structurally UNDERCOUNTS any doc whose detail is private (found 2026-08-31, Window 3)
+**Not an error in any audit — a blind spot in the audit METHOD, which is why it will recur until
+the method changes.** The morning roadmap-vs-state audit reads `docs/roadmap/*.md`, exactly as
+the Morning Status routine specifies. But some roadmap docs deliberately carry only a SUMMARY
+and point to a private file for the detail (a Rule 10 source-visibility decision, never a
+feature-gate). `tls-interception-sterilization-scope.md` is the live example: its own text says
+the implementation detail of most pieces "is maintained privately".
+
+**Consequence, and it is the wrong direction:** the pieces that are MOST developed are exactly
+the ones whose detail was moved out of the public doc, so a public-only read reports them as
+scoping-only. The audit undercounts precisely where work has happened. `roadmap-state-audit-2026-08-31.md`
+concluded "Pieces A–I ... remain scoping-only — 2 of 11 pieces shipped"; the private module's own
+build history contradicts that for at least two of those pieces. **The audit's J/K evidence was
+sound and correctly cited — this is not a criticism of that pass**, which is why the fix belongs
+in the method rather than in a correction to one document.
+
+**Fix directions (not done — audit-first, and this needs an operator call because it touches the
+public/private boundary):**
+(a) Every roadmap doc that delegates detail privately carries an explicit machine-readable
+    marker (e.g. `**Detail:** private`) so the audit can REPORT "cannot classify from the public
+    text" instead of silently classifying as parked — the honest answer, and the same
+    "unmeasured is not clean" rule applied to a doc audit.
+(b) The audit additionally reads the private mirror when present. More accurate, but it makes an
+    audit that currently runs entirely in the public repo depend on the private one.
+(c) Accept and annotate per-doc.
+**(a) is recommended** — it keeps the audit public-only and turns a silent miscount into a
+declared gap. ⚠ Do NOT "fix" this by copying private detail back into the public doc; that
+reverses a deliberate Rule 10 decision.
+
+### [LOW] "Piece 5" and "Step 4" each name two different things across live documents (found 2026-08-31, Window 3)
+Nothing is broken; this is a collision waiting to cost someone an afternoon, and it already
+caused a reconciliation pass before any code was written.
+
+**Two live "Piece 5"s:**
+- `docs/roadmap/adr-0009-l3-behavioral-trigger-scope.md:122` — Piece 5 = **peer-enrollment lookup
+  / fleet-roster distribution** (Tier 1 trigger engine).
+- Tier 2's private implementation doc — Piece 5 = **gate fail-safe / steering withdrawal**, built
+  2026-08-08. This framing is already public in commit subjects (`d041fa5`).
+
+**"Step 4" is overloaded too:** `cdcce46` (Tier 2 steering selector) and `2f6d36d` (Gateway Mode's
+reversible switch) both say "step 4" and are unrelated work.
+
+**The underlying reason it is confusing, and worth writing down once:** Pieces A–K are a DESIGN
+decomposition (what the capability must do) while Steps 1–4 are a BUILD SEQUENCE (the order it is
+being constructed). They are ORTHOGONAL AXES, not competing names — a Step cuts across several
+Pieces. Anyone reading "Steps 1–4 plus Piece 5" as a rename of "Pieces A–I" will conclude the
+work is duplicated when it is not, or vice versa.
+
+**Fix direction:** qualify the number wherever it appears alone — "Tier 1 Piece 5
+(peer-enrollment)" vs "Tier 2 Piece 5 (fail-safe)" — and state the Pieces-are-design /
+Steps-are-build-order distinction in both scope docs' headers. Renumbering is NOT recommended:
+these identifiers are already in commit history and cross-references, and stable-but-ambiguous
+beats renumbered-and-dangling.
