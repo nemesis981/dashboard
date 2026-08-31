@@ -5709,3 +5709,41 @@ checks on this box, none currently emit anything it catches, so the risk is real
 presently exercised.
 
 **Status:** committed locally, not yet pushed — Window 2 to review/push per standard handoff.
+
+### [FOLLOW-UP] Should Fork B's install-time NAT rule be re-derived by the renderer? (filed 2026-08-31, operator asked this tracked separately from the ADR-0005 exception)
+Today `configure_forkb_nat()` writes the rule once at install and nothing revisits it. Gateway
+Mode's SNAT rule, by contrast, is re-derived by `nemesis-fw-render` from persisted config on
+every render — so it self-heals and tracks config changes. Fork B's does neither: if the
+physical NIC is renamed or replaced, the baked-in interface is silently wrong until someone
+re-runs `install.sh`. Worth considering whether it should move to the same
+re-derived-from-config model.
+
+**Not urgent** — the rule is inert while `ip_forward=0`, and measured 2026-08-31 (VM rig, real
+kernel, per-rule packet counters) to be shadowed by PIA's own unrestricted MASQUERADE whenever
+PIA is connected: PIA holds POSTROUTING position 1 and takes 100% of matching traffic while
+connected (0 packets through Fork B's rule), and Fork B's rule takes over cleanly the moment
+PIA's chain is not populated. Full evidence: `firewall-enforcement-engine/forkb-splittunnel-rig/`
+(private mirror, commit `c5b2bf8`). See `docs/architecture/0005-dns-firewall-device-auth-
+architecture.md` §8.1 for the exception this rule operates under.
+
+### [BUG] `allow_port_on_interface` / `deny_port_on_interface` execute with no audit record (found 2026-08-31, verified — repro below)
+`nemesis_fwd.py`'s dispatch writes the audit row only for `op in WRITE_OPS`. Both ops are in
+`OPS` and in the dashboard peer's grant, but **not in `WRITE_OPS`**, and neither calls `audit()`
+internally — so a credentialed firewall port change happens with nothing in `audit_log`.
+`WRITE_OPS`' own comment states the invariant that would have caught this: *"Keep this set
+exactly equal to the write ops that EXIST in OPS below."* It is not currently true.
+
+**Fix is probably one line** (add both to `WRITE_OPS`, alongside `gateway_switch` which just
+joined it in `64ae0c7`) — **but this is a security-audit-trail change and wants its own commit
+and its own test**, deliberately not folded into any other change (Rule 2).
+
+**Reproduce (verified live 2026-08-31, still reproduces):**
+```
+python3 -c "import sys; sys.path.insert(0,'/opt/nemesis/alert_manager'); import nemesis_fwd as F; print(sorted(o for o in F.PEER_POLICY['dashboard']['ops'] if o not in F.WRITE_OPS and o not in F.READ_OPS and o not in F.NO_CREDENTIAL_OPS))"
+# -> ['allow_port_on_interface', 'deny_port_on_interface']
+```
+
+**Status:** not fixed. Owed a commit adding both to `WRITE_OPS` plus a regression test proving
+the audit row now appears (and, ideally, a test asserting `WRITE_OPS` really does equal every
+write-shaped op in `OPS`, so this class of gap can't reopen silently — see the standing "every
+new branch needs a test that exercises it" practice).
