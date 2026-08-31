@@ -5498,3 +5498,27 @@ immediately. **The audit trail was what solved this, not the UI.**
    which is never a normal condition and is currently indistinguishable from a refusal.
 *Diagnosed and fixed in-session (helper restarted, verified by timestamp + PID + zero recurrences);
 the checklist/stamp work above is NOT done.*
+
+### [LOW] `email_accounts.last_connected_at` and `last_error` are never written (found 2026-08-31)
+Both columns ship in the canonical DDL with reasoning attached — `last_error`'s own comment says
+*"An explicit failure string, never a default that means something. NULL = never attempted; a
+value = the last real error observed."* **Nothing in `modules/email_security/` writes either
+one.** Verified by grep: the only repo hits are unrelated fields in `lan_integrity`,
+`malware_detection` and `dhcp`.
+
+Confirmed live 2026-08-31 with a mailbox genuinely connected and IDLE-polling Gmail:
+`last_connected_at` was still NULL. So the column cannot currently distinguish "never attempted"
+from "connected an hour ago" — which is precisely the distinction its sibling comment says it
+exists to preserve.
+
+**Same bug class as `owner_user_id` before the F2 fix earlier the same night** (see the consent-
+gate audit entry): a column that exists, reads as meaningful to anyone querying it, and is
+permanently NULL. It is LOW rather than MEDIUM only because nothing reads these two yet —
+exactly the property that made F2 latent right up until it wasn't.
+
+**Fix:** set `last_connected_at` in the supervisor when `ImapIdleClient.connect()` succeeds, and
+`last_error` on the terminal paths in `_watch` (`AUTH_FAILED` / `CONFIG_ERROR` / `CRASHED`),
+where `_safe_detail(exc)` is already computed and is already written to the in-memory watcher
+state. The data exists; it just never reaches the row. Doing so also gives `status()` a durable
+answer across restarts — today watcher state is in-memory only, so a restart erases every record
+of why a mailbox stopped being scanned.
