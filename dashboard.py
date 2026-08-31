@@ -131,6 +131,13 @@ import session_realm as _session_realm
 import capabilities as _caps   # learning-gate unlocks: read/write (ADR 0026)
 import quizzes as _quizzes     # hand-authored capability quizzes (ADR 0026 D4)
 from core import entitlements, passphrase
+# E-APPROVAL-* catalog. Guarded: admin-approval is a core feature but this
+# module is only needed to RECORD, and a failure to import it must never take
+# the dashboard down -- the call sites degrade to a log line.
+try:
+    from core import admin_approval_errors as _aa_errors
+except Exception:                                            # noqa: BLE001
+    _aa_errors = None
 
 init_alerts_db()
 hw_monitor.init_db()
@@ -5275,6 +5282,65 @@ def _consent_error(conn, code, context):
         log.exception("consent: error recording itself failed [%s]", code)
 
 
+def _approval_error(conn, code, context):
+    """Record an E-APPROVAL-* occurrence. Never raises, never masks the original.
+
+    ⚠ OPENS ITS OWN CONNECTION WHEN GIVEN None, unlike `_consent_error`. Two of
+    the three call sites are the AUDIT-GAP cases, where a privileged action has
+    already been taken and the approval is spent and unreplayable -- the ledger
+    row is the only remaining evidence it happened. Handing those a `None` conn
+    would log "NOT PERSISTED" and lose exactly the record that matters most.
+
+    One of those sites is reached BECAUSE a database write just failed, so a
+    fresh connection may fail too. That is why it is attempted rather than
+    assumed, and why record() still degrades to a loud NOT PERSISTED line if it
+    cannot be opened: an honest gap in the ledger beats a silent one.
+    """
+    owned = None
+    try:
+        from core import admin_approval_errors as _aa        # noqa: PLC0415
+        if conn is None:
+            try:
+                owned = conn = _consent_conn()
+            except Exception:                                 # noqa: BLE001
+                conn = None
+        _aa.record(conn, code, context, actor=_actor())
+    except Exception:                                        # noqa: BLE001
+        log.exception("admin-approval: error recording itself failed [%s]", code)
+    finally:
+        if owned is not None:
+            _close_quietly(owned)
+
+
+def _approval_audit_gap(site, **fields):
+    """⛔ A privileged action was TAKEN and its record failed to write.
+
+    Wrapper so no call site dereferences `_aa_errors` directly: every one of
+    them is already inside an exception handler, and an AttributeError there
+    would make the recovery the second failure.
+    """
+    if _aa_errors is None:
+        log.error("admin-approval: AUDIT GAP at %s, and the error catalog is "
+                  "unavailable to record it | %s", site, fields)
+        return
+    _approval_error(None, _aa_errors.E_AUDIT_GAP, dict(fields, site=site))
+
+
+def _approval_rejected(conn, exc, **fields):
+    """Classify and record a refused approval from the verdict it already carries."""
+    if _aa_errors is None:
+        log.warning("admin-approval: refusal not recorded, catalog unavailable")
+        return
+    reason = getattr(exc, "reason", None)
+    verdict = getattr(exc, "verdict", None)
+    aap = getattr(verdict, "reason", None) if verdict else None
+    code, unmapped = _aa_errors.classify(reason=reason, aap_code=aap)
+    _approval_error(conn, code, dict(fields,
+                                     gate=str(reason) if reason else None,
+                                     aap=str(aap) if aap else None,
+                                     unmapped=unmapped))
+
+
 def _close_quietly(conn):
     try:
         if conn is not None:
@@ -9706,9 +9772,15 @@ def _record_local_approval(approval, action_class, pid):
              row["executed_by"], row["spent_at"]))
         conn.commit()
         conn.close()
-    except Exception:
+    except Exception as exc:
         log.exception("ai: proposal %s executed under a spent approval but the "
                       "approval log row FAILED to write", pid)
+        # ⛔ NOT A REJECTION. The action already happened and the approval is
+        # spent and unreplayable, so this ledger entry is the ONLY remaining
+        # evidence that a privileged action occurred. Its own error_class for
+        # exactly that reason -- see core/admin_approval_errors.
+        _approval_audit_gap("_record_local_approval", proposal=str(pid),
+                            error="%s: %s" % (type(exc).__name__, exc))
 
 
 @app.route("/api/ai/proposals", methods=["GET"])
@@ -9885,6 +9957,13 @@ def api_admin_approval_approve():
             # detail is returned because every one of them is something the operator
             # must act on (re-approve, pick the right device, start over).
             log.warning("admin-approval: mint refused: %s", exc)
+            # ⚠ THE VERDICT WAS ALREADY HERE AND WAS BEING THROWN AWAY.
+            # GateRejected carries .reason (a GATE- code) and, for GATE-004,
+            # .verdict with the underlying AAP- code -- deliberately, so the
+            # AAP- code is "never lost behind a generic gate failure". Until
+            # 2026-08-31 str(exc) collapsed all of it into one log line, so a
+            # forged signature and an expired request were indistinguishable.
+            _approval_rejected(conn, exc, request_id=str(request_id)[:64])
             return jsonify({"ok": False, "error": str(exc)[:300]}), 409
     except Exception:
         log.exception("admin-approval: minting failed")
@@ -9902,6 +9981,11 @@ def api_admin_approval_approve():
             device_id, action, envelope, actor=_current_actor_label())
     except Exception:
         log.exception("admin-approval: could not queue the approved task")
+        # Also an audit gap, not a rejection: the approval is already spent and
+        # cannot be replayed, so the task is lost with no record of the
+        # privileged grant that authorised it.
+        _approval_audit_gap("queue_approved_task",
+                            request_id=str(request_id)[:64])
         # The approval is ALREADY SPENT at this point and cannot be replayed, so
         # say so plainly rather than implying a retry will work.
         return jsonify({"ok": False,

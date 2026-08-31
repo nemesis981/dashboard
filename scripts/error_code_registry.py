@@ -57,6 +57,10 @@ REGISTERED_NAMESPACES = frozenset({
     # every failure in it makes the detector see LESS while still reporting --
     # an empty result read as reassurance.
     "LANINT",       # modules/lan_integrity/module.py
+    # Added 2026-08-31. NOT a replacement for the AAP-/GATE- wire vocabulary,
+    # which is a stable cross-language contract mirrored into the agent -- this
+    # is the BRIDGE that makes those refusals countable on the appliance.
+    "APPROVAL",     # core/admin_approval_errors.py
 })
 
 #: Style 1 -- a catalog dict key:   "E-NS-001": ("desc", "HIGH", "class")
