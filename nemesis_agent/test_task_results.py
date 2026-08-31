@@ -218,18 +218,34 @@ def main():
             check("POSITIVE a successful task is reported ok",
                   rec.get(env["task_id"], {}).get("ok"), True)
 
-            # THE control for this layer. _dispatch signals an unknown action by
-            # RETURNING {"error": ...}, it does not raise — so "it returned" as a
-            # success test reports the most important failure as a success.
+            # THE control for this layer: an action the agent does not run must be
+            # reported as FAILED, carrying a SPECIFIC reason — never a generic
+            # failure, and never a silent success.
+            #
+            # ⚠ WHY THE DETAIL IS NO LONGER "unknown action" (updated 2026-08-31).
+            # This test predates default-deny task dispatch (`e6b6ccb`). An unknown
+            # action used to fall through to `_CommandHandler._dispatch`, which
+            # RETURNS {"error": "unknown action: ..."} — the string this once
+            # asserted. Now `assert_dispatchable()` refuses an unclassified action
+            # BEFORE dispatch, raising `UnclassifiedAction`, so "teleport" never
+            # reaches `_dispatch` and the recorded reason is the classification
+            # refusal, not a dispatch error. That is the security improvement
+            # working, and it is MORE specific than the old message — so this checks
+            # the reason is real and names the action, not one brittle literal.
+            # (The `_dispatch` monkeypatch is left as a belt-and-braces guard: even
+            # if classification were bypassed, an unknown action must still fail.)
             agent._CommandHandler._dispatch = (
                 lambda self, action, body: {"error": "unknown action: %s" % action})
             env2 = server_keys.build_task(DEV, "teleport", {})
             agent._handle_response_tasks(FakeResponse({"ok": True, "tasks": [env2]}), DEV)
             rec = {r["task_id"]: r for r in tasks.pending_results(now=now)}
-            check("CONTROL a returned {'error':...} is reported as FAILED",
+            check("CONTROL an action the agent does not run is reported as FAILED",
                   rec.get(env2["task_id"], {}).get("ok"), False)
-            check("CONTROL ...carrying the reason, not a generic failure",
-                  "unknown action" in rec.get(env2["task_id"], {}).get("detail", ""),
+            _detail2 = rec.get(env2["task_id"], {}).get("detail", "")
+            check("CONTROL ...carrying a SPECIFIC reason that names the action",
+                  ("teleport" in _detail2
+                   and any(w in _detail2.lower()
+                           for w in ("classif", "refus", "dispatch", "unknown"))),
                   True)
 
             def boom(self, action, body):
