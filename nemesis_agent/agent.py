@@ -682,6 +682,124 @@ def _findings_response():
         return {"error": "findings unavailable"}
 
 
+#: Track C connection collector: the ETW source, its buffer, and the assembler.
+#: One owner, module-global like _behavioral_monitor, so _shutdown() can reach it.
+_conn_source = None
+_conn_buffer = None
+
+
+def _start_conn_collector(conf):
+    """Start event-driven connection collection, IFF flag + consent + platform.
+
+    THREE independent conditions, and all three must hold:
+      * `conn_events_enabled` config flag, DEFAULT OFF. The build plan requires it
+        ships behind a flag "so it can land before it is trusted -- IN ADDITION TO,
+        never instead of" the consent gate. It is not a second consent switch.
+      * consent for ITEM_CONNECTIONS. On by default since 2026-08-31, but a user
+        who turned it off must not be collected from.
+      * Windows. ETW is the only event source built; Linux/macOS have none yet, so
+        this is a clean no-op there rather than a failure.
+
+    ⚠ A no-op is SILENT ONLY WHEN IT IS EXPECTED. Not-Windows and flag-off log at
+    debug; a genuine start failure (the `etw` package missing, the session
+    refusing) is E-AGENT-120 at warning, because "collector never started" and
+    "collector started and saw nothing" are indistinguishable downstream and the
+    difference matters.
+    """
+    global _conn_source, _conn_buffer
+    if str(conf.get("conn_events_enabled", "false")).strip().lower() != "true":
+        log.debug("conn collector: disabled by config (conn_events_enabled)")
+        return
+    if _platform_name != "Windows":
+        log.debug("conn collector: no event source on %s -- not starting",
+                  _platform_name)
+        return
+    try:
+        import consent as _consent                            # noqa: PLC0415
+        import conn_collector as _cc                          # noqa: PLC0415
+        import conn_buffer as _cb                             # noqa: PLC0415
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("conn collector: modules unavailable, not starting: %s", exc)
+        return
+    if not _consent.collection_allowed(_consent.ITEM_CONNECTIONS):
+        log.info("conn collector: connection recording is switched off -- not starting")
+        return
+
+    try:
+        cap = int(conf.get("conn_events_buffer_cap", _cb.DEFAULT_CAP))
+    except (TypeError, ValueError):
+        cap = _cb.DEFAULT_CAP
+    try:
+        _conn_buffer = _cb.ConnBuffer(cap)
+        dns = _cc.DnsCache()
+        asm = _cc.ConnectionAssembler(conf.get("device_id", "unknown"), dns_cache=dns)
+        _conn_source = _cc.EtwSource(asm, dns,
+                                     _consent.consent_version(),
+                                     _conn_buffer.put)
+        _conn_source.start()
+        log.info("conn collector: started (buffer cap %d)", _conn_buffer.cap)
+    except Exception as exc:                                  # noqa: BLE001
+        _conn_source = None
+        _conn_buffer = None
+        agent_errors.record("E-AGENT-120",
+                            "connection collector failed to start: %s" % exc)
+        log.warning("conn collector: FAILED to start: %s", exc)
+
+
+def _stop_conn_collector():
+    """Stop the source and flush. Safe to call when never started."""
+    global _conn_source, _conn_buffer
+    if _conn_source is not None:
+        try:
+            _conn_source.stop()          # force-flushes closed flows first
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("conn collector: stop error: %s", exc)
+    _conn_source = None
+    _conn_buffer = None
+
+
+def _drain_conn_events():
+    """Records for this heartbeat, or {} -- merged into the security block.
+
+    ⚠ CONSENT IS RE-CHECKED HERE, EVERY BEAT, AND A WITHDRAWAL DISCARDS THE BUFFER.
+    Checking only at start would let events collected before a mid-session
+    switch-off still be shipped afterwards. Turning connection recording off
+    deletes history rather than merely stopping collection (build plan
+    requirement 7), so shipping a buffered backlog after it would directly
+    contradict what the user was told.
+
+    The drop count is read-and-cleared ONLY here, where it is actually being put
+    into the payload -- reading it anywhere else would lose it silently, which is
+    the exact failure the counter exists to prevent.
+    """
+    if _conn_source is None or _conn_buffer is None:
+        return {}
+    try:
+        import consent as _consent                            # noqa: PLC0415
+        import conn_events as _ce                             # noqa: PLC0415
+        if not _consent.collection_allowed(_consent.ITEM_CONNECTIONS):
+            discarded = _conn_buffer.discard()
+            _stop_conn_collector()
+            log.info("conn collector: consent withdrawn -- stopped, %d buffered "
+                     "event(s) discarded unsent", discarded)
+            return {}
+        _conn_source.flush_closed()
+        events = _conn_buffer.drain()
+        dropped = _conn_buffer.take_dropped()
+    except Exception as exc:                                  # noqa: BLE001
+        log.warning("conn collector: drain error: %s", exc)
+        return {}
+    if not events and not dropped:
+        return {}
+    out = {_ce.PAYLOAD_KEY: events}
+    if dropped:
+        # Reported even when zero events accompany it: "we dropped N" is itself
+        # the finding, and a beat that drops everything would otherwise send
+        # nothing at all and read as a quiet device.
+        out["connection_events_dropped"] = dropped
+    return out
+
+
 def _start_behavioral_monitor(conf):
     """Start the behavioral monitor + its platform observer thread, IFF enabled +
     consented + the observer is present. Falco tail on Linux, Sysmon poll on
@@ -896,6 +1014,14 @@ def _collect_payload(conf):
         sec = security.collect(_platform_name)
     except Exception as e:
         log.warning("security collection error: %s", e)
+    # Event-driven connection events ride the SAME security block as the rest of
+    # the telemetry, under conn_events.PAYLOAD_KEY, which is where the server's
+    # ingest already looks (hw_monitor.py:2256). Merged rather than assigned so a
+    # collector failure cannot wipe the block security.collect() just built.
+    try:
+        sec.update(_drain_conn_events())
+    except Exception as e:                                    # noqa: BLE001
+        log.warning("conn events merge error: %s", e)
 
     # Suricata alerts
     suri_alerts = []
@@ -2459,6 +2585,10 @@ def _shutdown(*_):
     # The poll loop waits on `_wake`, so without this a shutdown would block for
     # up to the full poll interval (300s default) instead of returning at once.
     _wake.set()
+    # Stop the connection collector BEFORE anything else that could take time: its
+    # stop() force-flushes closed flows, and those records are lost if the process
+    # goes down first.
+    _stop_conn_collector()
     if _suricata_mod:
         _suricata_mod.stop()
     # Steering fail-safe: tear it down on shutdown so the box is never left steered
@@ -2595,6 +2725,10 @@ def main():
     # Behavioral monitor (Malware Layer B). No-op unless enabled + falco present +
     # consented; otherwise the engine inventory simply reports the coverage gap.
     _start_behavioral_monitor(_conf)
+
+    # Track C connection collector. No-op unless conn_events_enabled + consented +
+    # Windows; the flag defaults OFF so this lands dark until it is trusted.
+    _start_conn_collector(_conf)
 
     # Block in poll loop
     _poll_loop()

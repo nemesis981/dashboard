@@ -234,6 +234,18 @@ E_AGENT_CODES = {
                     "attempting to authorize work no human approved -- which is "
                     "precisely the case this layer exists to catch. Investigate "
                     "rather than re-issue.", "high"),
+
+    # ── 120–129  Connection metadata collection (Track C) ──
+    # A NEW block, not an extra code in 080-089: that range is the BEHAVIOURAL arm
+    # (Sysmon/Falco), a different subsystem with a different consent item and data
+    # shape. 100-109 and 110-119 are already in use -- checked against the live
+    # catalog rather than the block comments, which did not list every range.
+    "E-AGENT-120": ("Connection collector start failed",
+                    "Event-driven connection collection is enabled and consented "
+                    "but the ETW source could not be started, so no connection "
+                    "events will be reported from this endpoint. Distinct from a "
+                    "clean no-op: the collector was asked to run and could not.",
+                    "medium")
 }
 
 _MAX_CONTEXT = 300               # hard cap on a context string (bounded input)
