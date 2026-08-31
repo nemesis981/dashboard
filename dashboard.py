@@ -5891,7 +5891,14 @@ def email_enroll_complete():
     with no credential, which reads as a configured mailbox and fails later as an
     authentication error against a password that was never stored.
     """
-    if _es_enrollment is None or _ENROLL_RATE is None or _es_providers is None:
+    # EVERY module this route touches is named. Omitting one still failed closed
+    # -- an AttributeError on None is caught below and rejected -- but only
+    # incidentally, via a handler written for a different purpose. A guard that
+    # depends on a downstream catch is one refactor away from not holding, and
+    # the failure it would then produce is a 500 on an unauthenticated route
+    # rather than the identical rejection every other path returns.
+    if (_es_enrollment is None or _ENROLL_RATE is None or _es_providers is None
+            or _es_writes is None or _es_credentials is None):
         return _enroll_reject()
 
     # remote_addr, NEVER X-Forwarded-For -- unauthenticated route, so the header
