@@ -18,3 +18,15 @@ pythonnet; sys_platform == "win32"
 pystray
 pillow
 six
+# Track C connection collection (conn_collector.EtwSource). The PyPI package is
+# `pywintrace`; the module it provides is imported as `etw`, so the two names do
+# not match and grepping for "etw" in this file finds nothing. Windows-only: it
+# wraps the Win32 ETW API and has no meaning elsewhere, which is why the collector
+# is a clean no-op on Linux/macOS rather than a failure.
+#
+# Imported lazily inside EtwSource.start(), so a missing package does not stop the
+# agent -- it records E-AGENT-120 and runs without connection collection. That is
+# the correct failure mode and it is also why the gap could sit unnoticed: nothing
+# breaks loudly. Same shape as the `cryptography` omission above, which stayed
+# hidden until 2026-08-20 because the system interpreter happened to supply it.
+pywintrace; sys_platform == "win32"
