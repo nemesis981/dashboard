@@ -5238,3 +5238,48 @@ part of the fix, not left as a decoy.
 Fix is one line (resolve through `nemesis_paths.db_path()`), but it should be paired with a
 decision about whether a smoketest should refuse to run against a non-throwaway DB at all.
 *Found by read-only audit; not fixed in that pass (Rule 1).*
+
+### [MEDIUM] `agent_error_reports` is missing from `hw_monitor`'s Data Manager grant — survives only because hw_monitor runs in WARN mode (found 2026-08-31)
+Surfaced in the dashboard journal while verifying an unrelated deploy:
+```
+WOULD DENY (warn-only) module='hw_monitor' op=CREATE table='agent_error_reports'
+ — not in its namespace; add it or fix the caller before enforcing
+```
+**Measured, not inferred — 11 of hw_monitor's 12 CREATEd tables are granted; this is the only
+gap.** So it is one missed name, not a systemic drift, and the fix is a one-line addition to
+`NAMESPACES["hw_monitor"]["tables"]` in `alert_manager/data_manager.py`.
+
+**Why it does not fail today, and why that is the problem.** `hw_monitor.py:1487` deliberately
+calls `set_namespace_mode("hw_monitor", MODE_WARN)`, so `check_write` logs the violation and
+**returns True anyway**. Every other namespace on the box is `enforce` (checked all 21). The
+table is CREATEd at `hw_monitor.py:170`, exists in the live DB, and currently holds 0 rows.
+
+**⚠ WHAT BREAKS WHEN hw_monitor MOVES TO ENFORCE — and warn mode is explicitly a transitional
+state, so it will.** The CREATE and every INSERT get denied. On a fresh install the table is
+never created at all. Then:
+- `dashboard.py:6584` reads it inside `try: … except Exception: agent_errs = {}` — so a denied
+  read renders as **"no agent errors reported"**, which is indistinguishable from a healthy
+  fleet. A false all-clear on the exact surface that exists to report agent problems.
+- `modules/tickets/module.py:470` `scan_agent_error_reports_for_tickets()` (called from
+  `hw_monitor.py:4786`) finds nothing, so the agent-error→ticket bridge silently stops opening
+  tickets. Nothing logs that it stopped.
+
+**This is the SECOND instance of this exact bug class in one day.** `email_enrollment_requests`
+had canonical DDL, a writer, a consumer, an admin route and a fully green test suite, and could
+never be written in production because it was missing from the same file (fixed today,
+`f5de31e`). The difference is only that `email_security` is in `enforce`, so it failed loudly at
+500, while `hw_monitor` is in `warn`, so this one is failing *quietly and successfully*.
+`data_manager.py`'s own comments already warn about precisely this — "a missing grant passes
+every test and only appears in production as a WOULD DENY log line" — and a module's own suite
+cannot catch it, because those suites build tables on a plain sqlite3 connection.
+
+**Fix:** add `"agent_error_reports"` to the hw_monitor grant tuple. **Do not** relax to an
+`agent_` or `hw_` prefix — the dhcp entry in that file documents at length why a bare tuple
+falls through to `startswith()` and silently pre-authorises every future table sharing the stem.
+
+**Worth considering alongside it:** a check that every `CREATE TABLE IF NOT EXISTS` in a module's
+source has a matching grant would have caught both instances statically, without needing the
+module to run. That is a different and larger piece of work than this one-line fix, and should
+not hold it up.
+*Found by read-only verification during the 2026-08-31 email-security deploy; not fixed in that
+pass (Rule 1 — this is hw_monitor's namespace, outside that change's scope).*
