@@ -20,7 +20,7 @@ import conn_collector as cc         # noqa: E402
 import conn_events as ce            # noqa: E402
 import proc_map as pm               # noqa: E402
 
-EXPECTED_CHECKS = 14
+EXPECTED_CHECKS = 27
 passed = failed = 0
 
 
@@ -108,6 +108,59 @@ src, out = make(m3)
 src._on_network((28, dict(OPEN)))       # PID 4242 is not in the map
 check("unknown pid -> name None (never a neighbouring process's name)",
       out and out[0].get("proc_name") is None)
+
+print("\n⭐ the UNVERIFIED Kernel-Process provider: handler logic + self-reporting")
+# Every constant this exercises is documentation, not measurement. The point of
+# these checks is NOT to assert the field names are right -- they cannot be, from
+# here -- but that the handler behaves correctly for whichever shape arrives, and
+# that it SAYS which one it saw so a probe run settles it.
+m = pm.ProcessMap()
+src, out = make(m)
+src._on_process((cc.EtwSource.KP_EVENT_START,
+                 {"ProcessID": 7001, "ImageName": "C:\\Windows\\notepad.exe"}))
+check("⭐ a start event populates the map", m.lookup(7001)[0] == "notepad.exe",
+      m.lookup(7001))
+check("⭐ full path is kept alongside the basename",
+      m.lookup(7001)[1] == "C:\\Windows\\notepad.exe")
+check("⭐ it REPORTS which pid field matched",
+      src.stats.get("kp_pid_from_ProcessID") == 1, dict(src.stats))
+check("⭐ and which image field matched",
+      src.stats.get("kp_image_from_ImageName") == 1)
+check("a process handler emits NO connection events", len(out) == 0)
+
+src2, _ = make(m)
+src2._on_process((cc.EtwSource.KP_EVENT_START, {"NewProcessId": 7002,
+                                                "Image": "/usr/bin/curl"}))
+check("an ALTERNATE field shape is still handled", m.lookup(7002)[0] == "curl")
+check("  and the alternate field is named in the stats",
+      src2.stats.get("kp_pid_from_NewProcessId") == 1)
+
+src3, _ = make(m)
+src3._on_process((cc.EtwSource.KP_EVENT_STOP, {"ProcessID": 7001}))
+check("⭐ a stop event marks exited but KEEPS the name resolvable",
+      m.lookup(7001)[0] == "notepad.exe" and src3.stats.get("kp_stop") == 1)
+
+src4, _ = make(m)
+src4._on_process((cc.EtwSource.KP_EVENT_START, {"ImageName": "x.exe"}))
+check("no pid field -> counted, not guessed",
+      src4.stats.get("kp_no_pid_field") == 1)
+src4._on_process((999, {"ProcessID": 1}))
+check("an unmapped event id announces itself",
+      src4.stats.get("kp_unmapped_event_id") == 1)
+src4._on_process((cc.EtwSource.KP_EVENT_START, "not-a-dict"))
+check("malformed payload -> counted, never raises",
+      src4.stats.get("kp_malformed") == 1)
+
+src5, _ = make(None)
+src5._on_process((cc.EtwSource.KP_EVENT_START, {"ProcessID": 1, "ImageName": "a"}))
+check("no map -> counted, never raises", src5.stats.get("kp_no_map") == 1)
+
+print("\n⭐ a start for a KNOWN pid replaces the name even with no image")
+m.note_start(7001, "old.exe", "/old.exe")
+src6, _ = make(m)
+src6._on_process((cc.EtwSource.KP_EVENT_START, {"ProcessID": 7001}))
+check("⭐ reuse with no image clears the stale name rather than keeping it",
+      m.lookup(7001)[0] is None, m.lookup(7001))
 
 _total = passed + failed
 check("assertion count matches EXPECTED_CHECKS (%d)" % EXPECTED_CHECKS,

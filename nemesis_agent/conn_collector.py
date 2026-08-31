@@ -403,6 +403,38 @@ class EtwSource:
     #: measurement rather than an oversight.
     DNS_KEYWORDS = 0xFFFFFFFFFFFFFFFF
 
+    # ── Kernel-Process provider ───────────────────────────────────────────────
+    #
+    # ⚠⚠ EVERYTHING IN THIS BLOCK IS FROM DOCUMENTATION AND HAS NEVER BEEN
+    # MEASURED ON HARDWARE. That is a real difference from the two providers
+    # above, whose GUIDs, keywords, level and event-id tables all trace to the
+    # 2026-08-07 probe (`scoping-and-estimates/etw-probe-report-2026-08-07.json`).
+    # That probe covered ONLY Kernel-Network and DNS-Client; it never touched this
+    # provider.
+    #
+    # THIS FILE HAS ALREADY BEEN BURNED ONCE BY EXACTLY THIS. An earlier revision
+    # called `connid` "a real per-connection identifier" — an INFERENCE FROM ITS
+    # PRESENCE, never a measurement of its content — and it was wrong: the value is
+    # the string "0" on every event. So this block is labelled rather than trusted,
+    # and `_on_process` below is written to SELF-REPORT which field shape it
+    # actually saw instead of assuming one.
+    #
+    # Settle it with `tools/etw_process_probe.py` on an elevated Windows host. Until
+    # then: if these are wrong the provider simply delivers nothing we understand,
+    # the counters say so, and the psutil-seeded map still answers for every
+    # pre-existing process. Degrades, does not break.
+    KERNEL_PROCESS = "Microsoft-Windows-Kernel-Process"
+    KERNEL_PROCESS_GUID = "{22FB2CD6-0E7B-422B-A0C7-2FAD1FD0E716}"   # UNVERIFIED
+    KP_KEYWORD_PROCESS = 0x10                                        # UNVERIFIED
+    KP_EVENT_START = 1                                               # UNVERIFIED
+    KP_EVENT_STOP = 2                                                # UNVERIFIED
+
+    #: Candidate field names, tried in order. A LIST rather than one name because
+    #: the real key is unmeasured; whichever hits is counted, so a probe run reads
+    #: the answer straight out of the stats.
+    KP_PID_FIELDS = ("ProcessID", "PID", "ProcessId", "NewProcessId")
+    KP_IMAGE_FIELDS = ("ImageName", "ImageFileName", "ProcessName", "Image")
+
     def __init__(self, assembler, dns_cache, consent_version, emit,
                  clock_mono=time.monotonic, proc_map=None):
         self.asm = assembler
@@ -730,6 +762,68 @@ class EtwSource:
         except Exception:                                    # noqa: BLE001
             self.stats["dns_errors"] += 1
 
+    def _on_process(self, event):
+        """Keep the pid->identity map current. NEVER raises, never emits.
+
+        This is a pure side-channel: it feeds `proc_map` and produces no connection
+        events of its own. A failure here costs future NAMES, never a connection
+        record — same contract as `_proc()`.
+
+        ⚠ SELF-REPORTING BY DESIGN. Because the field shape is unmeasured, this
+        tries each candidate key and counts which one matched
+        (`kp_pid_from_<field>` / `kp_image_from_<field>`). After one probe run the
+        stats name the real fields, and this can be narrowed to them deliberately
+        rather than left permissive forever.
+        """
+        try:
+            pmap = getattr(self, "proc_map", None)
+            if pmap is None:
+                self.stats["kp_no_map"] += 1
+                return
+            eid, payload = event[0], event[1]
+            if not isinstance(payload, dict):
+                self.stats["kp_malformed"] += 1
+                return
+
+            pid = None
+            for f in self.KP_PID_FIELDS:
+                if payload.get(f) is not None:
+                    pid = _as_int(payload.get(f))
+                    if pid is not None:
+                        self.stats["kp_pid_from_" + f] += 1
+                        break
+            if pid is None:
+                self.stats["kp_no_pid_field"] += 1
+                return
+
+            if eid == self.KP_EVENT_STOP:
+                pmap.note_exit(pid)
+                self.stats["kp_stop"] += 1
+                return
+
+            image = None
+            for f in self.KP_IMAGE_FIELDS:
+                v = payload.get(f)
+                if isinstance(v, str) and v:
+                    image = v
+                    self.stats["kp_image_from_" + f] += 1
+                    break
+
+            if eid == self.KP_EVENT_START:
+                # A start with no image still REPLACES the entry: the pid has been
+                # recycled, so keeping the previous program's name would be the
+                # confidently-wrong case proc_map warns about. A nameless entry is
+                # the honest answer.
+                pmap.note_start(pid, _basename(image), image)
+                self.stats["kp_start" if image else "kp_start_no_image"] += 1
+                return
+
+            # An id we do not have a meaning for. Counted rather than dropped —
+            # this is how an unmeasured event-id table announces itself.
+            self.stats["kp_unmapped_event_id"] += 1
+        except Exception:                                    # noqa: BLE001
+            self.stats["kp_errors"] += 1
+
     def _dispatch(self, event):
         """ONE session, both providers, routed by EventHeader.ProviderId.
 
@@ -752,6 +846,8 @@ class EtwSource:
             pid_guid = str((p.get("EventHeader") or {}).get("ProviderId") or "").upper()
             if pid_guid == self.KERNEL_NETWORK_GUID.upper():
                 self._on_network(event)
+            elif pid_guid == self.KERNEL_PROCESS_GUID.upper():
+                self._on_process(event)
             elif pid_guid == self.DNS_CLIENT_GUID.upper():
                 self._on_dns(event)
             else:
@@ -762,15 +858,48 @@ class EtwSource:
             self.stats["dispatch_errors"] += 1
 
     def start(self):
+        """Open the session. Falls back to the MEASURED providers if the
+        unverified process provider cannot be subscribed.
+
+        ⚠ THE FALLBACK IS THE POINT, NOT DEFENSIVENESS FOR ITS OWN SAKE. The
+        Kernel-Process GUID and keyword are documentation, not measurement (see
+        the constants block). If either is wrong, `pywintrace` may refuse the whole
+        subscription — and losing connection collection entirely in exchange for an
+        unverified enrichment would be a straightforwardly bad trade. So a refusal
+        drops that one provider, is COUNTED, and collection continues on the two
+        providers that are measured, with the psutil-seeded map still naming every
+        pre-existing process.
+        """
         from etw import ETW, ProviderInfo                    # noqa: PLC0415
         from etw.GUID import GUID                            # noqa: PLC0415
-        providers = [
+
+        measured = [
             ProviderInfo(self.KERNEL_NETWORK, GUID(self.KERNEL_NETWORK_GUID),
                          self.LEVEL, self.KW_IPV4 | self.KW_IPV6),
             ProviderInfo(self.DNS_CLIENT, GUID(self.DNS_CLIENT_GUID),
                          self.LEVEL, self.DNS_KEYWORDS),
         ]
-        job = ETW(providers=providers, event_callback=self._dispatch)
+        try:
+            unverified = [ProviderInfo(self.KERNEL_PROCESS,
+                                       GUID(self.KERNEL_PROCESS_GUID),
+                                       self.LEVEL, self.KP_KEYWORD_PROCESS)]
+        except Exception:                                    # noqa: BLE001
+            # Even CONSTRUCTING it can fail on a malformed GUID string.
+            self.stats["kp_provider_unavailable"] += 1
+            unverified = []
+
+        if unverified:
+            try:
+                job = ETW(providers=measured + unverified,
+                          event_callback=self._dispatch)
+                job.start()
+                self._jobs.append(job)
+                self.stats["kp_provider_subscribed"] += 1
+                return self
+            except Exception:                                # noqa: BLE001
+                self.stats["kp_provider_refused"] += 1
+
+        job = ETW(providers=measured, event_callback=self._dispatch)
         job.start()
         self._jobs.append(job)
         return self
@@ -789,6 +918,18 @@ class EtwSource:
             except Exception:                                # noqa: BLE001
                 pass
         self._jobs = []
+
+
+def _basename(path):
+    """Last path component, or None. Windows separators, so not os.path.basename.
+
+    The agent may run on Linux in tests while the paths it parses are Windows
+    ones; os.path.basename would leave 'C:\\x\\y.exe' untouched there and the
+    name field would silently carry a full path.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    return path.replace("/", "\\").rstrip("\\").split("\\")[-1] or None
 
 
 def _as_int(v):
