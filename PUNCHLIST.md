@@ -5663,3 +5663,27 @@ appliance.
 hardware is genuinely hitting 100°C, the tickets are doing their job and the fix is cooling, not
 deduplication.
 *Found while cleaning up the integrity_watch duplicates; not investigated (Rule 1).*
+
+### [HIGH] Submit-to-Support ships device PII with no IP/MAC/hostname/email redaction — still open (surfaced again 2026-08-31, roadmap-state-audit-2026-08-31.md)
+**Not a new finding — this is `docs/roadmap/diagnostics-and-access-master-plan.md` §2.1, that
+doc's own named ★ TOP PRIORITY (pre-wider-release) item, filed here for visibility because it
+was not previously tracked in PUNCHLIST and this audit confirmed it is still unfixed.** Full
+spec, effort estimate, and blocking analysis already live in that doc (§2.1, plus the ordering
+notes at its bottom: "small effort, high stakes, gates Submit," "independent, blocks nothing,
+blocks *wider* Submit use — do first") — this entry exists so it surfaces in the
+routinely-scanned punchlist instead of only inside a roadmap doc.
+
+**Confirmed live 2026-08-31:** `diagnostics/redact.py` (160 lines) implements only
+`_KEY_PATTERN` — secret-*value* redaction (API keys, tokens, passwords). No IP, MAC,
+hostname, or email pattern exists in the file. A `/api/diagnostics/submit` (or equivalent)
+payload sent through Submit-to-Support today carries those values in the clear.
+
+**Do not conflate with the separate, already-shipped PII work:** `alert_manager/
+nemesis_pseudonymize.py` covers AI-model exposure (source/destination IPs sent to an external
+LLM) and is explicitly a different scope with its own tests, per the roadmap doc's own
+scope-boundary note ("a secrets scrubber and a PII pseudonymizer have different — do NOT
+overload `redact.py`"). This item is specifically about the Submit-to-Support path, which
+`nemesis_pseudonymize.py` does not cover.
+
+**Status:** unresolved, gates wider Submit-to-Support use. See `diagnostics-and-access-
+master-plan.md` §2.1 for the full fix spec before starting.
