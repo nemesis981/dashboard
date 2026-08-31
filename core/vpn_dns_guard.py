@@ -223,23 +223,57 @@ def masquerade_egress_iface():
         enforces elsewhere in this module: vendor WireGuard builds use arbitrary
         device names, so `tun0`-style heuristics are not safe.
 
-    **Verified on PIA ONLY** — the same caveat ADR 0002 states for this module as a
-    whole. It is correct for PIA-style SPLIT-TUNNEL VPNs, which keep the main
-    default route on the physical NIC and divert host traffic via fwmark/source
-    policy routing into a separate table (`piavpnrt`). This function deliberately
-    reads only the MAIN table, so PIA's tunnel does not mask the real egress.
+    **Full-tunnel VPNs return None, and the caller must refuse to install a masquerade
+    rule** rather than guess an interface and silently NAT to the wrong egress. Do not
+    "fix" that by falling back to the first interface found.
 
-    **Redirect-gateway VPNs (OpenVPN `redirect-gateway`, WireGuard
-    `AllowedIPs=0.0.0.0/0`) are NOT handled, and FAIL VISIBLY.** Those replace the
-    main default route with the tunnel, every candidate is a tunnel kind, and this
-    returns None. That is the required behaviour: the caller must refuse to install
-    a masquerade rule rather than guess an interface and silently NAT to the wrong
-    egress. Do not "fix" this by falling back to the first interface found.
+    ⚠ HOW THAT IS DECIDED CHANGED ON 2026-08-31, AND THE OLD REASONING WAS WRONG.
+    This used to walk `ip route show default` and return the first non-tunnel interface,
+    on the stated theory that a redirect-gateway VPN "replaces the main default route
+    with the tunnel, every candidate is a tunnel kind, and this returns None."
+
+    That theory only holds when the tunnel REPLACES the main default. The commonest
+    full-tunnel form does not: OpenVPN's `redirect-gateway` installs a `0.0.0.0/1` +
+    `128.0.0.0/1` straddle and LEAVES the physical `default` in place. Both /1s are more
+    specific, so they win for every destination — but `ip route show default` cannot see
+    them. Measured live against a connected full tunnel: this function returned
+    `enp131s0` with exit 0 while `ip route get 1.1.1.1` resolved to `tun0`. It did not
+    fail visibly; it answered confidently and wrongly, and `install.sh` would have
+    persisted `-A POSTROUTING -s 100.64.0.0/10 -o enp131s0 -j MASQUERADE` into
+    `before.rules` — pinning forwarded tailnet traffic OUTSIDE the user's VPN.
+
+    Egress is now decided by MEASURED routing outcome (`ip route get` across probe
+    destinations spanning both halves of the address space), the same mechanism and the
+    same operator ruling as `forkb_policy_route.classify_by_resolution`. Under a full
+    tunnel, or whenever coverage cannot be computed confidently, this returns None.
+
+    ⚠ Provider-agnostic by construction, per that ruling: no client name, no
+    vendor-specific table name. The same client can be split or full-tunnel depending on
+    its configuration, so identity implies nothing — live state is re-read every call.
     """
-    for iface in _default_route_ifaces():
-        if _iface_kind(iface) not in TUNNEL_KINDS:
-            return iface
-    return None
+    # Imported lazily to avoid a module-scope cycle: forkb_policy_route imports
+    # TUNNEL_KINDS from here. At call time both modules are fully loaded. _HERE is put
+    # on the path because this module is also imported as `core.vpn_dns_guard`, where
+    # core/ is not otherwise importable as a flat directory.
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    from forkb_policy_route import (                                # noqa: PLC0415
+        PROBE_DESTINATIONS, NO_VPN, SPLIT_TUNNEL,
+        classify_by_resolution, parse_route_get, resolved_egress)
+
+    resolutions = {}
+    for dest in PROBE_DESTINATIONS:
+        rc, out, _ = _run(["ip", "route", "get", dest])
+        # A failed lookup is an explicit non-measurement, never "no route that way":
+        # classify_by_resolution treats any None as a confidence failure and declines.
+        resolutions[dest] = parse_route_get(out) if rc == 0 else None
+
+    kinds = {i: _iface_kind(i) for i in {v for v in resolutions.values() if v}}
+    topology, reason = classify_by_resolution(resolutions, kinds, TUNNEL_KINDS)
+    if topology not in (NO_VPN, SPLIT_TUNNEL):
+        log.info("masquerade egress: refusing (topology=%s) -- %s", topology, reason)
+        return None
+    return resolved_egress(resolutions, kinds, TUNNEL_KINDS)
 
 
 def detect_tunnel():
