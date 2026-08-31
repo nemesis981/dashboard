@@ -135,6 +135,11 @@ def _run(cmd, timeout=6):
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return p.returncode, p.stdout, p.stderr
     except Exception as e:  # noqa: BLE001
+        # Logged, because until 2026-08-31 this was silent: a missing `ip`
+        # binary, a timeout or a permission failure all became a bare rc=1 that
+        # callers could not tell from "the command ran and said no".
+        log.warning("vpn_dns_guard: %s could not run: %s",
+                    cmd[0] if cmd else "?", e)
         return 1, "", str(e)
 
 
@@ -152,22 +157,57 @@ def _run_json(cmd, timeout=6):
 # Tunnel detection — by interface TYPE carrying the default route
 # --------------------------------------------------------------------------- #
 
-def _iface_kind(iface):
-    """Return the kernel link kind for an iface (e.g. 'tun', 'wireguard'), or ''."""
+def _iface_kind_ex(iface):
+    """(kind, determined). `determined` is False when the kind is UNKNOWN.
+
+    ⛔ THE DISTINCTION THIS FUNCTION EXISTS TO MAKE, and the security bug it
+    fixes. `_iface_kind` returns '' for BOTH "the kernel says this is a plain
+    physical NIC" and "the lookup failed" -- and `classify_by_resolution`'s
+    contract states that '' or missing means PHYSICAL, not unknown (correctly:
+    a normal ethernet NIC genuinely has no linkinfo.info_kind).
+
+    So ANY failure of `ip -d -j link show` -- a missing binary, a timeout, a
+    permission error, an iproute2 build change -- classified the interface as
+    physical-not-tunnel. That is the permissive direction: it is what lets
+    `masquerade_egress_iface()` hand back an interface it should have refused,
+    and NAT forwarded tailnet traffic outside the user's VPN. Same consequence
+    as the /1-straddle bug fixed in 707bf2f, arriving by a different route and
+    producing no output at all.
+
+    The sysfs fallback below is definitive for tun/tap but says NOTHING about
+    WireGuard, so it does not close the gap on its own.
+    """
     data = _run_json(["ip", "-d", "-j", "link", "show", iface])
     if data:
         try:
             info = data[0].get("linkinfo", {}) or {}
             kind = info.get("info_kind", "")
             if kind:
-                return kind
+                return kind, True
+            # linkinfo present and carrying no info_kind IS a real answer: a
+            # plain NIC. Determined.
+            return "", True
         except Exception:  # noqa: BLE001
             pass
     # Fallback for iproute2 builds that omit linkinfo for tun/tap devices: the
     # presence of tun_flags in sysfs is a definitive "this is a tun/tap device".
     if os.path.exists(f"/sys/class/net/{iface}/tun_flags"):
-        return "tun"
-    return ""
+        return "tun", True
+    # ⚠ Reached when the lookup produced nothing usable. If the interface does
+    # not exist at all this is also where we land -- and "I could not determine
+    # what this is" is the honest answer for that too.
+    return "", False
+
+
+def _iface_kind(iface):
+    """Return the kernel link kind for an iface (e.g. 'tun', 'wireguard'), or ''.
+
+    ⚠ CANNOT DISTINGUISH "plain NIC" FROM "lookup failed" -- both are ''. Kept
+    for the detection/reporting callers whose contract predates the split; any
+    caller making a SECURITY decision must use `_iface_kind_ex` and refuse on
+    `determined=False`. See that function.
+    """
+    return _iface_kind_ex(iface)[0]
 
 
 def _default_route_ifaces():
@@ -268,10 +308,33 @@ def masquerade_egress_iface():
         # classify_by_resolution treats any None as a confidence failure and declines.
         resolutions[dest] = parse_route_get(out) if rc == 0 else None
 
-    kinds = {i: _iface_kind(i) for i in {v for v in resolutions.values() if v}}
+    # ⛔ AN UNDETERMINED KIND IS A NON-MEASUREMENT AND MUST DECLINE, exactly as
+    # a failed `ip route get` does two lines above. Until 2026-08-31 this used
+    # `_iface_kind`, whose '' means BOTH "plain NIC" and "lookup failed" -- and
+    # classify_by_resolution reads '' as PHYSICAL by contract. So any failure of
+    # `ip -d -j link show` made a tunnel look like a physical NIC and could hand
+    # back an interface that should have been refused, NATing forwarded tailnet
+    # traffic OUTSIDE the user's VPN. Refusing costs a masquerade rule; guessing
+    # wrong silently defeats the VPN.
+    kinds, undetermined = {}, []
+    for i in {v for v in resolutions.values() if v}:
+        kind, determined = _iface_kind_ex(i)
+        if not determined:
+            undetermined.append(i)
+        kinds[i] = kind
+    if undetermined:
+        log.warning("masquerade egress: REFUSING -- could not determine the link "
+                    "kind of %s, and an undetermined kind reads as 'physical' to "
+                    "the classifier. Not guessing; a wrong answer here NATs "
+                    "tailnet traffic outside the VPN.", ", ".join(sorted(undetermined)))
+        return None
+
     topology, reason = classify_by_resolution(resolutions, kinds, TUNNEL_KINDS)
     if topology not in (NO_VPN, SPLIT_TUNNEL):
-        log.info("masquerade egress: refusing (topology=%s) -- %s", topology, reason)
+        # Raised from info to warning: this is the security-relevant decision in
+        # this module and it was the quietest line in it.
+        log.warning("masquerade egress: refusing (topology=%s) -- %s",
+                    topology, reason)
         return None
     return resolved_egress(resolutions, kinds, TUNNEL_KINDS)
 
