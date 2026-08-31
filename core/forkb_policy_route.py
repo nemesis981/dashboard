@@ -40,6 +40,10 @@ SOURCE-SELECTED, NOT fwmark-SELECTED (operator ruling, from the audit):
     is winning is treated as absent.
 """
 
+#: The ONLY import in this otherwise-pure module. Stdlib, no I/O, no side effects --
+#: it classifies probe destinations, which is arithmetic on addresses, not access.
+import ipaddress
+
 # ── Topologies ───────────────────────────────────────────────────────────────
 NO_VPN = "no_vpn"                 # no tunnel carrying traffic; bypass is inert but valid
 SPLIT_TUNNEL = "split_tunnel"     # main default is a real NIC; VPN diverts by policy/routes
@@ -71,7 +75,23 @@ def _resolve_tunnel_kinds(tunnel_kinds):
 
 
 def classify_topology(default_route_ifaces, iface_kinds, tunnel_kinds=None):
-    """(topology, reason) from the MAIN-table default-route interfaces and their kinds.
+    """SUPERSEDED -- do NOT use for new decisions. Use `classify_by_resolution()`.
+
+    ⚠ THIS FUNCTION CANNOT REACH FULL_TUNNEL FOR A VPN THAT USES A /1 STRADDLE, which is
+    the commonest full-tunnel shape there is. Such a client covers the address space with
+    `0.0.0.0/1` + `128.0.0.0/1` while LEAVING the physical `default` in place, so a
+    non-tunnel interface is always present, so `non_tunnel` is never empty, so the
+    operator's "full-tunnel -> decline" ruling was unreachable. Measured live 2026-08-31
+    against a connected full-tunnel VPN: this returned `split_tunnel` (or `no_vpn`,
+    depending on the collector) and the decision came out INSTALL, while every internet
+    destination was in fact resolving to the tunnel.
+
+    Retained only because its tests document the old behaviour. Ruling that replaced it:
+    `decisions/2026-08-31-forkb-topology-by-routing-outcome-RESOLVED.md` (private mirror).
+
+    (original contract below)
+
+    (topology, reason) from the MAIN-table default-route interfaces and their kinds.
 
     `default_route_ifaces` -- interfaces carrying a default route in the MAIN table.
     `iface_kinds`          -- {iface: kernel link kind}; '' or missing means unknown.
@@ -122,6 +142,151 @@ def classify_topology(default_route_ifaces, iface_kinds, tunnel_kinds=None):
                 "main default is on non-tunnel %s while tunnel(s) %s are present"
                 % (real[0], ", ".join(sorted(tunnels))))
     return NO_VPN, "main default is on non-tunnel %s; no tunnel carries a default" % real[0]
+
+
+#: Destinations probed to decide coverage. Spread across BOTH halves of the address
+#: space on purpose: a `/1` straddle is exactly the shape a narrow probe set misses, and
+#: it is the shape that made the old classifier wrong.
+#:
+#: ⚠ NO PACKET IS EVER SENT TO THESE. `ip route get` is a FIB lookup; these are routing
+#: coordinates, not endpoints. They are deliberately synthetic and unaffiliated -- naming
+#: a real service here would imply contacting it and would tie a routing decision to a
+#: third party.
+PROBE_DESTINATIONS = ("1.0.0.1", "32.0.0.1", "64.0.0.1", "96.0.0.1",
+                      "129.0.0.1", "160.0.0.1", "200.0.0.1", "208.0.0.1")
+
+#: Fewer resolved probes than this is a confidence failure, not a small sample.
+MIN_PROBES = 4
+
+_HALF_LOW, _HALF_HIGH = "0.0.0.0/1", "128.0.0.0/1"
+
+
+def _probe_half(dest):
+    return _HALF_LOW if int(ipaddress.ip_address(dest)) < 2 ** 31 else _HALF_HIGH
+
+
+def _is_public_probe(dest):
+    """True only for a globally-routable unicast address.
+
+    The premise check for the whole classifier: a private, reserved, loopback,
+    link-local, CGNAT or multicast destination says nothing about general internet
+    egress, and a LAN destination legitimately resolves to the physical NIC even under a
+    full tunnel. Probing one would manufacture a SPLIT verdict out of nothing.
+
+    ⚠ `is_global`, NOT `not is_private` -- they are different and the difference is our
+    own tailnet. Measured on Python 3.14: 100.64.0.0/10 (CGNAT, the Tailscale range) has
+    **is_private=False** and is_global=False. An earlier version of this function tested
+    `is_private` and a comment asserted that it excluded the tailnet; it did not, and a
+    probe pointed at our own tunnel would have skewed the verdict toward the tunnel it
+    was supposed to be measuring. Caught by test_forkb_resolution_topology.py.
+
+    The explicit exclusions are kept alongside `is_global` deliberately: they are cheap,
+    and they state the intent for a reader who would otherwise have to know exactly what
+    `is_global` covers in the stdlib version in use.
+    """
+    try:
+        ip = ipaddress.ip_address(dest)
+    except ValueError:
+        return False
+    if not ip.is_global:
+        return False
+    return not (ip.is_private or ip.is_reserved or ip.is_multicast
+                or ip.is_loopback or ip.is_link_local or ip.is_unspecified)
+
+
+def probe_plan(destinations=PROBE_DESTINATIONS):
+    """argv lists for the collector to run. Planned here so the privileged/impure half
+    does no thinking -- same split as plan_install/plan_teardown."""
+    return [["ip", "route", "get", d] for d in destinations]
+
+
+def classify_by_resolution(resolutions, iface_kinds, tunnel_kinds=None,
+                           min_probes=MIN_PROBES):
+    """(topology, reason) from MEASURED routing outcomes. The current classifier.
+
+    `resolutions` -- {destination: egress_iface_or_None}, each from `ip route get <dst>`.
+    `iface_kinds` -- {iface: kernel link kind}; '' or missing means PHYSICAL, not
+                     unknown (see classify_topology's note -- getting that backwards was
+                     a real bug).
+
+    ⚠ PROVIDER-AGNOSTIC BY CONSTRUCTION, and that is an operator ruling, not a
+    preference. This sees destinations and interface kinds. It never sees, and must never
+    consult, a client's name, its routing-table names, or any other vendor fingerprint:
+    the SAME client can be configured split or full-tunnel, so identity implies nothing
+    about topology. Re-evaluated live, every time.
+
+    ⚠ WHY `ip route get` RATHER THAN READING A TABLE. It resolves through the FULL rule
+    chain, so it reports what the kernel would actually do -- including policy rules any
+    client installed, in tables we would otherwise have to know the names of. Parsing a
+    specific table's contents is what produced the superseded classifier's blind spot.
+
+    Low confidence DECLINES (UNDETERMINED), never guesses: too few probes, any probe that
+    failed to resolve, a non-public probe destination, or probes covering only one half
+    of the address space.
+    """
+    kinds = _resolve_tunnel_kinds(tunnel_kinds)
+    if not resolutions:
+        return UNDETERMINED, "no routing probes were resolved -- refusing to guess"
+
+    bad = sorted(d for d in resolutions if not _is_public_probe(d))
+    if bad:
+        return (UNDETERMINED,
+                "probe destinations are not globally-routable unicast (%s); such a "
+                "destination says nothing about internet egress" % ", ".join(bad))
+
+    unresolved = sorted(d for d, i in resolutions.items() if not i)
+    if unresolved:
+        return (UNDETERMINED,
+                "%d of %d probes did not resolve to an interface (%s) -- an unresolved "
+                "probe is a non-measurement, not a 'no route that way'"
+                % (len(unresolved), len(resolutions), ", ".join(unresolved)))
+
+    if len(resolutions) < min_probes:
+        return (UNDETERMINED,
+                "only %d probes resolved, need at least %d for a confident verdict"
+                % (len(resolutions), min_probes))
+
+    halves = {_probe_half(d) for d in resolutions}
+    if len(halves) < 2:
+        return (UNDETERMINED,
+                "probes cover only %s -- a /1 straddle is invisible to a one-sided probe "
+                "set, which is the exact blind spot this classifier exists to close"
+                % ", ".join(sorted(halves)))
+
+    tunnelled = sorted(d for d, i in resolutions.items()
+                       if iface_kinds.get(i, "") in kinds)
+    direct = sorted(d for d, i in resolutions.items()
+                    if iface_kinds.get(i, "") not in kinds)
+    t_ifaces = sorted({resolutions[d] for d in tunnelled})
+    d_ifaces = sorted({resolutions[d] for d in direct})
+
+    if not direct:
+        return (FULL_TUNNEL,
+                "all %d probed destinations resolve to tunnel interface(s) %s -- no "
+                "non-tunnel path to the internet remains"
+                % (len(resolutions), ", ".join(t_ifaces)))
+    if not tunnelled:
+        return (NO_VPN,
+                "all %d probed destinations resolve to non-tunnel interface(s) %s"
+                % (len(resolutions), ", ".join(d_ifaces)))
+    return (SPLIT_TUNNEL,
+            "%d of %d probed destinations resolve to tunnel %s, the rest to non-tunnel "
+            "%s" % (len(tunnelled), len(resolutions), ", ".join(t_ifaces),
+                    ", ".join(d_ifaces)))
+
+
+def resolved_egress(resolutions, iface_kinds, tunnel_kinds=None):
+    """The single non-tunnel egress the probes agree on, or None.
+
+    None when they DISAGREE, deliberately: two different physical egresses means we
+    cannot say which one a bypass should pin to, and `decide()` turns a missing egress
+    into DECLINE. Guessing one would pin inspected traffic to an interface no
+    measurement chose.
+    """
+    kinds = _resolve_tunnel_kinds(tunnel_kinds)
+    found = {i for i in resolutions.values()
+             if i and iface_kinds.get(i, "") not in kinds}
+    return found.pop() if len(found) == 1 else None
 
 
 def decide(topology, egress_iface, reason=""):
@@ -384,8 +549,12 @@ def reconcile(collect, run, now, stable_since, debounce=None):
         return {"ok": False, "action": "abort",
                 "reason": "self-test failed, refusing to touch routing: %s" % detail}
 
-    ifaces, kinds = collect("topology")
-    topology, treason = classify_topology(ifaces, kinds)
+    # `collect("topology")` returns (resolutions, kinds) -- MEASURED `ip route get`
+    # outcomes keyed by destination, not a list of default-route interfaces. Changed
+    # 2026-08-31 per the operator ruling: topology is decided by where traffic actually
+    # resolves, never by which interface holds a route literally named `default`.
+    resolutions, kinds = collect("topology")
+    topology, treason = classify_by_resolution(resolutions, kinds)
     installed, _ = verify_installed(collect("rules"), collect("table"))
 
     action, areason = plan_action(topology, installed, now, stable_since, debounce)
@@ -405,7 +574,7 @@ def reconcile(collect, run, now, stable_since, debounce=None):
         return result
 
     # INSTALL
-    egress = next((i for i in ifaces if kinds.get(i, "") not in _resolve_tunnel_kinds(None)), None)
+    egress = resolved_egress(resolutions, kinds)
     decision, egress, msg = decide(topology, egress, treason)
     result["message"] = msg
     if decision == DECLINE:
@@ -448,6 +617,12 @@ def reconcile(collect, run, now, stable_since, debounce=None):
 _K = {"tun", "tap", "wireguard", "vti", "vti6", "ppp", "gre", "ip6tnl"}
 
 
+#: Number of canary assertions in selftest(). Asserted against the source by
+#: test_forkb_policy_route.py so it cannot silently drift -- it was found stale
+#: (25 claimed, 33 actual) the first time anyone counted.
+_CANARY_COUNT = 33
+
+
 def selftest():
     """(ok, detail). Runs in the PRODUCTION path: this module's normal output is
     'everything is fine', which is also what a broken one produces."""
@@ -478,6 +653,51 @@ def selftest():
     # the same egress must be refused under a full tunnel.
     if decide(FULL_TUNNEL, "eth0", "x")[0] != DECLINE:
         return False, "canary: an egress argument overrode a full-tunnel refusal"
+
+    # ── the empirical classifier, the one decisions now run through ──────────
+    # THE STRADDLE CASE, which the superseded classifier could not get right: every
+    # destination resolves to the tunnel while a physical `default` still exists. This
+    # canary is the regression guard for the 2026-08-31 finding.
+    _straddle = {d: "tun0" for d in PROBE_DESTINATIONS}
+    if classify_by_resolution(_straddle, {"tun0": "tun", "eth0": ""}, _K)[0] != FULL_TUNNEL:
+        return False, "canary: a fully-tunnelled resolution set was not full_tunnel"
+
+    _direct = {d: "eth0" for d in PROBE_DESTINATIONS}
+    if classify_by_resolution(_direct, {"eth0": ""}, _K)[0] != NO_VPN:
+        return False, "canary: an all-direct resolution set was not no_vpn"
+
+    _mixed = dict(_direct)
+    _mixed["1.0.0.1"] = "tun0"
+    if classify_by_resolution(_mixed, {"eth0": "", "tun0": "tun"}, _K)[0] != SPLIT_TUNNEL:
+        return False, "canary: a genuinely mixed resolution set was not split_tunnel"
+
+    # Low confidence must DECLINE, not guess (operator ruling Q3).
+    if classify_by_resolution({}, {}, _K)[0] != UNDETERMINED:
+        return False, "canary: an empty probe set did not fail closed"
+    if classify_by_resolution({"1.0.0.1": None, "129.0.0.1": "eth0"},
+                             {"eth0": ""}, _K)[0] != UNDETERMINED:
+        return False, "canary: an unresolved probe did not fail closed"
+    if classify_by_resolution({"192.168.1.1": "eth0", "129.0.0.1": "eth0"},
+                             {"eth0": ""}, _K)[0] != UNDETERMINED:
+        return False, "canary: a PRIVATE probe destination was accepted"
+    # OUR OWN TAILNET must never be a probe destination: it resolves to our own tunnel
+    # and would bias the verdict toward the very thing being measured. `is_private` is
+    # False for 100.64.0.0/10, so this cannot be left to intuition.
+    if classify_by_resolution({"100.64.0.1": "tailscale0", "129.0.0.1": "eth0",
+                              "1.0.0.1": "eth0", "200.0.0.1": "eth0"},
+                             {"eth0": "", "tailscale0": "tun"}, _K)[0] != UNDETERMINED:
+        return False, "canary: a CGNAT/tailnet probe destination was accepted"
+
+    # One-sided probes cannot see a straddle -- refusing is the whole point.
+    _one_side = {d: "eth0" for d in ("1.0.0.1", "32.0.0.1", "64.0.0.1", "96.0.0.1")}
+    if classify_by_resolution(_one_side, {"eth0": ""}, _K)[0] != UNDETERMINED:
+        return False, "canary: a one-sided probe set was accepted as confident"
+
+    if resolved_egress(_direct, {"eth0": ""}, _K) != "eth0":
+        return False, "canary: a unanimous non-tunnel egress was not resolved"
+    if resolved_egress({"1.0.0.1": "eth0", "129.0.0.1": "eth1"},
+                       {"eth0": "", "eth1": ""}, _K) is not None:
+        return False, "canary: disagreeing egresses did not resolve to None"
 
     ok, _ = verify_winning("1.2.3.4 dev eth0 src 5.6.7.8", "eth0")
     if not ok:
@@ -525,4 +745,4 @@ def selftest():
     if plan_action(UNDETERMINED, True, 100.0, 100.0, 8)[0] != TEARDOWN:
         return False, "canary: an undetermined topology did not tear down"
 
-    return True, "25 canaries passed"
+    return True, "%d canaries passed" % _CANARY_COUNT

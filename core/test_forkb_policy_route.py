@@ -243,13 +243,25 @@ def test_plan_action_asymmetry():
 
 
 def _harness(topology_ifaces, kinds, rules="", table="", route_get="", default_route=""):
-    """Injected collectors + a recording runner. No root, no network, no VPN."""
+    """Injected collectors + a recording runner. No root, no network, no VPN.
+
+    `topology_ifaces` is the interface (or interfaces) that probed destinations resolve
+    to. It is translated into the measured-resolution map `collect("topology")` now
+    returns, per the 2026-08-31 ruling that topology is decided by routing OUTCOME.
+
+    The translation preserves each existing caller's intent exactly: one interface means
+    every destination resolves there (all-direct -> no_vpn, all-tunnel -> full_tunnel),
+    and several are distributed across the probe set to express a genuine split.
+    """
     ran = []
     state = {"rules": rules, "table": table}
+    dests = F.PROBE_DESTINATIONS
+    resolutions = {d: topology_ifaces[i % len(topology_ifaces)]
+                   for i, d in enumerate(dests)} if topology_ifaces else {}
 
     def collect(what):
         if what == "topology":
-            return topology_ifaces, kinds
+            return resolutions, kinds
         if what == "rules":
             return state["rules"]
         if what == "table":
