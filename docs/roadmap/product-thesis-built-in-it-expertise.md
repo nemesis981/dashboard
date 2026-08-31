@@ -6,6 +6,14 @@ future work, not a feature). Sits alongside the tiered-UX habit (CLAUDE.md Tier-
 [0004](../architecture/0004-scan-task-orchestration.md)'s north-star ("enterprise
 capability without enterprise pricing").
 
+**Tracking note (added 2026-08-31, operator decision, roadmap-state-audit-2026-08-31.md):**
+this document does **not** participate in the roadmap SHIPPED/PARTIAL/PARKED tally. It is a
+reference/principle doc, not a build item, and forcing it into that three-way schema is a
+category error — there is no code state to verify it against. Excluded from the file count
+in every roadmap audit's tally line going forward; still counted by `ls docs/roadmap/*.md`,
+so a future audit's file-set-vs-tally-total check should expect a difference of exactly 1 for
+this reason, not read it as drift.
+
 ## The thesis
 Enterprise security assumes an **IT DEPARTMENT** absorbs the complexity — connectivity,
 tuning, diagnosis, alert interpretation. **Our user has none**: an owner/manager, a
