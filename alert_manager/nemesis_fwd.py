@@ -1860,29 +1860,100 @@ def _validate_gateway_params(params):
     return True, iface, str(net)
 
 
+#: nft's wording when a table/chain simply does not exist, as opposed to a
+#: failure to ASK. Matched on stderr because the exit code is 1 for both, and
+#: an absent chain is the normal state whenever the gateway is disabled.
+_NFT_ABSENT_RE = re.compile(r"No such file or directory|does not exist",
+                            re.IGNORECASE)
+
+
 def _gw_collect():
-    """Live state on all four axes. Keys are switch()'s contract, not ours."""
+    """Live state on all four axes. Keys are switch()'s contract, not ours.
+
+    ⛔ EVERY FAILED READ IS NAMED IN `unmeasured`, NEVER SUBSTITUTED. Until
+    2026-08-31 each failure fell back to a value that happens to BE the pass
+    condition on the DISABLE path -- unreadable drop-in -> "" -> "not
+    persisted"; unreadable env -> {} -> "not configured"; failed nft -> empty
+    stdout -> "SNAT absent". So three separate read failures each produced a
+    confident "successfully disabled" verdict about a box whose real state
+    nobody knew. verify_state() now refuses to pass on any named axis.
+    """
+    unmeasured = []
+
     try:
         with open(gateway_mode.SYSCTL_DROPIN) as fh:
             dropin = fh.read()
-    except OSError:
+    except FileNotFoundError:
+        # LEGITIMATELY ABSENT, and a real answer: no drop-in means forwarding
+        # is not persisted. Distinguished from unreadable, which is not.
         dropin = ""
-    live = subprocess.run([SYSCTL_BIN, "-n", "net.ipv4.ip_forward"],
-                          capture_output=True, text=True, timeout=10).stdout.strip()
-    snat = subprocess.run([NFT_BIN, "list", "chain", "inet", "nemesis_enforce",
-                           "gateway_snat"], capture_output=True, text=True,
-                          timeout=10)
-    env = _read_env_values(NEMESIS_ENV_PATH,
-                           ("NEMESIS_GW_LAN_IFACE", "NEMESIS_GW_LAN_CIDR"))
+    except OSError as exc:
+        dropin = ""
+        unmeasured.append("forwarding drop-in (%s)" % type(exc).__name__)
+
+    # ⚠ RETURN CODES ARE CHECKED. Both of these were discarded: a missing
+    # binary raised straight out of this function, and any non-zero exit gave
+    # empty stdout that read as a definite "no".
+    live = ""
+    try:
+        r = subprocess.run([SYSCTL_BIN, "-n", "net.ipv4.ip_forward"],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            live = r.stdout.strip()
+        else:
+            unmeasured.append("live forwarding (sysctl rc=%d)" % r.returncode)
+    except Exception as exc:                                    # noqa: BLE001
+        unmeasured.append("live forwarding (%s)" % type(exc).__name__)
+
+    snat_present = False
+    try:
+        r = subprocess.run([NFT_BIN, "list", "chain", "inet", "nemesis_enforce",
+                            "gateway_snat"], capture_output=True, text=True,
+                           timeout=10)
+        if r.returncode == 0:
+            snat_present = "masquerade" in r.stdout
+        elif _NFT_ABSENT_RE.search(r.stderr or ""):
+            # ⚠ A MISSING CHAIN IS A REAL ANSWER, NOT A FAILED MEASUREMENT, and
+            # conflating the two would have been worse than the bug this fix is
+            # for. nft exits NON-ZERO for a chain that does not exist -- which
+            # is the NORMAL state when the gateway is disabled. Treating every
+            # non-zero exit as unmeasured made a correct disable fail
+            # verification and roll back. Caught before shipping; the original
+            # code ignored rc entirely, which was right HERE and wrong for
+            # sysctl above.
+            snat_present = False
+        else:
+            # Permission denied, nft missing, netlink failure: no answer.
+            unmeasured.append("SNAT chain (nft rc=%d: %s)"
+                              % (r.returncode,
+                                 (r.stderr or "").strip().splitlines()[0][:60]
+                                 if (r.stderr or "").strip() else "no stderr"))
+    except Exception as exc:                                    # noqa: BLE001
+        unmeasured.append("SNAT chain (%s)" % type(exc).__name__)
+
+    env, env_ok = _read_env_values(NEMESIS_ENV_PATH,
+                                   ("NEMESIS_GW_LAN_IFACE", "NEMESIS_GW_LAN_CIDR"))
+    if not env_ok:
+        unmeasured.append("persisted gateway config (%s unreadable)"
+                          % os.path.basename(NEMESIS_ENV_PATH))
+
     return {"iface": env.get("NEMESIS_GW_LAN_IFACE") or None,
             "cidr": env.get("NEMESIS_GW_LAN_CIDR") or None,
             "dropin": dropin,
             "live": live,
-            "snat": "masquerade" in snat.stdout}
+            "snat": snat_present,
+            "unmeasured": unmeasured}
 
 
 def _read_env_values(path, keys):
-    """Read selected keys out of an env-style file. Missing file -> {}."""
+    """(values, readable). ABSENT is readable; UNREADABLE is not.
+
+    ⛔ The second element exists because `{}` was ambiguous and the ambiguity
+    was load-bearing: an absent file genuinely means "nothing persisted", while
+    a permission error means "unknown" -- and on the gateway DISABLE path
+    "nothing persisted" is the PASS condition, so the two could not be allowed
+    to look alike.
+    """
     out = {}
     try:
         with open(path) as fh:
@@ -1891,9 +1962,11 @@ def _read_env_values(path, keys):
                 for key in keys:
                     if line.startswith(key + "="):
                         out[key] = line.split("=", 1)[1].strip()
+    except FileNotFoundError:
+        return out, True        # absent == nothing persisted. A real answer.
     except OSError:
-        pass
-    return out
+        return out, False       # present but unreadable. NOT an answer.
+    return out, True
 
 
 def _gw_run(action):

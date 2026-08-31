@@ -362,14 +362,33 @@ def plan_switch(enable, iface=None, cidr=None):
 
 
 def verify_state(enable, config_iface, config_cidr, dropin_content, live_output,
-                 snat_present):
+                 snat_present, unmeasured=()):
     """(ok, problems) -- is the box ACTUALLY in the requested state, on every axis?
 
     Checks all four axes and returns EVERY problem, not the first. A switch that
     half-applied needs the whole picture: reporting only the first failure invites
     fixing one axis and re-running into the next.
+
+    ⛔ `unmeasured` NAMES AXES THAT COULD NOT BE READ, AND ANY OF THEM FAILS
+    VERIFICATION. This is not defensive padding -- it closes a real hole, and
+    the DISABLE direction is where it bit:
+
+        every "could not read" substituted a value that happens to BE the pass
+        condition when disabling. An unreadable sysctl drop-in became "" ->
+        `dropin_says_enabled("")` is False -> "not persisted", which is what a
+        correct disable looks like. An unreadable /etc/nemesis.env became {} ->
+        `configured` False -> the "still persisted" problem never fires. An nft
+        command that failed produced empty stdout -> `snat_present` False ->
+        the "SNAT chain still present" problem never fires.
+
+    So three separate read failures each produced a confident "successfully
+    disabled" verdict about a box whose actual state was unknown. An axis that
+    could not be measured is not a passing axis.
     """
     problems = []
+    for axis in (unmeasured or ()):
+        problems.append("%s: COULD NOT BE MEASURED, so this verification "
+                        "cannot pass -- an unread axis is not a clean one" % axis)
     fwd_ok, fwd_detail = verify_forwarding(dropin_content, live_output, enable)
     if not fwd_ok:
         problems.append("forwarding: %s" % fwd_detail)
@@ -441,7 +460,8 @@ def switch(enable, iface, cidr, run, collect):
 
     st = collect()
     vok, problems = verify_state(enable, st.get("iface"), st.get("cidr"),
-                                 st.get("dropin"), st.get("live"), st.get("snat"))
+                                 st.get("dropin"), st.get("live"), st.get("snat"),
+                                 unmeasured=st.get("unmeasured") or ())
     if not vok:
         # The steps all reported success and the box is STILL wrong. Roll back,
         # with the same re-derive-last rule as above.
