@@ -1,7 +1,23 @@
 # TLS interception + sterilization layer — Tier 2 (scope, not estimate)
 
-**Status:** scoping doc (read-only analysis; no code changed). Captured 2026-07-25, same
-session as the [ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) and
+**Status:** Tier 2 has moved from scoping into implementation. An inline gate exists and
+has been exercised against real traffic in a lab context: it terminates and re-originates
+TLS with upstream certificate verification, passes non-TLS traffic through, runs
+inspection in a contained component under independent supervision, and withdraws its own
+traffic steering if the gate fails, so a failure degrades to unfiltered traffic rather
+than to no traffic. **It is not integrated into the shipped product**, and
+detection-resistance is a goal of raising attacker cost, not a guarantee. Pieces J and K
+are covered in this document; the implementation detail of the remaining pieces is
+maintained privately (a source-visibility decision, not a feature-gating one — the
+capability ships at every tier). Corrected 2026-08-31 — the prior "no code changed"
+framing had gone stale (private-module git-writer's Rule 10 call,
+`handoff/2026-08-31-window1-to-window2-tls-disclosure-call.md`, private mirror); left
+unresolved by this correction, and explicitly not folded in: whether the QUIC/GAP-2
+findings and the PCI DSS business-case material should also go public — flagged for the
+operator, not decided here.
+
+Captured 2026-07-25, same session as the
+[ADR 0009 addendum](../architecture/0009-security-inspection-proxy.md) and
 [adr-0009-l3-behavioral-trigger-scope.md](adr-0009-l3-behavioral-trigger-scope.md). **Extended
 same day** with the full undetectable-inline design (Pieces D–I below), consolidated from a
 same-day design session, once the three-tier structure named this capability **Tier 2** in the
