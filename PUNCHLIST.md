@@ -5403,3 +5403,59 @@ reason Tailscale goes first.
 **Explicitly out of scope until decided:** removing `snapd` itself. That is a different and much
 larger decision than "prefer debs for these five apps", and nothing here requires it.
 **Do not batch these.** Each migration is independently reversible; a batch is not.
+
+### [FUTURE] Email enrollment: support a LIST of accounts, and give the two admin actions a UI at all (operator-requested 2026-08-31)
+**Capture only — not built.** Groups the deferred email-security UI work into one place. ⚠ Note
+for whoever picks this up: the two UI gaps below had been raised in conversation during the
+2026-08-31 build but were **never actually filed** until now — they are new entries here, not
+cross-references to something already tracked.
+
+**1. Multi-account enrollment (the operator's ask, and the substantive design work).**
+Today the flow is strictly one mailbox per code: `api_enroll_create` mints ONE code for ONE
+`owner_user_id` + `address_hint`, and the owner-facing pages walk exactly one mailbox to
+completion. The operator has 2 accounts now; households will have several, and repeating the
+whole chase per account is real friction.
+
+Two rough shapes, both worth sketching before choosing:
+- **Mint several at once** — one admin call returns N codes/links (or one message listing them).
+  Simplest server-side; the per-code security properties are untouched, since each is still a
+  separate single-use row. Cost: the owner juggles N links.
+- **One flow that continues** — the owner completes mailbox 1, then the success page offers
+  "add another". Much better UX, but it needs a deliberate decision about what authorises the
+  second mailbox: the first code is CONSUMED by then, so either a fresh code is issued mid-flow
+  (a new bearer credential minted to an already-authenticated-by-code session, which is a real
+  security design question, not a detail) or the original code's single-use property is
+  relaxed — **which it must not be.**
+
+**⚠ THREE IMPLEMENTATION CONSTRAINTS THAT WILL BITE, from having just built this:**
+- **The rate limiter makes serial enrollment fail sooner than anyone expects.**
+  `enrollment.RATE_MAX = 10` per `RATE_WINDOW_S = 300`, keyed on `remote_addr`, and completing
+  ONE mailbox costs **two** requests (claim + complete). So a household member enrolling **5
+  mailboxes back to back from one device hits the limit exactly**, and the limiter counts
+  rejected attempts too. Any multi-account design must account for this or it will fail in the
+  middle with the generic rejection — which says "your code is not valid", the least useful
+  possible message for a rate limit.
+- **Each account needs a SECOND admin action afterwards.** Enrollment stores `enabled=0`
+  deliberately (adding a mailbox and reading it are two consents), so N mailboxes = N enrollment
+  flows **plus** N calls to `/api/email-security/account/scanning`. The friction compounds; a
+  bulk-enable is probably wanted alongside this.
+- **Credential slots are allocated per account from a monotonic sequence** capped at 999 by the
+  `^EMAIL_SEC_APPPW_[0-9]{1,3}$` key shape. Fine for a household, but a bulk flow that allocates
+  eagerly (before validating anything) would burn slots — see the F1 finding fixed on 2026-08-31,
+  where exactly that ordering was an unauthenticated DoS.
+
+**2. There is no UI for minting an enrollment link.** `/api/email-security/enroll/create` is
+admin-only and API-only; today the operator runs a `fetch()` from the browser console. That is
+fine for the operator and untenable for the product — this is the entry point for the whole
+feature.
+
+**3. There is no UI for switching scanning on or off.**
+`/api/email-security/account/scanning` (built 2026-08-31) is likewise admin-only and API-only.
+It is the CONSENT gate — the thing that begins reading a person's mail — so it arguably deserves
+the most deliberate UI of the three, showing which mailbox, whose it is, and its current watcher
+state (the route already returns `watcher_state` and a reason precisely so a UI can show
+"connected" vs "not being scanned: auth_failed" honestly rather than a green tick).
+
+**Sequencing note:** (2) and (3) are the minimum for anyone other than the operator to use this
+feature at all; (1) is the quality-of-life improvement on top. Doing (1) first would mean
+building a bulk flow that still has to be driven from a console.
