@@ -39,9 +39,12 @@ SCOPE BOUNDARY THAT MUST SURVIVE INTO LATER STAGES
 
 from __future__ import annotations
 
+import logging
 import threading
 
 from modules import NemesisModule, get_data_manager
+
+log = logging.getLogger("nemesis.email_security.module")
 
 #: Module name, used for Data Manager access control and table ownership.
 #: Tables this module owns carry the `email_` prefix (ADR 0001).
@@ -70,6 +73,9 @@ class Module(NemesisModule):
         #: than a hardcoded string that would later become a lie.
         self._client = None
         self._last_error: str | None = None
+        #: MailboxSupervisor once start() has run. Its per-account states are
+        #: what keeps a dead watcher visible -- see status().
+        self._supervisor = None
 
     # --- Lifecycle ---------------------------------------------------------
 
@@ -117,12 +123,57 @@ class Module(NemesisModule):
             self._running = True
             self._last_error = None
 
+        # ── Watchers start OUTSIDE the lock, deliberately ──────────────────
+        # Each watcher spawns a thread that connects to a mailbox; holding
+        # self._lock across that would serialise startup behind network I/O and
+        # deadlock against any status() call the threads' own logging triggers.
+        #
+        # A supervisor failure does NOT unwind start(). The module is genuinely
+        # running -- its tables exist and it is enabled -- and a mailbox that
+        # cannot be watched is a per-ACCOUNT fault that status() reports per
+        # account. Raising here would report a module-wide failure for what may
+        # be one bad credential, and would leave the module stopped with its
+        # tables already created.
+        try:
+            # ⚠ ABSOLUTE, not relative -- for the identical reason get_routes()
+            # states below, and it bit here too. `modules_loader` loads this file
+            # via spec_from_file_location(), so there is NO parent package and
+            # `from . import supervisor` raises ImportError. Caught by the
+            # handler below, that would have left the supervisor permanently
+            # unstarted: no watcher, no scanning, and only a _last_error string
+            # to show for it. Caught by test_module.py, which loads this module
+            # the same way the real loader does.
+            from modules.email_security import supervisor as _sup  # noqa: PLC0415
+            self._supervisor = _sup.MailboxSupervisor()
+            self._supervisor.start()
+        except Exception as exc:                                 # noqa: BLE001
+            # Recorded, never swallowed: status() renders this as an explicit
+            # error rather than as a quiet "no mailboxes connected".
+            self._supervisor = None
+            self._last_error = "supervisor failed to start: %s" % type(exc).__name__
+            log.exception("email_security: supervisor failed to start")
+
     def stop(self) -> None:
         """Idempotent. Reverses start()."""
         with self._lock:
             if not self._running:
                 return
             self._running = False
+            sup, self._supervisor = self._supervisor, None
+
+        # Outside the lock for the same reason start() is: stop() joins threads,
+        # and holding the lock across a join deadlocks against any watcher whose
+        # own shutdown path calls back into this object.
+        if sup is not None:
+            try:
+                sup.stop()
+            except Exception as exc:                            # noqa: BLE001
+                # Recorded, not raised: a stop() that raises would prevent the
+                # module being disabled, which is the one thing it must allow.
+                self._last_error = "supervisor stop failed: %s" % type(exc).__name__
+                log.warning("email_security: supervisor stop failed: %s", exc)
+
+        with self._lock:
             if self._client is not None:
                 try:
                     self._client.close()
@@ -149,6 +200,7 @@ class Module(NemesisModule):
             running = self._running
             client = self._client
             err = self._last_error
+            sup = self._supervisor
 
         if not running:
             return {"state": "stopped", "detail": "module disabled"}
@@ -166,11 +218,59 @@ class Module(NemesisModule):
             return {"state": "running",
                     "detail": "enabled, no mailbox configured yet — "
                               "no mail is being examined"}
+
+        # ── A BROKEN WATCHER MUST NOT LOOK LIKE A HEALTHY ONE ──────────────
+        # ImapIdleClient.run() ends the loop on a permanent auth failure BY
+        # DESIGN (retrying a dead credential burns provider rate limits). That
+        # makes a stopped watcher indistinguishable from a working one from
+        # here: the account row still says enabled=1, so `accounts` still counts
+        # it. Reporting "N mailbox(es) connected" off that count would be a
+        # green state for a mailbox nobody is reading -- the exact false
+        # assurance this function was written to refuse. So the SUPERVISOR's own
+        # per-account states are what is reported, never the configured count.
+        if sup is not None:
+            try:
+                broken = sup.problem_accounts()
+                states = sup.states()
+            except Exception as exc:                            # noqa: BLE001
+                return {"state": "error",
+                        "detail": "cannot read watcher state: %s"
+                                  % type(exc).__name__}
+            live = [s for s in states if s["state"] == "connected"]
+            if broken:
+                # Named individually. "Some mailboxes have a problem" is not
+                # actionable; the address and the reason are.
+                return {"state": "error",
+                        "detail": "%d of %d mailbox(es) NOT being scanned: %s"
+                                  % (len(broken), len(states),
+                                     "; ".join("%s (%s)" % (b["address"],
+                                                            b["state"])
+                                               for b in broken))}
+            if states and not live:
+                return {"state": "error",
+                        "detail": "%d mailbox(es) configured but none connected"
+                                  % len(states)}
+            if live:
+                return {"state": "running",
+                        "detail": "%d mailbox(es) connected" % len(live)}
+
         if client is None:
-            return {"state": "error" if err else "running",
-                    "detail": err or ("%d mailbox(es) configured, not connected "
-                                      "(IMAP client not built yet — build spec "
-                                      "stage 2.2)" % accounts)}
+            # ⚠ THE COUNT AND "not connected" ARE STATED IN BOTH BRANCHES, AND
+            # THAT IS THE POINT. An earlier version returned the bare error
+            # string when one was present, which silently DROPPED the fact that
+            # N mailboxes are configured and unscanned -- replacing a statement
+            # about coverage with a statement about a subsystem. The operator
+            # needs both: what is not happening, and why. Caught by
+            # test_module.py's "'configured but NOT connected' is stated on the
+            # card, not hidden", which is exactly the assurance this module's
+            # status() exists to keep.
+            if err:
+                return {"state": "error",
+                        "detail": "%d mailbox(es) configured, not connected — %s"
+                                  % (accounts, err)}
+            return {"state": "running",
+                    "detail": "%d mailbox(es) configured, not connected"
+                              % accounts}
         return {"state": "running",
                 "detail": "%d mailbox(es) connected" % accounts}
 

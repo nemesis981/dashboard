@@ -278,6 +278,23 @@ class ImapIdleClient:
 
     # ── Connection ─────────────────────────────────────────────────────────
 
+    @property
+    def uidvalidity(self):
+        """The mailbox's current UIDVALIDITY as an int, or None before SELECT.
+
+        Public because a UID is meaningless without it: the verdict table's
+        uniqueness constraint spans (account_id, uidvalidity, uid), so any caller
+        recording a UID needs this alongside it. Returning None rather than 0
+        keeps "not selected yet" distinguishable from a real value -- a 0 would
+        be a legal-looking integer that silently collides across mailboxes.
+        """
+        if self._uidvalidity is None:
+            return None
+        try:
+            return int(self._uidvalidity)
+        except (TypeError, ValueError):
+            return None
+
     def _ssl_context(self) -> ssl.SSLContext:
         """The TLS context for this connection.
 

@@ -1,0 +1,398 @@
+"""One watcher thread per enabled mailbox. ADR 0028, build spec stage 2.8.
+
+WHAT THIS IS
+    The piece that makes mail actually get scanned. Everything else existed and
+    composed correctly; nothing ran it. `ImapIdleClient` had zero production
+    instantiations before this file.
+
+⚠ THE TRAP THIS FILE EXISTS TO AVOID, STATED FIRST BECAUSE IT IS THE WHOLE POINT
+    `ImapIdleClient.run()` lets `ImapAuthError` PROPAGATE and END the loop, on
+    purpose: retrying a credential that cannot work burns attempts against the
+    provider's rate limits and turns a config error into an account-recovery
+    problem.
+
+    That is correct, and it creates a silent-failure shape one layer up. A thread
+    that has exited is not connected, not retrying, and not visibly broken. If
+    the supervisor merely let the thread die, a single wrong password would stop
+    scanning that mailbox FOREVER while the dashboard card kept reporting the
+    mailbox as configured and the module as running.
+
+    So every terminal outcome is CAUGHT AND RECORDED as a per-account state, and
+    `states()` exposes it for `status()` to render. A dead watcher is a fact the
+    UI must be able to state, not an absence it has to infer.
+
+ONE THREAD PER MAILBOX, NEVER A SHARED CONNECTION
+    imap_idle documents that an IMAP connection is not safe to share across
+    threads -- interleaved responses corrupt each other. One client, one mailbox,
+    one thread, and no lock pretending otherwise.
+
+THE CALLBACK MUST NEVER RAISE INTO THE CLIENT
+    An exception from the scan would escape through the client's fetch loop and
+    kill the watcher for every subsequent message. One malformed message must not
+    stop the mailbox. `_scan_one` therefore catches everything and records the
+    failure as a verdict row problem instead.
+
+PRIVACY. Nothing here logs subjects, bodies, senders, or any message content.
+    Log lines carry UIDs, counts and account ids only -- the same contract
+    imap_idle keeps.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import threading
+
+log = logging.getLogger("nemesis.email_security.supervisor")
+
+#: Per-account watcher states. Distinct values because the fixes differ, and a
+#: UI that collapsed them would tell the operator to do the wrong thing.
+STARTING = "starting"          # thread launched, no connection yet
+CONNECTED = "connected"        # authenticated and watching
+AUTH_FAILED = "auth_failed"    # PERMANENT: credential rejected. Human fix.
+CONFIG_ERROR = "config_error"  # PERMANENT: TLS/transport/credential-store fault
+CRASHED = "crashed"            # unexpected: a bug, not a configuration problem
+STOPPED = "stopped"            # asked to stop, exited cleanly
+
+#: The states meaning "this mailbox is not being scanned and will not recover on
+#: its own". Grouped so callers test intent rather than enumerating strings.
+TERMINAL_STATES = (AUTH_FAILED, CONFIG_ERROR, CRASHED)
+
+
+class _Watcher:
+    """One mailbox: its thread, its client, and its last known state."""
+
+    def __init__(self, account: dict):
+        self.account = dict(account)
+        self.state = STARTING
+        self.detail = ""
+        self.thread: threading.Thread | None = None
+        self.stop_event = threading.Event()
+        self.client = None
+        self.messages_scanned = 0
+
+    @property
+    def address(self):
+        return self.account.get("address") or "<unknown>"
+
+    def snapshot(self) -> dict:
+        """State for status(). Deliberately carries no credential material."""
+        return {
+            "account_id": self.account.get("id"),
+            "address": self.address,
+            "provider": self.account.get("provider"),
+            "mailbox": self.account.get("mailbox"),
+            "state": self.state,
+            "detail": self.detail,
+            "messages_scanned": self.messages_scanned,
+            "alive": bool(self.thread and self.thread.is_alive()),
+        }
+
+
+class MailboxSupervisor:
+    """Runs a watcher per enabled mailbox. Not itself a thread.
+
+    Constructed by `Module.start()` and shut down by `Module.stop()`. Safe to
+    start and stop repeatedly.
+    """
+
+    def __init__(self, *, client_factory=None, account_loader=None):
+        # Both injectable so the suite can drive the supervisor without a live
+        # mailbox or a real database. Production passes neither.
+        self._client_factory = client_factory or _build_client
+        self._account_loader = account_loader or _load_enabled_accounts
+        self._lock = threading.Lock()
+        self._watchers: dict = {}
+        self._started = False
+
+    # --- lifecycle ---------------------------------------------------------
+
+    def start(self) -> int:
+        """Launch a watcher per enabled mailbox. Returns how many started.
+
+        Idempotent. An account whose credential cannot be resolved still gets a
+        watcher RECORD in CONFIG_ERROR rather than being skipped: a mailbox that
+        is enabled but unscannable must be visible, and silently omitting it
+        would make the account list and the watcher list disagree with no
+        indication which is right.
+        """
+        with self._lock:
+            if self._started:
+                return len(self._watchers)
+            self._started = True
+
+        try:
+            accounts = self._account_loader()
+        except Exception as exc:                                # noqa: BLE001
+            # An unreadable account table is an explicit failure, never "no
+            # mailboxes" -- the same rule Module._configured_account_count keeps.
+            log.exception("email_security: cannot load accounts")
+            with self._lock:
+                self._started = False
+            raise
+
+        started = 0
+        for acct in accounts:
+            w = _Watcher(acct)
+            with self._lock:
+                self._watchers[acct.get("id")] = w
+            t = threading.Thread(
+                target=self._watch, args=(w,),
+                name="email-watch-%s" % (acct.get("id"),), daemon=True)
+            w.thread = t
+            t.start()
+            started += 1
+        log.info("email_security: supervisor started %d watcher(s)", started)
+        return started
+
+    def stop(self, timeout: float = 10.0) -> None:
+        """Signal every watcher to stop and wait briefly. Idempotent.
+
+        Threads are daemons, so a watcher blocked in a socket read cannot hold
+        shutdown open indefinitely. The join is best-effort and its failure is
+        recorded rather than raised -- a stop() that raised would prevent the
+        module being disabled, which is the one thing stop() must always allow.
+        """
+        with self._lock:
+            watchers = list(self._watchers.values())
+            self._started = False
+
+        for w in watchers:
+            w.stop_event.set()
+            if w.client is not None:
+                try:
+                    w.client.close()          # unblocks a socket read promptly
+                except Exception:             # noqa: BLE001
+                    pass
+        for w in watchers:
+            if w.thread is not None:
+                w.thread.join(timeout=timeout)
+                if w.thread.is_alive():
+                    log.warning("email_security: watcher for account %s did not "
+                                "stop within %.0fs", w.account.get("id"), timeout)
+        with self._lock:
+            self._watchers.clear()
+
+    # --- state -------------------------------------------------------------
+
+    def states(self) -> list:
+        """Snapshot of every watcher. The input to an honest status()."""
+        with self._lock:
+            return [w.snapshot() for w in self._watchers.values()]
+
+    def problem_accounts(self) -> list:
+        """Watchers in a terminal state -- enabled mailboxes NOT being scanned.
+
+        This is the accessor that keeps a dead watcher from being invisible.
+        """
+        return [s for s in self.states() if s["state"] in TERMINAL_STATES]
+
+    # --- the watcher thread ------------------------------------------------
+
+    def _watch(self, w: _Watcher) -> None:
+        """One mailbox, until stopped or permanently broken.
+
+        EVERY exit path sets a state. A thread that ended without one would be
+        exactly the invisible failure this module exists to prevent.
+        """
+        from . import imap_idle                                  # noqa: PLC0415
+        try:
+            client = self._client_factory(w.account, self._make_callback(w))
+        except Exception as exc:                                 # noqa: BLE001
+            # Credential missing/unreadable, unknown provider, refused TLS
+            # config -- all permanent and all a human's to fix.
+            w.state = CONFIG_ERROR
+            w.detail = _safe_detail(exc)
+            log.error("email_security: watcher for account %s cannot start: %s",
+                      w.account.get("id"), w.detail)
+            return
+
+        w.client = client
+        try:
+            w.state = CONNECTED
+            client.run(w.stop_event)
+            # run() returns only when stop was set.
+            w.state = STOPPED
+            w.detail = ""
+        except imap_idle.ImapAuthError as exc:
+            # ⚠ THE CASE THIS FILE EXISTS FOR. Permanent by design in the client;
+            # made VISIBLE here. Without this the mailbox silently stops being
+            # scanned while everything above still reports healthy.
+            w.state = AUTH_FAILED
+            w.detail = _safe_detail(exc)
+            log.error("email_security: authentication failed for account %s -- "
+                      "this mailbox is NO LONGER BEING SCANNED until the "
+                      "credential is replaced: %s",
+                      w.account.get("id"), w.detail)
+        except imap_idle.ImapConfigError as exc:
+            w.state = CONFIG_ERROR
+            w.detail = _safe_detail(exc)
+            log.error("email_security: transport misconfigured for account %s -- "
+                      "not retried, mailbox NOT being scanned: %s",
+                      w.account.get("id"), w.detail)
+        except Exception as exc:                                 # noqa: BLE001
+            # A bug, not a configuration problem. Distinguished so nobody is
+            # sent to check a password over what is actually a defect here.
+            w.state = CRASHED
+            w.detail = _safe_detail(exc)
+            log.exception("email_security: watcher for account %s crashed",
+                          w.account.get("id"))
+        finally:
+            try:
+                client.close()
+            except Exception:                                    # noqa: BLE001
+                pass
+
+    # --- the scan callback -------------------------------------------------
+
+    def _make_callback(self, w: _Watcher):
+        """Build the on_message callback bound to this account."""
+        def _on_message(uid, raw):
+            self._scan_one(w, uid, raw)
+        return _on_message
+
+    def _scan_one(self, w: _Watcher, uid, raw) -> None:
+        """parse -> check -> persist, for ONE message.
+
+        ⚠ NEVER RAISES. An exception here would escape through the client's
+        fetch loop and kill the watcher, so one malformed or hostile message
+        would stop the mailbox for every message behind it -- a denial of
+        service delivered by email, which is precisely the shape mime_parse
+        already refuses to have. Failures become a recorded problem instead.
+        """
+        from . import fast_check, mime_parse, sender_id, writes  # noqa: PLC0415
+        from . import providers                                  # noqa: PLC0415
+
+        account_id = w.account.get("id")
+        uidvalidity = getattr(w.client, "uidvalidity", None)
+        if uidvalidity is None:
+            # A UID without its UIDVALIDITY cannot be keyed correctly: the
+            # verdict table's uniqueness spans both, and inventing a 0 would
+            # collapse this message onto another mailbox generation's row.
+            # Refusing to write is the honest outcome.
+            log.warning("email_security: no UIDVALIDITY for account %s; "
+                        "skipping verdict for uid %s", account_id, uid)
+            return
+
+        try:
+            parsed = mime_parse.parse(raw)
+        except Exception as exc:                                 # noqa: BLE001
+            # mime_parse documents that it never raises; this is belt and braces
+            # so a regression there cannot take the watcher down with it.
+            log.error("email_security: parse failed for account %s uid %s: %s",
+                      account_id, uid, type(exc).__name__)
+            return
+
+        try:
+            authserv = providers.get(
+                w.account.get("provider") or providers.DEFAULT_PROVIDER
+            ).get("authserv_id")
+            result = fast_check.check(parsed, expect_authserv_id=authserv)
+        except Exception as exc:                                 # noqa: BLE001
+            log.error("email_security: check failed for account %s uid %s: %s",
+                      account_id, uid, type(exc).__name__)
+            return
+
+        headers = getattr(parsed, "headers", {}) or {}
+        auth = result.auth
+        try:
+            writes.record_verdict(
+                account_id, uidvalidity, int(uid),
+                # ⚠ verdict STAYS None. fast_check returns signals and auth
+                # facts and deliberately NO verdict -- combining them is a
+                # separate decision with its own measurement requirement (D9).
+                # Writing "clean" here to fill the column would manufacture a
+                # judgement nothing made, and it would be served with full
+                # confidence to a UI that cannot tell it was invented.
+                verdict=None, confidence=None, reason=None,
+                signals_json=json.dumps(result.to_dict(), sort_keys=True,
+                                        default=str),
+                message_id_hdr=_first(headers.get("message_id")),
+                received_at=_first(headers.get("date")),
+                auth_spf=(auth.spf if auth else None),
+                auth_dkim=(auth.dkim if auth else None),
+                auth_dmarc=(auth.dmarc if auth else None),
+                dmarc_policy=(auth.dmarc_policy if auth else None),
+                auth_problems=(",".join(auth.problems) if auth and auth.problems
+                               else None),
+                # None is a legitimate value meaning UNKNOWN (no salt, or no
+                # parseable From). sender_id refuses to fall back to an
+                # unsalted digest, which would be reversible against a contact
+                # list -- so NULL here must never be read as "a new sender".
+                sender_hash=sender_id.sender_token(_first(headers.get("from"))),
+            )
+        except Exception as exc:                                 # noqa: BLE001
+            log.error("email_security: could not record verdict for account %s "
+                      "uid %s: %s", account_id, uid, type(exc).__name__)
+            return
+
+        w.messages_scanned += 1
+        # COUNT AND UID ONLY. Never a subject, sender, or body.
+        log.info("email_security: scanned uid %s for account %s", uid, account_id)
+
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+def _first(value):
+    """Headers arrive as a list or a scalar depending on the header. Take one."""
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value else None
+    return str(value) if value else None
+
+
+def _safe_detail(exc) -> str:
+    """A short, non-secret description of a failure.
+
+    Truncated and type-prefixed. An exception message from the IMAP layer can
+    echo server output, so this is kept short and is never rendered anywhere a
+    credential could be reconstructed from it.
+    """
+    return ("%s: %s" % (type(exc).__name__, exc))[:300]
+
+
+def _load_enabled_accounts() -> list:
+    """Every mailbox with scanning switched ON.
+
+    `enabled=0` is the default at enrollment on purpose -- adding a mailbox and
+    beginning to read it are two different consents -- so this deliberately does
+    NOT pick up freshly enrolled accounts until someone turns them on.
+    """
+    from modules import get_data_manager                         # noqa: PLC0415
+    conn = get_data_manager().connect("email_security")
+    try:
+        cur = conn.execute(
+            "SELECT id, address, provider, imap_host, imap_port, mailbox, "
+            "       credential_ref FROM email_accounts WHERE enabled=1")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _build_client(account: dict, on_message):
+    """Construct a configured client for one account.
+
+    Raises on a missing credential or unknown provider rather than returning a
+    client that cannot work -- the caller records that as CONFIG_ERROR, which is
+    a visible state. A client built with an empty password would instead fail as
+    an authentication error and send someone to check a password that was never
+    stored.
+    """
+    from . import credential_store, imap_idle, providers         # noqa: PLC0415
+
+    prov = providers.get(account.get("provider") or providers.DEFAULT_PROVIDER)
+    secret = credential_store.get_secret(account["credential_ref"])
+
+    return imap_idle.ImapIdleClient(
+        account["address"], secret,
+        # The ACCOUNT's stored host/port win over the provider defaults: the row
+        # is what enrollment actually recorded, and a provider table edited later
+        # must not silently redirect an existing mailbox somewhere else.
+        host=account.get("imap_host") or prov["imap_host"],
+        port=int(account.get("imap_port") or prov["imap_port"]),
+        mailbox=account.get("mailbox") or "INBOX",
+        on_message=on_message,
+        tls_mode=prov["tls_mode"],
+        allow_self_signed=prov["allow_self_signed"],
+        provider=prov["key"],
+        strip_inner_whitespace=prov.get("strip_inner_whitespace", True),
+    )
