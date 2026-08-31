@@ -1831,6 +1831,12 @@ def init_email_security_tables():
                 -- An explicit failure string, never a default that means something.
                 -- NULL = never attempted; a value = the last real error observed.
                 last_error     TEXT,
+                -- WHO switched scanning on or off, and WHEN. The consent record
+                -- (ADR 0028). `enabled` alone says the current state; these say
+                -- who decided it. The op log cannot: it is metadata-only and
+                -- records neither the mailbox nor the direction.
+                enabled_actor  TEXT,
+                enabled_at     TEXT,
                 UNIQUE(address, mailbox)
             )
         """)
@@ -2093,7 +2099,20 @@ def init_email_security_tables():
                  c.execute("PRAGMA table_info(email_accounts)").fetchall()}
         for _col, _decl in (("created_actor", "TEXT"),
                             ("last_connected_at", "TEXT"),
-                            ("last_error", "TEXT")):
+                            ("last_error", "TEXT"),
+                            # ── The CONSENT record (ADR 0028, added 2026-08-31)
+                            # Switching scanning on begins reading a person's
+                            # mail; switching it off withdraws that. Until these
+                            # existed the ONLY trace was the Data Manager op log,
+                            # which is metadata-only by design -- module, table,
+                            # operation, actor, rowcount, ts, and no parameters.
+                            # So the durable record of "an admin began reading
+                            # someone's private mail" could not say WHICH mailbox
+                            # or in WHICH direction. For the one route this
+                            # codebase calls a consent gate, that is the wrong
+                            # thing to be unable to answer.
+                            ("enabled_actor", "TEXT"),
+                            ("enabled_at", "TEXT")):
             if _col not in _acct:
                 c.execute("ALTER TABLE email_accounts ADD COLUMN %s %s"
                           % (_col, _decl))

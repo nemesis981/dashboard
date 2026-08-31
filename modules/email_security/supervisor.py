@@ -130,17 +130,27 @@ class MailboxSupervisor:
                 self._started = False
             raise
 
-        started = 0
-        for acct in accounts:
-            w = _Watcher(acct)
-            with self._lock:
-                self._watchers[acct.get("id")] = w
-            t = threading.Thread(
-                target=self._watch, args=(w,),
-                name="email-watch-%s" % (acct.get("id"),), daemon=True)
-            w.thread = t
-            t.start()
-            started += 1
+        # Same decide-and-insert-under-one-hold discipline as refresh(), and for
+        # the same reason. Not reachable through the toggle route today --
+        # modules_loader only publishes the instance AFTER start() returns, and
+        # _guard_view 503s until then, so nothing can call refresh() while this
+        # runs. That is an accident of the loader's ordering, not a property of
+        # this class, so the defence lives here rather than depending on it.
+        to_start = []
+        with self._lock:
+            for acct in accounts:
+                acct_id = acct.get("id")
+                if acct_id in self._watchers:
+                    continue
+                w = _Watcher(acct)
+                w.thread = threading.Thread(
+                    target=self._watch, args=(w,),
+                    name="email-watch-%s" % (acct_id,), daemon=True)
+                self._watchers[acct_id] = w
+                to_start.append(w)
+        for w in to_start:
+            w.thread.start()
+        started = len(to_start)
         log.info("email_security: supervisor started %d watcher(s)", started)
         return started
 
@@ -171,39 +181,71 @@ class MailboxSupervisor:
                 # lifecycle deliberately tore down.
                 return {"started": 0, "stopped": 0}
 
+        # The DB read happens OUTSIDE the lock -- it is I/O, and holding a lock
+        # across it would serialise every status() call behind a query.
         accounts = self._account_loader()
         want = {a.get("id"): a for a in accounts}
 
+        # ⛔ DECIDE AND INSERT UNDER ONE LOCK HOLD. THIS IS NOT STYLE.
+        #
+        # This was previously read-then-decide-then-insert with the lock dropped
+        # in between, and the insert was an unconditional `=`. Two concurrent
+        # refreshes -- an admin double-clicking the toggle is enough, Flask being
+        # threaded -- both computed the same `to_start`, both spawned a watcher,
+        # and the second OVERWROTE the first in the dict. The first watcher was
+        # then live and unreachable: `stop()` and the stop pass below both
+        # iterate `self._watchers`, which no longer contained it, so its
+        # stop_event was never set and its client never closed.
+        #
+        # REPRODUCED 2026-08-31 before fixing: 2 threads started, 1 tracked, and
+        # 1 STILL READING after stop() returned. For a route whose entire purpose
+        # is that consent to read someone's mail can be withdrawn, a withdrawal
+        # that reports success while a watcher keeps reading is the worst
+        # available outcome -- worse than never having built the toggle.
+        #
+        # `_started` is RE-CHECKED here, and that closes a second hole: the
+        # check at the top of this method was a TOCTOU. The lock was dropped for
+        # the DB read above, during which stop() could run to completion --
+        # setting _started False, signalling every watcher and clearing the dict
+        # -- after which this method would compute `have` as empty and start a
+        # watcher for EVERY enabled mailbox on a module that had just been
+        # disabled. status() would report "stopped" while scanning continued.
+        # stop() sets _started under this same lock, so re-checking it here makes
+        # that ordering impossible rather than merely unlikely.
+        stopped, to_start = [], []
         with self._lock:
-            have = set(self._watchers)
-        to_start = [want[i] for i in want if i not in have]
-        to_stop = [i for i in have if i not in want]
+            if not self._started:
+                return {"started": 0, "stopped": 0}
+            for acct_id in [i for i in self._watchers if i not in want]:
+                stopped.append(self._watchers.pop(acct_id))
+            for acct_id, acct in want.items():
+                # SKIP, never overwrite. A watcher already tracked for this id is
+                # the one running; replacing it strands a live thread.
+                if acct_id in self._watchers:
+                    continue
+                w = _Watcher(acct)
+                # The Thread object is built and attached BEFORE the watcher
+                # becomes visible, so a concurrent states() can never observe a
+                # tracked watcher with thread=None and report "alive": False for
+                # something that is about to be alive.
+                w.thread = threading.Thread(
+                    target=self._watch, args=(w,),
+                    name="email-watch-%s" % (acct_id,), daemon=True)
+                self._watchers[acct_id] = w
+                to_start.append(w)
 
-        stopped = []
-        for acct_id in to_stop:
-            with self._lock:
-                w = self._watchers.pop(acct_id, None)
-            if w is None:
-                continue
+        # Threads are STARTED outside the lock: _watch() runs indefinitely and
+        # starting under the lock would hold it for the life of the watcher.
+        for w in stopped:
             w.stop_event.set()
             if w.client is not None:
                 try:
                     w.client.close()      # unblocks a socket read promptly
                 except Exception:         # noqa: BLE001
                     pass
-            stopped.append(w)
-
-        started = 0
-        for acct in to_start:
-            w = _Watcher(acct)
-            with self._lock:
-                self._watchers[acct.get("id")] = w
-            t = threading.Thread(
-                target=self._watch, args=(w,),
-                name="email-watch-%s" % (acct.get("id"),), daemon=True)
-            w.thread = t
-            t.start()
-            started += 1
+        for w in to_start:
+            w.thread.start()
+        started = len(to_start)
 
         # Joined AFTER the new ones are launched so a slow shutdown does not
         # delay scanning starting on a mailbox someone just switched on.

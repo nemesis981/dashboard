@@ -136,11 +136,20 @@ def set_account_enabled(address: str, enabled: bool, *,
     mailbox that was never registered is a caller bug, and silently inventing the
     row would hide it behind a write that looks successful.
     """
-    conn = get_data_manager().connect(MODULE_NAME)
+    dm = get_data_manager()
+    conn = dm.connect(MODULE_NAME)
     try:
+        # ⚠ THE ACTOR AND TIMESTAMP ARE WRITTEN HERE, NOT LEFT TO THE OP LOG.
+        # The Data Manager's op log records module/table/operation/actor/rowcount
+        # /ts and NO parameters -- so it can say "somebody updated email_accounts"
+        # and never which mailbox or in which direction. For the decision to begin
+        # or end reading a person's mail, that is precisely the question an audit
+        # has to answer, which is why these are columns on the row itself. Same
+        # reasoning as record_verdict's quarantine_actor.
         cur = conn.execute(
-            "UPDATE email_accounts SET enabled=? WHERE address=? AND mailbox=?",
-            (1 if enabled else 0, address, mailbox))
+            "UPDATE email_accounts SET enabled=?, enabled_actor=?, enabled_at=? "
+            " WHERE address=? AND mailbox=?",
+            (1 if enabled else 0, dm.current_actor(), _now(), address, mailbox))
         # REQUIRED. GuardedConnection guards and op-logs the write but does NOT
         # commit -- only the atomic helpers (upsert/increment_counter) do. Without
         # this the UPDATE is discarded at close() while `cur.rowcount` still

@@ -156,6 +156,18 @@ def load_all(path: str | None = None) -> dict:
     except OSError as exc:
         raise CredentialUnavailable(
             "email credential store %s could not be read: %s" % (p, exc)) from exc
+    except (UnicodeDecodeError, ValueError) as exc:
+        # ⚠ A DECODE ERROR IS *NOT* AN OSError, so it escaped every handler above
+        # and surfaced to the caller as a bare ValueError. Reachable: one
+        # non-UTF-8 byte anywhere in the file -- a hand-edited entry, a password
+        # pasted from a latin-1 source -- and the caller reported "could not
+        # verify the stored credential" for ONE mailbox when the real state is
+        # "the store is unreadable, every mailbox is affected". That is exactly
+        # the misdirection the Unavailable/Missing split exists to prevent, so
+        # it belongs on this side of it.
+        raise CredentialUnavailable(
+            "email credential store %s is not valid UTF-8 and cannot be parsed: "
+            "%s" % (p, exc)) from exc
 
 
 def get_secret(credential_ref: str, path: str | None = None) -> str:

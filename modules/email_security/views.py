@@ -359,6 +359,21 @@ def api_set_account_scanning():
                 "detail": ("This is a server configuration problem affecting "
                            "every mailbox, not a problem with this one."),
             }), 503
+        except cs.CredentialError as exc:
+            # ⚠ THE BASE CLASS, CAUGHT AFTER ITS TWO SUBCLASSES. get_secret
+            # raises bare CredentialError for a malformed credential_ref, which
+            # is a sibling of the two above rather than a parent of either -- so
+            # it fell through to the generic 500 below. Semantically that is the
+            # 409 case ("this mailbox's enrollment is not usable, send a new
+            # link"), and reporting it as a server error sends the operator to
+            # look for a fault in the appliance instead of at the row.
+            log.warning("email_security: unusable credential_ref for %s: %s",
+                        address, exc)
+            return jsonify({
+                "ok": False, "error": "unusable credential reference",
+                "detail": ("This mailbox's stored credential reference is "
+                           "malformed. Send the owner a new enrollment link."),
+            }), 409
         except Exception as exc:                              # noqa: BLE001
             log.warning("email_security: credential check failed: %s", exc)
             return jsonify({"ok": False,
@@ -370,35 +385,83 @@ def api_set_account_scanning():
         log.warning("email_security: set_account_enabled failed: %s", exc)
         return jsonify({"ok": False, "error": "could not update the mailbox"}), 500
 
+    # The consent decision, logged at INFO on SUCCESS -- not only on failure.
+    # A route whose log contains nothing when it works cannot answer "when did
+    # scanning start on that mailbox" from the journal. The address is MASKED:
+    # this line records a decision, and the journal is readable without sudo.
+    try:
+        from modules.email_security.imap_idle import _mask     # noqa: PLC0415
+        _who = _mask(address)
+    except Exception:                                          # noqa: BLE001
+        _who = "<mailbox>"
+    log.info("email_security: scanning %s for %s by %s",
+             "ENABLED" if enabled else "DISABLED", _who,
+             get_data_manager().current_actor())
+
     # Reconcile the RUNNING watchers. Without this the row changes and nothing
     # else does until the module restarts -- see MailboxSupervisor.refresh.
     # A refresh failure is reported, never swallowed: the DB write succeeded, so
     # claiming plain success would tell the admin scanning had started when it
     # had not.
-    refreshed, refresh_error = None, None
+    refreshed, refresh_error, watcher = None, None, None
     try:
         import modules_loader                                 # noqa: PLC0415
+        from modules.email_security import supervisor as _sup  # noqa: PLC0415
         inst = modules_loader.get_loaded_modules().get(MODULE_NAME)
         sup = getattr(inst, "_supervisor", None) if inst is not None else None
         if sup is not None:
             refreshed = sup.refresh()
+            # ⚠ ASK ABOUT *THIS* MAILBOX. refresh() returns FLEET-WIDE counts,
+            # and deriving this mailbox's status from them was wrong in a way
+            # that needed no race to hit: a watcher parked in AUTH_FAILED (the
+            # owner rotated their app password) is deliberately left alone by
+            # refresh(), so an admin re-POSTing `enabled: true` to retry gets
+            # {"started": 0} -- and the old code answered `scanning_active:
+            # true` for a mailbox that is provably not being scanned and will
+            # not recover. Counts from the wrong subject, reported as this
+            # subject's state.
+            for s in sup.states():
+                if s.get("account_id") == acct.get("id"):
+                    watcher = s
+                    break
     except Exception as exc:                                  # noqa: BLE001
         refresh_error = type(exc).__name__
         log.exception("email_security: supervisor refresh failed")
 
     body = {"ok": True, "address": address, "mailbox": mailbox,
             "enabled": enabled, "updated": affected,
-            "watchers": refreshed}
+            "watchers": refreshed,
+            "watcher_state": (watcher or {}).get("state")}
+
     if refreshed is None:
-        # HONEST, not reassuring. The bit is set; whether anything is now
-        # watching is a different question and the caller must be able to tell.
+        # The bit is set; whether anything is now watching is a different
+        # question and the caller must be able to tell.
         body["scanning_active"] = False
         body["detail"] = (
             "Saved, but the running module was not reconciled%s. Scanning "
             "starts when the module is next started."
             % (" (%s)" % refresh_error if refresh_error else ""))
+    elif not enabled:
+        body["scanning_active"] = False
     else:
-        body["scanning_active"] = bool(enabled)
+        # Enabled AND a watcher exists AND it is not in a terminal state. A
+        # STARTING watcher counts: the thread is running and has not failed.
+        # Anything terminal does NOT, however recently it was asked to run.
+        state = (watcher or {}).get("state")
+        body["scanning_active"] = bool(
+            watcher is not None and state not in _sup.TERMINAL_STATES)
+        if watcher is None:
+            body["detail"] = ("Saved, but no watcher is running for this "
+                              "mailbox. Scanning has not started.")
+        elif state in _sup.TERMINAL_STATES:
+            # Named specifically. "Something is wrong" is not actionable; the
+            # state and its reason are, and this is the moment the admin is
+            # looking.
+            body["detail"] = (
+                "Saved, but this mailbox is NOT being scanned: %s%s. Switch it "
+                "off and on again to retry after fixing the cause."
+                % (state, (" -- %s" % watcher.get("detail"))
+                   if watcher.get("detail") else ""))
     return jsonify(body)
 
 

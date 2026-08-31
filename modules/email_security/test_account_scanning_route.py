@@ -262,5 +262,166 @@ finally:
     modules_loader.get_loaded_modules = _real_get_loaded
     live_sup.stop(timeout=2)
 
+print("\n== 7. AUDIT FINDINGS (2026-08-31 review) -- regression guards ==")
+
+# ── F5: the consent decision is attributable on the ROW, not just the op log ──
+# The Data Manager op log is metadata-only (module/table/operation/actor/rowcount
+# /ts, no parameters), so it cannot say WHICH mailbox or in WHICH direction.
+_live_accounts2 = []
+sup2 = sup_mod.MailboxSupervisor(client_factory=lambda a, cb: FakeClient(),
+                                 account_loader=lambda: list(_live_accounts2))
+sup2.start()
+_real2 = modules_loader.get_loaded_modules
+modules_loader.get_loaded_modules = lambda: {"email_security": _FakeModule(sup2)}
+try:
+    DM.set_actor("user:auditor")
+    post({"address": "has@example.com", "enabled": False})
+    row = writes.get_account("has@example.com")
+    conn = DM.connect("email_security")
+    try:
+        who, when = conn.execute(
+            "SELECT enabled_actor, enabled_at FROM email_accounts WHERE address=?",
+            ("has@example.com",)).fetchone()
+    finally:
+        conn.close()
+    check("F5: the DECIDING ACTOR is recorded on the row", who, "user:auditor")
+    check("  ...with a timestamp", bool(when))
+
+    # ── F3: scanning_active must describe THIS mailbox, not fleet-wide counts ──
+    # The case needing no race: a watcher parked in a TERMINAL state. refresh()
+    # deliberately leaves it alone, so a retry produces {"started": 0} -- and the
+    # old code answered scanning_active:true for a mailbox provably not scanning.
+    _live_accounts2.append({"id": row["id"], "address": "has@example.com",
+                            "provider": "gmail", "imap_host": "h",
+                            "imap_port": 993, "mailbox": "INBOX",
+                            "credential_ref": "EMAIL_SEC_APPPW_1"})
+    r = post({"address": "has@example.com", "enabled": True})
+    body = r.get_json() or {}
+    check("a healthy watcher reports scanning_active TRUE",
+          body.get("scanning_active"), True)
+    check("  ...and names the watcher state", body.get("watcher_state"),
+          sup_mod.CONNECTED)
+
+    # Force that watcher terminal, then retry the toggle exactly as an admin would.
+    for w in sup2._watchers.values():
+        w.state = sup_mod.AUTH_FAILED
+        w.detail = "credential rejected"
+    r = post({"address": "has@example.com", "enabled": True})
+    body = r.get_json() or {}
+    check("F3: refresh() reports NO change for an already-tracked mailbox",
+          body.get("watchers"), {"started": 0, "stopped": 0})
+    check("  ⚠ but scanning_active is FALSE -- the mailbox is NOT being scanned",
+          body.get("scanning_active"), False)
+    check("  ...the terminal state is named", body.get("watcher_state"),
+          sup_mod.AUTH_FAILED)
+    check("  ...and the reason is surfaced at the moment of the toggle",
+          "credential rejected" in (body.get("detail") or ""))
+finally:
+    modules_loader.get_loaded_modules = _real2
+    sup2.stop(timeout=2)
+    DM.set_actor("user:tester")
+
+# ── F1: concurrent refresh() must not leak a live, untracked watcher ──
+# REPRODUCED against the pre-fix code: 2 threads started, 1 tracked, 1 still
+# reading after stop(). The window is between the `have` read and the insert, so
+# it is widened here deliberately -- a real window, not an invented one.
+import time as _time                                           # noqa: E402
+
+_created = []
+
+
+class _CountingClient:
+    def __init__(self):
+        self.stopped = False
+        _created.append(self)
+
+    def run(self, stop):
+        while not stop.is_set():
+            _time.sleep(0.01)
+        self.stopped = True
+
+    def close(self):
+        pass
+
+
+_RealWatcher = sup_mod._Watcher
+
+
+class _SlowWatcher(_RealWatcher):
+    def __init__(self, account):
+        _time.sleep(0.15)
+        super().__init__(account)
+
+
+_ACC = [{"id": 7, "address": "race@example.com", "provider": "gmail",
+         "imap_host": "h", "imap_port": 993, "mailbox": "INBOX",
+         "credential_ref": "EMAIL_SEC_APPPW_1"}]
+sup_mod._Watcher = _SlowWatcher
+try:
+    sup3 = sup_mod.MailboxSupervisor(
+        client_factory=lambda a, cb: _CountingClient(),
+        account_loader=lambda: list(_ACC))
+    sup3._started = True
+    threads = [threading.Thread(target=sup3.refresh) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    _time.sleep(0.3)
+    check("F1: two concurrent refreshes start exactly ONE watcher",
+          len(_created), 1)
+    check("  ...and it is tracked (none leaked)", len(sup3.states()), 1)
+    _ACC.clear()
+    sup3.stop(timeout=2)
+    _time.sleep(0.4)
+    check("  ⚠ nothing is still reading after stop()",
+          [c for c in _created if not c.stopped], [])
+finally:
+    sup_mod._Watcher = _RealWatcher
+
+# ── F2: refresh() must not resurrect watchers after stop() ──
+# The old guard checked _started, released the lock for a DB read, and never
+# re-checked -- so stop() completing during that read left refresh() starting a
+# watcher for EVERY enabled mailbox on a module that had just been disabled.
+_after_stop = []
+
+
+def _slow_loader():
+    _time.sleep(0.2)          # stop() lands during this window
+    return [{"id": 9, "address": "ghost@example.com", "provider": "gmail",
+             "imap_host": "h", "imap_port": 993, "mailbox": "INBOX",
+             "credential_ref": "EMAIL_SEC_APPPW_1"}]
+
+
+sup4 = sup_mod.MailboxSupervisor(
+    client_factory=lambda a, cb: _after_stop.append(1) or FakeClient(),
+    account_loader=_slow_loader)
+sup4._started = True
+t = threading.Thread(target=sup4.refresh)
+t.start()
+_time.sleep(0.05)
+sup4.stop(timeout=2)          # completes while the loader is still sleeping
+t.join()
+_time.sleep(0.3)
+check("F2: a refresh racing stop() starts NOTHING", _after_stop, [])
+check("  ...and no watcher is tracked on a stopped supervisor",
+      len(sup4.states()), 0)
+
+# ── F4: a decode error is a STORE fault, not a per-mailbox one ──
+_bad = os.path.join(_TMP, "bad-secrets.env")
+with open(_bad, "wb") as fh:
+    fh.write(b"EMAIL_SEC_APPPW_1=caf\xe9\n")      # latin-1 byte, not UTF-8
+raised = None
+try:
+    cs.load_all(_bad)
+except cs.CredentialUnavailable:
+    raised = "Unavailable"
+except Exception as exc:                                       # noqa: BLE001
+    raised = type(exc).__name__
+check("F4: a non-UTF-8 store raises Unavailable, not a bare ValueError",
+      raised, "Unavailable")
+check("  ...and Unavailable is NOT swallowed by has_secret",
+      isinstance(cs.CredentialUnavailable("x"), cs.CredentialError))
+
 print("\n%d passed, %d failed" % (PASS, FAIL))
 sys.exit(1 if FAIL else 0)
