@@ -1928,11 +1928,47 @@ def init_email_security_tables():
                 expires_at     TEXT    NOT NULL,
                 used_at        TEXT,
                 account_id     INTEGER,
-                actor          TEXT
+                actor          TEXT,
+                disc_host      TEXT,
+                disc_port      INTEGER,
+                disc_tls       TEXT,
+                disc_source    TEXT,
+                disc_provider  TEXT,
+                disc_problems  TEXT,
+                disc_at        TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_email_enroll_owner "
                   "ON email_enrollment_requests(owner_user_id)")
+        # ── Autodiscovery results, baked in at LINK-MINT time ────────────────
+        #
+        # WHY THEY ARE STORED ON THE REQUEST RATHER THAN LOOKED UP LATER, and
+        # this is a security boundary rather than a caching decision:
+        # autodiscovery performs outbound DNS (RFC 6186 SRV) and HTTPS (Mozilla
+        # ISPDB) against a domain taken from its input. The owner-facing
+        # /email/enroll pages are UNAUTHENTICATED. Running discovery there would
+        # hand any anonymous caller the ability to make this appliance issue
+        # lookups against a domain of their choosing, at whatever rate they like.
+        # So it runs exactly once, ADMIN-SIDE, inside the authenticated
+        # link-minting route, and the answer travels on the row.
+        #
+        # `disc_at` is not decoration: these are a point-in-time observation of
+        # someone else's DNS, and a stale row must be recognisable as stale
+        # rather than read as current fact.
+        #
+        # All NULL is a legitimate, expected state -- discovery genuinely fails
+        # for most custom domains (measured: proton and the operator's own
+        # domain both find nothing), which is why Tier 3 manual entry is a normal
+        # path and not a rare fallback.
+        _enr_cols = {row[1] for row in
+                     c.execute("PRAGMA table_info(email_enrollment_requests)").fetchall()}
+        for _col, _type in (("disc_host", "TEXT"), ("disc_port", "INTEGER"),
+                            ("disc_tls", "TEXT"), ("disc_source", "TEXT"),
+                            ("disc_provider", "TEXT"), ("disc_problems", "TEXT"),
+                            ("disc_at", "TEXT")):
+            if _col not in _enr_cols:
+                c.execute("ALTER TABLE email_enrollment_requests "
+                          "ADD COLUMN %s %s" % (_col, _type))
 
         # ── Credential slot sequence (ADR 0028 D11.5 Option C, 2026-08-31) ──
         #

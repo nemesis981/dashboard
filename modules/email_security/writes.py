@@ -205,11 +205,54 @@ def record_verdict(account_id: int, uidvalidity: int, uid: int, *,
                 "sender_hash"])
 
 
+#: The autodiscovery columns on email_enrollment_requests, and the
+#: DiscoveryResult attribute each is fed from.
+_DISCOVERY_MAP = (
+    ("disc_host", "imap_host"),
+    ("disc_port", "imap_port"),
+    ("disc_tls", "tls_mode"),
+    ("disc_source", "source"),
+    ("disc_provider", "provider_hint"),
+)
+
+
+def _discovery_columns(discovery) -> dict:
+    """Flatten an autodiscover result into its stored columns.
+
+    ⚠ A result that did NOT find settings stores its PROBLEMS but no host/port.
+    That distinction is the whole point: "discovery ran and found nothing, for
+    these reasons" and "discovery never ran" are different states, and an admin
+    debugging a failed enrollment needs to tell them apart. Writing a host from
+    a not-found result would be worse still -- `DiscoveryResult` leaves those
+    None when `found` is False, but relying on that silently is exactly the
+    shape this codebase distrusts, so `found` is checked explicitly here.
+    """
+    out = {c: None for c, _ in _DISCOVERY_MAP}
+    out["disc_problems"] = None
+    out["disc_at"] = None
+    if not discovery:
+        return out
+    d = discovery if isinstance(discovery, dict) else discovery.to_dict()
+    out["disc_at"] = _now()
+    probs = d.get("problems") or []
+    # Stored as a plain comma-joined string, not JSON: these are short
+    # machine-generated tokens ("dns_NXDOMAIN", "ispdb_skipped"), the column is
+    # read by humans debugging an enrollment, and a JSON blob for a flat list of
+    # slugs is ceremony that makes it harder to read in a sqlite3 shell.
+    out["disc_problems"] = ",".join(str(p) for p in probs) or None
+    if not d.get("found"):
+        return out
+    for col, attr in _DISCOVERY_MAP:
+        out[col] = d.get(attr)
+    return out
+
+
 def create_enrollment_request(token_hash: str, owner_user_id: int, *,
                               created_by: int | None = None,
                               address_hint: str | None = None,
                               created_at: str | None = None,
-                              expires_at: str) -> None:
+                              expires_at: str,
+                              discovery: dict | None = None) -> None:
     """Persist ONE enrollment request. ADR 0028 D11.5 Option C.
 
     `token_hash` ONLY -- the plaintext exists solely in the code handed to the
@@ -219,17 +262,26 @@ def create_enrollment_request(token_hash: str, owner_user_id: int, *,
     `created_by` is the ADMIN who initiated; `owner_user_id` is whose mailbox it
     is. Deliberately separate (D11.6). NULL created_by is pure self-service --
     a real state, not a missing value.
+
+    `discovery` is an OPTIONAL autodiscover result dict (see
+    `_discovery_columns`). It is resolved by the CALLER, admin-side, because the
+    owner-facing pages are unauthenticated and must never be able to trigger
+    outbound lookups -- see the DDL comment in alert_manager/database.py. Passing
+    None stores NULLs, which is a legitimate state: discovery genuinely fails for
+    most custom domains.
     """
     # The Data Manager exposes upsert / next_sequence / increment_counter as its
     # atomic helpers -- there is NO insert(). `token_hash` is UNIQUE, so upsert on
     # it is the correct primitive.
     dm = get_data_manager()
+    values = {"token_hash": token_hash, "owner_user_id": owner_user_id,
+              "created_by": created_by, "address_hint": address_hint,
+              "created_at": created_at or _now(), "expires_at": expires_at,
+              "used_at": None, "account_id": None, "actor": dm.current_actor()}
+    values.update(_discovery_columns(discovery))
     dm.upsert(
         MODULE_NAME, "email_enrollment_requests",
-        {"token_hash": token_hash, "owner_user_id": owner_user_id,
-         "created_by": created_by, "address_hint": address_hint,
-         "created_at": created_at or _now(), "expires_at": expires_at,
-         "used_at": None, "account_id": None, "actor": dm.current_actor()},
+        values,
         conflict_cols=("token_hash",),
         # update=None is the DOCUMENTED "DO NOTHING". A token-hash collision must
         # NEVER extend an existing request's expiry or reassign its owner -- that
@@ -261,7 +313,9 @@ def get_enrollment_request(token_hash: str):
     try:
         cur = conn.execute(
             "SELECT token_hash, owner_user_id, created_by, address_hint, "
-            "       created_at, expires_at, used_at, account_id "
+            "       created_at, expires_at, used_at, account_id, "
+            "       disc_host, disc_port, disc_tls, disc_source, "
+            "       disc_provider, disc_problems, disc_at "
             "  FROM email_enrollment_requests WHERE token_hash = ?",
             (token_hash,))
         row = cur.fetchone()

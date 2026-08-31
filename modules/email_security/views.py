@@ -44,7 +44,7 @@ from flask import jsonify, request
 
 from modules import get_data_manager
 
-from . import enrollment, writes
+from . import autodiscover, enrollment, writes
 
 log = logging.getLogger("nemesis.email_security.views")
 
@@ -249,6 +249,29 @@ def api_enroll_create():
 
     now = datetime.now(timezone.utc)
     token = enrollment.new_token()
+
+    # ── Autodiscovery: HERE, admin-side, and deliberately nowhere else ───────
+    # This route is authenticated and capability-gated. The owner-facing
+    # /email/enroll pages are NOT, and running discovery there would let any
+    # anonymous caller make this appliance perform outbound DNS + HTTPS against
+    # a domain they choose, at whatever rate they like. Doing it once here, at
+    # mint time, and carrying the answer on the row is what keeps that surface
+    # closed. See the DDL comment in alert_manager/database.py.
+    #
+    # NEVER RAISES INTO THE MINT. discover() is documented not to raise, but a
+    # link that fails to mint because a third party's DNS was slow would make
+    # enrollment depend on the availability of the very thing it is trying to
+    # route around. A failed discovery is a NULL row and Tier 3 manual entry --
+    # a normal path, not a fallback.
+    discovery = None
+    if hint:
+        try:
+            discovery = autodiscover.discover(hint).to_dict()
+        except Exception as exc:                              # noqa: BLE001
+            log.warning("email_security: autodiscovery failed for a hint: %s",
+                        type(exc).__name__)
+            discovery = None
+
     try:
         # created_by is left NULL DELIBERATELY, not forgotten. D11.6 requires
         # owner_user_id and enrolled_by_user_id to be distinct and both COLUMNS
@@ -261,7 +284,8 @@ def api_enroll_create():
             enrollment.token_hash(token), owner_user_id,
             created_by=None, address_hint=hint,
             created_at=now.isoformat(timespec="seconds"),
-            expires_at=enrollment.expiry_from(now).isoformat(timespec="seconds"))
+            expires_at=enrollment.expiry_from(now).isoformat(timespec="seconds"),
+            discovery=discovery)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("email_security: enrollment request failed: %s", exc)
         return jsonify({"ok": False, "error": "could not create request"}), 500
