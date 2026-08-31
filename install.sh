@@ -1720,6 +1720,54 @@ configure_forkb_nat() {
     #   Layer 3 measurements taken PIA-down still do not transfer (different
     #   egress, different TTL, tun0 MTU 1441 vs 1500).
     #
+    # ── DOCUMENTED CHOKEPOINT EXCEPTION (decided 2026-08-31, operator) ────────
+    #
+    # THE DEVIATION. This function writes a *nat block straight into
+    # /etc/ufw/before.rules. It does NOT go through alert_manager/firewall.py.
+    # That is a real deviation from a real rule, recorded here rather than left
+    # for someone to rediscover as a bug.
+    #
+    # ⚠ WHICH RULE, precisely — the attribution matters and was previously wrong.
+    # The mandate is CLAUDE.md's ("All new network access-control MUST route
+    # through alert_manager/firewall.py ... Do NOT add ad-hoc nft/iptables/ufw
+    # calls elsewhere"), and the engine it names as inheriting the debt is
+    # ADR 0005. It is NOT an ADR-0009 requirement: 0009 is this feature's own
+    # parent ADR and contains no chokepoint mandate at all. Anyone reconciling
+    # this later should read 0005, not 0009.
+    #
+    # WHY THE EXCEPTION IS JUSTIFIED, not merely convenient:
+    #   * The chokepoint's admin path is STRUCTURALLY UNAVAILABLE here. Every
+    #     nemesis-fwd write op requires a fresh admin password verified against a
+    #     stored bcrypt hash. At install time that admin record does not exist
+    #     yet, and nemesis-fwd is not necessarily running. There is no credential
+    #     to present and no helper to present it to.
+    #   * This is PERSISTENT CONFIG, not a runtime rule operation. The
+    #     chokepoint's vocabulary is runtime verbs (block_ip, deny_ip, ...);
+    #     before.rules is deliberately the durable layer beneath them.
+    #   * Persistence is load-bearing and was MEASURED, not assumed — see the
+    #     /etc/nemesis.env note above: a value passed as a one-off was silently
+    #     dropped at the watcher's next re-render, with traffic leaving
+    #     un-translated while every status surface still reported success.
+    #
+    # ⚠ SCOPE — NARROW, AND IT DOES NOT GENERALISE.
+    # This exception covers INSTALL-TIME PERSISTENT CONFIG ONLY. It is NOT
+    # licence for any runtime NAT operation to bypass the chokepoint. Anything
+    # that changes NAT while the system is RUNNING goes through firewall.py /
+    # nemesis-fwd like everything else — which is exactly what the Gateway Mode
+    # gateway_switch op does. If you are about to cite this comment to justify a
+    # runtime path, you are citing it for the thing it explicitly excludes.
+    #
+    # ⚠ THE DEVIATION HAS ALREADY COST SOMETHING, so do not read it as free.
+    # masquerade_egress_iface() had NO test coverage at all, which is how it
+    # shipped answering wrongly under a /1-straddle VPN (fixed 2026-08-31,
+    # commit 707bf2f). Code outside the chokepoint did not inherit the
+    # chokepoint's scrutiny. Keep this path's coverage deliberate.
+    #
+    # OPEN FOLLOW-UP, tracked separately and NOT part of this exception: should
+    # this rule be RE-DERIVED by nemesis-fw-render from persisted config on every
+    # render, the way the Gateway Mode SNAT rule already is, rather than written
+    # once at install and never revisited? See PUNCHLIST.
+    #
     # STATIC CONFIG: the derived interface is baked into before.rules at install
     # time. If the physical NIC is replaced or renamed, re-run install.sh or edit
     # /etc/ufw/before.rules by hand.
