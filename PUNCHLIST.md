@@ -5906,3 +5906,39 @@ it is the artifact anyone reviewing the product's privacy posture will ask for f
   they were always disclosed.
 - Cross-reference: `docs/roadmap/track-c-metadata-tier-build-plan.md` REQUIREMENT 0 (which
   still describes the superseded opt-in model and needs its own correction).
+
+### [MEDIUM] `agent_deploy.spec` is gitignored, so a PyInstaller fix exists ONLY in the working tree (found 2026-08-31)
+
+**A working-tree reset silently loses it, and the loss is invisible until a frozen
+agent misbehaves in production.** Needs a decision on how to track it — this entry
+is the decision request, not the fix.
+
+**State.** `.gitignore:39` ignores `*.spec` repo-wide. `git ls-files` confirms **no
+spec is tracked**. `nemesis_agent/agent_deploy.spec` exists on disk and is the
+PyInstaller spec the frozen Windows agent is built from.
+
+**What is currently at risk.** Track C's ETW collector needs `etw` and `etw.GUID`
+in `hiddenimports`: both are imported *inside* `EtwSource.start()`, and PyInstaller's
+static analysis can miss a function-level submodule import. That edit was applied on
+2026-08-31 and **could not be committed**. If it is lost, the frozen agent fails at
+runtime **with the package correctly installed** — which is the worst version of
+this to diagnose, because every dependency check says it is present.
+
+**Why this is worse than an ordinary uncommitted change.** The standing
+"commit completed work locally, immediately" rule (CLAUDE.md, 2026-08-29) exists
+because an uncommitted tracked file has no protection. This is a step further: the
+file **cannot** be committed, so that rule cannot help. It is not a vigilance
+failure waiting to happen — vigilance has no mechanism to apply.
+
+**Two candidate resolutions, operator's call:**
+1. **Tracked exception** — `!nemesis_agent/agent_deploy.spec` in `.gitignore`, and
+   commit it. The blanket `*.spec` almost certainly exists to ignore PyInstaller's
+   *generated* specs; this one is hand-maintained and load-bearing, which is a
+   different thing. Cheapest, and it makes the file behave like the source it is.
+2. **Documented post-checkout step** — leave it ignored and record the required
+   `hiddenimports` somewhere tracked, with a build-time check that fails if they
+   are absent. Heavier, and it only works if the check is actually wired into CI;
+   a documented step nobody runs is how this class of thing is lost in the first place.
+
+Recommendation: **(1)**, with (2)'s build-time assertion as a follow-on if the exe
+build is ever seen to drift again. Do not resolve by "remember to re-apply it".
