@@ -56,6 +56,26 @@ FILE_TICKET = "file_ticket"
 ALREADY_FILED = "already_filed"
 STALE = "stale"
 UNREADABLE = "unreadable"
+#: The checker was never deployed here -- distinct from UNREADABLE, see _classify.
+NEVER_DEPLOYED = "never_deployed"
+
+#: Decisions that file a ticket, and therefore MUST pass the duplicate check.
+#:
+#: ⚠ THIS SET EXISTS BECAUSE THE DEDUP USED TO BE UNREACHABLE FOR TWO OF THEM.
+#: `assess` previously ran its `sig == last_signature` test only on the
+#: tampered-verdict path; UNREADABLE and STALE returned ABOVE it. UNREADABLE also
+#: returned a `None` signature, so `poll_once` stored None and suppression could
+#: never engage on the next cycle either. Measured consequence: **606 identical
+#: "File integrity status is unavailable" tickets in 11 hours, one every 66
+#: seconds (~1317/day)** -- 605 of the box's 673 open tickets, which pinned the
+#: header status light permanently RED and masked 2 CRITICAL and 4 MEDIUM real
+#: alerts behind them.
+#:
+#: That is the exact failure `_header_status_data`'s own 2026-08-02 comment
+#: records having already fixed once: "a light that is permanently red
+#: communicates nothing". Keep every ticket-filing decision in this set, and keep
+#: the check in ONE place (`assess`), so a new decision cannot quietly opt out.
+TICKET_DECISIONS = frozenset({FILE_TICKET, STALE, UNREADABLE, NEVER_DEPLOYED})
 
 
 def read_status(path=STATUS_PATH):
@@ -74,16 +94,45 @@ def read_status(path=STATUS_PATH):
         return None
 
 
-def assess(status, now_epoch, last_signature=None, file_mtime=None):
-    """PURE. -> (decision, signature, detail).
+def _classify(status, now_epoch, file_mtime=None, checker_installed=True):
+    """PURE. -> (decision, signature, detail). NO duplicate check -- see `assess`.
 
-    `signature` identifies THIS finding. The caller persists it and passes it back,
-    so an hourly checker reporting the same tampering does not file a ticket every
-    hour -- one incident, one ticket. A CHANGED finding files a new one, because a
-    second modified file is new information, not a repeat.
+    Split out so the dedup below applies to EVERY ticket-filing decision in one
+    place. It used to live inline on the tampered path only, which is how two
+    branches shipped with no suppression at all.
+
+    EVERY ticket-filing decision must return a STABLE, NON-NULL signature, or the
+    caller stores None and the suppression silently stops working. That is not a
+    style rule: it is the specific defect that produced 606 duplicate tickets.
     """
     if status is None:
-        return UNREADABLE, None, "integrity status file is missing or unreadable"
+        # ⚠ TWO DIFFERENT FACTS, AND COLLAPSING THEM WOULD DESTROY A REAL SIGNAL.
+        #
+        # `read_status` returns None for an absent file, and its docstring is
+        # explicit that this "is exactly what an attacker deleting it produces,
+        # and it is also what a not-yet-deployed checker produces". Suppressing
+        # the noisy case without separating them would mean an attacker deleting
+        # the fact file looks exactly like a fresh install -- silently downgrading
+        # a tamper signal to a setup reminder.
+        #
+        # The DIRECTORY is what separates them. `nemesis-integrity-check`'s deploy
+        # creates /var/lib/nemesis-integrity/ and writes status.json into it. A
+        # missing directory means the checker was never installed here; a present
+        # directory with no readable status file means something that was set up
+        # has stopped reporting or been removed, which is worth a HIGH ticket.
+        #
+        # ⚠ STATED PLAINLY, NOT GLOSSED: an attacker with root who removes the
+        # whole directory downgrades this to NEVER_DEPLOYED. That is a real
+        # limitation and it is consistent with this module's stated scope -- root
+        # adversaries are covered by the off-box heartbeat, never by this. It is
+        # NOT a reason to skip the distinction: without it, EVERY install that has
+        # not deployed the checker generates a permanent HIGH-priority ticket
+        # storm, which is what actually happened.
+        if not checker_installed:
+            return (NEVER_DEPLOYED, "never-deployed",
+                    "file integrity checking is not set up on this appliance")
+        return (UNREADABLE, "unreadable",
+                "integrity status file is missing or unreadable")
 
     verdict = status.get("verdict")
     findings = status.get("findings") or []
@@ -100,9 +149,33 @@ def assess(status, now_epoch, last_signature=None, file_mtime=None):
         return NOTHING, None, "clean"
 
     sig = "%s:%s" % (verdict, "|".join(sorted(str(f) for f in findings)))
-    if last_signature is not None and sig == last_signature:
-        return ALREADY_FILED, sig, "same finding already ticketed"
     return FILE_TICKET, sig, "%s: %s" % (verdict, "; ".join(str(f) for f in findings) or "no detail")
+
+
+def assess(status, now_epoch, last_signature=None, file_mtime=None,
+           checker_installed=True):
+    """PURE. -> (decision, signature, detail).
+
+    `signature` identifies THIS finding. The caller persists it and passes it back,
+    so an hourly checker reporting the same tampering does not file a ticket every
+    hour -- one incident, one ticket. A CHANGED finding files a new one, because a
+    second modified file is new information, not a repeat.
+
+    THE DUPLICATE CHECK IS APPLIED HERE, UNIFORMLY, to every decision in
+    TICKET_DECISIONS. Doing it in one place is the fix for the 606-ticket flood:
+    two of the four filing paths previously returned before ever reaching it.
+
+    `checker_installed` defaults to True — the CONSERVATIVE direction. An absent
+    status file is treated as suspicious unless the caller can positively show the
+    checker was never deployed, so a caller that does not know cannot accidentally
+    downgrade a real tamper signal into a setup notice.
+    """
+    decision, sig, detail = _classify(status, now_epoch, file_mtime,
+                                      checker_installed)
+    if (decision in TICKET_DECISIONS and last_signature is not None
+            and sig == last_signature):
+        return ALREADY_FILED, sig, "same finding already ticketed"
+    return decision, sig, detail
 
 
 def poll_once(path=STATUS_PATH, last_signature=None, now_epoch=None, opener=None):
@@ -118,25 +191,53 @@ def poll_once(path=STATUS_PATH, last_signature=None, now_epoch=None, opener=None
     except OSError:
         mtime = None
     status = read_status(path)
-    decision, sig, detail = assess(status, now_epoch, last_signature, mtime)
+    # The checker's deploy creates this directory and writes status.json into it,
+    # so its presence is what separates "never set up here" from "was set up and
+    # the fact file is now gone". See _classify for why that distinction matters
+    # and what it does NOT protect against.
+    checker_installed = os.path.isdir(os.path.dirname(path) or ".")
+    decision, sig, detail = assess(status, now_epoch, last_signature, mtime,
+                                   checker_installed)
 
-    if decision in (FILE_TICKET, STALE, UNREADABLE):
+    if decision in TICKET_DECISIONS:
         title = {FILE_TICKET: "File integrity check failed",
                  STALE: "File integrity checker has stopped reporting",
-                 UNREADABLE: "File integrity status is unavailable"}[decision]
-        body = (
-            "%s\n\n"
-            "This was reported by the root-owned integrity checker, which verifies a "
-            "signed manifest of sensitive server files.\n\n"
-            "IMPORTANT, so this is not over-read: this local check catches drift and "
-            "accidental changes -- a botched upgrade or a hand-edited file. It does NOT "
-            "detect an attacker with root, who could remove or falsify this signal. Only "
-            "the off-box heartbeat covers that case." % detail)
+                 UNREADABLE: "File integrity status is unavailable",
+                 NEVER_DEPLOYED: "File integrity checking is not set up"}[decision]
+        if decision is NEVER_DEPLOYED:
+            # A DIFFERENT body, because the standard one would be a lie here: it
+            # credits "the root-owned integrity checker" for a report, and on this
+            # path no checker exists to have reported anything.
+            body = (
+                "%s\n\n"
+                "File integrity checking is optional and has not been set up on this "
+                "appliance: %s does not exist, so the root-owned checker has never "
+                "written a status file here.\n\n"
+                "This is a SETUP NOTICE, not a security finding. Nothing is known to "
+                "be wrong. Until the checker is deployed, this appliance simply has no "
+                "local detection for drift or accidental modification of sensitive "
+                "server files.\n\n"
+                "You will get ONE of these, not one per check."
+                % (detail, os.path.dirname(path) or "the status directory"))
+        else:
+            body = (
+                "%s\n\n"
+                "This was reported by the root-owned integrity checker, which verifies a "
+                "signed manifest of sensitive server files.\n\n"
+                "IMPORTANT, so this is not over-read: this local check catches drift and "
+                "accidental changes -- a botched upgrade or a hand-edited file. It does NOT "
+                "detect an attacker with root, who could remove or falsify this signal. Only "
+                "the off-box heartbeat covers that case." % detail)
         try:
             fn = opener
             if fn is None:
                 from modules.tickets.module import open_ticket as fn   # noqa: PLC0415
-            fn(title=title, body=body, priority="High",
+            # NEVER_DEPLOYED is a SETUP task, not an incident. Filing it High
+            # alongside real tamper findings is what made the header light
+            # meaningless -- an unconfigured optional feature is not a security
+            # event and must not be dressed as one.
+            priority = "Low" if decision is NEVER_DEPLOYED else "High"
+            fn(title=title, body=body, priority=priority,
                category="alert", rule_id="integrity_manifest", actor="integrity-watch")
             log.warning("integrity_watch: filed ticket -- %s", detail)
         except Exception as exc:                               # noqa: BLE001

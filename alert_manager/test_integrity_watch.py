@@ -119,6 +119,99 @@ def test_poll_once_end_to_end_and_ticket_failure_retries():
         check("  signature NOT advanced, so it retries", sig2, None)
 
 
+def test_every_ticket_decision_dedups():
+    """⛔ THE REGRESSION GUARD FOR THE 606-TICKET FLOOD (2026-08-30/31).
+
+    The dedup used to run ONLY on the tampered path. UNREADABLE and STALE
+    returned above it, and UNREADABLE also returned a None signature, so the
+    caller stored None and suppression could never engage. Result: one ticket
+    every 66 seconds for 11 hours.
+
+    This asserts the property, not the incident: EVERY decision that files a
+    ticket must suppress its own repeat. A new filing decision that forgets to
+    is caught here.
+    """
+    print("\n[EVERY ticket-filing decision suppresses its own repeat]")
+    cases = {
+        iw.FILE_TICKET: (_status(verdict="tampered", findings=["x: modified"]), NOW, True),
+        iw.STALE: (_status(), NOW - iw.STALE_AFTER_S - 1, True),
+        iw.UNREADABLE: (None, NOW, True),
+        iw.NEVER_DEPLOYED: (None, NOW, False),
+    }
+    check("all filing decisions are covered by this test",
+          set(cases) == set(iw.TICKET_DECISIONS), True)
+    for want, (st, mtime, installed) in cases.items():
+        d1, sig1, _ = iw.assess(st, NOW, None, mtime, installed)
+        check("%s files on first sighting" % want, d1, want)
+        # THE ROOT CAUSE: a None signature makes suppression impossible.
+        check("  %s returns a NON-NULL signature" % want, sig1 is not None, True)
+        d2, sig2, _ = iw.assess(st, NOW, sig1, mtime, installed)
+        check("  %s repeat -> already filed" % want, d2, iw.ALREADY_FILED)
+        check("  %s signature stable across the repeat" % want, sig2, sig1)
+
+
+def test_never_deployed_is_distinct_from_a_deleted_fact_file():
+    """The distinction the noise fix must NOT collapse.
+
+    read_status returns None for both "never set up" and "an attacker deleted
+    it". Suppressing the noisy case without separating them would silently
+    downgrade a tamper signal into a setup reminder.
+    """
+    print("\n[never-deployed and deleted-fact-file stay DIFFERENT facts]")
+    d_new, sig_new, det_new = iw.assess(None, NOW, None, None, checker_installed=False)
+    d_gone, sig_gone, det_gone = iw.assess(None, NOW, None, None, checker_installed=True)
+    check("no checker installed -> NEVER_DEPLOYED", d_new, iw.NEVER_DEPLOYED)
+    check("installed but file gone -> UNREADABLE", d_gone, iw.UNREADABLE)
+    check("  the two are NOT the same decision", d_new == d_gone, False)
+    check("  ...nor the same signature", sig_new == sig_gone, False)
+    check("  never-deployed says it is a setup state", "not set up" in det_new, True)
+    check("  missing-file still says missing or unreadable",
+          "missing or unreadable" in det_gone, True)
+    # A never-deployed signature must not suppress a later real disappearance.
+    d_after, _, _ = iw.assess(None, NOW, sig_new, None, checker_installed=True)
+    check("⚠ a never-deployed ticket does NOT suppress a later UNREADABLE",
+          d_after, iw.UNREADABLE)
+
+
+def test_conservative_default_when_the_caller_cannot_tell():
+    print("\n[unknown deployment state defaults to SUSPICIOUS, not to 'not set up']")
+    d, _, _ = iw.assess(None, NOW, None, None)      # checker_installed omitted
+    check("default treats a missing file as UNREADABLE", d, iw.UNREADABLE)
+
+
+def test_never_deployed_files_a_low_setup_ticket_not_a_high_incident():
+    print("\n[an unconfigured optional feature is not a security incident]")
+    with tempfile.TemporaryDirectory() as td:
+        # A path whose PARENT does not exist -> checker never deployed.
+        p = os.path.join(td, "nope", "status.json")
+        seen = []
+        d, sig = iw.poll_once(p, None, NOW, opener=lambda **kw: seen.append(kw))
+        check("decision", d, iw.NEVER_DEPLOYED)
+        check("  one ticket filed", len(seen), 1)
+        check("  priority is LOW, not High", seen[0]["priority"], "Low")
+        check("  title says setup, not failure",
+              seen[0]["title"], "File integrity checking is not set up")
+        # The standard body credits a checker for reporting. On this path no
+        # checker exists, so that sentence would be a lie.
+        check("  body does NOT claim a checker reported it",
+              "was reported by the root-owned integrity checker" in seen[0]["body"], False)
+        check("  body says it will not repeat", "ONE of these" in seen[0]["body"], True)
+        # And the second poll files nothing at all.
+        d2, _ = iw.poll_once(p, sig, NOW, opener=lambda **kw: seen.append(kw))
+        check("  second poll files NOTHING", d2, iw.ALREADY_FILED)
+        check("  still only one ticket", len(seen), 1)
+
+
+def test_poll_once_detects_deployment_from_the_directory():
+    print("\n[deployment is detected from the status DIRECTORY]")
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "status.json")          # dir exists, file absent
+        seen = []
+        d, _ = iw.poll_once(p, None, NOW, opener=lambda **kw: seen.append(kw))
+        check("dir present + file absent -> UNREADABLE (suspicious)", d, iw.UNREADABLE)
+        check("  filed at High", seen[0]["priority"], "High")
+
+
 if __name__ == "__main__":
     print("integrity fact-file poller")
     for t in (test_clean_files_nothing, test_tampered_files_once_only,
@@ -127,7 +220,12 @@ if __name__ == "__main__":
               test_missing_file_is_not_clean,
               test_stale_is_detected_and_uses_mtime_not_self_report,
               test_cannot_verify_is_ticketed, test_read_status_rejects_garbage,
-              test_poll_once_end_to_end_and_ticket_failure_retries):
+              test_poll_once_end_to_end_and_ticket_failure_retries,
+              test_every_ticket_decision_dedups,
+              test_never_deployed_is_distinct_from_a_deleted_fact_file,
+              test_conservative_default_when_the_caller_cannot_tell,
+              test_never_deployed_files_a_low_setup_ticket_not_a_high_incident,
+              test_poll_once_detects_deployment_from_the_directory):
         t()
     print()
     if _fail:
