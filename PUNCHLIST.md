@@ -5283,3 +5283,76 @@ module to run. That is a different and larger piece of work than this one-line f
 not hold it up.
 *Found by read-only verification during the 2026-08-31 email-security deploy; not fixed in that
 pass (Rule 1 — this is hw_monitor's namespace, outside that change's scope).*
+
+### [HIGH] Tailscale-as-snap cannot manage DNS: MagicDNS never works on the appliance, breaking every tailnet-only link opened FROM the box (confirmed live 2026-08-31)
+**Not theoretical — hit in production today.** Enrollment could not be completed from the
+appliance itself: "server not found" opening its own tailnet HTTPS URL. Previously filed as the
+MED "appliance cannot resolve its own MagicDNS names"; this entry supersedes it with the root
+cause and raises the severity, because it blocks **local administration and every tailnet-only
+link** (enrollment, admin-approval pairing, installer links) opened from the appliance.
+
+**ROOT CAUSE — snap confinement, not file permissions.** Tailscale is installed as the Canonical
+**snap** (`tailscale 1.92.5 rev 154`, `confinement: strict`), running as
+`snap.tailscale.tailscaled.service`; `tailscaled.service` is `not-found`. Strict confinement
+blocks writes outside the snap's own directories, so `tailscaled` cannot touch `/etc/` **even as
+root**. Exact error, from its journal:
+```
+wgengine: error setting DNS config after major link change: writing to
+"/etc/resolv.pre-tailscale-backup.conf" in rename of "/etc/resolv.conf":
+open /etc/resolv.pre-tailscale-backup.conf: permission denied
+```
+**The tell that this is confinement and not misconfiguration:** the same log shows Tailscale
+computing the CORRECT config immediately before failing to apply it —
+`dns: OScfg: {Nameservers:[100.100.100.100] SearchDomains:[tailab2394.ts.net. .]}`. It knows
+exactly what to write and is refused.
+
+**Ruled OUT, so nobody re-checks them:** `/etc` is `drwxr-xr-x root root` and its `lsattr` shows
+`I` (indexed directory) — **not** `i` (immutable). Nothing about the filesystem blocks root here.
+
+**Measured consequences on this box:**
+- `dig <own-magicdns-name>` returns EMPTY — DNS genuinely does not resolve it.
+- `dig @100.100.100.100 …` → **connection refused**; the MagicDNS resolver is never stood up.
+- `tailscale dns status` reports "Tailscale DNS: enabled" while also saying *"no resolvers
+  configured, system default will be used"* — enabled and inert at the same time.
+- A manual `/etc/hosts` entry was added 02:50 today as a stopgap. **It masks the symptom only:**
+  `getent` now resolves, `dig` still does not. It pins a tailnet IP that can change, fixes one
+  name on one box, and must be repeated per install — which is precisely what must not ship.
+
+**⚠ THIS AFFECTS GENUINELY FRESH INSTALLS — it is not accumulated dev-box cruft. Verified:**
+- **`install.sh` never installs Tailscale.** It only *detects* it (`command -v tailscale`, l1667
+  and l1844) and skips tailnet firewall setup when absent. The install METHOD is entirely the
+  user's choice and we give no guidance.
+- **`install.sh` has ZERO references** to `resolv.conf`, MagicDNS, `accept-dns`, or
+  systemd-resolved. Nothing verifies DNS works after Tailscale is up.
+- The only Tailscale installer we ship is the **Windows agent** MSI path
+  (`nemesis_agent/installer_gui.py:627`) — client-side, irrelevant to the appliance.
+- **Ubuntu's own archive does not carry `tailscale`** (`apt-cache policy` shows it only from
+  `pkgs.tailscale.com`, which must be added manually). So a naive `apt install tailscale` FAILS
+  and `snap install tailscale` — Canonical-published, discoverable via `snap find` — is the path
+  of least resistance. **The most likely user choice is the broken one.**
+- Ironically this box already has the official apt repo configured
+  (`/etc/apt/sources.list.d/tailscale.list`, offering **1.102.3**, newer than the running snap)
+  and is running the snap regardless.
+
+**PROPOSED FIX — two parts, and the second is the one that ships.**
+1. *On this box:* remove the snap, install the official apt package (repo already present). The
+   apt build ships an unconfined `tailscaled.service` that can manage `/etc/resolv.conf`.
+   **⚠ Rule 13 applies — this is a host-level network change on the operator's daily driver, and
+   admin access rides the tailnet. Test on a VM clone first (the fleet exists for this), and any
+   revert must be PROVEN by reading live state back, not claimed.**
+2. *In the installer (the actual fix):*
+   - **Detect a snap-based Tailscale and fail loudly.** `snap list tailscale` / checking whether
+     the active unit is `snap.tailscale.tailscaled.service` is cheap and unambiguous. Installing
+     onto a snap Tailscale silently produces an appliance where every tailnet-only link is broken
+     from the box itself.
+   - **VERIFY MagicDNS rather than assume it.** After Tailscale is up, resolve the appliance's
+     own MagicDNS name and report failure explicitly. Nothing checks this today, which is exactly
+     the "verification code must prove its own premise" gap this repo already names — the
+     installer currently cannot tell a working tailnet from a half-working one.
+   - Document the apt path as the supported prerequisite.
+3. *Open decision, deliberately not assumed:* whether `install.sh` should auto-install Tailscale
+   via apt rather than treating it as a prerequisite. That is a product decision (it currently
+   treats it as operator-provided on purpose) and should be made explicitly, not folded into a
+   bug fix.
+*Found by read-only root-cause investigation after a live failure; nothing changed in that pass
+(Rule 1).*
