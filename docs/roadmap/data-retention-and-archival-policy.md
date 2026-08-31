@@ -1,10 +1,26 @@
 # Roadmap — Data retention and archival policy
 
-- **Status:** PARTIAL. Item 1 below (`dm_operation_log` archive-then-coalesce) shipped
-  `3066205 feat(data-manager): archive-then-coalesce for dm_operation_log (piece 5)` —
-  rows with a non-NULL actor are never touched/coalesced, archive-then-modify ordering
-  verified. The broader Tier A infinite-retention exemption, tar.gz-backup-machinery
-  reuse, and the retention-triggered disk-space monitor described below remain unbuilt.
+- **Status:** PARTIAL, and item 1 is now LIVE. The `dm_operation_log`
+  archive-then-coalesce mechanism shipped in `3066205`; its FIRST production run and a
+  daily timer landed `14132c4` (2026-08-31). That run archived 1,290,742 automated-writer
+  rows into 14,648 summary rows (table 1.68M → 405K) with the 350 human-actor rows
+  hash-verified untouched — closing the measured unbounded-growth problem this item
+  exists for. Rows with a non-NULL actor are never touched/coalesced; archive-then-modify
+  ordering verified.
+  - **Item 2 (tar.gz-backup reuse) will NOT be built — deliberate divergence, not a gap
+    (operator decision 2026-08-31).** The design's premise was "reuse `api_backup_create`'s
+    tar.gz path rather than a new export mechanism". In practice the coalescer was built
+    with its OWN archive format — self-verifying gzipped JSONL with a manifest and a
+    sha256 over the compressed bytes (`write_archive_manifested` / `verify_archive` in
+    `data_manager.py`). That format works, is integrity-checked, and per-row-recoverable.
+    Rebuilding it to route through the tar.gz backup path would be real effort for no
+    functional benefit, so the divergence stands as the accepted design. The "reuse, not
+    rebuild" reasoning below is kept for history but is superseded on this point.
+  - **Items 3 (Tier A infinite retention) and 4 (server disk-space monitor) remain
+    unbuilt** — logged as open scope, not urgent, not blocking. Note on item 3: Tier A
+    tables (`audit_log`, `login_events`, `tickets`, `malware_findings`) are already
+    effectively infinite by ABSENCE of any retention policy — the work there is a guard so
+    a future reaper does not accidentally cap them, not a feature to add now.
   Header found stale by `roadmap-state-audit-2026-08-31.md` — this doc's tally lineage
   had it right since the 2026-08-06 baseline, but this header itself was never corrected.
   Corrected here. Candidate to graduate to a numbered ADR once the remaining scope is
@@ -22,7 +38,7 @@ parallel mechanism:
 1. **`dm_operation_log` gets a real policy change, not just a retention cap** —
    coalescing/sampling for automated writers, full fidelity retained for human actors.
 2. **Archive format reuses the existing tar.gz backup machinery** (`api_backup_create`,
-   `dashboard.py:7427-7446` — `tarfile.open(archive_path, "w:gz")`), not a new export
+   `dashboard.py:14887-14947` — `tarfile.open(archive_path, "w:gz")`), not a new export
    mechanism.
 3. **Tier A tables get effectively infinite retention**: `audit_log`, `login_events`,
    `tickets`, `malware_findings`. Cost is negligible at these tables' row sizes and
@@ -72,8 +88,8 @@ instead of measuring it.
   the policy differentiates by actor type, not by age or count alone. Human-actor rows
   are never coalesced or sampled, regardless of age.
 - **REUSE, not REBUILD, for archive format** — the tar.gz backup machinery
-  (`dashboard.py:7427-7446`) is the one archival mechanism; this feature extends its
-  candidate-file set (`_backup_candidates()`, `dashboard.py:7100`) rather than adding a
+  (`dashboard.py:14947`) is the one archival mechanism; this feature extends its
+  candidate-file set (`_backup_candidates()`, `dashboard.py:14435`) rather than adding a
   second path.
 - **INFINITE, not CAPPED, for Tier A** (`audit_log`, `login_events`, `tickets`,
   `malware_findings`) — explicitly exempted from whatever cap/coalesce policy the rest of
@@ -102,7 +118,7 @@ instead of measuring it.
   mechanism.
 - Which fields survive coalescing vs. which are safe to drop/aggregate.
 - Where the archive's cadence/trigger lives — tied to the existing `api_backup_schedule`
-  cron-driven path (`dashboard.py:7453`) or a separate trigger.
+  cron-driven path (`dashboard.py:14964`) or a separate trigger.
 - Server-side disk-space monitoring: what threshold triggers archival vs. a plain
   operator warning; where it surfaces (existing hardware-monitor dashboard card is the
   natural fit — see [[nemesis-overhead-meter]] for the sibling "make invisible resource
