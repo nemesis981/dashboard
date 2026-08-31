@@ -404,17 +404,54 @@ class EtwSource:
     DNS_KEYWORDS = 0xFFFFFFFFFFFFFFFF
 
     def __init__(self, assembler, dns_cache, consent_version, emit,
-                 clock_mono=time.monotonic):
+                 clock_mono=time.monotonic, proc_map=None):
         self.asm = assembler
         self.dns = dns_cache
         self.consent_version = consent_version
         self.emit = emit
+        #: pid -> process identity. OPTIONAL and defaulted to None so every
+        #: existing caller and test keeps working unchanged; when absent, events
+        #: carry a bare pid exactly as they did before (see _proc()).
+        self.proc_map = proc_map
         self._jobs = []
         self._mono = clock_mono
         #: flow_key -> flow state. Replaces the old `connid`-keyed `_bytes` and
         #: `_local` dicts, which both collided on `"0"` for every connection.
         self._flows = {}
         self.stats = Counter()
+
+    def _proc(self, pid):
+        """(proc_name, proc_path) for a pid, or (None, None).
+
+        ONE helper for both the open and close paths deliberately: two lookups
+        written separately are two things that drift, and an event whose open and
+        close disagree about which program owned it is worse than one that names
+        neither.
+
+        ⚠ `proc_signed` IS NOT FILLED and that is deliberate. Authenticode
+        verification is a separate job with its own cost and failure modes;
+        populating name and path while leaving `proc_signed` looking answered
+        would be worse than leaving it plainly SIGNED_UNKNOWN.
+
+        Never raises: attribution is an ENRICHMENT. A failure here must cost a
+        name, never an event.
+        """
+        try:
+            # getattr, not self.proc_map: this class is legitimately built via
+            # __new__ with only the handler attributes set (the suite does exactly
+            # that to exercise event logic without an ETW session). A bare
+            # attribute access there raises AttributeError OUTSIDE any guard and
+            # costs the whole event -- which is precisely what this docstring
+            # promises cannot happen. It did, once, before this line.
+            pmap = getattr(self, "proc_map", None)
+            if pmap is None or pid is None:
+                return (None, None)
+            name, path, _src = pmap.lookup(pid)
+            self.stats["proc_named" if name else "proc_unnamed"] += 1
+            return (name, path)
+        except Exception:                                    # noqa: BLE001
+            self.stats["proc_lookup_errors"] += 1
+            return (None, None)
 
     def _emit_closed(self, fkey, st):
         """Emit the deferred close record for one flow. Never raises."""
@@ -426,9 +463,11 @@ class EtwSource:
             sent = recv = None
         else:
             sent, recv = st["sent"], st["recv"]
+        _pname, _ppath = self._proc(st["close_pid"])
         rec = self.asm.on_close(
             st["conn_id"], st["proto"], saddr, sport, daddr, dport,
-            pid=st["close_pid"], bytes_sent=sent, bytes_recv=recv,
+            pid=st["close_pid"], proc_name=_pname, proc_path=_ppath,
+            bytes_sent=sent, bytes_recv=recv,
             consent_version=self.consent_version,
             ts_close_wall=st["close_wall"], ts_close_mono=st["close_mono"])
         if rec:
@@ -579,8 +618,11 @@ class EtwSource:
                                      "sent": 0, "recv": 0, "undirected": 0,
                                      "opened_mono": now, "last_seen": now,
                                      "closing": None}
+                _opid = _pid(p.get("PID"))
+                _pname, _ppath = self._proc(_opid)
                 rec = self.asm.on_open(cid, proto, saddr, _port(sport), daddr,
-                                       _port(dport), pid=_pid(p.get("PID")),
+                                       _port(dport), pid=_opid,
+                                       proc_name=_pname, proc_path=_ppath,
                                        consent_version=self.consent_version)
                 if rec:
                     self.emit(rec)

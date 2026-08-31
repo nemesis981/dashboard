@@ -718,6 +718,7 @@ def _start_conn_collector(conf):
         import consent as _consent                            # noqa: PLC0415
         import conn_collector as _cc                          # noqa: PLC0415
         import conn_buffer as _cb                             # noqa: PLC0415
+        import proc_map as _pm                                # noqa: PLC0415
     except Exception as exc:                                  # noqa: BLE001
         log.warning("conn collector: modules unavailable, not starting: %s", exc)
         return
@@ -733,11 +734,33 @@ def _start_conn_collector(conf):
         _conn_buffer = _cb.ConnBuffer(cap)
         dns = _cc.DnsCache()
         asm = _cc.ConnectionAssembler(conf.get("device_id", "unknown"), dns_cache=dns)
+
+        # SEED the pid->identity map BEFORE the session opens. ETW only reports
+        # processes that start after the session does, so without this seed every
+        # connection from an already-running program -- which on any real machine
+        # is most of them -- would carry a bare pid and no name.
+        #
+        # Seeding is also the half that does not depend on the UNVERIFIED process
+        # provider: if that never delivers, this still answers for pre-existing
+        # processes, so attribution degrades rather than disappears.
+        _proc_map = _pm.ProcessMap()
+        try:
+            seeded = _proc_map.seed()
+            log.info("conn collector: process map seeded with %d entries", seeded)
+        except Exception as exc:                              # noqa: BLE001
+            # A failed seed costs NAMES, never collection. Logged rather than
+            # raised so the collector still starts and still reports connections.
+            seeded = 0
+            log.warning("conn collector: process map seed failed (%s) -- "
+                        "connections will be reported without program names", exc)
+
         _conn_source = _cc.EtwSource(asm, dns,
                                      _consent.consent_version(),
-                                     _conn_buffer.put)
+                                     _conn_buffer.put,
+                                     proc_map=_proc_map)
         _conn_source.start()
-        log.info("conn collector: started (buffer cap %d)", _conn_buffer.cap)
+        log.info("conn collector: started (buffer cap %d, %d seeded processes)",
+                 _conn_buffer.cap, seeded)
     except Exception as exc:                                  # noqa: BLE001
         _conn_source = None
         _conn_buffer = None
