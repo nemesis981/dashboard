@@ -66,6 +66,17 @@ instruction.
   this file itself becoming a second source of truth for the exact grant text; only the
   classification (clean / narrowly-scoped / expected) is tracked here.
 
+### `/usr/bin/tcpdump` file capabilities — NEW 2026-08-31, flagged by Window 3
+`cap_net_raw,cap_net_admin=eip` — confirmed live (`getcap /usr/bin/tcpdump`) by Window 2,
+independently of the report. Operator ran `sudo setcap cap_net_raw,cap_net_admin=eip
+/usr/bin/tcpdump` this session to enable non-root packet capture for a Tier 2 TLS-module
+test (Piece E(c), private repo `l3-tier2-tls-interception`). Same box as the rest of this
+file (dev/daily-driver, also the appliance) — Window 3's report called it "not the
+appliance," which does not match this box's known dual role; noted as a discrepancy in the
+report's framing, not in the grant itself, which is independently verified accurate.
+**Not yet a revocation candidate** — genuinely in use for active Tier 2 test work; revisit
+once that work concludes, same treatment as the `pihole` group entry below.
+
 ### `<user>`'s `pihole` group membership — STILL OPEN, unchanged
 Confirmed live 2026-08-31 (`getent group pihole` → `<user>` is a member). Same standing
 note as every prior check going back weeks: for
@@ -121,3 +132,6 @@ rule), needs a session with root access to actually `ls` it.
   still unreadable from this session (3rd consecutive session). Gateway-VM entry not
   re-checked (out of scope for the production-box Morning Status per its own open question,
   §ln93 above — still unresolved).
+- **2026-08-31, later same day** (Window 2): new `tcpdump` file-capability grant added,
+  flagged cross-session by Window 3 and independently verified via `getcap` before being
+  written down, per this file's standing "verify before recording" discipline.
