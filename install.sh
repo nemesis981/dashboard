@@ -1698,13 +1698,27 @@ configure_forkb_nat() {
     #   Fork B traffic to the non-tunnel egress (deliberately bypasses the VPN,
     #   and is more than Piece 2 was scoped for).
     #
-    #   PIA is currently disabled on this deployment anyway, for unrelated and
-    #   still-undiagnosed Nemesis errors — see PUNCHLIST.md, "[FUTURE] PIA VPN
-    #   deliberately disabled". Fork B's PIA-up support is gated on that item.
-    #   Whoever picks it up: fixing the PIA compatibility issue does NOT by itself
-    #   make Fork B work with PIA up. This rule needs revisiting too, and Layer 3
-    #   measurements taken PIA-down do not transfer (different egress, different
-    #   TTL, tun0 MTU 1441 vs 1500).
+    #   ⚠ CORRECTED 2026-08-31. THE PARAGRAPH THIS REPLACES SAID "PIA is currently
+    #   disabled on this deployment anyway", citing PUNCHLIST.md's "[FUTURE] PIA
+    #   VPN deliberately disabled", and gated Fork B's PIA-up support on it. THAT
+    #   IS NO LONGER TRUE: `piactl get connectionstate` returns Connected. The
+    #   PUNCHLIST entry dates from 2026-07-29 and describes a state that has since
+    #   changed. A gate resting on a stale premise is not a gate.
+    #
+    #   WHAT WAS ACTUALLY MEASURED (2026-08-31, VM rig, per-rule packet counters —
+    #   full evidence in the private mirror's forkb-splittunnel-rig/):
+    #     * Under a SPLIT tunnel, PIA's own `-A piavpn.r.100.transIp -o <nic> -j
+    #       MASQUERADE` has NO source restriction, so it matches forwarded tailnet
+    #       traffic too. PIA holds POSTROUTING position 1 and re-asserts it; this
+    #       rule is APPENDED below it. Measured: PIA 8 pkts, this rule 0.
+    #     * So this rule is SHADOWED whenever PIA is connected — and that is
+    #       BENIGN, not broken. Both masquerade to the same interface, so the
+    #       translation is identical, and when PIA's chain is not populated this
+    #       rule takes over cleanly (measured: 4 pkts, 0% loss).
+    #     * DO NOT "fix" the shadowing by changing -A to -I. PIA reconciles its
+    #       own position and would win; the two would fight.
+    #   Layer 3 measurements taken PIA-down still do not transfer (different
+    #   egress, different TTL, tun0 MTU 1441 vs 1500).
     #
     # STATIC CONFIG: the derived interface is baked into before.rules at install
     # time. If the physical NIC is replaced or renamed, re-run install.sh or edit
