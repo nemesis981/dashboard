@@ -160,8 +160,39 @@ def cmd_withdraw(args):
 
     _require_root()
 
-    # ONE atomic kernel operation. No render, no state file, no dependency on
-    # anything that may be the thing that failed.
+    # ⚠ CLEAR THE INTENT FIRST — AND THIS HELPER MUST DO IT ITSELF.
+    #
+    # FOUND BY THE END-TO-END TEST, 2026-08-31, and the unit tests could not have
+    # caught it: nft_steering.py's withdraw() clears intent before calling this,
+    # so the fail-safe path was correct and every gate passed. But this helper is
+    # ALSO a standalone privileged tool, and an operator running
+    # `nemesis-fw-steer withdraw` by hand during an incident -- an entirely
+    # reasonable thing to do -- flushed the chain and left the intent behind. The
+    # very next re-render then RESURRECTED steering into the dead gate they had
+    # just withdrawn from. Measured on a real table: step 7 read "PRESENT ❌
+    # resurrected".
+    #
+    # A safety property that holds only when entered through one particular layer
+    # is not a safety property. Clearing here makes withdraw safe from EVERY entry
+    # point; nft_steering.py clearing it first is then harmless belt-and-braces
+    # (an already-absent file is success).
+    #
+    # Order is the same as nft_steering's and for the same reason: clear THEN
+    # flush, so a render racing in between emits no steer chain rather than
+    # reinstalling one.
+    intent_cleared = True
+    state_for_clear = args.state or DEFAULT_STATE
+    try:
+        os.remove(state_for_clear)
+    except FileNotFoundError:
+        pass                      # already un-declared
+    except OSError as e:
+        intent_cleared = False
+        print("nemesis-fw-steer: WARNING could not remove intent %s: %r"
+              % (state_for_clear, e), file=sys.stderr)
+
+    # ONE atomic kernel operation. No render, no dependency on anything that may
+    # be the thing that failed.
     rc, _out, err = _run([NFT, "flush", "chain", TABLE_FAMILY, TABLE_NAME, chain])
     if rc != 0:
         # IDEMPOTENT: a chain that does not exist is already withdrawn. The
@@ -179,7 +210,16 @@ def cmd_withdraw(args):
 
     if not _rebaseline("steering withdraw"):
         sys.exit(6)
-    print("nemesis-fw-steer: steering withdrawn and baseline updated")
+    if not intent_cleared:
+        # Traffic is off the gate NOW, but the intent survives, so the next render
+        # re-steers into it. Safe this second, self-corrupting shortly. Distinct
+        # from a failed flush, and not a success.
+        print("nemesis-fw-steer: steering flushed but intent %s could NOT be "
+              "removed -- the next render will RE-INSTALL steering into the "
+              "withdrawn gate. Remove it by hand." % state_for_clear,
+              file=sys.stderr)
+        sys.exit(6)
+    print("nemesis-fw-steer: steering withdrawn, intent cleared, baseline updated")
     return 0
 
 
@@ -190,6 +230,9 @@ def main():
     p_i.add_argument("--state", default=None)
     p_w = sub.add_parser("withdraw", help="atomic chain flush + rebaseline")
     p_w.add_argument("--chain", default=ALLOWED_CHAIN)
+    # Needed so a non-default intent path is cleared too; without it a
+    # test or deployment using a custom --state would leave intent behind.
+    p_w.add_argument("--state", default=None)
     args = ap.parse_args()
     return cmd_install(args) if args.cmd == "install" else cmd_withdraw(args)
 

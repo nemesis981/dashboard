@@ -27,7 +27,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 HELPER = os.path.join(HERE, "nemesis-fw-steer")
 
-EXPECTED_CHECKS = 21
+EXPECTED_CHECKS = 25
 passed = failed = 0
 
 
@@ -108,6 +108,26 @@ check("⭐ malformed intent renders NO steer chain", "chain steer {" not in p2.s
 check("  and says so loudly rather than silently omitting it", "REFUSING" in p2.stderr)
 check("  while the rest of the table still renders (steering never costs blocks)",
       "chain input {" in p2.stdout and "chain forward {" in p2.stdout)
+
+print("\n⭐ REGRESSION: withdraw must clear intent ITSELF (found on a real table)")
+# The unit tests could not have caught this. nft_steering.py's withdraw() clears
+# intent before invoking the helper, so the fail-safe path was correct and every
+# gate passed -- but an operator running `nemesis-fw-steer withdraw` BY HAND left
+# the intent behind, and the next re-render resurrected steering into the dead
+# gate. Measured on a real nftables table 2026-08-31: "PRESENT ❌ resurrected".
+# A safety property that holds only via one entry point is not a safety property.
+src = open(HELPER).read()
+wd = src[src.index("def cmd_withdraw"):src.index("def main(")]
+check("⭐ cmd_withdraw removes the intent file itself",
+      "os.remove(" in wd, "otherwise a hand-run withdraw self-resurrects")
+check("⭐ it clears BEFORE flushing (same ordering rule as nft_steering)",
+      wd.index("os.remove(") < wd.index('"flush"'),
+      "flush-then-clear leaves a window where a render reinstalls steering")
+check("a failed clear is reported, not swallowed",
+      "could NOT be" in wd and "sys.exit(6)" in wd)
+rc, out = run("withdraw", "--state", "/tmp/x.state", "--chain", "input")
+check("withdraw accepts --state (so a non-default intent path is cleared too)",
+      rc == 3 and "refusing to flush" in out, "rc=%d" % rc)
 
 _total = passed + failed
 check("assertion count matches EXPECTED_CHECKS (%d)" % EXPECTED_CHECKS,
