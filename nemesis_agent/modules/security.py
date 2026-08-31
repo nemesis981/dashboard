@@ -21,6 +21,37 @@ _EXEC_EXTS_UNIX = {".sh", ".py", ".pl", ".rb", ".elf", ""}
 _seen_files = set()
 
 
+def _etw_supersedes(platform_name):
+    """True where the event-driven collector has REPLACED this poll path.
+
+    Takes the platform from `collect()`'s own argument rather than reading
+    platform.system() again: one source of truth per call, and it makes this
+    testable without monkeypatching a stdlib module.
+
+    ⚠ WINDOWS ONLY, AND THE PLATFORM CHECK IS THE WHOLE POINT (Track C Piece 6,
+    2026-08-31). The build plan retires this path LAST, after Linux collection, and
+    for a concrete reason: on Linux and macOS there is no event-driven collector at
+    all (no netlink/sock_diag, no eBPF), so retiring it there would silently remove
+    connection telemetry from those agents entirely. Windows is the only platform
+    whose replacement exists and has been PROVEN against real hardware -- a real
+    ETW session on Windows 11 10.0.26200.8655 delivering real events end to end.
+
+    Two mechanisms for one kind of data is exactly the "second source of truth that
+    disagrees with the first" the plan says to avoid, which is why this is a
+    replacement rather than both running.
+
+    ⚠ THE REPLACEMENT IS NOT FEATURE-EQUIVALENT, AND THAT IS A KNOWN, ACCEPTED
+    TRADE -- not an oversight. This poll path resolves `process` from the pid via
+    psutil; `EtwSource` does NOT populate proc_name/proc_path/proc_signed at all
+    (they are parameters it never passes). The build plan calls those fields "the
+    asymmetric win -- no network sensor can produce this", so retiring this path on
+    Windows gives up process NAMES in exchange for event-driven completeness. The
+    pid is still captured, so the field can be filled later. Tracked in PUNCHLIST;
+    do not treat the absence as a bug in this function.
+    """
+    return (platform_name or "") == "Windows"
+
+
 def _consent():
     """The gate module, imported lazily so this module still imports without it.
 
@@ -58,7 +89,7 @@ def collect(platform_name: str) -> dict:
     out = {}
     if c.collection_allowed(c.ITEM_TOP_PROCESSES):
         out["top_processes"] = _top_processes()
-    if c.collection_allowed(c.ITEM_CONNECTIONS):
+    if c.collection_allowed(c.ITEM_CONNECTIONS) and not _etw_supersedes(platform_name):
         # The legacy poll-based collector. Rides the SAME item as the event-driven
         # one deliberately: they are two mechanisms for one kind of data, and a
         # user who switched connection recording off must not keep the poll path.
