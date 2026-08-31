@@ -197,6 +197,31 @@ def write_env(values, username, session_id, password):
     return _request("write_env", {"values": values}, username, session_id, password)
 
 
+def write_email_secret(key, value, token, source_ip=None):
+    """Write ONE email app password, authorised by an enrollment code.
+
+    NO username/session/password, and that is the point: the caller is a
+    household member completing an enrollment link, who has no dashboard login at
+    all (ADR 0028 D11.5 Option C). The enrollment CODE is the credential.
+
+    This side does not validate the code and deliberately cannot -- the helper
+    hashes it, consumes it atomically against a single-use TTL-bounded row, and
+    only then writes the file. A compromised dashboard forwards bytes it cannot
+    forge, so it still cannot write a credential without a valid unspent code.
+
+    Returns the helper's reply, which carries the authoritative `owner_user_id`
+    read from the consumed row -- use THAT to attribute the mailbox, never a
+    value chosen on this side.
+
+    `source_ip` is recorded by the helper for the audit row. Caller-supplied and
+    therefore NOT trusted as identity -- a log field, never a check, exactly as
+    in `failsafe_revert`.
+    """
+    return _request("write_email_secret",
+                    {"values": {key: value}, "token": token,
+                     "source_ip": source_ip})
+
+
 def restart_dashboard(username, session_id, password):
     """Restart dashboard.service. Takes no target — the helper restarts one
     named unit and offers no way to name another."""

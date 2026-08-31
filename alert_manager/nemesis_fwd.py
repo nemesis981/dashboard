@@ -55,7 +55,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -162,6 +162,39 @@ ENV_WRITE_DENIED_KEYS = frozenset({
 ENV_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 ENV_VALUE_MAX = 2048
 
+#: The EMAIL CREDENTIAL file. A SEPARATE FILE FROM NEMESIS_ENV_PATH, AND THE
+#: SEPARATION IS THE WHOLE POINT (operator decision, 2026-08-31).
+#:
+#: /etc/nemesis.env holds core system secrets an admin configures once at install
+#: time. Email app passwords arrive by a LOWER-TRUST path -- a single-use
+#: enrollment link completed by a household member who is not an admin -- and the
+#: set of them GROWS UNBOUNDEDLY, potentially to dozens of mailboxes.
+#:
+#: Mixing the two would force a choice between two bad options: either routine,
+#: expected enrollment writes pollute the change-monitoring/file-integrity signal
+#: on the file holding the high-value secrets, or parts of that file have to be
+#: EXCLUDED from monitoring to compensate. Separating them keeps nemesis.env's
+#: write-monitoring signal clean -- any write to it stays exceptional and worth
+#: alerting on. Do not "simplify" these back into one file.
+#:
+#: NOT loaded via systemd EnvironmentFile, deliberately: a newly enrolled mailbox
+#: must be usable WITHOUT restarting seven services, so readers parse this file at
+#: call time instead of inheriting it as process environment.
+EMAIL_SECRETS_PATH = os.environ.get("NEMESIS_EMAIL_SECRETS_PATH",
+                                    "/etc/nemesis-email-secrets.env")
+
+#: The ONLY key shape this file may contain. Anchored at both ends: an unanchored
+#: pattern would match EMAIL_SEC_APPPW_1_PATH or X_EMAIL_SEC_APPPW_1 and turn a
+#: narrow slot allowlist into a prefix free-for-all. Three digits caps the
+#: keyspace at 1000 slots; slot allocation is an atomic DB sequence, so exhausting
+#: it fails CLOSED here (refused, loudly) rather than wrapping onto slot 0 and
+#: silently overwriting another household member's credential.
+EMAIL_SECRET_KEY_RE = re.compile(r"^EMAIL_SEC_APPPW_[0-9]{1,3}$")
+
+#: Keys per call. One enrollment sets exactly one slot; the cap simply bounds a
+#: malformed or hostile batch.
+EMAIL_SECRET_MAX_KEYS = 8
+
 #: Idle timeout for the view-credential cache. Configurable, not hardcoded, so
 #: it can be tuned without a design change. 300s matches sudo's long-standing
 #: timestamp_timeout default.
@@ -206,7 +239,26 @@ WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
 # above records for `add_rule`/`remove_rule`: an allowlist naming capability that
 # is not actually enforced invites designing against it. Fixed rather than worked
 # around, so the set means what it says.
-NO_CREDENTIAL_OPS = {"ping", "drop_credential", "failsafe_revert"}
+NO_CREDENTIAL_OPS = {"ping", "drop_credential", "failsafe_revert",
+                     # ADR 0028 D11.5 Option C. The ENROLLMENT CODE is the
+                     # credential, validated and consumed inside
+                     # op_write_email_secret against a hashed, single-use,
+                     # TTL-bounded row -- the same shape as failsafe_revert. The
+                     # owner completing an enrollment is a household member with
+                     # no dashboard login, so there is no session to require.
+                     "write_email_secret"}
+
+#: Audit ACTOR for a credential-exempt op. Was hardcoded to
+#: "token:failsafe-revert" at the single dispatch site, which was correct while
+#: exactly one token-credentialled op existed and became WRONG the moment a
+#: second one did -- an email enrollment filed under a firewall-revert actor is
+#: the same "audit trail should read by intent" defect AUDIT_ACTION above was
+#: introduced to fix. Unmapped ops fall back to a generic token actor rather than
+#: to another op's name.
+NO_CREDENTIAL_ACTOR = {
+    "failsafe_revert":     "token:failsafe-revert",
+    "write_email_secret":  "token:email-enrollment",
+}
 
 #: audit_log action name per op. Introduced 2026-07-31, replacing a hardcoded
 #: `"fw_%s" % op` at both audit call sites.
@@ -228,6 +280,11 @@ AUDIT_ACTION = {
     # svc_ rather than fw_: these are not firewall operations, and a service
     # restart filed under fw_* would mislead anyone reading the audit trail.
     "write_env":         "svc_write_env",
+    # email_ rather than svc_: this is neither a firewall nor a service-lifecycle
+    # operation, and it is the only op an unauthenticated household member can
+    # cause. It wants to be findable as such when reading or prefix-filtering the
+    # audit trail.
+    "write_email_secret": "email_write_secret",
     "restart_dashboard": "svc_restart_dashboard",
     # mem_ rather than fw_ or svc_: this is neither a firewall operation nor a
     # service lifecycle one. Filing it under fw_* would mislead anyone reading
@@ -285,7 +342,15 @@ PEER_POLICY = {
                 # It is NOT a general revert capability: the token names a
                 # single change, is single-use and expires in 30 minutes, and
                 # the helper -- not the dashboard -- decides all three.
-                "failsafe_revert"},
+                "failsafe_revert",
+                # Granted to the dashboard alone, for the same reason: it is the
+                # only peer with an HTTP surface and this op exists to be
+                # reachable from one. It is NOT a general env-write capability.
+                # The key shape is regex-bound to EMAIL_SEC_APPPW_<n>, the
+                # destination is a SEPARATE file from /etc/nemesis.env, and every
+                # call must present an unspent enrollment code that this helper
+                # -- not the dashboard -- validates and consumes.
+                "write_email_secret"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
     },
@@ -1218,29 +1283,36 @@ def _validate_env_updates(params):
     return clean
 
 
-def op_write_env(params):
-    """Merge keys into NEMESIS_ENV_PATH, preserving comments and order.
+def _merge_write_env_file(path, updates):
+    """Merge `updates` into the env-style file at `path`. Returns the keys written.
 
-    The helper performs the whole read-merge-write itself. The caller never
-    supplies a file body and never stages a temp file — it sends key/value pairs
-    and this process decides what the file becomes. That is what makes the
-    allowlist meaningful, and it also removes the /tmp hand-off the dashboard
-    previously needed.
+    EXTRACTED from op_write_env (2026-08-31) so the email-secrets writer shares
+    ONE implementation rather than a copy. The copy is the hazard: this function's
+    correctness lives in details that are easy to get subtly wrong on a second
+    writing -- chmod and chown happen BEFORE the swap, the temp file is created in
+    the SAME directory so os.replace is atomic rather than a cross-device copy,
+    and the fd is fsynced before it is renamed. A drifted duplicate of that would
+    not fail loudly; it would leave a briefly world-readable secrets file.
 
-    Written atomically: temp file in the SAME directory, ownership and mode set
-    BEFORE the swap, then os.replace(). A torn or briefly world-readable
-    /etc/nemesis.env would expose 16 secrets, so it must never exist on disk in
-    that state, not even momentarily.
+    Comments, blank lines and key ORDER in the existing file are preserved: this
+    file is also read by humans, and a writer that rewrote it into sorted bare
+    assignments would destroy the explanatory comments around each secret.
+
+    Ownership is root:nemesis 0640 for BOTH files, deliberately the same: the
+    dashboard runs as nemesis-dash which is in group `nemesis`, so it can READ
+    what it can never WRITE. That asymmetry is what makes routing the write
+    through this helper meaningful rather than ceremonial.
     """
-    updates = _validate_env_updates(params)
-
     try:
-        with open(NEMESIS_ENV_PATH) as fh:
+        with open(path) as fh:
             lines = fh.readlines()
     except FileNotFoundError:
+        # A first enrollment legitimately creates the file. NOT an error -- but
+        # note it is created with the same mode/ownership as an existing one,
+        # below, so a fresh file is never briefly permissive.
         lines = []
     except OSError as exc:
-        raise Denied("io_failed", "cannot read %s: %s" % (NEMESIS_ENV_PATH, exc))
+        raise Denied("io_failed", "cannot read %s: %s" % (path, exc))
 
     seen = set()
     out = []
@@ -1258,7 +1330,7 @@ def op_write_env(params):
             out.append("%s=%s\n" % (key, value))
             seen.add(key)
 
-    directory = os.path.dirname(NEMESIS_ENV_PATH) or "/"
+    directory = os.path.dirname(path) or "/"
     tmp_path = None
     try:
         fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".nemesis.env.")
@@ -1272,22 +1344,170 @@ def op_write_env(params):
         except KeyError:
             raise Denied("io_failed", "group 'nemesis' does not exist")
         os.chown(tmp_path, 0, gid)
-        os.replace(tmp_path, NEMESIS_ENV_PATH)
+        os.replace(tmp_path, path)
         tmp_path = None
     except Denied:
         raise
     except OSError as exc:
-        raise Denied("io_failed", "cannot write %s: %s" % (NEMESIS_ENV_PATH, exc))
+        raise Denied("io_failed", "cannot write %s: %s" % (path, exc))
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
                 os.unlink(tmp_path)
             except OSError:
                 pass
+    return seen
 
+
+def op_write_env(params):
+    """Merge keys into NEMESIS_ENV_PATH, preserving comments and order.
+
+    The helper performs the whole read-merge-write itself. The caller never
+    supplies a file body and never stages a temp file — it sends key/value pairs
+    and this process decides what the file becomes. That is what makes the
+    allowlist meaningful, and it also removes the /tmp hand-off the dashboard
+    previously needed.
+
+    Written atomically: temp file in the SAME directory, ownership and mode set
+    BEFORE the swap, then os.replace(). A torn or briefly world-readable
+    /etc/nemesis.env would expose 16 secrets, so it must never exist on disk in
+    that state, not even momentarily.
+    """
+    updates = _validate_env_updates(params)
+    seen = _merge_write_env_file(NEMESIS_ENV_PATH, updates)
     # KEY NAMES only. The values are secrets and are never logged, anywhere.
     log.info("fwd: write_env updated %s", ", ".join(sorted(seen)))
     return {"updated": sorted(seen)}
+
+
+def _validate_email_secret_updates(params):
+    """Validate a write_email_secret payload. Returns {key: value}. Raises Denied.
+
+    Every check is HERE rather than in the caller, for the same reason
+    _validate_env_updates states: the caller is explicitly modelled as
+    potentially compromised, so a check it performs is a check an attacker
+    simply skips.
+    """
+    values = (params or {}).get("values")
+    if not isinstance(values, dict) or not values:
+        raise Denied("bad_request", "values must be a non-empty object")
+    if len(values) > EMAIL_SECRET_MAX_KEYS:
+        raise Denied("bad_request", "too many keys")
+
+    clean = {}
+    for key, value in values.items():
+        if not isinstance(key, str) or not EMAIL_SECRET_KEY_RE.match(key):
+            raise Denied("bad_request", "invalid key name: %r" % (key,))
+        # Redundant against the anchored regex above, which cannot match any of
+        # these names -- kept anyway, for the reason the sibling validator gives:
+        # belt and braces, so a future widening of the regex is non-fatal rather
+        # than an instant arbitrary-code-execution path.
+        if key in ENV_WRITE_DENIED_KEYS:
+            raise Denied("bad_request", "refusing to set %s" % key)
+        if not isinstance(value, str):
+            raise Denied("bad_request", "value for %s must be a string" % key)
+        if not value:
+            # An empty credential is never a legitimate enrollment result, and
+            # writing one would produce a slot that reads as "configured" while
+            # authenticating nothing.
+            raise Denied("bad_request", "value for %s may not be empty" % key)
+        if len(value) > ENV_VALUE_MAX:
+            raise Denied("bad_request",
+                         "value for %s exceeds %d bytes" % (key, ENV_VALUE_MAX))
+        if any(c in value for c in ("\n", "\r", "\x00")):
+            # The one that matters: a newline injects a SECOND assignment, which
+            # is how an allowlisted key becomes a way to set a denied one.
+            raise Denied("bad_request",
+                         "value for %s may not contain newlines or NUL" % key)
+        clean[key] = value
+    return clean
+
+
+def op_write_email_secret(params):
+    """Write ONE email app password, authorised by an enrollment token.
+
+    THE SECOND OP REACHABLE FROM AN UNAUTHENTICATED REQUEST, and it follows
+    op_failsafe_revert's discipline exactly rather than inventing a new one: its
+    authority is re-derived HERE from the database, never taken from the caller.
+
+    WHY NO SESSION CREDENTIAL. The person completing an enrollment is an account
+    OWNER -- a household member who has no dashboard login at all, which is the
+    entire premise of ADR 0028 D11.5 Option C: the admin who initiates the
+    enrollment must never handle the owner's credential, and the owner must not
+    need an admin account to supply it. Requiring a session credential here would
+    make the op useless in the only situation it exists for.
+
+    THE ENROLLMENT CODE IS THE CREDENTIAL, and validating it in THIS process
+    rather than in the web process is what keeps that safe. A compromised
+    dashboard forwards bytes it cannot forge, so it still cannot write an email
+    credential without a valid, unspent, unexpired code. Exactly the property the
+    failsafe_revert docstring claims for reverts.
+
+    CONSUME BEFORE WRITING, deliberately -- same ordering, same reasoning. The
+    row is consumed in a single conditional UPDATE and the affected-row count is
+    what authorises the write, so two simultaneous posts cannot both win. Acting
+    first and consuming after would leave a replay window as long as the write.
+
+    THE COST OF THAT ORDERING, STATED PLAINLY: a code is spent even if the file
+    write then fails, and the owner must request a new one. That is the
+    fail-CLOSED direction and it is the right one here -- the alternative spends
+    nothing but permits replay. Unlike failsafe_revert there is no manual
+    fallback path, so this is a real (if small) UX cost accepted on purpose, not
+    an oversight.
+
+    RETURNS THE OWNER FROM THE CONSUMED ROW. The caller does not get to say whose
+    mailbox this is: `owner_user_id` comes out of the row this call just won, so a
+    compromised dashboard cannot attribute an enrolled mailbox to a different
+    person than the admin addressed the code to.
+    """
+    updates = _validate_email_secret_updates(params)
+
+    token = (params or {}).get("token")
+    if not isinstance(token, str) or not token.strip():
+        raise Denied("bad_request", "enrollment token required")
+
+    # Hashed lookup, never a plaintext column -- the stored value is a SHA-256 of
+    # the code, so a stolen database yields nothing that can complete someone
+    # else's enrollment.
+    token_hash = hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    try:
+        with _db() as conn:
+            # The predicates live in the WHERE clause, NOT in a preceding SELECT.
+            # A read-then-write would let two simultaneous requests both observe
+            # `used_at IS NULL` and both proceed -- a single-use code used twice.
+            cur = conn.execute(
+                "UPDATE email_enrollment_requests "
+                "   SET used_at = ?, actor = ? "
+                " WHERE token_hash = ? "
+                "   AND used_at IS NULL "
+                "   AND expires_at > ?",
+                (now_iso, "token:email-enrollment", token_hash, now_iso))
+            if cur.rowcount != 1:
+                # Invalid, expired and already-used are ONE answer to the caller.
+                # Distinguishing them would confirm to an unauthenticated guesser
+                # that a code existed, which is the oracle the enrollment route's
+                # identical-reject rule exists to deny.
+                raise Denied("peer_denied", "enrollment code not valid")
+            row = conn.execute(
+                "SELECT owner_user_id, address_hint FROM email_enrollment_requests "
+                " WHERE token_hash = ?", (token_hash,)).fetchone()
+    except Denied:
+        raise
+    except Exception as exc:
+        # A DB failure is NOT "bad code". Reporting it as one would be a failed
+        # read wearing the costume of a real answer.
+        raise Denied("internal", "could not consume enrollment code: %s" % exc)
+
+    seen = _merge_write_env_file(EMAIL_SECRETS_PATH, updates)
+    # KEY NAMES only. The values are app passwords and are never logged, anywhere.
+    log.info("fwd: write_email_secret updated %s", ", ".join(sorted(seen)))
+    return {
+        "updated": sorted(seen),
+        "owner_user_id": (row["owner_user_id"] if row is not None else None),
+        "address_hint": (row["address_hint"] if row is not None else None),
+    }
 
 
 def op_restart_dashboard(params):
@@ -1529,6 +1749,7 @@ OPS = {
     "allow_port_on_interface": op_allow_port_on_interface,
     "reassert_port_deny_on_interface": op_reassert_port_deny_on_interface,
     "failsafe_revert": op_failsafe_revert,
+    "write_email_secret": op_write_email_secret,
 }
 
 
@@ -1617,7 +1838,8 @@ class Helper:
             # Logged on SUCCESS here; refusals are audited by the Denied path,
             # so every attempt appears either way -- §4 requires that, and an
             # endpoint reachable without login must not have a quiet failure.
-            audit(audit_action_for(op), "token:failsafe-revert",
+            audit(audit_action_for(op),
+                  NO_CREDENTIAL_ACTOR.get(op, "token:credentialled"),
                   ip=params.get("source_ip"), detail=req.get("request_id"))
             log.info("fwd: %s ok for peer=%s (pid=%d, token-credentialled)",
                      op, peer_name, pid)
