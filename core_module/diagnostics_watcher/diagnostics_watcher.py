@@ -61,12 +61,19 @@ from modules.diagnostics import watcher as diag_watcher  # noqa: E402
 # PYTHONPATH (/opt/nemesis/alert_manager), same as `nemesis_paths` above.
 import nemesis_connectivity_notify as conn_notify         # noqa: E402
 import integrity_watch as _integrity_watch                # noqa: E402
+import drift_watch as _drift_watch                        # noqa: E402
 
 #: Last ticketed integrity finding, so an hourly checker reporting the same
 #: tampering does not file a ticket every cycle. Process-local by design: a
 #: restart re-files once, which is the safe direction -- re-notifying about a
 #: real finding is recoverable, silently dropping one is not.
 _INTEGRITY_STATE = {"sig": None}
+
+#: Same shape, same reasoning, for the netfilter drift checker's fact file. Kept as a
+#: SEPARATE signature rather than folded into the one above: the two checkers report
+#: independent properties, and sharing one signature would let a change in either
+#: suppress the other's ticket.
+_DRIFT_STATE = {"sig": None}
 
 _running = True
 
@@ -260,6 +267,26 @@ def main() -> None:
                 last_signature=_INTEGRITY_STATE["sig"])[1]
         except Exception:
             log.exception("diagnostics-service: integrity poll error")
+
+        # ── Netfilter drift fact file -> ticket (nodivert + tailnet anti-spoof) ──
+        # Same privilege split and the same reason as the integrity block above: the
+        # ROOT checker (nemesis-drift-check.timer) cannot file its own ticket, because
+        # a root process writing alerts.db creates root-owned WAL siblings that lock
+        # the dashboard out of its own database. Root writes a fact file; this already
+        # periodic, non-web-facing poller turns it into a ticket.
+        #
+        # ⚠ An ABSENT fact file is reported as nothing, not as "no drift" -- the
+        # checker may simply not have run yet, and read_fact() returns None for absent
+        # and unreadable alike. That is why the deploy verifies the file exists rather
+        # than trusting a quiet poller.
+        #
+        # Wrapped in its OWN try for the same reason the integrity poll is: neither
+        # reporter may suppress the other, and neither may stop the diagnostics probe.
+        try:
+            _DRIFT_STATE["sig"] = _drift_watch.poll_once(
+                last_signature=_DRIFT_STATE["sig"])[1]
+        except Exception:
+            log.exception("diagnostics-service: drift poll error")
 
         # Sleep in 1s increments so SIGTERM/SIGINT shut us down promptly.
         _probe_sleep(_interval_seconds())
