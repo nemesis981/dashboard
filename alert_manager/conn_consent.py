@@ -288,7 +288,33 @@ def coverage_state(device_id, conn=None) -> str:
     """
     try:
         st = status(device_id, conn=conn)
-    except Exception:                                        # noqa: BLE001
+    except Exception as exc:                                 # noqa: BLE001
+        # ⚠ RECORDED, NOT JUST RETURNED. COVERAGE_UNKNOWN is a correct answer
+        # to the CALLER -- guessing "covered" would be far worse -- but until
+        # 2026-08-31 it was the ONLY trace. The identical underlying fault IS
+        # recorded as E-CONSENT-006 when it happens via the status ROUTE
+        # (dashboard.py), so the same failure was countable down one path and
+        # invisible down this one. That asymmetry is the finding, not the
+        # return value.
+        #
+        # A connection is NOT opened just to record: status() has already
+        # failed, and if the database is what broke, opening another handle
+        # inside the handler fails too. With the caller's conn we persist; with
+        # none, record() says "NOT PERSISTED" in the journal rather than
+        # pretending. Never raises either way -- this function is contractually
+        # non-raising and callers depend on that.
+        try:
+            import conn_consent_errors                       # noqa: PLC0415
+            conn_consent_errors.record(
+                conn, conn_consent_errors.E_STATUS_FAILED,
+                {"fn": "coverage_state", "device": (device_id or "")[:12],
+                 "error": "%s: %s" % (type(exc).__name__, exc)})
+        except Exception:                                    # noqa: BLE001
+            # This module deliberately has no logger of its own; the errors
+            # module owns that surface. If even the import failed there is
+            # nowhere left to say so, and swallowing is the only option that
+            # keeps this function non-raising.
+            pass
         return COVERAGE_UNKNOWN
     if st.get("reason") == "no record":
         # Disclosure model: a device nobody has configured is collecting.
