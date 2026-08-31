@@ -49,6 +49,29 @@ sys.exit(0 if ok else 1)
   exit 2
 fi
 
+# The unit must be able to CONNECT to tailscaled's local-API socket. Connecting to a
+# unix socket requires WRITE access to the inode, and ProtectSystem=strict mounts the
+# hierarchy read-only -- so the socket's directory needs an explicit ReadWritePaths
+# exception or the netfilter half reports UNDETERMINED forever.
+#
+# Detected rather than hardcoded: a snap install and a native install put it in
+# different places. If none is found we still install (the daemon may start later) and
+# say so, because the checker fails CLOSED and will name the missing socket itself.
+TS_SOCK=""
+for c in /var/run/tailscale/tailscaled.sock /run/tailscale/tailscaled.sock \
+         /var/snap/tailscale/common/socket/tailscaled.sock; do
+  if [ -S "$c" ]; then TS_SOCK="$c"; break; fi
+done
+if [ -n "$TS_SOCK" ]; then
+  TS_SOCK_DIR="$(dirname "$TS_SOCK")"
+  echo "tailscaled socket: $TS_SOCK"
+else
+  TS_SOCK_DIR=""
+  echo "WARNING: no tailscaled socket found. Installing anyway -- the checker fails"
+  echo "         CLOSED and will report the exact path it looked for. Re-run this"
+  echo "         script once tailscaled is up so the unit gets its socket exception."
+fi
+
 install -d -o root -g root -m 0500 "$DEST"
 install -d -o root -g root -m 0755 "$STATUS_DIR"
 
@@ -70,9 +93,17 @@ Type=oneshot
 # documented reason this is not a diagnostics/ module.
 User=root
 ExecStart=$DEST/nemesis-drift-check
-# It reads /etc/ufw/before.rules and the tailscaled socket; it writes only the fact file.
+# It reads /etc/ufw/before.rules and tailscaled's local-API socket; it writes only the
+# fact file.
+#
+# ⚠ NO PATH= IS SET, AND NONE SHOULD BE. The checker talks to tailscaled's socket
+# directly and runs no external binary. An earlier version shelled out to \`tailscale\`,
+# which broke on first deployment: that binary is a snap at /snap/bin, absent from
+# systemd's default PATH. Adding /snap/bin here would fix the lookup and still be wrong
+# -- running a snap requires snap-confine, which refuses to start inside the mount
+# namespace these very directives create. The dependency was removed instead.
 ProtectSystem=strict
-ReadWritePaths=$STATUS_DIR
+ReadWritePaths=$STATUS_DIR${TS_SOCK_DIR:+ $TS_SOCK_DIR}
 ProtectHome=yes
 PrivateTmp=yes
 NoNewPrivileges=yes
@@ -120,5 +151,11 @@ echo "Two things to read in that JSON, not just the verdict:"
 echo "  * .verifier MUST be $DEST/netfilter_drift.py --"
 echo "    /opt/nemesis/core/... means the deploy did not take and root is importing"
 echo "    a user-writable file. 'ok' reads identically either way."
-echo "  * .checks.netfilter_mode.status of 'undetermined' means the tailscaled socket"
-echo "    was not reachable under the sandbox -- a fail-closed non-answer, NOT a pass."
+echo "  * .checks.netfilter_mode.status MUST be 'ok' or 'drifted', NOT 'undetermined'."
+echo "    Undetermined means the socket was unreachable -- a fail-closed non-answer, not"
+echo "    a pass. The detail now names the REAL cause (socket missing / permission"
+echo "    denied / no answer); read it rather than assuming the daemon is at fault."
+if [ -z "$TS_SOCK_DIR" ]; then
+  echo "  * NOTE: no socket was found at install time, so the unit has NO socket"
+  echo "    exception. Re-run this script once tailscaled is up."
+fi

@@ -70,13 +70,24 @@ def parse_netfilter_mode(prefs_text):
     return v if isinstance(v, int) else None
 
 
-def check_netfilter_mode(prefs_text):
-    """(status, detail). UNDETERMINED when prefs are unreadable -- never OK."""
+def check_netfilter_mode(prefs_text, unread_reason=None):
+    """(status, detail). UNDETERMINED when prefs are unreadable -- never OK.
+
+    `unread_reason` carries WHY the read failed, from the caller that attempted it.
+
+    ⚠ IT EXISTS BECAUSE THE OLD FIXED MESSAGE WAS ACTIVELY MISLEADING, and that cost
+    real time on 2026-08-31. This function said "the daemon did not answer" for every
+    unreadable case, so a deployed run reported a daemon problem when the true cause was
+    that the CLI binary was not on the unit's PATH at all. A wrong cause is worse than no
+    cause: it sends the reader to investigate a healthy daemon. When the caller knows
+    what actually failed, it says so here; the fallback wording no longer asserts a cause
+    it cannot know.
+    """
     mode = parse_netfilter_mode(prefs_text)
     if mode is None:
         return (UNDETERMINED,
-                "could not read Tailscale prefs -- the daemon did not answer, so the "
-                "netfilter mode is unknown. NOT treated as healthy.")
+                "could not read Tailscale prefs (%s), so the netfilter mode is unknown. "
+                "NOT treated as healthy." % (unread_reason or "cause not recorded"))
     if mode == MODE_NODIVERT:
         return OK, "netfilter mode is nodivert (%d), as configured" % mode
     return (DRIFTED,
@@ -157,6 +168,12 @@ def selftest():
         return False, "canary: mode 'off' (0) was not flagged"
     if check_netfilter_mode("")[0] != UNDETERMINED:
         return False, "canary: unreadable prefs did not fail closed"
+    # The reason must reach the detail. A checker that cannot report WHY it failed sends
+    # the next reader after the wrong subsystem -- which is what happened on 2026-08-31.
+    if "binary not found" not in check_netfilter_mode("", "binary not found")[1]:
+        return False, "canary: the caller's failure reason was dropped from the detail"
+    if "cause not recorded" not in check_netfilter_mode("")[1]:
+        return False, "canary: a missing reason did not fall back honestly"
     if check_netfilter_mode("not json")[0] != UNDETERMINED:
         return False, "canary: unparseable prefs did not fail closed"
 
@@ -171,4 +188,4 @@ def selftest():
 
     if overall([OK, DRIFTED]) != DRIFTED or overall([OK, UNDETERMINED]) != UNDETERMINED:
         return False, "canary: worst-of aggregation rounds down"
-    return True, "10 canaries passed"
+    return True, "12 canaries passed"

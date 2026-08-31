@@ -13,7 +13,8 @@ database), so the result reaches the product as a fact file instead.
 
 Exit codes:  0 both properties hold | 1 drift detected | 2 cannot verify (FAIL CLOSED)
 """
-import json, os, subprocess, sys, tempfile, datetime
+import json, os, socket, sys, tempfile, datetime
+import http.client
 
 #: WHERE THE VERIFIER IS LOADED FROM -- not cosmetic, and not the repo by default.
 #: deploy_drift_check.sh installs netfilter_drift.py BESIDE this script inside a
@@ -39,15 +40,107 @@ UFW_RULES = os.environ.get("NEMESIS_UFW_RULES", "/etc/ufw/before.rules")
 EXIT_OK, EXIT_DRIFT, EXIT_CANNOT = 0, 1, 2
 
 
-def _prefs():
-    """Tailscale prefs, or None. Reading them IS the liveness proof -- see the module
-    docstring on why `systemctl is-active tailscaled` must never be used here."""
+#: tailscaled's local-API socket. Checked in order; first existing socket wins.
+#: A snap install and a native install put it in different places, so neither path may
+#: be hardcoded alone.
+SOCKET_CANDIDATES = (
+    "/var/run/tailscale/tailscaled.sock",              # native package
+    "/run/tailscale/tailscaled.sock",                  # native, /run-first systems
+    "/var/snap/tailscale/common/socket/tailscaled.sock",  # snap (canonical)
+)
+
+
+def _is_socket(path):
+    import stat as _stat
     try:
-        r = subprocess.run(["tailscale", "debug", "prefs"],
-                           capture_output=True, text=True, timeout=10)
-        return r.stdout if r.returncode == 0 else None
-    except Exception:                                               # noqa: BLE001
-        return None
+        return _stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _find_socket():
+    """(path, reason). A missing socket is an explicit failure, never a default.
+
+    ⚠ AN EXPLICIT OVERRIDE IS AUTHORITATIVE AND NEVER FALLS BACK. If
+    NEMESIS_TAILSCALED_SOCKET is set and is not a socket, that is an ERROR -- we do not
+    quietly search the system paths instead. Falling back would mean the checker reports
+    on a DIFFERENT daemon than the operator pointed it at while looking entirely
+    healthy, which is the same "answered from the wrong place" failure the provenance
+    field elsewhere in this file exists to make visible. Caught by
+    test_drift_check_prefs_source.py, which pointed the override at a nonexistent path
+    and got a confident "ok" read from the real daemon.
+    """
+    override = os.environ.get("NEMESIS_TAILSCALED_SOCKET")
+    if override:
+        if _is_socket(override):
+            return override, None
+        return None, ("NEMESIS_TAILSCALED_SOCKET=%s is not a socket; refusing to fall "
+                      "back to system paths" % override)
+
+    tried = []
+    for cand in SOCKET_CANDIDATES:
+        if not cand:
+            continue
+        tried.append(cand)
+        if _is_socket(cand):
+            return cand, None
+    return None, "no tailscaled socket found (tried: %s)" % ", ".join(tried)
+
+
+def _prefs():
+    """(prefs_json_text, reason). Reading them IS the liveness proof -- see the module
+    docstring on why `systemctl is-active tailscaled` must never be used here.
+
+    ⚠ THIS TALKS TO THE DAEMON SOCKET DIRECTLY AND MUST NOT GO BACK TO THE CLI.
+    It used to run `tailscale debug prefs`, and that failed in the FIRST real deployment
+    (2026-08-31) for a reason no test could have caught: `tailscale` is a snap at
+    /snap/bin/tailscale, and systemd's default PATH does not include /snap/bin. The
+    binary was never found, `except Exception` swallowed the FileNotFoundError, and the
+    check reported UNDETERMINED with "the daemon did not answer" -- naming a healthy
+    daemon as the suspect.
+
+    Adding /snap/bin to the unit's PATH would fix the lookup and still be the wrong
+    shape: invoking a snap requires snap-confine, which refuses to run inside the mount
+    namespace that systemd's own sandboxing creates. The dependency itself is what has to
+    go. The local API is the same source the CLI reads, one hop shorter, and it is what
+    the daemon actually serves -- so the liveness property is preserved exactly: if the
+    daemon does not answer, we get no prefs and report UNDETERMINED.
+
+    Every failure returns its OWN reason. A single "unreadable" for socket-missing,
+    refused, timed-out and malformed-response is what made the original bug expensive.
+    """
+    path, why = _find_socket()
+    if path is None:
+        return None, why
+
+    class _UnixHTTP(http.client.HTTPConnection):
+        def connect(self):
+            sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sk.settimeout(10)
+            sk.connect(path)
+            self.sock = sk
+
+    try:
+        conn = _UnixHTTP("local-tailscaled.sock", timeout=10)
+        conn.request("GET", "/localapi/v0/prefs",
+                     headers={"Host": "local-tailscaled.sock"})
+        resp = conn.getresponse()
+        body = resp.read().decode("utf-8", "replace")
+        if resp.status != 200:
+            return None, ("tailscaled local API at %s returned HTTP %d (not 200)"
+                          % (path, resp.status))
+        return body, None
+    except PermissionError as exc:
+        # Distinct on purpose: this is the shape a sandbox or apparmor denial takes, and
+        # it is NOT a daemon fault. Naming it here is what stops the next reader from
+        # investigating tailscaled.
+        return None, ("permission denied connecting to %s (%s) -- the daemon is not "
+                      "implicated; check the unit's sandboxing" % (path, exc))
+    except socket.timeout:
+        return None, "tailscaled did not answer within 10s on %s" % path
+    except Exception as exc:                                        # noqa: BLE001
+        return None, "could not query tailscaled on %s: %s: %s" % (
+            path, type(exc).__name__, exc)
 
 
 def _rules():
@@ -93,7 +186,8 @@ def main():
         print("CANNOT VERIFY: %s" % detail, file=sys.stderr)
         return EXIT_CANNOT
 
-    m_status, m_detail = ND.check_netfilter_mode(_prefs())
+    prefs_text, prefs_why = _prefs()
+    m_status, m_detail = ND.check_netfilter_mode(prefs_text, prefs_why)
     a_status, a_detail = ND.check_antispoof(_rules())
     overall = ND.overall([m_status, a_status])
     findings = [d for s, d in ((m_status, m_detail), (a_status, a_detail))

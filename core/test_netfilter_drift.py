@@ -13,7 +13,7 @@ import netfilter_drift as D
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 35
+EXPECTED_CHECKS = 39
 
 
 def check(label, got, want):
@@ -109,6 +109,19 @@ def test_no_systemctl_proxy():
     check("...and says why, in the docstring", "not-found" in src, True)
 
 
+def test_unread_reason_is_reported():
+    print("\n[an unreadable prefs read must name its REAL cause, not blame the daemon]")
+    st, detail = D.check_netfilter_mode("", "no tailscaled socket found (tried: /a, /b)")
+    check("still undetermined", st, D.UNDETERMINED)
+    check("the caller's reason reaches the detail", "no tailscaled socket found" in detail, True)
+    # The 2026-08-31 regression in one assertion: the old text asserted a daemon fault
+    # for every failure, including a missing CLI binary. It must no longer do that
+    # unless the caller actually said so.
+    check("does NOT invent a daemon fault", "did not answer" in detail, False)
+    check("an absent reason is admitted, not guessed",
+          "cause not recorded" in D.check_netfilter_mode("")[1], True)
+
+
 def test_selftest():
     print("\n[known-good AND known-bad, in the production path]")
     ok, detail = D.selftest()
@@ -126,6 +139,7 @@ if __name__ == "__main__":
     test_antispoof_fails_closed()
     test_overall_never_rounds_down()
     test_no_systemctl_proxy()
+    test_unread_reason_is_reported()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:
