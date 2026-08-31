@@ -15,7 +15,23 @@ Exit codes:  0 both properties hold | 1 drift detected | 2 cannot verify (FAIL C
 """
 import json, os, subprocess, sys, tempfile, datetime
 
-sys.path.insert(0, "/opt/nemesis/core")
+#: WHERE THE VERIFIER IS LOADED FROM -- not cosmetic, and not the repo by default.
+#: deploy_drift_check.sh installs netfilter_drift.py BESIDE this script inside a
+#: 0500 root:root directory, and that copy is preferred whenever it exists.
+#:
+#: The repo copy is a DEV fallback for running out of the tree by hand. It must not
+#: be the first choice: this runs as root from a timer, and /opt/nemesis/core is
+#: 0664 <user>:<user> -- writable by an unprivileged account. A root process importing
+#: from there executes whatever that account can write, which turns a drift checker
+#: into a local privilege-escalation path. Exactly the reasoning behind
+#: nemesis-integrity-check's "the repo path is deliberately NOT on sys.path", and
+#: the reason its deploy ships its own copy of integrity.py rather than importing
+#: the watched tree's.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_REPO_CORE = "/opt/nemesis/core"
+_VERIFIER_DIR = (_HERE if os.path.exists(os.path.join(_HERE, "netfilter_drift.py"))
+                 else _REPO_CORE)
+sys.path.insert(0, _VERIFIER_DIR)
 import netfilter_drift as ND                                        # noqa: E402
 
 STATUS = os.environ.get("NEMESIS_DRIFT_STATUS", "/var/lib/nemesis-drift/status.json")
@@ -71,6 +87,7 @@ def main():
         payload = {"checked_at": datetime.datetime.now(datetime.timezone.utc)
                    .isoformat(timespec="seconds"),
                    "verdict": "cannot_verify", "exit_code": EXIT_CANNOT,
+                   "verifier": ND.__file__,
                    "findings": ["self-test failed: %s" % detail], "checks": {}}
         write_status(STATUS, payload)
         print("CANNOT VERIFY: %s" % detail, file=sys.stderr)
@@ -88,6 +105,12 @@ def main():
         "checked_at": datetime.datetime.now(datetime.timezone.utc)
                       .isoformat(timespec="seconds"),
         "verdict": overall, "exit_code": code, "findings": findings,
+        # PROVENANCE, deliberately recorded rather than assumed. An installed run
+        # must show the 0500 root:root copy; seeing /opt/nemesis/core here means the
+        # deploy did not take and root is importing a user-writable file. That is a
+        # misdeployment the verdict alone would never reveal -- "ok" reads identically
+        # either way.
+        "verifier": ND.__file__,
         "checks": {"netfilter_mode": {"status": m_status, "detail": m_detail},
                    "antispoof_rule": {"status": a_status, "detail": a_detail}},
     })
