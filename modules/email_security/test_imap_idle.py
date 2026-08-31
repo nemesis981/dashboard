@@ -29,6 +29,7 @@ WHAT THIS PINS, AND WHY EACH ONE
 
 import imaplib
 import os
+import ssl as _ssl
 import sys
 import threading
 
@@ -296,12 +297,112 @@ def _code_only(path):
 
 
 _code = _code_only(os.path.join(_HERE, "imap_idle.py"))
-check("no provider-agnostic branching in CODE (Gmail only, per D3)",
+# ⚠ LABEL CORRECTED 2026-08-31. This never tested "Gmail only" -- it tests that
+# the OAUTH DEFERRAL has not been reversed, which is the boundary that actually
+# matters and is still enforced. Proton was added by extending the TRANSPORT
+# (implicit TLS vs STARTTLS) with no new way to prove identity, so this check is
+# unaffected by design rather than by luck. A provider needing XOAUTH2 would
+# still trip it, which is the point.
+check("the OAuth deferral is intact in CODE (no XOAUTH2 path)",
       "outlook" not in _code.lower() and "xoauth" not in _code.lower(),
       "a generic client is how Outlook's deferred OAuth cost sneaks back in")
 check("CONTROL: the naive prose-grep WOULD have false-positived here",
       "outlook" in src.lower(),
       "proves the code-only check is doing real work, not trivially passing")
+
+print("\n-- 12. TRANSPORT: STARTTLS, loopback leniency, and the retry fix --")
+
+# The loopback gate. It decides whether an unverifiable certificate may be
+# accepted, so it must fail CLOSED on anything it cannot confirm.
+for good in ("127.0.0.1", "127.1.2.3", "::1", "[::1]", "localhost", "LOCALHOST"):
+    check("loopback: %s" % good, imap_idle._is_loopback(good))
+for bad in ("imap.gmail.com", "192.168.1.10", "10.0.0.1", "8.8.8.8",
+            "127.0.0.1.evil.com", "", None, "  "):
+    check("NOT loopback: %r" % (bad,), not imap_idle._is_loopback(bad))
+
+# The pairing that makes leniency defensible, enforced at construction.
+def _construct(**kw):
+    base = dict(user="u@example.com", app_password="abcdefghijklmnop")
+    base.update(kw)
+    try:
+        imap_idle.ImapIdleClient(**base)
+        return None
+    except Exception as exc:                                    # noqa: BLE001
+        return type(exc).__name__
+
+check("self-signed + REMOTE host is REFUSED at construction",
+      _construct(host="imap.gmail.com", allow_self_signed=True)
+      == "ImapConfigError",
+      _construct(host="imap.gmail.com", allow_self_signed=True))
+check("  ...and the same request for LOOPBACK is allowed",
+      _construct(host="127.0.0.1", port=1143, tls_mode="starttls",
+                 allow_self_signed=True) is None,
+      _construct(host="127.0.0.1", port=1143, tls_mode="starttls",
+                 allow_self_signed=True))
+check("an unknown tls_mode is refused",
+      _construct(tls_mode="sorta-tls") == "ImapConfigError",
+      _construct(tls_mode="sorta-tls"))
+check("implicit is still the default",
+      imap_idle.ImapIdleClient("u@example.com", "pw").tls_mode
+      == imap_idle.TLS_IMPLICIT)
+
+# The SSL context. Asserting the RESULTING FLAGS, not that a call was made --
+# a context built with the wrong flags looks identical from the call site.
+_strict = imap_idle.ImapIdleClient("u@example.com", "pw")._ssl_context()
+_lenient = imap_idle.ImapIdleClient(
+    "u@example.com", "pw", host="127.0.0.1", port=1143,
+    tls_mode="starttls", allow_self_signed=True)._ssl_context()
+check("default context VERIFIES the certificate",
+      _strict.check_hostname is True
+      and _strict.verify_mode == _ssl.CERT_REQUIRED,
+      (_strict.check_hostname, _strict.verify_mode))
+check("lenient context relaxes BOTH flags (either alone still fails)",
+      _lenient.check_hostname is False
+      and _lenient.verify_mode == _ssl.CERT_NONE,
+      (_lenient.check_hostname, _lenient.verify_mode))
+
+# The classification fix. A certificate rejection must NOT be retryable.
+check("ImapConfigError is NOT a transient error",
+      not issubclass(imap_idle.ImapConfigError, imap_idle.ImapTransientError))
+check("  ...and is NOT an auth error either (different fix, different advice)",
+      not issubclass(imap_idle.ImapConfigError, imap_idle.ImapAuthError))
+check("  ...but IS catchable as ImapError",
+      issubclass(imap_idle.ImapConfigError, imap_idle.ImapError))
+# run() retries ONLY ImapTransientError, so a config error ends the loop. That
+# is the whole point: the old code retried cert failures forever with backoff.
+_run = _code_only(os.path.join(_HERE, "imap_idle.py"))
+check("run() does not catch ImapConfigError (so it is never retried)",
+      "except ImapConfigError" not in _run)
+check("SSLCertVerificationError is classified as CONFIG, not transient",
+      "ssl.SSLCertVerificationError" in _run
+      and "raise ImapConfigError" in _run)
+
+# Password handling must not corrupt a provider whose secret may contain spaces.
+check("Gmail-style inner spaces are stripped",
+      imap_idle.ImapIdleClient("u@example.com", "abcd efgh ijkl mnop")._pw
+      == "abcdefghijklmnop")
+check("...but NOT when the provider says otherwise",
+      imap_idle.ImapIdleClient("u@example.com", " keep me ",
+                               strip_inner_whitespace=False)._pw == "keep me")
+
+# The two TLS vocabularies must not drift apart.
+import providers as _prov                                       # noqa: E402
+check("TLS constants match providers.py exactly",
+      (imap_idle.TLS_IMPLICIT, imap_idle.TLS_STARTTLS)
+      == (_prov.TLS_IMPLICIT, _prov.TLS_STARTTLS))
+check("every provider's tls_mode is one this client accepts",
+      all(_prov.get(k)["tls_mode"] in (imap_idle.TLS_IMPLICIT,
+                                       imap_idle.TLS_STARTTLS)
+          for k, _ in _prov.choices()))
+# The bonus defect from the audit: Gmail advice shown to a Proton user.
+check("auth advice is provider-specific, not hardcoded Gmail text",
+      "Gmail" in imap_idle._auth_help("gmail")
+      and "Gmail" not in imap_idle._auth_help("proton"))
+check("  ...and Proton's advice names Bridge",
+      "Bridge" in imap_idle._auth_help("proton"))
+check("  ...with a safe generic fallback for an unknown provider",
+      isinstance(imap_idle._auth_help("nope"), str)
+      and len(imap_idle._auth_help("nope")) > 0)
 
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

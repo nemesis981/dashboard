@@ -1,16 +1,32 @@
 """Gmail IMAP IDLE client. ADR 0028 D2/D3, build spec Stage 2.2.
 
-SCOPE: GMAIL ONLY, AND DELIBERATELY NOT GENERALISED
-    The build spec is explicit that this must not become a provider-agnostic
-    IMAP client. Outlook.com personal accounts are deferred precisely because
-    they need XOAUTH2 and a registered Microsoft OAuth app -- the
-    registration/review cost ADR 0028 D1 chose IMAP to avoid. A generic client
-    is how that cost sneaks back in through the back door: someone adds a
-    `provider=` argument, then an OAuth branch, and the deferral has silently
-    been reversed by refactoring rather than by decision.
+SCOPE: PASSWORD-OVER-TLS PROVIDERS ONLY. THE OAUTH DEFERRAL STILL HOLDS.
+    This file used to say GMAIL ONLY. It now also serves Proton (via Proton Mail
+    Bridge), and the boundary it was protecting has been RESTATED rather than
+    removed, because the original warning was right about the danger and wrong
+    about where the line sits.
+
+    The danger it named: someone adds a `provider=` argument, then an OAuth
+    branch, and ADR 0028 D1's deferral of Outlook.com -- taken to avoid the cost
+    of registering and getting review for a Microsoft OAuth app -- has been
+    reversed by refactoring instead of by decision.
+
+    THAT REMAINS FORBIDDEN, and it is what the line actually protects. What is
+    permitted here is narrower than "any provider": every supported provider
+    authenticates with a plain username + app password over TLS, and only the
+    TRANSPORT SHAPE varies -- implicit TLS versus STARTTLS, and whether the
+    endpoint is loopback. Those are mechanical facts about where to connect, not
+    a second authentication model.
+
+    So the rule is: a provider whose only difference is transport belongs in
+    `providers.py` and needs no new code path here. A provider needing a
+    different way to PROVE IDENTITY -- OAuth, XOAUTH2, a token refresh -- does
+    NOT belong here and is still a real decision, not a refactor. If you find
+    yourself adding a token-refresh branch to `connect()`, stop.
 
     Gmail app passwords are a TRANSITIONAL mechanism with no announced removal
-    date. This client is a real but shrinking escape hatch, not a foundation.
+    date. Proton requires Bridge to be installed and RUNNING on this machine.
+    Both are real but shrinking escape hatches, not foundations.
 
 CREDENTIALS ARE PARAMETERS, NEVER READ FROM CONFIG HERE
     The client takes host/user/password as constructor arguments and reads no
@@ -71,6 +87,13 @@ DEFAULT_IDLE_SECONDS = 25 * 60
 GMAIL_IMAP_HOST = "imap.gmail.com"
 GMAIL_IMAP_PORT = 993
 
+#: TLS transport shapes. Mirrors providers.TLS_* -- kept as literals here so this
+#: module still imports standalone (its suite runs without the provider table),
+#: and `test_imap_idle.py` asserts the two definitions are identical rather than
+#: trusting this comment to stay true.
+TLS_IMPLICIT = "implicit"
+TLS_STARTTLS = "starttls"
+
 #: An untagged EXISTS response is how the server announces new mail during
 #: IDLE. Matched strictly: a loose match that also accepted EXPUNGE or FETCH
 #: would make the client "detect" mail that did not arrive.
@@ -95,6 +118,32 @@ class ImapTransientError(ImapError):
     """Network, TLS, or server-side failure. Retryable with backoff."""
 
 
+class ImapConfigError(ImapError):
+    """A PERMANENT transport or configuration fault. Never retried.
+
+    ⚠ THIS EXISTS BECAUSE THE ABSENCE OF IT WAS A REAL, EXPENSIVE BUG.
+    A TLS certificate rejection is an `ssl.SSLError`, and `connect()` used to
+    wrap every `ssl.SSLError` as `ImapTransientError`. So a permanent,
+    never-going-to-succeed certificate failure was treated as a passing network
+    blip and retried forever with exponential backoff (5s -> 300s) -- and
+    because the wrapper reported only the exception TYPE, nothing in any log
+    line ever said "certificate". The observable symptom was an endless,
+    unexplained reconnect loop.
+
+    That is this project's standing "a default that means something" failure in
+    its most costly form: not a wrong answer, but a wrong CLASSIFICATION that
+    routes a permanent fault into the retry path and hides its cause.
+
+    Distinguished from ImapAuthError because the fixes differ and the person
+    reading the message needs to know which: an auth error means the credential
+    is wrong, a config error means the connection itself is misconfigured (wrong
+    TLS mode, an untrusted certificate, Bridge not running).
+
+    `run()` does not catch this, so it propagates and ends the loop -- which is
+    correct. Retrying it is exactly the bug.
+    """
+
+
 class ImapUnsupported(ImapError):
     """The interpreter cannot support push IDLE. Raised at construction."""
 
@@ -102,6 +151,56 @@ class ImapUnsupported(ImapError):
 def _idle_supported() -> bool:
     """True when the stdlib provides native IDLE (Python 3.14+)."""
     return hasattr(imaplib.IMAP4, "idle")
+
+
+def _is_loopback(host: str) -> bool:
+    """True only for an address that cannot leave this machine.
+
+    This gates whether an unverifiable TLS certificate may be accepted, so it
+    must FAIL CLOSED: anything it cannot positively confirm as loopback is
+    treated as remote. A hostname that merely resolves to 127.0.0.1 is
+    deliberately NOT accepted -- resolution can change under us, and a DNS
+    answer is not a property of the connection. The literal 'localhost' is
+    accepted because it is not resolvable to anything else in practice.
+    """
+    if not isinstance(host, str) or not host.strip():
+        return False
+    h = host.strip().strip("[]").lower()
+    if h == "localhost":
+        return True
+    try:
+        import ipaddress                                        # noqa: PLC0415
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        # Not a literal address -- a hostname. Fail closed.
+        return False
+
+
+def _auth_help(provider) -> str:
+    """Provider-appropriate advice for a login failure.
+
+    Imported LAZILY and defensively. This runs on an error path, and an
+    ImportError raised while explaining an error would replace a useful message
+    with a traceback -- so a missing providers module degrades to generic advice
+    rather than obscuring the failure being reported.
+    """
+    try:
+        try:  # resolves under either caller PYTHONPATH shape
+            from modules.email_security import providers        # noqa: PLC0415
+        except ImportError:                                     # pragma: no cover
+            import providers                                    # noqa: PLC0415
+        return providers.auth_help(provider)
+    except Exception:                                           # noqa: BLE001
+        # ⚠ The fallback is a genuine last resort, NOT a normal path. Reaching it
+        # means every provider silently gets generic advice while the specific
+        # text sits unreachable -- the Gmail-advice-to-a-Proton-user defect
+        # reappearing in a quieter form. Logged so it is visible rather than
+        # merely survivable. Both import shapes are tried above precisely so this
+        # is not reached by an ordinary difference in how the module was loaded.
+        log.warning("email_security: provider advice unavailable; falling back "
+                    "to generic text for provider=%r", provider)
+        return ("Check that the app password was copied correctly and is still "
+                "valid with your email provider.")
 
 
 class ImapIdleClient:
@@ -116,7 +215,11 @@ class ImapIdleClient:
                  host: str = GMAIL_IMAP_HOST, port: int = GMAIL_IMAP_PORT,
                  mailbox: str = "INBOX",
                  on_message=None,
-                 idle_seconds: int = DEFAULT_IDLE_SECONDS):
+                 idle_seconds: int = DEFAULT_IDLE_SECONDS,
+                 tls_mode: str = TLS_IMPLICIT,
+                 allow_self_signed: bool = False,
+                 provider: str | None = None,
+                 strip_inner_whitespace: bool = True):
         if not _idle_supported():
             raise ImapUnsupported(
                 "imaplib.IMAP4.idle() is unavailable on this interpreter "
@@ -127,14 +230,43 @@ class ImapIdleClient:
             # Explicit, not a silent connect-and-fail: an empty credential
             # produces an auth error that reads like a wrong password.
             raise ValueError("user and app_password are both required")
+        if tls_mode not in (TLS_IMPLICIT, TLS_STARTTLS):
+            raise ImapConfigError(
+                "unknown tls_mode %r (expected %r or %r)"
+                % (tls_mode, TLS_IMPLICIT, TLS_STARTTLS))
+
+        # ⚠ ENFORCED HERE, IN CODE, NOT MERELY DOCUMENTED. Accepting a
+        # certificate nothing can verify is defensible for loopback, where there
+        # is no man-in-the-middle position to occupy, and indefensible for a
+        # remote host, where the certificate is the ONLY thing authenticating
+        # the server. A caller that asks for both a remote host and a
+        # self-signed certificate is asking to have its mail read in transit,
+        # and gets refused at construction rather than at first connect.
+        if allow_self_signed and not _is_loopback(host):
+            raise ImapConfigError(
+                "refusing to accept unverified certificates for non-loopback "
+                "host %r. Certificate leniency is permitted ONLY for 127.0.0.1 "
+                "/ ::1, where there is no interception position; against a "
+                "remote host it removes the only thing authenticating the "
+                "server." % host)
 
         self.user = user
-        # Google displays app passwords in four groups of four. Strip
-        # whitespace here so a pasted value with spaces does not fail as what
-        # looks like a wrong password.
-        self._pw = "".join(app_password.split())
+        # Google displays app passwords in four groups of four, so a pasted
+        # value carries spaces that are not part of the secret. Stripping them
+        # is CORRECT for Gmail and WRONG in general -- a provider whose password
+        # may legitimately contain a space would be silently corrupted into
+        # something that fails as a wrong password. Hence a flag, set from
+        # providers.py, rather than an unconditional strip.
+        self._pw = ("".join(app_password.split()) if strip_inner_whitespace
+                    else app_password.strip())
         self.host = host
         self.port = port
+        self.tls_mode = tls_mode
+        self.allow_self_signed = allow_self_signed
+        #: Only used to select the right advice on an auth failure. It does NOT
+        #: drive any connection behaviour -- transport comes from tls_mode/port,
+        #: so a wrong provider label cannot silently change how we connect.
+        self.provider = provider
         self.mailbox = mailbox
         self.on_message = on_message
         self.idle_seconds = idle_seconds
@@ -146,17 +278,85 @@ class ImapIdleClient:
 
     # ── Connection ─────────────────────────────────────────────────────────
 
+    def _ssl_context(self) -> ssl.SSLContext:
+        """The TLS context for this connection.
+
+        Verification is FULL by default. It is relaxed only when
+        `allow_self_signed` is set, which the constructor permits only for a
+        loopback host -- so the two checks together mean an unverified
+        certificate can never be accepted from a remote server, whatever a
+        caller passes.
+        """
+        ctx = ssl.create_default_context()
+        if self.allow_self_signed:
+            # Proton Mail Bridge presents a self-signed certificate for
+            # 127.0.0.1 that is in no CA store. Both must be relaxed:
+            # check_hostname alone still fails on an untrusted issuer, and
+            # setting verify_mode while check_hostname is True raises.
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
     def connect(self) -> None:
-        """Open TLS, authenticate, select the mailbox. Idempotent."""
+        """Open TLS, authenticate, select the mailbox. Idempotent.
+
+        Two transports, chosen by `tls_mode`:
+          implicit -- TLS from the first byte (IMAPS, the :993 style). Gmail.
+          starttls -- plaintext connect, then upgrade. Proton Bridge's :1143.
+
+        Using the wrong one does not degrade gracefully; it fails in the
+        handshake, which is why this is explicit configuration rather than a
+        guess based on port number.
+        """
         if self._conn is not None:
             return
+        ctx = self._ssl_context()
         try:
-            conn = imaplib.IMAP4_SSL(
-                self.host, self.port, ssl_context=ssl.create_default_context())
-        except (OSError, ssl.SSLError) as exc:
+            if self.tls_mode == TLS_STARTTLS:
+                conn = imaplib.IMAP4(self.host, self.port)
+                # If STARTTLS fails we must NOT continue: the connection is
+                # still plaintext and carrying on would send the app password in
+                # the clear. imaplib raises on a NO/BAD response, and the
+                # handler below turns that into a permanent config error.
+                conn.starttls(ssl_context=ctx)
+            else:
+                conn = imaplib.IMAP4_SSL(self.host, self.port, ssl_context=ctx)
+        except ssl.SSLCertVerificationError as exc:
+            # ⚠ PERMANENT, NOT TRANSIENT -- see ImapConfigError's docstring.
+            # This was previously swallowed into ImapTransientError and retried
+            # forever with backoff, with nothing in any message saying
+            # "certificate". Naming it here is the entire fix.
+            raise ImapConfigError(
+                "TLS certificate for %s:%d could not be verified (%s). This "
+                "will not fix itself, so it is not retried. If this is Proton "
+                "Mail Bridge on loopback, the account must be enrolled as a "
+                "provider that permits its self-signed certificate."
+                % (self.host, self.port, exc.verify_message or "no detail")) from exc
+        except ssl.SSLError as exc:
+            # A non-verification TLS failure is usually a transport MISMATCH --
+            # implicit TLS attempted against a STARTTLS port, or the reverse.
+            # Also permanent: the same wrong setting will fail identically on
+            # every retry.
+            raise ImapConfigError(
+                "TLS handshake with %s:%d failed (%s) using tls_mode=%r. This "
+                "is usually the wrong transport for the port -- implicit TLS "
+                "against a STARTTLS port, or the reverse. Not retried."
+                % (self.host, self.port, type(exc).__name__, self.tls_mode)) from exc
+        except imaplib.IMAP4.error as exc:
+            # STARTTLS refused by the server, or an unusable greeting.
+            raise ImapConfigError(
+                "%s:%d refused STARTTLS or returned an unusable greeting (%s). "
+                "Not retried: continuing would send the credential in "
+                "plaintext." % (self.host, self.port, type(exc).__name__)) from exc
+        except OSError as exc:
+            # Genuinely transient: refused, unreachable, timed out. For a
+            # loopback provider this is the ordinary "Bridge is not running"
+            # case, which really can start working without a config change.
             raise ImapTransientError(
-                "connect to %s:%d failed: %s"
-                % (self.host, self.port, type(exc).__name__)) from exc
+                "connect to %s:%d failed: %s%s"
+                % (self.host, self.port, type(exc).__name__,
+                   " -- for Proton this usually means Proton Mail Bridge is not "
+                   "running" if _is_loopback(self.host) else "")) from exc
 
         try:
             conn.login(self.user, self._pw)
@@ -167,11 +367,16 @@ class ImapIdleClient:
                 pass
             # Deliberately does NOT include the password or the server's raw
             # message, which can echo credential material.
+            #
+            # The advice is PROVIDER-AWARE. It used to be hardcoded Gmail text
+            # ("check that 2-Step Verification is enabled, and that IMAP is
+            # turned on in Gmail settings"), which is not merely unhelpful to a
+            # Proton user but actively wrong guidance sending them to settings
+            # that do not exist for their account.
             raise ImapAuthError(
-                "login failed for %s -- check the app password, that 2-Step "
-                "Verification is enabled, and that IMAP is turned on in Gmail "
-                "settings. Not retried: none of those is fixed by retrying."
-                % _mask(self.user)) from exc
+                "login failed for %s -- %s Not retried: none of those is fixed "
+                "by retrying." % (_mask(self.user), _auth_help(self.provider))
+            ) from exc
 
         self.capabilities = conn.capabilities
         self._conn = conn
