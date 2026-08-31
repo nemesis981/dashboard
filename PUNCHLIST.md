@@ -6123,3 +6123,46 @@ route records its codes at 7 sites. The gaps are elsewhere:
 with a call site waiting for it, near-zero design work. Then (4) `lan_integrity`, then (3) Fork
 B's silent chain (a real security-relevant fail-permissive), then (2) Gateway Mode, then (1) the
 admin-approval bridge, which is the largest and needs a namespace decision first.
+
+### [MEDIUM] Tunnel-coverage detection is set-membership, not prefix-coverage arithmetic — a VPN using many large prefixes misclassifies as NOT tunnelled (found 2026-08-30/31, owed as its own item since the 08-30 handoff)
+
+**Two live functions share this exact root cause**, discovered on the same day in neighbouring
+modules against the same VPN:
+
+- `modules/diagnostics/watcher.py`'s `tunnel_carries_egress()` — checks for a tunnel-KIND
+  interface carrying a **default route, a `/1` straddle, or `2000::/3`**. All three are real,
+  common shapes (confirmed via 12/12 real-kernel topologies) and PIA's own case is a `/1`
+  straddle, so this covers the client actually in use here.
+- `core/forkb_policy_route.py`'s legacy `classify_topology()` (now marked SUPERSEDED — see
+  below) had the identical weakness, with a worse consequence: a wrong ROUTING decision (a
+  bypass installed under what's actually a full tunnel, pinning inspected traffic outside the
+  user's VPN while every surface reports success) rather than just a false alert.
+
+**The gap, precisely:** none of these three shapes is exhaustive. A VPN client that covers the
+address space via **many large but non-default, non-`/1`, non-`2000::/3` prefixes** — a real,
+if unmeasured, configuration shape — would classify as NOT tunnelled by both functions, and
+would reproduce the false alert from `tunnel_carries_egress()` unchanged. **Not seen in any
+client measured to date** — flagged as a design gap, not an observed failure.
+
+**Closing it needs prefix-coverage arithmetic** (does the union of a routing table's prefixes
+cover "enough" of the address space to count as a tunnel), **not a longer set of known
+shapes** — every additional named shape is still finite, and the actual property being tested
+("does this table route effectively everything through the tunnel") is a coverage question,
+not a membership one. Needs an operator ruling on where the coverage threshold sits before any
+code changes — this is a design decision, not a one-line fix.
+
+**Mitigating fact, not a fix:** Fork B's REBUILT topology classifier
+(`classify_by_resolution()`, replacing the SUPERSEDED `classify_topology()` referenced above,
+shipped 2026-08-31) determines topology via **measured routing outcomes** (`ip route get`
+against real destinations) rather than pattern-matching the routing table's shape at all — it
+does not care what prefixes exist, only where a packet would actually go. This makes it
+structurally different from the set-membership approach and **likely, but not confirmed,
+immune** to this specific gap. Not verified either way this pass; worth confirming before
+assuming Fork B's current path is exposed.
+
+**`tunnel_carries_egress()` in the connectivity watcher is unaffected by Fork B's rebuild** —
+different module, still set-membership, still open.
+
+Full evidence chain (private mirror): `known-limitations/forkb-full-tunnel-decline-unreachable-
+2026-08-31.md`, `known-limitations/vpn-aware-verdict-REGRESSION-2026-08-30.md`,
+`handoff/2026-08-30-window1-handoff.md`.
