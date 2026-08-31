@@ -171,6 +171,70 @@ it.* (The deliberate no-interim-fix on the DNS issue above is this principle in 
 
 ---
 
+## 8. Documented exceptions to the chokepoint mandate
+
+CLAUDE.md requires all new network access-control to route through
+`alert_manager/firewall.py` (the single `ufw` chokepoint this ADR's firewall engine
+governs). Exceptions are tracked here, individually justified and narrowly scoped —
+never a general license.
+
+### 8.1 Install-time persistent NAT config (2026-08-31)
+
+`install.sh`'s `configure_forkb_nat()` writes a `*nat` block directly into
+`/etc/ufw/before.rules` without routing through `alert_manager/firewall.py`. This is a
+deliberate, operator-approved exception, not an oversight.
+
+**Why the chokepoint cannot be used here.** Every `nemesis-fwd` write op requires a
+fresh admin password verified against a stored bcrypt hash. At install time that admin
+record does not yet exist and the helper is not necessarily running — there is no
+credential to present and no helper to present it to. The chokepoint's admin path is
+structurally unavailable, not merely inconvenient.
+
+**Why it is the right layer anyway.** This is persistent config, not a runtime rule
+operation. The chokepoint's vocabulary is runtime verbs (`block_ip`, `deny_ip`, …);
+`before.rules` is the durable layer beneath them. Persistence is load-bearing and
+measured: a value passed as a one-off environment variable was silently dropped at the
+firewall watcher's next re-render, leaving traffic un-translated while every status
+surface reported success.
+
+**Scope — narrow, and it does not generalise.** This covers **install-time persistent
+config only**. It is not licence for any runtime NAT operation to bypass the chokepoint;
+runtime NAT goes through `firewall.py`/`nemesis-fwd` like everything else, as Gateway
+Mode's `gateway_switch` op does (§8.2 below shows the contrast directly: same general
+subject area, chokepoint used because the admin path IS available at runtime).
+
+**The deviation has already cost something.** `masquerade_egress_iface()` had no test
+coverage at all, which is how it shipped answering wrongly under a `/1` straddle VPN
+(fixed 2026-08-31, `707bf2f`). Code outside the chokepoint did not inherit the
+chokepoint's scrutiny.
+
+**Not this ADR's original scope, and the attribution is worth being precise about:**
+the chokepoint mandate itself is CLAUDE.md's, naming this ADR as the engine that
+inherits the debt — it is not an ADR-0009 requirement. ADR 0009 is Fork B's parent ADR
+and has no chokepoint mandate; its only "chokepoint" mention is an export API. An
+earlier draft of this exception attributed it to ADR 0009; corrected here.
+
+**Follow-up, tracked separately (PUNCHLIST):** whether Fork B's install-time NAT rule
+should be re-derived by the renderer on every render (as Gateway Mode's SNAT rule is)
+rather than written once at install and never revisited, so it self-heals if the
+physical NIC is renamed or replaced. Not urgent — the rule is inert while
+`ip_forward=0`, and measured 2026-08-31 to be shadowed by PIA's own MASQUERADE
+whenever PIA is connected (see `firewall-enforcement-engine/forkb-splittunnel-rig/`,
+commit `c5b2bf8`, private mirror).
+
+### 8.2 Contrast: Gateway Mode's runtime NAT goes through the chokepoint
+
+Gateway Mode's `switch()` (`core/gateway_mode.py`) needed a privileged executor to
+actually flip forwarding + install its SNAT rule at runtime, when an admin session and
+the `nemesis-fwd` helper both exist. That executor is `gateway_switch`, a new
+admin-credentialed op added to `nemesis-fwd` and granted to the dashboard peer alone
+(`64ae0c7`), reached via `POST /api/gateway/switch` (`3aec429`) — through the
+chokepoint, per the mandate, because the admin path IS available at runtime. §8.1's
+exception exists specifically because that path is unavailable at install time; it is
+not a precedent for skipping the chokepoint when the path is available.
+
+---
+
 ## Status / next
 
 Proposed. This ADR **records** the corrected diagnosis and the decided direction; it does not
