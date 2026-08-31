@@ -5993,10 +5993,12 @@ unmeasured axes), and the two catalogs (E-FORKB x5, E-GATEWAY x4).
 Registry went from **81 codes / 16 namespaces** (of which 24 were invisible to the checker)
 to **137 codes / 24 namespaces**, CLEAN.
 
-⚠ **STILL OPEN, and deliberately NOT closed by this work:** Track C's AGENT-side gaps —
-`nemesis_agent/consent.py` and `conn_collector.py` still reference `agent_errors` zero times
-while `agent_errors.py` carries 37 E-AGENT codes. That is item 5's second half and is scoped
-to its own future pass; the server side is done.
+~~STILL OPEN: Track C's AGENT-side gaps~~ — **DONE 2026-08-31, `958a0cd`.** consent.py and
+conn_collector.py now record E-AGENT-121/122/123 (connection events dropped, consent record
+unreadable, revocation could not be written). ⚠ The existing coverage check could not have
+caught the gap: neither file was in `test_agent_errors.py`'s scanned list, so its phantom
+check never read them. Both the file list and the codes were needed. **The whole audit thread
+is now complete, agent and server.**
 
 **Two audit claims were corrected during the work and are worth keeping:** `E-CONSENT-006`
 was NOT a phantom (it is recorded at `dashboard.py:5183`; the real gap was an asymmetry with
