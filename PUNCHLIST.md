@@ -6248,9 +6248,24 @@ the implementation detail of most pieces "is maintained privately".
 the ones whose detail was moved out of the public doc, so a public-only read reports them as
 scoping-only. The audit undercounts precisely where work has happened. `roadmap-state-audit-2026-08-31.md`
 concluded "Pieces A–I ... remain scoping-only — 2 of 11 pieces shipped"; the private module's own
-build history contradicts that for at least two of those pieces. **The audit's J/K evidence was
-sound and correctly cited — this is not a criticism of that pass**, which is why the fix belongs
-in the method rather than in a correction to one document.
+build history contradicts that for **one** of those pieces (Piece F — a real per-destination
+leaf store, `leafstore.py`). **The audit's J/K evidence was sound and correctly cited — this is
+not a criticism of that pass**, which is why the fix belongs in the method rather than in a
+correction to one document.
+
+⚠ **SELF-CORRECTION, 2026-08-31, same day.** This entry first said "at least two of those
+pieces", counting Piece E on the strength of `layer1.py`/`layer2.py`/`layer3.py`. **Reading those
+files rather than their names shows they are VALIDATION HARNESSES, not the implementation** —
+they answer "is the cert story identical whether cache-served or deep-inspected?" and "can an
+observer tell BY LATENCY ALONE?". They MEASURE whether normalization holds; they do not perform
+it. Piece E's section carries no "built" claim and its padding commit (`ae52c21`) is explicitly
+"self-correction, **not applied**". So Piece E is MEASURED AND DECIDED, NOT IMPLEMENTED.
+
+**The correction cuts against my own finding and toward the audit's**: the undercount is real but
+SMALLER than first reported, and the morning pass was closer to right than this entry originally
+credited. Recorded rather than quietly amended, because a filed finding that overstates its case
+is exactly what makes the next reader distrust the ones that do not. The method fix below is
+unaffected — a public-only read still cannot see Piece F.
 
 **Fix directions (not done — audit-first, and this needs an operator call because it touches the
 public/private boundary):**
