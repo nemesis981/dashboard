@@ -9,7 +9,12 @@
 > `roadmap-state-audit-2026-08-24.md` (kept as history). No PII/infra values (Rule 8):
 > commit hashes + filenames only.
 
-**Tally: 13 SHIPPED · 14 PARTIAL · 59 STUB/PARKED — 86 total.**
+**Tally: 13 SHIPPED · 13 PARTIAL · 59 STUB/PARKED — 85 total.**
+
+**Why 85, not the 86 files on disk:** `product-thesis-built-in-it-expertise.md` is
+deliberately excluded from this tally (operator decision, same day — see §8). `ls
+docs/roadmap/*.md` will keep reporting 86; a future file-set-drift check should expect
+that +1 gap for this specific, documented reason, not read it as unexplained drift.
 
 ## ⚠ Methodology note — this is the first FULL re-derivation since 2026-08-06
 
@@ -144,21 +149,22 @@ One item moves the other direction under the same tightened standard:
 |---|---|---|
 | `storage-monitoring-retention-supplement-2026-08-03.md` | SHIPPED | PARTIAL — items 1 and 3 are live, the rest is design-only; a real subset shipped, not the whole deliverable |
 
-## 5. Findings surfaced, not resolved — flagged for operator decision
+## 5. Findings surfaced this pass, resolved same day — see §8
 
-- **`malware-detection-pipeline.md` has no `Status:` header at all**, and is a large V1/V2/V3
-  umbrella design doc whose named sub-features (Layer B behavioral monitoring, Layer D
-  local ML, the local isolated sandbox) now each have their own independently-tracked
-  roadmap file. Kept at its historical **PARTIAL** classification rather than guessed at,
-  but flagged: should this doc be marked superseded/retired now that its pieces are
-  tracked separately, or does it still own real V2/V3 remainder scope? Needs an explicit
-  call, not an inference.
+Both items below were flagged here without a unilateral call, then resolved by explicit
+operator decision the same day. Kept in this section for the original reasoning; §8 has
+the resolution and what changed as a result.
+
+- **`malware-detection-pipeline.md` had no `Status:` header at all**, and is a large
+  V1/V2/V3 umbrella design doc whose named sub-features (Layer B behavioral monitoring,
+  Layer D local ML, the local isolated sandbox) now each have their own
+  independently-tracked roadmap file. Flagged: should this doc be marked
+  superseded/retired now that its pieces are tracked separately, or does it still own
+  real V2/V3 remainder scope? **Resolved 2026-08-31: retired** — see §8.
 - **`product-thesis-built-in-it-expertise.md` is not a build item.** It's a
   philosophy/business-thesis reference doc other roadmap files cite as design rationale.
-  Forced into the SHIPPED/PARTIAL/PARKED schema for tally-arithmetic purposes (counted
-  PARKED here, the least-wrong bucket), but this is a category mismatch, not a real
-  classification. Recommend either excluding reference docs from the roadmap tally
-  entirely going forward, or adding a fourth bucket.
+  Forcing it into the SHIPPED/PARTIAL/PARKED schema is a category mismatch, not a real
+  classification. **Resolved 2026-08-31: excluded from the tally entirely** — see §8.
 
 ## 6. Security-relevant findings surfaced during this pass (unrelated to bucket movement)
 
@@ -168,7 +174,9 @@ One item moves the other direction under the same tightened standard:
   (secret *values*) is redacted; no IP/MAC/hostname/email pattern exists. The doc's
   broader §5 access-control foundation shipped (classified PARTIAL overall on that
   balance), but this specific named risk has been open since the doc was written and has
-  survived every baseline since. Worth direct attention, not just a classification note.
+  survived every baseline since. **Filed 2026-08-31 as its own PUNCHLIST entry** (`[HIGH]
+  Submit-to-Support ships device PII...`) so it surfaces in the routinely-scanned
+  punchlist rather than only inside this roadmap doc — operator decision, same day.
 - **`clean-uninstall-build-spec.md`** (kept PARTIAL, unchanged bucket) — flag on
   `aa8d784` ("Cutover B Phase 0... remove web uninstall") and PUNCHLIST entry `353ce11`
   ("uninstall leaves agent process + state behind") sitting on top of the previously
@@ -211,7 +219,7 @@ One item moves the other direction under the same tightened standard:
 | `rogue-dhcp-detection.md` | `2ce0866`/`5b15b3c` — new this pass, see §2 |
 | `uninstall-deenroll.md` | new this pass, see §2 |
 
-## PARTIAL (14)
+## PARTIAL (13)
 
 | File | State |
 |---|---|
@@ -222,7 +230,6 @@ One item moves the other direction under the same tightened standard:
 | `diagnostics-and-access-master-plan.md` | §5 access-control shipped and exceeds original scope; §2.1 PII-redaction gap still open — see §6 |
 | `gateway-mode-scoping.md` | New this pass — see §2 |
 | `installer-unified-v1.0.6.md` | Delivery + self-onboard live; two named before-trip fixes remain unconfirmed either way this pass |
-| `malware-detection-pipeline.md` | Historical classification kept; flag for retire/supersede decision, see §5 |
 | `malware-layer-d-local-ml.md` | Classifier pipeline shipped; no trained model — doc's own header already says so |
 | `memory-injection-detection-design.md` | Observation-layer active; detection technique stays paused, per doc's own split |
 | `storage-monitoring-retention-supplement-2026-08-03.md` | Moved down from SHIPPED this pass — see §4 |
@@ -249,11 +256,11 @@ One item moves the other direction under the same tightened standard:
 `ipv6-rogue-router-detection.md`, `l2-windivert-stumble-escalation.md`,
 `latent-bug-fleet-clamav-only.md` *(moved, §4)*,
 `lateral-movement-outbreak-detection.md` *(moved, §4)*,
-`malware-cloud-sandbox-optional.md`, `msp-central-management.md`,
-`nemesis-overhead-meter.md`, `nemesis-test-lab.md`,
+`malware-cloud-sandbox-optional.md`,
+`malware-detection-pipeline.md` *(retired/superseded, §8)*,
+`msp-central-management.md`, `nemesis-overhead-meter.md`, `nemesis-test-lab.md`,
 `network-resource-scaling-advisor.md`, `open-source-threat-feeds.md` *(moved, §4)*,
 `post-update-module-repair.md`, `pre-escalation-support-search.md`,
-`product-thesis-built-in-it-expertise.md` *(reference doc, not a build item — §5)*,
 `ram-recovery-windows-platform-gap.md`, `removable-media-device-control.md`,
 `responsive-dashboard-multiuser-ready.md`, `sandbox-first-software-testing.md` *(moved, §4)*,
 `sandbox-to-system-migration.md` *(moved, §4)*, `server-on-windows-roadmap.md`,
@@ -263,6 +270,35 @@ One item moves the other direction under the same tightened standard:
 `udp-default-deny-scoping.md`, `venue-guest-network.md`, `verified-partner-program.md`,
 `vulnerability-patch-management.md`, `windows-agent-memory-injection-rework-prereqs.md`.
 
+## Excluded from tracking (1)
+
+`product-thesis-built-in-it-expertise.md` — not a build item (philosophy/business-thesis
+reference doc), removed from the SHIPPED/PARTIAL/PARKED tally entirely, operator decision
+2026-08-31. See §8.
+
+## 8. Follow-up: operator decisions applied 2026-08-31 (same day)
+
+Both items flagged in §5 were resolved the same day the audit was written, by explicit
+operator decision rather than a unilateral call:
+
+- **`malware-detection-pipeline.md`: retired.** Its own header now carries a "RETIRED
+  2026-08-31" note pointing to the three roadmap files that now own its scope
+  (`malware-layer-b-behavioral-monitoring.md`, `malware-layer-d-local-ml.md`,
+  `malware-local-isolated-sandbox.md`). Reclassified **PARTIAL → PARKED** in this doc's
+  own tally, consistent with how `windows-agent-memory-injection-rework-prereqs.md` (also
+  SUPERSEDED) is tracked — kept for history, not counted as live scope.
+- **`product-thesis-built-in-it-expertise.md`: excluded from the tally entirely.** Its
+  own header now carries an explicit tracking-exclusion note. Moved out of the
+  SHIPPED/PARTIAL/PARKED count into its own "Excluded from tracking" section above. This
+  is why the tally total is 85, not the 86 files `ls docs/roadmap/*.md` reports — see the
+  note under the Tally line at the top of this document.
+- **`diagnostics-and-access-master-plan.md` §2.1 (PII-redaction gap):** filed as its own
+  `PUNCHLIST.md` entry (`[HIGH]`) for routine-scan visibility — see §6.
+
+Net effect on the tally: PARTIAL 14→13 (malware-detection-pipeline moved to PARKED),
+PARKED 59 (unchanged in count: +1 malware-detection-pipeline, -1 product-thesis, now
+excluded), tracked total 86→85.
+
 ## Method
 
 Six parallel read-only investigations each covered ~14-15 roadmap files: read the file,
@@ -271,10 +307,15 @@ codebase for the specific modules/tables/routes/tests the doc names as its deliv
 cross-reference `git log`. Findings were then reconciled against `roadmap-state-audit-
 2026-08-06.md` — the actual source baseline the incremental chain has carried forward
 unverified since — which surfaced and allowed correction of two sub-agent false negatives
-(§3). File-set arithmetic (86 = 13 + 14 + 59) is internally consistent and independently
-confirmed against `ls docs/roadmap/*.md`.
+(§3). File-set arithmetic (85 tracked + 1 excluded = 13 + 13 + 59 + 1 = 86) is internally
+consistent and independently confirmed against `ls docs/roadmap/*.md`.
 
-Roadmap FILE headers were **not edited** in this pass (audit-only, per Rule 1 and the
-explicit scope of this request) — §3, §6, and §7 above list every file whose own header
-or content is now known to be stale and needs a follow-up edit. Baseline doc for the next
-Morning Status: this file (2026-08-31), superseding `roadmap-state-audit-2026-08-24.md`.
+Roadmap FILE headers were **not edited in the original pass** (audit-only, per Rule 1 and
+the explicit scope of the original request) — §3, §6, and §7 listed every file whose own
+header or content was known to be stale. §8's two retirement/exclusion edits and a
+same-day follow-up pass then corrected the headers named in §3
+(`idle-lock-walk-away-protection.md`, `hardware-stable-identifiers.md`,
+`malware-yara-rule-autoupdate.md`), §7's `data-retention-and-archival-policy.md`, and
+`dashboard-roles-access-control.md`'s sub-admin content — see each file's own history for
+the exact edit. Baseline doc for the next Morning Status: this file (2026-08-31),
+superseding `roadmap-state-audit-2026-08-24.md`.
