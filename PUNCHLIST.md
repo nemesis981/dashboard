@@ -5942,3 +5942,43 @@ failure waiting to happen — vigilance has no mechanism to apply.
 
 Recommendation: **(1)**, with (2)'s build-time assertion as a follow-on if the exe
 build is ever seen to drift again. Do not resolve by "remember to re-apply it".
+
+### [MEDIUM] Windows ETW collector does not populate proc_name/proc_path/proc_signed — the plan's stated "asymmetric win" (found 2026-08-31, on real hardware)
+
+**Measured, elevated, on real Windows** (11 build 10.0.26200.8655): every emitted
+event carried `pid` but `proc_name: null`, `proc_path: null`,
+`proc_signed: "unknown"`. Not a runtime failure — `EtwSource` never passes those
+arguments at all; they are parameters on the assembler that default to `None`.
+
+**Why it matters more than a missing field.** `track-c-metadata-tier-build-plan.md`
+Piece 1 calls exactly these fields **"the asymmetric win — no network sensor can
+produce this"**. It is the stated justification for collecting on the endpoint
+rather than at the network. Without them the Windows collector produces roughly
+what a network sensor already could, plus a pid.
+
+**And Piece 6 has now traded the old source of it away** (2026-08-31, operator-
+directed, done knowingly). The retired poll path resolved the process name from the
+pid via `psutil.Process(pid).name()`. Windows agents now get event-driven
+completeness and no process names; the trade was accepted deliberately, but it is
+only sound if this gets closed.
+
+**The pid IS captured, so this is fillable — but not naively.** A `psutil` lookup at
+open-time races the thing the tier exists to catch: a beacon that connects for two
+seconds is very likely gone before the lookup runs, so the events that matter most
+are exactly the ones that would resolve to nothing. Options worth weighing rather
+than picking on the spot:
+  - resolve at open-time via psutil, accept the race, and COUNT the misses (cheap,
+    honest, partial);
+  - subscribe to the ETW process provider and maintain a pid→image map, so exits do
+    not erase the answer (more work, and the correct shape);
+  - resolve server-side from a process inventory the agent already ships.
+
+**Do not close this by making the fields "unknown" look intentional.** The schema
+already distinguishes `SIGNED_UNKNOWN` from absent for a reason.
+
+**Other quality signals from the same run, recorded so they are not re-measured
+from scratch:** `data_orphan` 107 vs `data` 101 (bytes largely unattributed to
+flows — every sample had `bytes_sent`/`bytes_recv` null), `close_unmatched_flow` 6
+of 15 closes, `flow_replaced_unclosed` 2, `close_duplicate` 2, `dns_no_results` 36
+against `dns_observed` 9 (so `resolved_name` was null throughout). The collector
+WORKS; the fidelity of what it produces is a separate, open question.
