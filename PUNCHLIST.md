@@ -5871,3 +5871,38 @@ the rebinding variant too; (b) an allowlist of permitted mail domains, which def
 of Tier 3; (c) accept and document. **(a) is the recommended one** and is a small addition to
 `imap_idle`'s connect path rather than new machinery. Do not "fix" this by adding a lookup to
 `settings_resolve.py`.
+
+### [V2-FINALIZATION] Write the full "what we collect and why" disclosure list as its own doc/manual section (operator-directed 2026-08-31)
+
+**This document does not exist yet, and it is a V2-finalization task — not today's build.**
+Logged now, while the reasoning is fresh, so it is not rediscovered at release time.
+
+**What it is.** One authoritative, user-facing list covering EVERY feature that collects
+data, and for each one: what data it gathers, why the product needs it, whether it is
+**on by default**, how to turn it off, how long it is kept, and who can see it.
+
+**Why it is owed.** On 2026-08-31 the operator replaced Track C's affirmative-opt-in model
+with **disclosure-and-toggle**: security telemetry is on by default, disclosed plainly, and
+individually switchable off. That model's entire legitimacy rests on the disclosure half
+actually existing and actually being findable. Six items now ship on-by-default
+(connections, running programs, sign-ins, USB devices, new files in drop locations,
+program behaviour) — `nemesis_agent/consent.py`'s `DISCLOSURE_TEXT` covers those six for
+the agent, but it is agent-scoped and is NOT a product-wide list. Anything the SERVER
+collects, and any future collecting feature, has no equivalent.
+
+**The specific risk this closes.** Default-on plus a scattered, per-feature disclosure is
+the shape that reads as burying it, however honest each individual string is. A single
+list is what makes "disclosed clearly, not buried" checkable rather than asserted — and
+it is the artifact anyone reviewing the product's privacy posture will ask for first.
+
+**Notes for whoever writes it**
+- `nemesis_agent/consent.py` `TELEMETRY_ITEMS` is the machine-readable source for the six
+  agent items (key, label, one-line description). Generate from it rather than
+  hand-copying, or the two drift — the failure this repo keeps finding.
+- Retention is currently stated as 30 days for connection events (`reap_conn_events()`);
+  confirm per-item rather than assuming it generalises.
+- The four items that were previously ungated (running programs, sign-ins, USB, new files)
+  were collected with NO disclosure at all before 2026-08-31. The list should not imply
+  they were always disclosed.
+- Cross-reference: `docs/roadmap/track-c-metadata-tier-build-plan.md` REQUIREMENT 0 (which
+  still describes the superseded opt-in model and needs its own correction).
