@@ -29,6 +29,7 @@ Pure tests. No root, no network, no live tailscaled.
 """
 import ast
 import os
+import shutil
 import re
 import sys
 import tempfile
@@ -40,7 +41,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 28
+EXPECTED_CHECKS = 51
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -53,6 +54,11 @@ SNAP_PATH_ALLOWLIST = {
     "core/netfilter_drift.py",                    # explanatory comment only
     "core/test_drift_check_prefs_source.py",      # documents the 2026-08-31 failure
     "core/test_tailscale_packaging_independence.py",  # this file
+    # tailscale_packaging() must name /var/snap/tailscale to DETECT a snap install.
+    # Legitimate and required: it is used for REPORTING which packaging is present,
+    # never to decide whether to act. Added to the allowlist deliberately after this
+    # guard flagged it -- which is the guard working, not a false positive.
+    "core/vpn_dns_guard.py",
 }
 
 
@@ -291,6 +297,141 @@ def test_no_new_hardcoded_snap_paths():
           offenders, [])
 
 
+# --------------------------------------------------------------------------
+# 6. MagicDNS conflict guard (vpn_dns_guard) -- EVERY branch is FORCED.
+#    Added 2026-09-01. A branch that is merely reachable is not covered: the
+#    standing check is "name the test that forces execution down this path".
+# --------------------------------------------------------------------------
+
+def _guard():
+    import vpn_dns_guard
+    return vpn_dns_guard
+
+
+_resolv_seq = [0]
+
+
+def _resolv(tmpdir, lines):
+    """Write a resolv.conf fixture to a UNIQUE path.
+
+    It previously reused one filename per tempdir, so a second fixture silently
+    OVERWROTE the first and two differently-named variables referred to the same
+    file -- the 'exclusive' case was actually reading the 'mixed' content and the
+    probe short-circuited before its query ran. The tell was the call count: 0
+    probes on a path that must make 2.
+    """
+    _resolv_seq[0] += 1
+    p = os.path.join(tmpdir, "resolv.%d.conf" % _resolv_seq[0])
+    with open(p, "w") as fh:
+        fh.write(lines)
+    return p
+
+
+def test_packaging_detection_forced():
+    print("\n[packaging detection: each branch FORCED, not merely reachable]")
+    G = _guard()
+    real_which, real_realpath, real_isdir = shutil.which, os.path.realpath, os.path.isdir
+    try:
+        shutil.which = lambda n: "/snap/bin/tailscale"
+        os.path.realpath = lambda p: "/snap/tailscale/154/bin/tailscale"
+        os.path.isdir = lambda p: False
+        check("snap binary path -> 'snap'", G.tailscale_packaging(), "snap")
+
+        shutil.which = lambda n: "/usr/bin/tailscale"
+        os.path.realpath = lambda p: "/usr/bin/tailscale"
+        os.path.isdir = lambda p: False
+        check("apt binary path -> 'apt'", G.tailscale_packaging(), "apt")
+
+        os.path.isdir = lambda p: p == "/var/snap/tailscale"
+        check("/var/snap present overrides to 'snap'", G.tailscale_packaging(), "snap")
+
+        shutil.which = lambda n: None
+        check("no binary -> 'absent'", G.tailscale_packaging(), "absent")
+    finally:
+        shutil.which, os.path.realpath, os.path.isdir = real_which, real_realpath, real_isdir
+
+
+def test_resolv_exclusivity():
+    print("\n[resolv.conf exclusivity: unreadable must NOT read as 'not exclusive']")
+    G = _guard()
+    with tempfile.TemporaryDirectory() as d:
+        check("only tailscale servers -> True",
+              G.resolv_is_exclusively_tailscale(
+                  _resolv(d, "nameserver 100.100.100.100\nnameserver fd7a:115c:a1e0::53\n")), True)
+        check("tailscale + pi-hole -> False",
+              G.resolv_is_exclusively_tailscale(
+                  _resolv(d, "nameserver 100.100.100.100\nnameserver 127.0.0.1\n")), False)
+        check("pi-hole only -> False",
+              G.resolv_is_exclusively_tailscale(_resolv(d, "nameserver 127.0.0.1\n")), False)
+        check("no nameservers -> False",
+              G.resolv_is_exclusively_tailscale(_resolv(d, "# nothing\n")), False)
+    check("UNREADABLE -> None (fails closed, never False)",
+          G.resolv_is_exclusively_tailscale("/nonexistent/resolv.conf"), None)
+
+
+def test_conflict_branches_forced():
+    print("\n[conflict probe: all six branches forced via injected query]")
+    G = _guard()
+    yes = lambda *a, **k: True
+    no = lambda *a, **k: False
+    unk = lambda *a, **k: None
+    with tempfile.TemporaryDirectory() as d:
+        excl = _resolv(d, "nameserver 100.100.100.100\n")
+        mixed = _resolv(d, "nameserver 127.0.0.1\n")
+
+        r = G.magicdns_conflict(query=yes, resolv_path="/nonexistent/x")
+        check("unreadable resolv.conf -> conflict None", r["conflict"], None)
+
+        r = G.magicdns_conflict(query=no, resolv_path=mixed)
+        check("NOT exclusive (the SNAP shape) -> conflict False", r["conflict"], False)
+        check("...and the reason names the snap case",
+              "snap install" in r["reason"], True)
+
+        r = G.magicdns_conflict(query=yes, resolv_path=excl)
+        check("exclusive + resolver ANSWERS -> conflict False", r["conflict"], False)
+
+        r = G.magicdns_conflict(query=no, resolv_path=excl)
+        check("exclusive + both silent -> conflict None (positive control)",
+              r["conflict"], None)
+        check("...and the reason names the POSITIVE CONTROL",
+              "POSITIVE CONTROL" in r["reason"], True)
+
+        calls = {"n": 0}
+        def ts_down_fallback_up(server, *a, **k):
+            calls["n"] += 1
+            return False if server == G.TS_MAGIC_V4 else True
+        r = G.magicdns_conflict(query=ts_down_fallback_up, resolv_path=excl)
+        check("exclusive + ts silent + fallback answers -> conflict TRUE",
+              r["conflict"], True)
+        check("...and it probed BOTH resolvers (control really ran)", calls["n"], 2)
+
+        r = G.magicdns_conflict(query=unk, resolv_path=excl)
+        check("probe undeterminable -> conflict None (fails closed)", r["conflict"], None)
+
+
+def test_snap_can_never_conflict():
+    print("\n[SNAP: the condition cannot arise -- no-op BY CONSTRUCTION]")
+    G = _guard()
+    # Under snap the takeover is blocked, so resolv.conf is never exclusively
+    # Tailscale's. Whatever the resolvers do, the guard must not fire.
+    with tempfile.TemporaryDirectory() as d:
+        snap_shape = _resolv(d, "nameserver 127.0.0.1\nnameserver 10.0.0.243\n")
+        for label, q in (("all silent", lambda *a, **k: False),
+                         ("all answering", lambda *a, **k: True),
+                         ("undeterminable", lambda *a, **k: None)):
+            r = G.magicdns_conflict(query=q, resolv_path=snap_shape)
+            check("snap shape, %-14s -> conflict False" % label, r["conflict"], False)
+
+
+def test_guard_uses_no_unit_name_proxy():
+    print("\n[the snap unit-name trap is avoided in executable code]")
+    strings = _code_strings(_read("core/vpn_dns_guard.py"))
+    check("no 'systemctl is-active' proxy in executable code",
+          any("is-active" in x for x in strings), False)
+    check("no bare 'tailscaled' unit name in executable code",
+          any(x.strip() == "tailscaled" for x in strings), False)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -300,6 +441,11 @@ if __name__ == "__main__":
     test_invocations_are_bare_names()
     test_tailscale_api_is_cloud_only()
     test_no_new_hardcoded_snap_paths()
+    test_packaging_detection_forced()
+    test_resolv_exclusivity()
+    test_conflict_branches_forced()
+    test_snap_can_never_conflict()
+    test_guard_uses_no_unit_name_proxy()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

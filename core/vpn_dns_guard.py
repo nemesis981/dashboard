@@ -51,7 +51,9 @@ CLI (for the live-test harness and manual ops)
 import json
 import logging
 import os
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -147,6 +149,8 @@ E_COMMAND_UNRUNNABLE     = "E-FORKB-002"
 E_RECONCILE_REFUSED      = "E-FORKB-003"
 E_RECONCILE_FAILED       = "E-FORKB-004"
 E_RECONCILE_CYCLE_ERROR  = "E-FORKB-005"
+E_MAGICDNS_CONFLICT      = "E-FORKB-006"
+E_MAGICDNS_UNDETERMINED  = "E-FORKB-007"
 
 #: Fork B is not doing what it was asked to do.
 _CLASS_FORKB_DEGRADED = "forkb-routing-degraded"
@@ -172,6 +176,15 @@ _ERR_CODES = {
     E_RECONCILE_CYCLE_ERROR: (
         "The reconcile cycle raised; Fork B routing was not evaluated this "
         "interval", "HIGH", _CLASS_FORKB_DEGRADED),
+    E_MAGICDNS_CONFLICT: (
+        "Tailscale's resolver is the ONLY resolver in resolv.conf and does not "
+        "answer, while the fallback resolver does -- DNS is fully broken for "
+        "this host. Detected but NOT yet mitigated: the actuator needs a "
+        "privileged op (see ADR 0002 amendment)", "HIGH", _CLASS_FORKB_DEGRADED),
+    E_MAGICDNS_UNDETERMINED: (
+        "The MagicDNS conflict probe could not determine the state (resolv.conf "
+        "unreadable, or a resolver could not be probed). Failing closed: no "
+        "action taken", "MEDIUM", _CLASS_FORKB_DEGRADED),
 }
 
 _recorder = None
@@ -813,6 +826,195 @@ def restore(ph, state):
         log.error("restore completed but state did NOT persist — the next cycle "
                   "may treat the tunnel as still applied")
     return True
+
+
+# --------------------------------------------------------------------------- #
+# MagicDNS conflict detection  (ADR 0002 amendment -- see docs/architecture/0002)
+#
+# THE PROBLEM. With Tailscale installed from apt and `accept-dns=true`, Tailscale
+# takes DNS over in `directManager` mode and rewrites /etc/resolv.conf to point
+# EXCLUSIVELY at its own resolver (100.100.100.100) -- it writes NO fallback entry.
+# A VPN killswitch that blocks that address therefore does not merely disable
+# MagicDNS: it removes every resolver the host has. Measured live 2026-09-01 on
+# the daily driver -- total DNS outage until `accept-dns=false` was set.
+#
+# WHY THE TRIGGER IS OBSERVED STATE, NOT THE VENDOR AND NOT THE PACKAGING.
+#   * Vendor-neutral by construction, matching detect_tunnel()'s existing stance:
+#     any killswitch that blocks the resolver produces the same observation.
+#   * The snap/apt asymmetry falls out FOR FREE. Under a snap install the DNS
+#     takeover cannot succeed (strict confinement blocks the /etc/resolv.conf
+#     write), so resolv.conf is never exclusively Tailscale's, so this can never
+#     fire. That is a no-op BY CONSTRUCTION rather than a packaging special-case
+#     that could rot. `tailscale_packaging()` exists to REPORT which case we are
+#     in -- it must never be used to DECIDE.
+#
+# ⛔ NEVER identify the daemon by systemd unit name. On snap the unit is
+# `snap.tailscale.tailscaled.service`, so `systemctl is-active tailscaled` returns
+# "inactive" FOR A RUNNING DAEMON. core/netfilter_drift.py documents this exact
+# trap; its answer is the pattern used here -- prove liveness by reading something
+# only a live daemon can answer, never a name proxy.
+# --------------------------------------------------------------------------- #
+
+TS_MAGIC_V4 = "100.100.100.100"
+TS_MAGIC_V6 = "fd7a:115c:a1e0::53"
+TS_MAGIC_RESOLVERS = frozenset((TS_MAGIC_V4, TS_MAGIC_V6))
+RESOLV_CONF_PATH = "/etc/resolv.conf"
+
+
+def tailscale_cli():
+    """Path to the tailscale CLI, or None. PATH-resolved so BOTH packagings work."""
+    return shutil.which("tailscale")
+
+
+def tailscale_packaging():
+    """'snap' | 'apt' | 'absent' | 'unknown'. For REPORTING ONLY -- never to decide."""
+    exe = tailscale_cli()
+    if not exe:
+        return "absent"
+    try:
+        real = os.path.realpath(exe)
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    if real.startswith("/snap/") or os.path.isdir("/var/snap/tailscale"):
+        return "snap"
+    if real.startswith("/usr/"):
+        return "apt"
+    return "unknown"
+
+
+def _resolv_nameservers(path=RESOLV_CONF_PATH):
+    """Nameservers from resolv.conf, or None if UNREADABLE.
+
+    None is deliberately distinct from []: an unreadable file must not read as
+    "no nameservers" and thereby as "not exclusively Tailscale", which would
+    silently suppress the guard. Fail closed, never to a legal-looking value.
+    """
+    try:
+        found = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("nameserver"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        found.append(parts[1])
+        return found
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def resolv_is_exclusively_tailscale(path=RESOLV_CONF_PATH):
+    """True / False / None(undetermined). True only if EVERY nameserver is Tailscale's."""
+    servers = _resolv_nameservers(path)
+    if servers is None:
+        return None
+    if not servers:
+        return False
+    return all(s in TS_MAGIC_RESOLVERS for s in servers)
+
+
+def dns_query_answers(server, name="example.com", timeout=2.0):
+    """Real UDP DNS query. True=answered, False=no answer, None=could not attempt.
+
+    A FUNCTIONAL query, not a port check: "something is bound" and "it answers"
+    are different claims, and only the second one is the thing that matters.
+    """
+    sock = None
+    try:
+        family = socket.AF_INET6 if ":" in server else socket.AF_INET
+        query = struct.pack("!HHHHHH", 0x1234, 0x0100, 1, 0, 0, 0)
+        for label in name.split("."):
+            query += bytes([len(label)]) + label.encode()
+        query += b"\x00" + struct.pack("!HH", 1, 1)
+        sock = socket.socket(family, socket.SOCK_DGRAM)
+        sock.settimeout(timeout)
+        sock.sendto(query, (server, 53))
+        data, _ = sock.recvfrom(512)
+        return len(data) >= 12 and data[:2] == query[:2]
+    except (socket.timeout, ConnectionRefusedError, OSError):
+        return False
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        if sock is not None:
+            try:
+                sock.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def magicdns_conflict(fallback_addr="127.0.0.1", query=None, resolv_path=RESOLV_CONF_PATH):
+    """Is Tailscale's resolver the ONLY resolver AND not answering?
+
+    `conflict` is True / False / None(undetermined). `query` is injectable so
+    every branch can be FORCED by a test rather than merely being reachable.
+
+    ⛔ POSITIVE CONTROL. Never returns True on "Tailscale does not answer" alone.
+    If the fallback resolver is ALSO unreachable then DNS is broken for some other
+    reason, falling back would fix nothing, and claiming this conflict would be a
+    wrong diagnosis. A probe that can only produce one answer measures nothing.
+    """
+    q = query or dns_query_answers
+    result = {"conflict": None, "reason": "", "packaging": tailscale_packaging(),
+              "exclusive": None, "ts_answers": None, "fallback_answers": None}
+
+    exclusive = resolv_is_exclusively_tailscale(resolv_path)
+    result["exclusive"] = exclusive
+    if exclusive is None:
+        result["reason"] = "resolv.conf unreadable -- failing closed, no action"
+        return result
+    if not exclusive:
+        result["conflict"] = False
+        result["reason"] = ("resolv.conf is not exclusively Tailscale's resolver, so a "
+                            "blocked Tailscale resolver cannot remove all DNS "
+                            "(this is always the case on a snap install)")
+        return result
+
+    ts_answers = q(TS_MAGIC_V4)
+    result["ts_answers"] = ts_answers
+    if ts_answers is None:
+        result["reason"] = "could not probe Tailscale's resolver -- failing closed, no action"
+        return result
+    if ts_answers:
+        result["conflict"] = False
+        result["reason"] = "Tailscale's resolver answers; no conflict"
+        return result
+
+    fallback_answers = q(fallback_addr)
+    result["fallback_answers"] = fallback_answers
+    if fallback_answers is None:
+        result["reason"] = "could not probe the fallback resolver -- failing closed, no action"
+        return result
+    if not fallback_answers:
+        result["reason"] = ("POSITIVE CONTROL FAILED: the fallback resolver is also "
+                            "unreachable, so this is not the MagicDNS conflict and "
+                            "falling back would fix nothing. No action")
+        return result
+
+    result["conflict"] = True
+    result["reason"] = ("Tailscale's resolver is the ONLY resolver and does not answer "
+                        "while the fallback does -- all DNS is broken and falling back "
+                        "will restore it")
+    return result
+
+
+def evaluate_magicdns(fallback_addr="127.0.0.1"):
+    """Probe and RECORD. Detection only -- performs no mitigation.
+
+    The actuator (`tailscale set --accept-dns=false`) needs root, and this service
+    runs as nemesis-vpndns with NoNewPrivileges and an EMPTY CapabilityBoundingSet.
+    It therefore cannot and must not act; the privileged half belongs behind
+    nemesis-fwd's op allowlist. Detecting and recording is useful on its own: it
+    names the fault in the journal at the moment it happens.
+    """
+    verdict = magicdns_conflict(fallback_addr=fallback_addr)
+    if verdict["conflict"] is True:
+        _record(E_MAGICDNS_CONFLICT, {k: str(v)[:200] for k, v in verdict.items()})
+        log.warning("MagicDNS conflict: %s", verdict["reason"])
+    elif verdict["conflict"] is None:
+        _record(E_MAGICDNS_UNDETERMINED, {k: str(v)[:200] for k, v in verdict.items()})
+        log.warning("MagicDNS probe undetermined: %s", verdict["reason"])
+    return verdict
 
 
 def reconcile(ph=None, force=None):
