@@ -627,6 +627,13 @@ _ERR_CODES = {
     "E-MAGICDNS-002": ("magicdns_switch applied but verification showed the "
                        "preference did NOT change. A claimed change is not a "
                        "change", "HIGH", None),
+    "E-MAGICDNS-005": ("magicdns_switch REFUSED to enable MagicDNS because "
+                       "/etc/resolv.conf is not a systemd-resolved symlink. "
+                       "Enabling would arm a trap: Tailscale's release path "
+                       "restarts resolved and lets it regenerate, which cannot "
+                       "reach a hand-written regular file -- so the guard could "
+                       "later disable MagicDNS and DNS would stay broken",
+                       "HIGH", None),
     "E-MAGICDNS-004": ("magicdns_switch changed the preference successfully but "
                        "DNS RESOLUTION DID NOT RECOVER. A preference is not an "
                        "outcome. Most often /etc/resolv.conf has been replaced by "
@@ -2557,6 +2564,32 @@ def op_magicdns_switch(params):
             log.warning("fwd: magicdns_switch REFUSED: %s", reason)
             return {"ok": False, "refused": True, "reason": reason,
                     "packaging": packaging, "conflict": conflict}
+        # ⛔ PRECONDITION: never ENABLE MagicDNS while the RELEASE path is broken.
+        #
+        # Tailscale's takeover moves /etc/resolv.conf aside to
+        # /etc/resolv.pre-tailscale-backup.conf and writes its own file; release
+        # restores that backup and/or restarts systemd-resolved. BOTH halves depend
+        # on resolv.conf having been the resolved SYMLINK at takeover time. If it is
+        # a hand-written regular file there is no useful backup to restore and the
+        # resolved restart cannot reach a plain file -- so a later disable leaves
+        # resolv.conf pointing at Tailscale with accept-dns=false. That impossible-
+        # looking state was reached live on 2026-09-01 and persisted 2.5+ minutes.
+        #
+        # Enabling in that condition ARMS A TRAP: it works until the guard needs to
+        # fall back, and then cannot. Refuse instead, and say exactly how to fix it.
+        managed = _resolv_conf_is_resolved_managed()
+        if managed is not True:
+            reason = ("refused: /etc/resolv.conf is not a systemd-resolved symlink "
+                      "(managed=%r), so Tailscale's release path could not restore it "
+                      "later. Enabling now would arm a trap. Fix first: sudo ln -sf "
+                      "../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf"
+                      % (managed,))
+            _errors_record("E-MAGICDNS-005",
+                           {"enable": enable, "resolv_conf_resolved_managed": str(managed)})
+            log.warning("fwd: magicdns_switch REFUSED: %s", reason)
+            return {"ok": False, "refused": True, "reason": reason,
+                    "packaging": packaging, "conflict": conflict,
+                    "resolv_conf_resolved_managed": managed}
         if conflict is True:
             reason = ("refused: the conflict is still present, so re-enabling "
                       "MagicDNS would break DNS again")

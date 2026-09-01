@@ -42,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 139
+EXPECTED_CHECKS = 146
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -980,6 +980,52 @@ def test_outcome_check_has_a_call_site():
           _calls_within(Fp, "_await_resolution", "_resolution_works"), True)
 
 
+# --------------------------------------------------------------------------
+# 12. ARM-THE-TRAP PRECONDITION -- never ENABLE while the RELEASE path is broken.
+#
+# ⛔ 2026-09-01, fifth live test. After PIA dropped, the box sat in a state that
+# should not exist: accept-dns=False AND /etc/resolv.conf still pointing at
+# 100.100.100.100, broken for 2.5+ minutes.
+#
+# CAUSE: Tailscale's takeover moves resolv.conf aside to
+# /etc/resolv.pre-tailscale-backup.conf and writes its own; release restores that
+# backup and/or restarts resolved. BOTH halves need resolv.conf to have been the
+# resolved SYMLINK at takeover time. Measured live: with a hand-written regular
+# file the backup was ABSENT entirely, so release had nothing to restore and the
+# resolved restart could not reach a plain file.
+#
+# Enabling in that condition ARMS A TRAP -- fine until the guard must fall back,
+# and then it cannot. Refuse up front instead.
+# --------------------------------------------------------------------------
+
+def test_refuses_to_enable_when_release_path_is_broken():
+    print("\n[refuse to ENABLE when resolv.conf is not resolved-managed]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=True, conflict=False, owned=True,
+                       reachable=True, resolv_managed=False)
+    check("enable REFUSED when resolv.conf is a plain file", res.get("refused"), True)
+    check("...ok is False", res.get("ok"), False)
+    check("...records E-MAGICDNS-005", "E-MAGICDNS-005" in rec, True)
+    check("...reason says it would arm a trap",
+          "arm a trap" in (res.get("reason") or ""), True)
+    check("...and gives the exact fix", "ln -sf" in (res.get("reason") or ""), True)
+
+
+def test_enable_allowed_once_the_release_path_is_sound():
+    print("\n[but ENABLE proceeds normally when the symlink is in place]")
+    F = _fwd()
+    res, _ = _run_op(F, enable=True, conflict=False, owned=True,
+                     reachable=True, resolv_managed=True)
+    check("enable proceeds when resolved-managed", res.get("ok"), True)
+
+
+def test_precondition_has_a_call_site():
+    print("\n[and the precondition must actually run]")
+    check("op_magicdns_switch() -> _resolv_conf_is_resolved_managed()",
+          _calls_within("alert_manager/nemesis_fwd.py", "op_magicdns_switch",
+                        "_resolv_conf_is_resolved_managed"), True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -1016,6 +1062,9 @@ if __name__ == "__main__":
     test_op_does_not_auto_revert_on_failed_resolution()
     test_happy_path_reports_resolution_recovered()
     test_outcome_check_has_a_call_site()
+    test_refuses_to_enable_when_release_path_is_broken()
+    test_enable_allowed_once_the_release_path_is_sound()
+    test_precondition_has_a_call_site()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))
