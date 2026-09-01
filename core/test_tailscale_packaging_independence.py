@@ -41,7 +41,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 82
+EXPECTED_CHECKS = 96
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -569,6 +569,94 @@ def test_fwd_cli_absent_fails_closed():
     check("...and recorded E-MAGICDNS-003", "E-MAGICDNS-003" in rec, True)
 
 
+# --------------------------------------------------------------------------
+# 8. CALL-SITE REACHABILITY -- "does production actually RUN this?"
+#
+# ⛔ WHY THIS SECTION EXISTS. On 2026-09-01 the MagicDNS guard shipped, passed 82
+# checks, deployed cleanly, and DID NOTHING during a live test that produced a real
+# DNS outage: evaluate_magicdns() had NO CALLER. Every one of those 82 checks
+# invoked the functions DIRECTLY, so the suite proved the mechanism WORKS and never
+# proved it RUNS. The identical defect had been fixed in this repo one day earlier
+# (66ba78e, "wire drift_watch into the diagnostics watcher -- it had no caller").
+#
+# A test that calls a function cannot see a missing call site. Only a structural
+# assertion over the source can. These are those assertions.
+# --------------------------------------------------------------------------
+
+def _calls_within(rel_path, caller, callee):
+    """True if `caller`'s body contains a call to `callee`.
+
+    Counts BOTH bare calls (`f()`) and attribute calls (`mod.f()`), because the
+    helper reaches its re-validation through a lazily-imported module.
+    Returns None if the file or the caller cannot be found -- which FAILS the
+    assertion rather than passing it, since 'not found' must never read as 'fine'.
+    """
+    src = _read(rel_path)
+    if not src:
+        return None
+    try:
+        tree = ast.parse(src)
+    except Exception:
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == caller:
+            for c in ast.walk(node):
+                if not isinstance(c, ast.Call):
+                    continue
+                f = c.func
+                if isinstance(f, ast.Name) and f.id == callee:
+                    return True
+                if isinstance(f, ast.Attribute) and f.attr == callee:
+                    return True
+            return False
+    return None
+
+
+def test_callsite_control():
+    print("\n[CONTROL: the call-site checker can actually detect ABSENCE]")
+    # Known-present and known-absent, proven before the real assertions are trusted.
+    check("detects a call that IS there (reconcile -> detect_tunnel)",
+          _calls_within("core/vpn_dns_guard.py", "reconcile", "detect_tunnel"), True)
+    check("detects a call that is NOT there",
+          _calls_within("core/vpn_dns_guard.py", "reconcile", "no_such_function_xyz"), False)
+    check("missing caller -> None, never True",
+          _calls_within("core/vpn_dns_guard.py", "no_such_caller_xyz", "anything"), None)
+    check("missing file -> None, never True",
+          _calls_within("core/no_such_file_xyz.py", "a", "b"), None)
+
+
+def test_magicdns_guard_is_reachable_from_the_service_loop():
+    print("\n[THE BUG THAT SHIPPED: the guard must be reachable from main_loop]")
+    G = "core/vpn_dns_guard.py"
+    # The whole chain, link by link. Any single break makes the guard dead code.
+    check("main_loop() -> reconcile()", _calls_within(G, "main_loop", "reconcile"), True)
+    check("reconcile() -> evaluate_magicdns()   <-- THE MISSING LINK",
+          _calls_within(G, "reconcile", "evaluate_magicdns"), True)
+    check("evaluate_magicdns() -> magicdns_conflict()",
+          _calls_within(G, "evaluate_magicdns", "magicdns_conflict"), True)
+    check("evaluate_magicdns() -> _magicdns_ask_helper()",
+          _calls_within(G, "evaluate_magicdns", "_magicdns_ask_helper"), True)
+    check("_magicdns_ask_helper() -> magicdns_switch() (the client wrapper)",
+          _calls_within(G, "_magicdns_ask_helper", "magicdns_switch"), True)
+
+
+def test_helper_revalidation_has_a_call_site():
+    print("\n[the helper's RE-VALIDATION must actually run, not merely exist]")
+    F = "alert_manager/nemesis_fwd.py"
+    check("op_magicdns_switch() -> magicdns_conflict()  (re-validation)",
+          _calls_within(F, "op_magicdns_switch", "magicdns_conflict"), True)
+    check("op_magicdns_switch() -> _magicdns_read_pref() (verify-after-act)",
+          _calls_within(F, "op_magicdns_switch", "_magicdns_read_pref"), True)
+    check("op_magicdns_switch() -> _magicdns_state_read() (own-change check)",
+          _calls_within(F, "op_magicdns_switch", "_magicdns_state_read"), True)
+    check("op_magicdns_switch() -> _errors_record() (failures are recorded)",
+          _calls_within(F, "op_magicdns_switch", "_errors_record"), True)
+    # And it must be dispatchable -- reachable from the wire, not just defined.
+    fwd = _fwd()
+    check("op is reachable from the OPS dispatch table",
+          fwd.OPS.get("magicdns_switch") is fwd.op_magicdns_switch, True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -590,6 +678,9 @@ if __name__ == "__main__":
     test_fwd_never_reenables_what_it_did_not_disable()
     test_fwd_verifies_the_change_took()
     test_fwd_cli_absent_fails_closed()
+    test_callsite_control()
+    test_magicdns_guard_is_reachable_from_the_service_loop()
+    test_helper_revalidation_has_a_call_site()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

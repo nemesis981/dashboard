@@ -1064,15 +1064,43 @@ def reconcile(ph=None, force=None):
     state = _load_state()
     tunnel = detect_tunnel()
 
+    # ⛔ THE MAGICDNS GUARD RUNS EVERY CYCLE, BOTH DIRECTIONS, AND UNCONDITIONALLY.
+    #
+    # It is placed HERE -- above the force/apply/restore branches -- deliberately, so
+    # there is exactly ONE call site that every path passes through. Putting it inside
+    # the tunnel-up branch would make the RESTORE direction unreachable (accept-dns
+    # would never come back on when the tunnel dropped), and putting it after the
+    # returns would make it dead code again.
+    #
+    # ⚠ IT WAS DEAD CODE ON ITS FIRST DEPLOY (2026-09-01): evaluate_magicdns() was
+    # written, tested by 82 checks, deployed, and NEVER CALLED -- so the first live
+    # test produced a real DNS outage the guard did not even attempt to prevent. The
+    # identical defect had been fixed in this repo ONE DAY EARLIER (66ba78e,
+    # "wire drift_watch into the diagnostics watcher -- it had no caller").
+    # test_tailscale_packaging_independence.py now asserts THIS CALL SITE by AST.
+    # Do not move or conditionalise it without updating that test.
+    #
+    # Never allowed to break the Pi-hole reconcile it shares a cycle with: MagicDNS
+    # being unavailable is a degradation, upstream DNS failing is an outage.
+    try:
+        magicdns = evaluate_magicdns()
+    except Exception:  # noqa: BLE001
+        log.exception("magicdns evaluation errored; Pi-hole reconcile continues")
+        magicdns = {"conflict": None, "reason": "evaluation raised", "action": None}
+
     if force == "apply":
         tunnel = tunnel if tunnel["up"] else {"up": True, "iface": _force_iface(), "kind": "forced"}
-        return {"action": "apply", "tunnel": tunnel, "ok": apply_fix(ph, tunnel, state)}
+        return {"action": "apply", "tunnel": tunnel, "magicdns": magicdns,
+                "ok": apply_fix(ph, tunnel, state)}
     if force == "restore":
-        return {"action": "restore", "tunnel": tunnel, "ok": restore(ph, state)}
+        return {"action": "restore", "tunnel": tunnel, "magicdns": magicdns,
+                "ok": restore(ph, state)}
 
     if tunnel["up"]:
-        return {"action": "apply", "tunnel": tunnel, "ok": apply_fix(ph, tunnel, state)}
-    return {"action": "restore", "tunnel": tunnel, "ok": restore(ph, state)}
+        return {"action": "apply", "tunnel": tunnel, "magicdns": magicdns,
+                "ok": apply_fix(ph, tunnel, state)}
+    return {"action": "restore", "tunnel": tunnel, "magicdns": magicdns,
+            "ok": restore(ph, state)}
 
 
 def _force_iface():
