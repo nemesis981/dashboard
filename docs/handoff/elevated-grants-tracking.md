@@ -72,6 +72,18 @@ from yesterday's grant. Still in active use for Tier 2 TLS-module test work (Pie
 private repo `l3-tier2-tls-interception`). **Not yet a revocation candidate** — revisit
 once that work concludes, same treatment as the `pihole` group entry below.
 
+### Temporary Tailscale audit sudo grant — ADDED AND REVOKED, 2026-09-01, same session
+A NOPASSWD sudo grant for a `tailscale`-related command was added earlier this morning
+for Window 1's investigation, then revoked once that investigation concluded. **Revoke
+confirmed two ways:** the operator re-tested the command directly and confirmed it now
+requires interactive auth again; independently, Window 2 checked live `sudo -n -l` output
+this session and found **no `tailscale`-related NOPASSWD entry present** (grep against the
+full non-interactive sudo listing returned no match). Exact grant command/path not
+recorded here — it existed only briefly within this session and left no trace in the
+current `sudo -n -l` output to transcribe. Not a revocation candidate going forward
+because there is nothing left to revoke; logged here as a closed add/revoke cycle for the
+audit trail, per Morning Status item 7's "surfaced live every session" discipline.
+
 ### `<user>`'s `pihole` group membership — STILL OPEN, unchanged
 Confirmed live 2026-09-01 (`getent group pihole` → `<user>` is a member). Same standing
 note as every prior check going back weeks: for
@@ -136,3 +148,8 @@ rule), needs a session with root access to actually `ls` it.
   active Tier 2 use. Polkit rules still unreadable from this session (4th consecutive
   session). Gateway-VM entry not re-checked (production-box scope, per the still-unresolved
   open question above).
+- **2026-09-01, later same session** (Window 2): recorded a closed add/revoke cycle for a
+  temporary Tailscale-audit sudo grant made earlier this morning for Window 1's
+  investigation. Revocation independently confirmed via live `sudo -n -l` (no
+  `tailscale`-related NOPASSWD entry present), corroborating the operator's own
+  interactive-auth re-test.
