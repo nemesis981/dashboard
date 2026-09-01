@@ -944,6 +944,29 @@ def dns_query_answers(server, name="example.com", timeout=2.0):
                 pass
 
 
+def magicdns_resolver_reachable(query=None):
+    """Is Tailscale's OWN resolver answering? True / False / None(undetermined).
+
+    ⛔ THIS IS THE CAUSE-LEVEL SIGNAL, and it is deliberately independent of
+    /etc/resolv.conf.
+
+    OSCILLATION BUG, 2026-09-01: the restore decision used `conflict is False`.
+    But disabling accept-dns makes Tailscale hand resolv.conf back to Pi-hole, so
+    resolv.conf stops being exclusively Tailscale and `conflict` becomes False --
+    THE MITIGATION ERASES ITS OWN TRIGGER. The guard then re-enabled, recreating
+    the conflict, and flip-flopped every ~20s with PIA never dropping:
+
+        14:19:31 disable | 14:19:57 ENABLE | 14:20:17 disable | 14:20:37 ENABLE
+
+    A symptom that the fix removes cannot be the condition for undoing the fix.
+    Restore must hinge on whether the BLOCKER is gone -- i.e. whether Tailscale's
+    resolver answers again -- which is true only once the killswitch stops
+    blocking it, and is unaffected by what resolv.conf currently says.
+    """
+    q = query or dns_query_answers
+    return q(TS_MAGIC_V4)
+
+
 def magicdns_conflict(fallback_addr="127.0.0.1", query=None, resolv_path=RESOLV_CONF_PATH):
     """Is Tailscale's resolver the ONLY resolver AND not answering?
 
@@ -1023,10 +1046,26 @@ def evaluate_magicdns(fallback_addr="127.0.0.1", act=True):
         _record(E_MAGICDNS_UNDETERMINED, {k: str(v)[:200] for k, v in verdict.items()})
         log.warning("MagicDNS probe undetermined: %s", verdict["reason"])
     elif act:
-        # No conflict. Ask to restore ONLY if the helper itself disabled it --
-        # the helper enforces that; we do not track it here, deliberately, so
-        # there is ONE source of truth for "was this ours".
-        verdict["action"] = _magicdns_ask_helper(True, quiet=True)
+        # No conflict RIGHT NOW -- but that is not sufficient to restore, because
+        # disabling accept-dns is itself what removes the conflict signal. Ask to
+        # re-enable only when BOTH hold:
+        #   * resolv.conf is NOT exclusively Tailscale's -- i.e. a state consistent
+        #     with "MagicDNS is currently off", so there is something to restore
+        #     (and we do not pester the helper every 20s while it is healthily on);
+        #   * Tailscale's resolver ANSWERS again -- the blocker is genuinely gone.
+        # The second condition is the fix for the 2026-09-01 oscillation: while the
+        # tunnel is up the resolver stays unreachable, so no restore is attempted.
+        # Whether it was OURS to restore is still the helper's call, deliberately --
+        # one source of truth for that.
+        reachable = magicdns_resolver_reachable()
+        verdict["resolver_reachable"] = reachable
+        if verdict["exclusive"] is False and reachable is True:
+            verdict["action"] = _magicdns_ask_helper(True, quiet=True)
+        else:
+            verdict["action"] = {"ok": False, "skipped": True,
+                                 "reason": "not restoring: resolver_reachable=%r "
+                                           "exclusive=%r" % (reachable,
+                                                             verdict["exclusive"])}
     return verdict
 
 

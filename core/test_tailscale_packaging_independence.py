@@ -42,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 113
+EXPECTED_CHECKS = 124
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -783,6 +783,105 @@ def test_socket_reachability_control():
           _account_can_open("root", "no_such_group_xyz"), True)  # root short-circuits
 
 
+# --------------------------------------------------------------------------
+# 10. OSCILLATION -- "PIA stays up across MANY cycles" must settle, not flap.
+#
+# ⛔ THE BUG THIS EXISTS FOR (2026-09-01, third live test). The guard fired
+# correctly at 25s, then RE-ENABLED itself 26s later while PIA was still up, and
+# flapped every ~20s:
+#     14:19:31 disable | 14:19:57 ENABLE | 14:20:17 disable | 14:20:37 ENABLE
+# Cause: the restore decision used `conflict is False`, but DISABLING accept-dns is
+# what clears the conflict signal -- Tailscale hands resolv.conf back to Pi-hole, so
+# it stops being the exclusive resolver. THE MITIGATION ERASED ITS OWN TRIGGER.
+# Single-fire tests could never see this; only multi-cycle simulation can.
+# --------------------------------------------------------------------------
+
+def _simulate_cycles(G, cycles, resolver_reachable_after=None):
+    """Run N reconcile cycles against a STATEFUL model of the box.
+
+    Models the thing that actually caused the bug: resolv.conf is exclusively
+    Tailscale's IFF accept-dns is on, so the conflict signal disappears the moment
+    the guard acts. `resolver_reachable_after` = cycle index at which the blocker
+    clears (None = never, i.e. the tunnel stays up throughout).
+    Returns the ordered list of enable/disable requests actually made.
+    """
+    st = {"accept_dns": True, "calls": [], "cycle": 0}
+
+    def fake_conflict(fallback_addr="127.0.0.1", query=None, resolv_path=None):
+        exclusive = st["accept_dns"]
+        reachable = _reachable()
+        if not exclusive:
+            return {"conflict": False, "exclusive": False, "packaging": "apt",
+                    "ts_answers": reachable, "fallback_answers": True,
+                    "reason": "not exclusive"}
+        if reachable:
+            return {"conflict": False, "exclusive": True, "packaging": "apt",
+                    "ts_answers": True, "fallback_answers": None,
+                    "reason": "resolver answers"}
+        return {"conflict": True, "exclusive": True, "packaging": "apt",
+                "ts_answers": False, "fallback_answers": True,
+                "reason": "conflict"}
+
+    def _reachable():
+        if resolver_reachable_after is None:
+            return False
+        return st["cycle"] >= resolver_reachable_after
+
+    def fake_reach(query=None):
+        return _reachable()
+
+    def fake_ask(enable, quiet=False):
+        st["calls"].append(enable)
+        st["accept_dns"] = enable
+        return {"ok": True, "enable": enable}
+
+    saved = (G.magicdns_conflict, G.magicdns_resolver_reachable,
+             G._magicdns_ask_helper, G._record)
+    try:
+        G.magicdns_conflict = fake_conflict
+        G.magicdns_resolver_reachable = fake_reach
+        G._magicdns_ask_helper = fake_ask
+        G._record = lambda *a, **k: None
+        for i in range(cycles):
+            st["cycle"] = i
+            G.evaluate_magicdns()
+    finally:
+        (G.magicdns_conflict, G.magicdns_resolver_reachable,
+         G._magicdns_ask_helper, G._record) = saved
+    return st["calls"], st["accept_dns"]
+
+
+def test_no_oscillation_while_the_tunnel_stays_up():
+    print("\n[OSCILLATION: PIA up for 10 cycles -- disable ONCE, never re-enable]")
+    G = _guard()
+    calls, final = _simulate_cycles(G, cycles=10, resolver_reachable_after=None)
+    check("exactly ONE action taken across 10 cycles", len(calls), 1)
+    check("...and it was a DISABLE", calls[:1], [False])
+    check("no re-enable EVER while the blocker persists", True in calls, False)
+    check("accept-dns ends OFF (the safe state)", final, False)
+    # The pre-fix code produced [False, True, False, True, ...] -- assert that shape is gone.
+    check("no alternating disable/enable pattern",
+          calls == [False], True)
+
+
+def test_restores_once_the_blocker_actually_clears():
+    print("\n[RECOVERY: blocker clears at cycle 5 -- restore ONCE, then settle]")
+    G = _guard()
+    calls, final = _simulate_cycles(G, cycles=10, resolver_reachable_after=5)
+    check("disabled first", calls[0], False)
+    check("then re-enabled exactly once", calls.count(True), 1)
+    check("...and only after the blocker cleared", calls, [False, True])
+    check("accept-dns ends ON (MagicDNS restored)", final, True)
+
+
+def test_healthy_box_is_left_alone():
+    print("\n[NO-OP: resolver reachable from the start -- guard must do NOTHING]")
+    G = _guard()
+    calls, final = _simulate_cycles(G, cycles=8, resolver_reachable_after=0)
+    check("no action taken on a healthy box", calls, [])
+    check("accept-dns untouched", final, True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -810,6 +909,9 @@ if __name__ == "__main__":
     test_peer_account_map_is_complete_both_directions()
     test_every_peer_can_actually_open_the_socket()
     test_socket_reachability_control()
+    test_no_oscillation_while_the_tunnel_stays_up()
+    test_restores_once_the_blocker_actually_clears()
+    test_healthy_box_is_left_alone()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

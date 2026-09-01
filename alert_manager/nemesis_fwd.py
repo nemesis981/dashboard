@@ -2506,6 +2506,33 @@ def op_magicdns_switch(params):
             log.warning("fwd: magicdns_switch REFUSED: %s", reason)
             return {"ok": False, "refused": True, "reason": reason,
                     "packaging": packaging, "conflict": conflict}
+        # ⛔ CAUSE-LEVEL GATE -- the fix for the 2026-09-01 OSCILLATION.
+        #
+        # `conflict is False` is NOT sufficient to re-enable. Disabling accept-dns
+        # is itself what clears the conflict signal: Tailscale hands /etc/resolv.conf
+        # back to Pi-hole, so it stops being the exclusive resolver and the probe
+        # reads False while the killswitch is still blocking it. Re-enabling then
+        # recreated the conflict, and the guard flip-flopped every ~20s with the
+        # tunnel never dropping (disable 14:19:31, ENABLE 14:19:57, disable 14:20:17,
+        # ENABLE 14:20:37).
+        #
+        # A symptom the fix removes cannot be the condition for undoing the fix.
+        # Re-enable only when Tailscale's resolver ANSWERS again -- a signal that is
+        # independent of resolv.conf and false for as long as the blocker persists.
+        # Measured here, in this process, exactly like the disable path: the caller
+        # supplies a request, never a verdict.
+        reachable = _guard.magicdns_resolver_reachable()
+        if reachable is not True:
+            reason = ("refused: Tailscale's resolver still does not answer "
+                      "(reachable=%r), so the blocker is still present. Re-enabling "
+                      "would break DNS again" % (reachable,))
+            _errors_record("E-MAGICDNS-001",
+                           {"enable": enable, "reason": "resolver-still-unreachable",
+                            "reachable": str(reachable)})
+            log.warning("fwd: magicdns_switch REFUSED: %s", reason)
+            return {"ok": False, "refused": True, "reason": reason,
+                    "packaging": packaging, "conflict": conflict,
+                    "resolver_reachable": reachable}
 
     # ---- act ---------------------------------------------------------------
     try:
