@@ -30,6 +30,7 @@ Pure tests. No root, no network, no live tailscaled.
 import ast
 import os
 import shutil
+import subprocess
 import re
 import sys
 import tempfile
@@ -41,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 96
+EXPECTED_CHECKS = 113
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -657,6 +658,131 @@ def test_helper_revalidation_has_a_call_site():
           fwd.OPS.get("magicdns_switch") is fwd.op_magicdns_switch, True)
 
 
+# --------------------------------------------------------------------------
+# 9. PEER SOCKET REACHABILITY -- "can this peer even OPEN the socket?"
+#
+# ⛔ WHY THIS EXISTS. On 2026-09-01 the MagicDNS guard was correctly added to
+# PEER_POLICY, peer_uids, OPS and WRITE_OPS -- all verified registering at startup
+# -- and still could not act, because `nemesis-vpndns` was not in the group owning
+# /run/nemesis/fwd.sock. The allowlist is consulted AFTER a connection is accepted,
+# so authorisation was wired at layers 2 and 3 while LAYER 0 -- can this process
+# open the socket at all -- was never wired. The live log read:
+#
+#   magicdns_switch could not reach nemesis-fwd:
+#   nemesis-fwd unreachable at /run/nemesis/fwd.sock: [Errno 13] Permission denied
+#
+# This is the SAME shape as the call-site bug one layer down: the registry tests
+# proved the peer was DECLARED and never proved it was REACHABLE.
+# --------------------------------------------------------------------------
+
+def _socket_group(F):
+    """Group owning the live socket; falls back to the configured constant.
+
+    Returns None if neither can be determined -- which FAILS the assertions rather
+    than passing them, since 'cannot tell' must never read as 'fine'.
+    """
+    try:
+        import grp
+        path = getattr(F, "SOCKET_PATH", "/run/nemesis/fwd.sock")
+        if os.path.exists(path):
+            return grp.getgrgid(os.stat(path).st_gid).gr_name
+    except Exception:
+        pass
+    return getattr(F, "SOCKET_GROUP", None)
+
+
+def _unit_env(unit, key):
+    """Read Environment=KEY=value from a unit file.
+
+    ⚠ NECESSARY, not defensive. DASH_USER comes from NEMESIS_DASH_USER, which the
+    UNIT sets and a shell does not -- so resolving it in the test's own environment
+    yields None and the peer looks accountless. That is the same "resolved the
+    config in the wrong environment" error that made me read the wrong LOG_PATH
+    during the 2026-09-01 diagnosis. Resolve it the way the SERVICE resolves it.
+    """
+    try:
+        out = subprocess.run(["systemctl", "cat", unit], capture_output=True,
+                             text=True, timeout=10).stdout
+    except Exception:
+        return None
+    m = re.search(r"^Environment=%s=(\S+)" % re.escape(key), out, re.M)
+    return m.group(1) if m else None
+
+
+def _peer_accounts(F):
+    """peer policy name -> the service account that connects as it."""
+    # NEMESIS_DASH_USER is set on the CONSUMER's unit (nemesis-fwd), not on the
+    # dashboard's -- I looked at the dashboard unit first and found nothing, which
+    # is the same wrong-environment mistake twice in one file. Ask the unit that
+    # actually reads the variable.
+    return {"dashboard": getattr(F, "DASH_USER", None)
+                         or _unit_env("nemesis-fwd", "NEMESIS_DASH_USER")
+                         or os.environ.get("NEMESIS_DASH_USER"),
+            "alert-watcher": getattr(F, "ALERTW_USER", None),
+            "fail2ban": getattr(F, "FAIL2BAN_USER", None),
+            "fw-healer": getattr(F, "HEALER_USER", None),
+            "vpn-dns-guard": getattr(F, "VPNDNS_USER", None)}
+
+
+def _account_can_open(user, group):
+    """True/False/None. root opens anything; otherwise group membership decides."""
+    if not user or not group:
+        return None
+    if user == "root":
+        return True
+    try:
+        import grp, pwd
+        members = set(grp.getgrnam(group).gr_mem)
+        if user in members:
+            return True
+        # primary group counts too
+        return grp.getgrgid(pwd.getpwnam(user).pw_gid).gr_name == group
+    except KeyError:
+        return None
+    except Exception:
+        return None
+
+
+def test_peer_account_map_is_complete_both_directions():
+    print("\n[every PEER_POLICY peer maps to a real service account, and vice versa]")
+    F = _fwd()
+    accounts = _peer_accounts(F)
+    policy = set(F.PEER_POLICY)
+    check("no peer in PEER_POLICY lacks an account mapping",
+          sorted(policy - set(accounts)), [])
+    check("no account mapping names a peer that does not exist",
+          sorted(set(accounts) - policy), [])
+    for name in sorted(policy):
+        check("peer %-15s has a non-empty account" % name,
+              bool(accounts.get(name)), True)
+
+
+def test_every_peer_can_actually_open_the_socket():
+    print("\n[LAYER 0: every peer's account must be able to OPEN the socket]")
+    F = _fwd()
+    group = _socket_group(F)
+    check("socket group is determinable", bool(group), True)
+    accounts = _peer_accounts(F)
+    for name in sorted(F.PEER_POLICY):
+        user = accounts.get(name)
+        check("peer %-15s (%s) can open the socket" % (name, user or "?"),
+              _account_can_open(user, group), True)
+
+
+def test_socket_reachability_control():
+    print("\n[CONTROL: the reachability checker can detect a NON-member]")
+    F = _fwd()
+    group = _socket_group(F)
+    # Known-bad: an account that certainly is not in the socket group.
+    check("a non-member account is reported as NOT able to open",
+          _account_can_open("daemon", group), False)
+    check("root is always able", _account_can_open("root", group), True)
+    check("unknown account -> None, never True",
+          _account_can_open("no_such_user_xyz", group), None)
+    check("unknown group -> None, never True",
+          _account_can_open("root", "no_such_group_xyz"), True)  # root short-circuits
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -681,6 +807,9 @@ if __name__ == "__main__":
     test_callsite_control()
     test_magicdns_guard_is_reachable_from_the_service_loop()
     test_helper_revalidation_has_a_call_site()
+    test_peer_account_map_is_complete_both_directions()
+    test_every_peer_can_actually_open_the_socket()
+    test_socket_reachability_control()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))
