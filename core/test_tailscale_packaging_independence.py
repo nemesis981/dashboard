@@ -42,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 182
+EXPECTED_CHECKS = 190
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -1166,6 +1166,60 @@ def test_repair_registry_and_callsites():
           _calls_within(Fp, "op_resolvconf_repair", "_await_resolution"), True)
 
 
+# --------------------------------------------------------------------------
+# 14. verify_upstream_resolves timeout budget (ADR 0002 code, changed 2026-09-01).
+#
+# It runs SEQUENTIALLY inside the reconcile cycle, so its total budget delays
+# everything after it. Measured that day: 3 zones x 2 tries x +time=3 produced 23s,
+# 18s and 50s gaps while the poll interval was a healthy 5s -- the cycle was BLOCKED
+# here, not polling slowly.
+# --------------------------------------------------------------------------
+
+def test_verify_budget_reduced_safely():
+    print("\n[verify budget: 1 try per zone, THREE zones retained]")
+    import inspect
+    G = _guard()
+    sig = inspect.signature(G.verify_upstream_resolves)
+    check("tries_per_zone default is 1", sig.parameters["tries_per_zone"].default, 1)
+    check("still THREE independent zones", len(G.VERIFY_ZONES), 3)
+    check("worst-case dig calls is 3, not 6",
+          len(G.VERIFY_ZONES) * sig.parameters["tries_per_zone"].default, 3)
+
+
+def test_verify_makes_exactly_one_call_per_zone():
+    print("\n[forced: an all-failing upstream makes 3 calls, never 6]")
+    G = _guard()
+    calls = []
+    real = G._run
+    try:
+        G._run = lambda cmd, **k: (calls.append(cmd) or (1, "", ""))
+        got = G.verify_upstream_resolves()
+        check("returns False when nothing answers", got, False)
+        check("made exactly 3 dig calls", len(calls), 3)
+        check("...one per distinct zone",
+              len({c[-2].split(".", 1)[1] for c in calls}), 3)
+    finally:
+        G._run = real
+
+
+def test_per_query_timeout_is_deliberately_unchanged():
+    print("\n[+time=3 is HELD pending real latency data -- assert it did not drift]")
+    G = _guard()
+    calls = []
+    real = G._run
+    try:
+        G._run = lambda cmd, **k: (calls.append(cmd) or (1, "", ""))
+        G.verify_upstream_resolves()
+        check("per-query timeout is still +time=3", "+time=3" in calls[0], True)
+    finally:
+        G._run = real
+    # ADR 0002 records that a flaky VPN DNS has no secondary while the tunnel is up;
+    # a shorter timeout would score a SLOW-but-working resolver as FAIL and roll back
+    # a working fix. Changing this needs measured latencies, not an estimate.
+    check("duration is logged so the decision can be made on data",
+          "elapsed_ms" in _read("core/vpn_dns_guard.py"), True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -1212,6 +1266,9 @@ if __name__ == "__main__":
     test_repair_is_atomic_and_single_target()
     test_repair_reports_when_it_did_not_help()
     test_repair_registry_and_callsites()
+    test_verify_budget_reduced_safely()
+    test_verify_makes_exactly_one_call_per_zone()
+    test_per_query_timeout_is_deliberately_unchanged()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

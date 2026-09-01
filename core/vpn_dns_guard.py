@@ -619,24 +619,51 @@ class Pihole:
 # Verification — does Pi-hole actually resolve upstream right now?
 # --------------------------------------------------------------------------- #
 
-def verify_upstream_resolves(tries_per_zone=2):
+def verify_upstream_resolves(tries_per_zone=1):
     """
     Query Pi-hole (127.0.0.1) for a random label under real zones. PASS if any
     returns NOERROR or NXDOMAIN (upstream answered); FAIL on SERVFAIL / REFUSED /
     timeout (upstream unreachable — the killswitch symptom).
+
+    ⛔ tries_per_zone WAS 2, REDUCED TO 1 ON 2026-09-01. WHY, AND WHY THIS IS SAFE.
+
+    This function runs inside the reconcile cycle, SEQUENTIALLY, so when the upstream
+    is unreachable its total timeout budget delays everything after it. Measured that
+    day: 3 zones x 2 tries x `+time=3` produced gaps of 23s, 18s and 50s between guard
+    log lines while the poll interval itself was a healthy 5s. The cycle was not
+    polling slowly — it was BLOCKED here.
+
+    The redundancy that matters is THREE INDEPENDENT ZONES, not duplicate attempts at
+    each. Each zone is a separate query through the same upstream, so one try per zone
+    still gives THREE independent chances for a flaky resolver to answer. What is lost
+    is 6 attempts -> 3, not 2 -> 1.
+
+    ⚠ `+time=3` IS DELIBERATELY UNCHANGED. ADR 0002's own "Negative / risks" section
+    records that while the VPN is up there is a SINGLE upstream and "if the VPN's DNS
+    is flaky there is no secondary". A resolver that is SLOW rather than dead is
+    exactly that flakiness — and shortening the per-query timeout would score it FAIL
+    and roll back a working fix. That half of the change is held pending the duration
+    evidence logged below, rather than guessed at. Do not shorten it without that data.
     """
     stamp = f"{int(time.time())}-{os.getpid()}"
     for zone in VERIFY_ZONES:
         name = f"nemesis-vpndns-{stamp}.{zone}"
         for _ in range(tries_per_zone):
+            t0 = time.monotonic()
             rc, out, _ = _run(
                 ["dig", "+tries=1", "+time=3", "@127.0.0.1", name, "A"], timeout=8,
             )
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
             if rc == 0 and "status:" in out:
                 status = out.split("status:", 1)[1].split(",", 1)[0].strip()
-                log.info("verify %s -> %s", name, status)
+                # Duration is logged on EVERY answered query, deliberately: the
+                # decision on whether `+time=3` can safely become 2s needs real
+                # observed latencies through a live tunnel, not an estimate.
+                log.info("verify %s -> %s (%dms)", name, status, elapsed_ms)
                 if status in ("NOERROR", "NXDOMAIN"):
                     return True
+            else:
+                log.info("verify %s -> no answer (%dms)", name, elapsed_ms)
     return False
 
 
