@@ -6315,3 +6315,41 @@ work is duplicated when it is not, or vice versa.
 Steps-are-build-order distinction in both scope docs' headers. Renumbering is NOT recommended:
 these identifiers are already in commit history and cross-references, and stable-but-ambiguous
 beats renumbered-and-dangling.
+
+### [LOW] Follow-up owed before Option B's default flips to ON: prove the MagicDNS/killswitch guard is VPN-agnostic, not just PIA-tested (logged 2026-09-01, Window 2, operator-directed)
+**Not urgent — a reasonable follow-up once things settle, explicitly not build-now work.**
+
+⚠ **Corrected same day, hours after first logged.** This entry originally said "once Option
+B ships," written as if the build hadn't started. **It had already substantially shipped by
+the time this entry was written** — `ff3d6c4` through `b05ec54` (7 commits), detection +
+actuator + 5 real root causes found and fixed across 6 live tests on the daily driver, 146
+tests passing. **But it is deliberately NOT the default.** Window 1's standing closeout
+recommendation is to **leave `accept-dns=false`** — one residual risk (Tailscale's own
+repeated-DNS-takeover behavior can destroy the preserved backup symlink, leaving
+`accept-dns=False` coexisting with a still-Tailscale-owned `resolv.conf`, i.e. stuck broken)
+remains unclosed and is not even confirmed to be a Nemesis-side defect rather than a
+Tailscale one. Full detail: `~/work/nemesis-internal/handoff/2026-09-01-window1-handoff.md`
+and `~/work/nemesis-internal/known-limitations/RESIDUAL-tailscale-backup-loss-2026-09-01.md`.
+So this follow-up is better framed as: **owed before anyone proposes flipping the default to
+ON**, not gated on the build landing — the build has landed; the default hasn't changed.
+See the full saga (updated with this correction):
+`~/work/nemesis-internal/known-limitations/tailscale-magicdns-pia-saga-FULL-2026-09-01.md`.
+
+**The design is already stated as vendor-neutral** — it triggers on *observed state*
+(`resolv.conf` points exclusively at Tailscale's resolver AND that resolver is unreachable),
+never on "PIA specifically," so any killswitch-style VPN should trip the same guard. **That
+claim is currently a design intent, not a measured result** — every observation to date (the
+`100.100.100.100` blocking, the three-way confirmation, the reconnect landmine, and all 6 live
+tests today) was made against PIA, the only killswitch VPN actually installed on the daily
+driver or the fleet.
+
+**Verification does NOT require purchasing or activating another VPN service.** On the clone
+VM (or a fresh one, per the existing fresh-clone-discipline rule), simulate a generic
+killswitch with an nft/iptables rule blocking outbound access to `100.100.100.100` — the same
+effect any killswitch VPN would have on an address it doesn't recognize as its own tunnel
+traffic — and confirm the guard's detection/repair still fires correctly against that
+simulated condition, not against PIA's specific mechanism. Extend
+`core/test_tailscale_packaging_independence.py` per the standing "no parallel suite" finding
+from today's investigation, and make sure the check **forces** the simulated-killswitch branch
+rather than merely being reachable by it (the same "a green suite that never walked the new
+code proves nothing" standard applied throughout today's saga).
