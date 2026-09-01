@@ -47,7 +47,7 @@ instruction.
 
 ---
 
-## Current state (last live check: 2026-08-31, Window 2 Morning Status)
+## Current state (last live check: 2026-09-01, Window 2 Morning Status)
 
 ### Production box (`sudo -n -l`, `getent group`, `id <user>`) — CONFIRMED CLEAN
 - No broad `(ALL) NOPASSWD:` grants. (The class revoked 2026-08-19 — `systemctl restart
@@ -66,19 +66,14 @@ instruction.
   this file itself becoming a second source of truth for the exact grant text; only the
   classification (clean / narrowly-scoped / expected) is tracked here.
 
-### `/usr/bin/tcpdump` file capabilities — NEW 2026-08-31, flagged by Window 3
-`cap_net_raw,cap_net_admin=eip` — confirmed live (`getcap /usr/bin/tcpdump`) by Window 2,
-independently of the report. Operator ran `sudo setcap cap_net_raw,cap_net_admin=eip
-/usr/bin/tcpdump` this session to enable non-root packet capture for a Tier 2 TLS-module
-test (Piece E(c), private repo `l3-tier2-tls-interception`). Same box as the rest of this
-file (dev/daily-driver, also the appliance) — Window 3's report called it "not the
-appliance," which does not match this box's known dual role; noted as a discrepancy in the
-report's framing, not in the grant itself, which is independently verified accurate.
-**Not yet a revocation candidate** — genuinely in use for active Tier 2 test work; revisit
+### `/usr/bin/tcpdump` file capabilities — added 2026-08-31, re-confirmed 2026-09-01
+`cap_net_admin,cap_net_raw=eip` — re-confirmed live (`getcap /usr/bin/tcpdump`) unchanged
+from yesterday's grant. Still in active use for Tier 2 TLS-module test work (Piece E(c),
+private repo `l3-tier2-tls-interception`). **Not yet a revocation candidate** — revisit
 once that work concludes, same treatment as the `pihole` group entry below.
 
 ### `<user>`'s `pihole` group membership — STILL OPEN, unchanged
-Confirmed live 2026-08-31 (`getent group pihole` → `<user>` is a member). Same standing
+Confirmed live 2026-09-01 (`getent group pihole` → `<user>` is a member). Same standing
 note as every prior check going back weeks: for
 `~/work/nemesis-internal/tools/pihole-cardinality.py`. **Worth its own revoke decision
 once that tool's current use is done — not urgent, but genuinely open, not forgotten.**
@@ -110,8 +105,8 @@ fleet VMs; this entry is carried forward from the last time it was actually chec
   (e.g. folded into Window 3's VM-fleet closeout sweep instead). Flagging again here
   rather than letting it silently drop a second time.
 
-### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 3 consecutive sessions
-`ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-08-31, same result
+### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 4 consecutive sessions
+`ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-09-01, same result
 as prior sessions that attempted this check. Genuinely unable to verify from this
 session's privilege level, not a skipped check — flagged per CLAUDE.md's explicit
 instruction to note this rather than silently omit it. No live root-level check of this
@@ -135,3 +130,9 @@ rule), needs a session with root access to actually `ls` it.
 - **2026-08-31, later same day** (Window 2): new `tcpdump` file-capability grant added,
   flagged cross-session by Window 3 and independently verified via `getcap` before being
   written down, per this file's standing "verify before recording" discipline.
+- **2026-09-01** (Window 2, Morning Status): re-checked live. Production box still clean,
+  same grant set (`sudo -n -l` narrowly-scoped, no broad grants). `pihole`/`nemesis-db`/
+  `nemesis-fw` group memberships unchanged. `tcpdump` capabilities unchanged, still in
+  active Tier 2 use. Polkit rules still unreadable from this session (4th consecutive
+  session). Gateway-VM entry not re-checked (production-box scope, per the still-unresolved
+  open question above).
