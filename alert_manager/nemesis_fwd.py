@@ -48,6 +48,7 @@ import pwd
 import re
 import selectors
 import signal
+import shutil
 import socket
 import struct
 import subprocess
@@ -98,6 +99,11 @@ FAIL2BAN_USER = os.environ.get("NEMESIS_FAIL2BAN_USER", "nemesis-f2b")
 #: healer peer resolves to uid 0. Overridable for testing; see PEER_POLICY["fw-healer"]
 #: for why registering root as a peer grants nothing it did not already have.
 HEALER_USER = os.environ.get("NEMESIS_FWD_HEALER_USER", "root")
+#: vpn_dns_guard's own service account. Fifth peer, added 2026-09-01 under the
+#: ADR 0002 scope amendment. Same shape as ALERTW_USER/FAIL2BAN_USER: unattended,
+#: no human, no credential, and a hard ONE-op allowlist as the substituted
+#: control. See PEER_POLICY["vpn-dns-guard"].
+VPNDNS_USER = os.environ.get("NEMESIS_VPNDNS_USER", "nemesis-vpndns")
 SOCKET_GROUP = os.environ.get("NEMESIS_FWD_GROUP", "nemesis-fw")
 UFW_BIN = "/usr/sbin/ufw"
 IPTABLES_BIN = "/usr/sbin/iptables"
@@ -233,7 +239,8 @@ READ_OPS = {"list_blocked", "list_rules", "list_port_grants"}
 # of every ufw chain), so there is no route op for these names to become.
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
              "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
-             "gateway_switch", "request_port", "release_port"}
+             "gateway_switch", "request_port", "release_port",
+             "magicdns_switch"}
 # `failsafe_revert` carries no session credential BECAUSE the admin may be unable
 # to log in -- the firewall change under test can be what broke their path to the
 # dashboard. The revert TOKEN is the credential, validated inside
@@ -280,6 +287,9 @@ NO_CREDENTIAL_ACTOR = {
 #: orphan the audit rows already written under the old name — audit_log is
 #: append-only and its history has to stay queryable.
 AUDIT_ACTION = {
+    # dns_ rather than fw_ or svc_: this changes neither the firewall nor a
+    # service lifecycle. It flips one Tailscale DNS preference.
+    "magicdns_switch":   "dns_magicdns_switch",
     "block_ip":          "fw_block_ip",
     "deny_ip":           "fw_deny_ip",
     "unblock_ip":        "fw_unblock_ip",
@@ -385,6 +395,37 @@ PEER_POLICY = {
                 "request_port", "release_port", "list_port_grants"},
         "require_credential": True,
         "audit_actor": None,          # the verified admin username
+    },
+    "vpn-dns-guard": {
+        # ONE op and nothing else. Added 2026-09-01 (ADR 0002 scope amendment)
+        # after TWO measured DNS outages in one day.
+        #
+        # THE FAULT. With apt Tailscale and accept-dns=true, Tailscale takes DNS
+        # over in directManager mode and writes /etc/resolv.conf pointing
+        # EXCLUSIVELY at 100.100.100.100 -- with NO fallback entry. A VPN
+        # killswitch that blocks that address therefore removes EVERY resolver the
+        # host has, not merely MagicDNS. Connecting a VPN takes the box's DNS out.
+        #
+        # WHY THIS PEER GAINS ALMOST NOTHING, WHICH IS THE ARGUMENT FOR IT.
+        # op_magicdns_switch RE-MEASURES the conflict here, in this process, and
+        # refuses when its own measurement disagrees with the request. A fully
+        # compromised guard can send enable=false all day and achieve nothing
+        # unless DNS is *actually* broken in exactly this way. It supplies a
+        # REQUEST, never a VERDICT -- the same reasoning write_email_secret's
+        # docstring gives for validating the enrollment code here rather than in
+        # the web process.
+        #
+        # Blast radius if this peer is fully compromised: toggle MagicDNS on a box
+        # whose DNS is already objectively broken, or already objectively fixed.
+        # It cannot touch the firewall, re-role the box, enumerate rules, block or
+        # unblock an IP, or write env. STRICTLY SMALLER than every other write op
+        # here -- gateway_switch re-roles the whole box.
+        #
+        # NOT granted to the dashboard: this needs no HTTP surface, and the
+        # dashboard is the only peer that has one.
+        "ops": {"magicdns_switch"},
+        "require_credential": False,
+        "audit_actor": "vpn-dns-guard",
     },
     "alert-watcher": {
         # Adds blocks (temporary and permanent) and releases ONLY quarantines the
@@ -579,6 +620,16 @@ _ERR_CODES = {
     # nobody, so the distinction was destroyed rather than protected. This is
     # the sole authority for writing an email credential from an
     # unauthenticated request.
+    "E-MAGICDNS-001": ("privileged helper REFUSED a magicdns_switch: its own "
+                       "measurement of the DNS conflict disagreed with the "
+                       "request. Correct behaviour -- the caller supplies a "
+                       "request, never a verdict", "MEDIUM", None),
+    "E-MAGICDNS-002": ("magicdns_switch applied but verification showed the "
+                       "preference did NOT change. A claimed change is not a "
+                       "change", "HIGH", None),
+    "E-MAGICDNS-003": ("the tailscale CLI was unusable (absent, timeout or "
+                       "permission), so MagicDNS state could be neither read "
+                       "nor changed", "HIGH", None),
     "E-EMAIL-010": ("privileged helper refused an enrollment consume (invalid, "
                     "expired or already used); the internal reason is in "
                     "context and is never returned to the caller",
@@ -2319,6 +2370,180 @@ def op_list_port_grants(_params):
             "registry": PORT_GRANTS_PATH}
 
 
+# ── MagicDNS conflict actuator (ADR 0002 scope amendment, 2026-09-01) ─────────
+#
+# ⚠ THE HELPER RE-MEASURES. IT DOES NOT TRUST THE CALLER.
+#
+# vpn_dns_guard detects the conflict but runs as nemesis-vpndns with
+# NoNewPrivileges=yes and an EMPTY CapabilityBoundingSet, so it cannot act. This
+# op is the privileged half -- and the ONLY thing that makes granting a fifth peer
+# defensible is that the decision is re-made HERE, from this process's own
+# measurement, including the positive control. The caller supplies a REQUEST,
+# never a VERDICT. Exactly the reasoning op_write_email_secret gives for
+# validating the enrollment code in this process rather than in the web one.
+#
+# SNAP INSTALLS: the probe cannot report a conflict under snap BY CONSTRUCTION
+# (strict confinement blocks the /etc/resolv.conf takeover, so resolv.conf is
+# never exclusively Tailscale's). This op therefore REFUSES on snap with an
+# explicit "condition does not apply" -- reported, never silent. A guard that
+# claimed to have mitigated a condition that cannot occur would be a false
+# assurance, which is worse than no guard.
+
+MAGICDNS_STATE_PATH = os.environ.get(
+    "NEMESIS_MAGICDNS_STATE", "/var/lib/nemesis/magicdns_guard_state.json")
+
+
+def _magicdns_state_read():
+    """Helper-side state. Unreadable -> {} and the op fails CLOSED on re-enable."""
+    try:
+        with open(MAGICDNS_STATE_PATH) as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:  # noqa: BLE001
+        log.exception("fwd: magicdns state unreadable; treating as empty")
+        return {}
+
+
+def _magicdns_state_write(state):
+    try:
+        os.makedirs(os.path.dirname(MAGICDNS_STATE_PATH), exist_ok=True)
+        tmp = MAGICDNS_STATE_PATH + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(state, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, MAGICDNS_STATE_PATH)
+        os.chmod(MAGICDNS_STATE_PATH, 0o600)
+        return True
+    except Exception:  # noqa: BLE001
+        log.exception("fwd: could not persist magicdns state")
+        return False
+
+
+def _tailscale_bin():
+    """PATH-resolved so BOTH packagings work.
+
+    ⛔ NEVER derive this from a systemd unit name: on snap the unit is
+    snap.tailscale.tailscaled.service and `systemctl is-active tailscaled`
+    reports INACTIVE FOR A RUNNING DAEMON. See core/netfilter_drift.py.
+    """
+    return shutil.which("tailscale")
+
+
+def _magicdns_read_pref(exe):
+    """Current accept-dns. True/False, or None if it cannot be read."""
+    try:
+        p = subprocess.run([exe, "debug", "prefs"], capture_output=True,
+                           text=True, timeout=10)
+        if p.returncode != 0:
+            return None
+        return bool(json.loads(p.stdout or "{}").get("CorpDNS"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def op_magicdns_switch(params):
+    """Turn Tailscale's accept-dns off (fallback) or back on, after re-measuring.
+
+    params: {"enable": bool}
+    """
+    enable = params.get("enable")
+    if not isinstance(enable, bool):
+        raise Denied("bad_request", "magicdns_switch requires a boolean 'enable'")
+
+    exe = _tailscale_bin()
+    if not exe:
+        _errors_record("E-MAGICDNS-003", {"stage": "locate-cli"})
+        return {"ok": False, "reason": "tailscale CLI not found on PATH"}
+
+    try:
+        sys.path.insert(0, _CORE) if _CORE not in sys.path else None
+        import vpn_dns_guard as _guard  # noqa: PLC0415  (lazy: no import-time side effects)
+    except Exception as exc:  # noqa: BLE001
+        _errors_record("E-MAGICDNS-003", {"stage": "import-probe",
+                                          "error": str(exc)[:200]})
+        return {"ok": False, "reason": "conflict probe unavailable: %s" % str(exc)[:120]}
+
+    verdict = _guard.magicdns_conflict()
+    conflict = verdict.get("conflict")
+    packaging = verdict.get("packaging")
+
+    # ---- re-validation: our measurement, not the caller's claim -------------
+    if enable is False:
+        if conflict is not True:
+            reason = ("refused: this helper measured conflict=%r, so disabling "
+                      "MagicDNS would not fix anything (%s)"
+                      % (conflict, verdict.get("reason", "")[:160]))
+            if packaging == "snap":
+                reason = ("refused: CONDITION DOES NOT APPLY on a snap install -- "
+                          "confinement blocks the DNS takeover, so Tailscale is "
+                          "never the exclusive resolver and this conflict cannot "
+                          "occur. Nothing to mitigate")
+            _errors_record("E-MAGICDNS-001",
+                           {"enable": enable, "conflict": str(conflict),
+                            "packaging": packaging,
+                            "probe": str(verdict.get("reason"))[:200]})
+            log.warning("fwd: magicdns_switch REFUSED: %s", reason)
+            return {"ok": False, "refused": True, "reason": reason,
+                    "packaging": packaging, "conflict": conflict}
+    else:
+        state = _magicdns_state_read()
+        if not state.get("disabled_by_guard"):
+            reason = ("refused: this helper did not disable MagicDNS, so it will "
+                      "not re-enable it. A value set by a human is never overridden")
+            _errors_record("E-MAGICDNS-001",
+                           {"enable": enable, "reason": "not-ours"})
+            log.warning("fwd: magicdns_switch REFUSED: %s", reason)
+            return {"ok": False, "refused": True, "reason": reason,
+                    "packaging": packaging, "conflict": conflict}
+        if conflict is True:
+            reason = ("refused: the conflict is still present, so re-enabling "
+                      "MagicDNS would break DNS again")
+            _errors_record("E-MAGICDNS-001",
+                           {"enable": enable, "reason": "conflict-still-present"})
+            log.warning("fwd: magicdns_switch REFUSED: %s", reason)
+            return {"ok": False, "refused": True, "reason": reason,
+                    "packaging": packaging, "conflict": conflict}
+
+    # ---- act ---------------------------------------------------------------
+    try:
+        p = subprocess.run([exe, "set", "--accept-dns=%s" % ("true" if enable else "false")],
+                           capture_output=True, text=True, timeout=20)
+        if p.returncode != 0:
+            _errors_record("E-MAGICDNS-003",
+                           {"stage": "set", "rc": p.returncode,
+                            "err": (p.stderr or "")[:200]})
+            return {"ok": False, "reason": "tailscale set failed: %s"
+                    % (p.stderr or "")[:160]}
+    except Exception as exc:  # noqa: BLE001
+        _errors_record("E-MAGICDNS-003", {"stage": "set", "error": str(exc)[:200]})
+        return {"ok": False, "reason": "tailscale set errored: %s" % str(exc)[:160]}
+
+    # ---- verify: a CLAIMED change is not a change --------------------------
+    observed = _magicdns_read_pref(exe)
+    if observed is None:
+        _errors_record("E-MAGICDNS-002", {"enable": enable, "observed": "unreadable"})
+        return {"ok": False, "reason": "applied but could not read the preference back"}
+    if observed != enable:
+        _errors_record("E-MAGICDNS-002", {"enable": enable, "observed": observed})
+        log.error("fwd: magicdns_switch enable=%s but pref reads %s", enable, observed)
+        return {"ok": False, "reason": "preference did not change (reads %s)" % observed}
+
+    state = _magicdns_state_read()
+    state["disabled_by_guard"] = (enable is False)
+    state["last_change_ts"] = int(time.time())
+    state["last_enable"] = enable
+    persisted = _magicdns_state_write(state)
+
+    log.info("fwd: magicdns_switch enable=%s ok (packaging=%s, state_persisted=%s)",
+             enable, packaging, persisted)
+    return {"ok": True, "enable": enable, "packaging": packaging,
+            "verified": True, "state_persisted": persisted,
+            "reason": verdict.get("reason", "")[:200]}
+
+
 OPS = {
     "expire_quarantine": op_expire_quarantine,
     "reclaim_shm": op_reclaim_shm,
@@ -2339,6 +2564,7 @@ OPS = {
     "request_port": op_request_port,
     "release_port": op_release_port,
     "list_port_grants": op_list_port_grants,
+    "magicdns_switch": op_magicdns_switch,
 }
 
 
@@ -2578,7 +2804,8 @@ def main():
 
     peer_uids = {}
     for policy_name, user in (("dashboard", DASH_USER), ("alert-watcher", ALERTW_USER),
-                              ("fail2ban", FAIL2BAN_USER), ("fw-healer", HEALER_USER)):
+                              ("fail2ban", FAIL2BAN_USER), ("fw-healer", HEALER_USER),
+                              ("vpn-dns-guard", VPNDNS_USER)):
         try:
             peer_uids[pwd.getpwnam(user).pw_uid] = policy_name
         except KeyError:

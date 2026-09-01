@@ -41,7 +41,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 51
+EXPECTED_CHECKS = 82
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -432,6 +432,143 @@ def test_guard_uses_no_unit_name_proxy():
           any(x.strip() == "tailscaled" for x in strings), False)
 
 
+# --------------------------------------------------------------------------
+# 7. nemesis_fwd magicdns_switch -- the PRIVILEGED actuator (fifth peer).
+#    Added 2026-09-01. The load-bearing property is that the HELPER re-measures
+#    and refuses when its own verdict disagrees with the caller's request.
+# --------------------------------------------------------------------------
+
+def _fwd():
+    sys.path.insert(0, os.path.join(REPO, "alert_manager"))
+    import nemesis_fwd
+    return nemesis_fwd
+
+
+class _FakeProbe:
+    """Stands in for vpn_dns_guard so every verdict can be FORCED."""
+    def __init__(self, conflict, packaging="apt", reason="forced"):
+        self._v = {"conflict": conflict, "packaging": packaging, "reason": reason}
+    def magicdns_conflict(self, *a, **k):
+        return dict(self._v)
+
+
+def _run_op(F, enable, conflict, packaging="apt", owned=False,
+            pref_after=None, cli="/usr/bin/tailscale", set_rc=0):
+    """Invoke op_magicdns_switch with every external dependency forced."""
+    import subprocess as _sp
+    saved = (sys.modules.get("vpn_dns_guard"), F._tailscale_bin,
+             F._magicdns_state_read, F._magicdns_state_write,
+             F._magicdns_read_pref, F._errors_record, _sp.run)
+    recorded = []
+    try:
+        sys.modules["vpn_dns_guard"] = _FakeProbe(conflict, packaging)
+        F._tailscale_bin = lambda: cli
+        F._magicdns_state_read = lambda: {"disabled_by_guard": owned}
+        F._magicdns_state_write = lambda st: True
+        F._magicdns_read_pref = lambda exe: (enable if pref_after is None else pref_after)
+        F._errors_record = lambda code, ctx=None: recorded.append(code)
+
+        class _R:
+            def __init__(self): self.returncode = set_rc; self.stdout = "{}"; self.stderr = ""
+        _sp.run = lambda *a, **k: _R()
+        return F.op_magicdns_switch({"enable": enable}), recorded
+    finally:
+        (mod, tb, sr, sw, rp, er, spr) = saved
+        if mod is None:
+            sys.modules.pop("vpn_dns_guard", None)
+        else:
+            sys.modules["vpn_dns_guard"] = mod
+        F._tailscale_bin, F._magicdns_state_read = tb, sr
+        F._magicdns_state_write, F._magicdns_read_pref = sw, rp
+        F._errors_record, _sp.run = er, spr
+
+
+def test_fwd_registry_wiring():
+    print("\n[fwd: the fifth peer is wired in every registry, and ONLY that op]")
+    F = _fwd()
+    check("op is dispatchable", callable(F.OPS.get("magicdns_switch")), True)
+    check("op is in WRITE_OPS", "magicdns_switch" in F.WRITE_OPS, True)
+    check("vpn-dns-guard grants EXACTLY one op",
+          F.PEER_POLICY["vpn-dns-guard"]["ops"], {"magicdns_switch"})
+    check("that peer requires no credential (unattended)",
+          F.PEER_POLICY["vpn-dns-guard"]["require_credential"], False)
+    check("audit actor is the peer name",
+          F.PEER_POLICY["vpn-dns-guard"]["audit_actor"], "vpn-dns-guard")
+    others = [n for n, p in F.PEER_POLICY.items()
+              if n != "vpn-dns-guard" and "magicdns_switch" in p["ops"]]
+    check("NO other peer was granted it", others, [])
+    check("NOT token-exempt (peer-gated, not token-gated)",
+          "magicdns_switch" in F.NO_CREDENTIAL_OPS, False)
+    check("audit action is dns_-prefixed, not fw_",
+          F.audit_action_for("magicdns_switch"), "dns_magicdns_switch")
+
+
+def test_fwd_rejects_bad_params():
+    print("\n[fwd: parameter validation is helper-side]")
+    F = _fwd()
+    for bad in ("false", 0, 1, None, [], {}):
+        try:
+            F.op_magicdns_switch({"enable": bad})
+            ok = False
+        except Exception as exc:
+            ok = exc.__class__.__name__ == "Denied"
+        check("non-bool enable=%-6r rejected" % (bad,), ok, True)
+
+
+def test_fwd_refuses_when_its_own_measurement_disagrees():
+    print("\n[fwd: THE load-bearing property -- helper re-measures, caller does not decide]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=False, conflict=False)
+    check("disable refused when helper sees NO conflict", res.get("refused"), True)
+    check("...and it did NOT report success", res.get("ok"), False)
+    check("...and it recorded E-MAGICDNS-001", "E-MAGICDNS-001" in rec, True)
+
+    res, rec = _run_op(F, enable=False, conflict=None)
+    check("disable refused when conflict UNDETERMINED (fails closed)",
+          res.get("refused"), True)
+
+
+def test_fwd_snap_refuses_and_says_so():
+    print("\n[fwd: SNAP -- refuses AND reports 'does not apply', never silent]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=False, conflict=False, packaging="snap")
+    check("snap: refused", res.get("refused"), True)
+    check("snap: reason says CONDITION DOES NOT APPLY",
+          "DOES NOT APPLY" in (res.get("reason") or ""), True)
+    check("snap: reason explains confinement blocks the takeover",
+          "confinement" in (res.get("reason") or ""), True)
+    check("snap: packaging reported back to the caller", res.get("packaging"), "snap")
+
+
+def test_fwd_never_reenables_what_it_did_not_disable():
+    print("\n[fwd: a human-set value is never overridden]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=True, conflict=False, owned=False)
+    check("enable refused when helper did not disable it", res.get("refused"), True)
+    check("...reason names it as not ours", "did not disable" in (res.get("reason") or ""), True)
+    res, rec = _run_op(F, enable=True, conflict=True, owned=True)
+    check("enable refused while the conflict is STILL present", res.get("refused"), True)
+
+
+def test_fwd_verifies_the_change_took():
+    print("\n[fwd: a CLAIMED change is not a change]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=False, conflict=True, pref_after=True)
+    check("pref did not actually change -> ok False", res.get("ok"), False)
+    check("...and recorded E-MAGICDNS-002", "E-MAGICDNS-002" in rec, True)
+    res, rec = _run_op(F, enable=False, conflict=True, pref_after=None)
+    check("happy path: conflict real -> applied and verified", res.get("ok"), True)
+    check("...and reported verified=True", res.get("verified"), True)
+
+
+def test_fwd_cli_absent_fails_closed():
+    print("\n[fwd: no tailscale CLI -> explicit failure, never a silent success]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=False, conflict=True, cli=None)
+    check("missing CLI -> ok False", res.get("ok"), False)
+    check("...and recorded E-MAGICDNS-003", "E-MAGICDNS-003" in rec, True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -446,6 +583,13 @@ if __name__ == "__main__":
     test_conflict_branches_forced()
     test_snap_can_never_conflict()
     test_guard_uses_no_unit_name_proxy()
+    test_fwd_registry_wiring()
+    test_fwd_rejects_bad_params()
+    test_fwd_refuses_when_its_own_measurement_disagrees()
+    test_fwd_snap_refuses_and_says_so()
+    test_fwd_never_reenables_what_it_did_not_disable()
+    test_fwd_verifies_the_change_took()
+    test_fwd_cli_absent_fails_closed()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

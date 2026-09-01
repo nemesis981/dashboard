@@ -855,6 +855,7 @@ def restore(ph, state):
 # only a live daemon can answer, never a name proxy.
 # --------------------------------------------------------------------------- #
 
+_ALERTMGR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "alert_manager")
 TS_MAGIC_V4 = "100.100.100.100"
 TS_MAGIC_V6 = "fd7a:115c:a1e0::53"
 TS_MAGIC_RESOLVERS = frozenset((TS_MAGIC_V4, TS_MAGIC_V6))
@@ -998,23 +999,56 @@ def magicdns_conflict(fallback_addr="127.0.0.1", query=None, resolv_path=RESOLV_
     return result
 
 
-def evaluate_magicdns(fallback_addr="127.0.0.1"):
-    """Probe and RECORD. Detection only -- performs no mitigation.
+def evaluate_magicdns(fallback_addr="127.0.0.1", act=True):
+    """Probe, RECORD, and ask the privileged helper to act.
 
-    The actuator (`tailscale set --accept-dns=false`) needs root, and this service
-    runs as nemesis-vpndns with NoNewPrivileges and an EMPTY CapabilityBoundingSet.
-    It therefore cannot and must not act; the privileged half belongs behind
-    nemesis-fwd's op allowlist. Detecting and recording is useful on its own: it
-    names the fault in the journal at the moment it happens.
+    THIS SERVICE CANNOT ACT ITSELF and must not try: it runs as nemesis-vpndns
+    with NoNewPrivileges=yes and an EMPTY CapabilityBoundingSet, while
+    `tailscale set` needs root. The privileged half lives behind nemesis-fwd's
+    one-op allowlist (`magicdns_switch`), which RE-MEASURES the conflict there
+    and refuses if its own verdict disagrees. What we send is a request, never a
+    verdict -- so a compromised guard cannot toggle DNS at will.
+
+    `act=False` makes this detection-only, for tests and dry runs.
     """
     verdict = magicdns_conflict(fallback_addr=fallback_addr)
+    verdict["action"] = None
+
     if verdict["conflict"] is True:
         _record(E_MAGICDNS_CONFLICT, {k: str(v)[:200] for k, v in verdict.items()})
         log.warning("MagicDNS conflict: %s", verdict["reason"])
+        if act:
+            verdict["action"] = _magicdns_ask_helper(False)
     elif verdict["conflict"] is None:
         _record(E_MAGICDNS_UNDETERMINED, {k: str(v)[:200] for k, v in verdict.items()})
         log.warning("MagicDNS probe undetermined: %s", verdict["reason"])
+    elif act:
+        # No conflict. Ask to restore ONLY if the helper itself disabled it --
+        # the helper enforces that; we do not track it here, deliberately, so
+        # there is ONE source of truth for "was this ours".
+        verdict["action"] = _magicdns_ask_helper(True, quiet=True)
     return verdict
+
+
+def _magicdns_ask_helper(enable, quiet=False):
+    """Send the request. NEVER raises into the reconcile cycle."""
+    try:
+        sys.path.insert(0, _ALERTMGR) if _ALERTMGR not in sys.path else None
+        import fw_client  # noqa: PLC0415
+        res = fw_client.magicdns_switch(enable)
+        if res.get("ok"):
+            log.info("magicdns_switch enable=%s applied and verified", enable)
+        elif not quiet:
+            log.warning("magicdns_switch enable=%s refused/failed: %s",
+                        enable, str(res.get("reason"))[:200])
+        return res
+    except Exception as exc:  # noqa: BLE001
+        # Helper down, socket missing, permission denied -- all non-fatal here.
+        # Detection still recorded above; the operator can act by hand.
+        if not quiet:
+            log.warning("magicdns_switch could not reach nemesis-fwd: %s",
+                        str(exc)[:160])
+        return {"ok": False, "reason": "helper unreachable: %s" % str(exc)[:120]}
 
 
 def reconcile(ph=None, force=None):

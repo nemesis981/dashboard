@@ -166,6 +166,18 @@ def expire_quarantine(ip):
     return _request("expire_quarantine", {"ip": ip})
 
 
+def magicdns_switch(enable):
+    """Ask the helper to toggle Tailscale's accept-dns. UNATTENDED path.
+
+    Narrower than it looks, by design: the helper RE-MEASURES the DNS conflict
+    itself and refuses when its own verdict disagrees. This sends a REQUEST, never
+    a VERDICT -- the same shape as expire_quarantine, where the helper checks the
+    table rather than trusting the caller. A compromised caller gains nothing it
+    could not already have by breaking its own DNS.
+    """
+    return _request("magicdns_switch", {"enable": bool(enable)})
+
+
 # ── admin path (dashboard) — every write needs a fresh credential ────────────
 
 def deny_ip(ip, username, session_id, password):
