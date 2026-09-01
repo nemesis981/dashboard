@@ -42,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 146
+EXPECTED_CHECKS = 182
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -498,8 +498,13 @@ def test_fwd_registry_wiring():
     F = _fwd()
     check("op is dispatchable", callable(F.OPS.get("magicdns_switch")), True)
     check("op is in WRITE_OPS", "magicdns_switch" in F.WRITE_OPS, True)
-    check("vpn-dns-guard grants EXACTLY one op",
-          F.PEER_POLICY["vpn-dns-guard"]["ops"], {"magicdns_switch"})
+    # ⛔ EXACT SET, not a membership check. This deliberately fails whenever the
+    # peer's capability set changes -- it caught the resolvconf_repair addition,
+    # which is the point: a fifth peer quietly growing new powers is exactly what
+    # a registry test is for. Update it consciously, never loosen it to "contains".
+    check("vpn-dns-guard grants EXACTLY these two ops",
+          F.PEER_POLICY["vpn-dns-guard"]["ops"],
+          {"magicdns_switch", "resolvconf_repair"})
     check("that peer requires no credential (unattended)",
           F.PEER_POLICY["vpn-dns-guard"]["require_credential"], False)
     check("audit actor is the peer name",
@@ -1026,6 +1031,141 @@ def test_precondition_has_a_call_site():
                         "_resolv_conf_is_resolved_managed"), True)
 
 
+# --------------------------------------------------------------------------
+# 13. resolvconf_repair -- own the on-disk outcome, asymmetrically and safely.
+#
+# Every row of the decision table is FORCED. The load-bearing one is that a
+# user-pinned resolv.conf is NEVER touched: today's manual rescues wrote exactly
+# that shape, and destroying an operator's deliberate pin would be worse than the
+# bug this op exists to fix.
+# --------------------------------------------------------------------------
+
+def _repair(F, corp, owner, stub_ok=True, resolution=True, hist=None):
+    """Run op_resolvconf_repair with every external dependency forced."""
+    saved = (F._magicdns_read_pref, F._tailscale_bin, F._resolvconf_owner,
+             F._stub_is_usable, F._await_resolution, F._magicdns_state_read,
+             F._magicdns_state_write, F._errors_record)
+    rec, linked = [], []
+    try:
+        F._tailscale_bin = lambda: "/usr/bin/tailscale"
+        F._magicdns_read_pref = lambda exe: corp
+        F._resolvconf_owner = lambda: owner
+        F._stub_is_usable = lambda: (stub_ok, "forced")
+        F._await_resolution = lambda *a, **k: resolution
+        F._magicdns_state_read = lambda: {"resolvconf_repairs": list(hist or [])}
+        F._magicdns_state_write = lambda st: linked.append(st) or True
+        F._errors_record = lambda code, ctx=None: rec.append(code)
+        import os as _os
+        real_sym, real_ren, real_lex, real_unlink = (_os.symlink, _os.rename,
+                                                     _os.path.lexists, _os.unlink)
+        made = []
+        try:
+            _os.symlink = lambda t, l: made.append((t, l))
+            _os.rename = lambda a, b: made.append(("rename", a, b))
+            _os.path.lexists = lambda p: False
+            _os.unlink = lambda p: None
+            return F.op_resolvconf_repair({}), rec, made
+        finally:
+            (_os.symlink, _os.rename, _os.path.lexists, _os.unlink) = (
+                real_sym, real_ren, real_lex, real_unlink)
+    finally:
+        (F._magicdns_read_pref, F._tailscale_bin, F._resolvconf_owner,
+         F._stub_is_usable, F._await_resolution, F._magicdns_state_read,
+         F._magicdns_state_write, F._errors_record) = saved
+
+
+def test_repair_decision_table():
+    print("\n[every row of the decision table, forced]")
+    F = _fwd()
+    r, _, made = _repair(F, corp=True, owner="tailscale")
+    check("accept-dns ON  + tailscale-owned -> no-op", r.get("action"), "none")
+    check("...and nothing was written", made, [])
+    r, _, made = _repair(F, corp=False, owner="resolved")
+    check("accept-dns OFF + resolved-owned  -> no-op", r.get("action"), "none")
+    r, _, made = _repair(F, corp=True, owner="resolved")
+    check("accept-dns ON  + resolved-owned  -> no-op (self-heals)", r.get("action"), "none")
+    check("...and it does NOT author Tailscale content", made, [])
+    r, _, made = _repair(F, corp=False, owner="tailscale")
+    check("accept-dns OFF + tailscale-owned -> REPAIRED", r.get("action"), "repaired")
+    check("...resolution reported recovered", r.get("resolution_recovered"), True)
+
+
+def test_never_touches_a_user_pin():
+    print("\n[LOAD-BEARING: a deliberate user pin is NEVER touched]")
+    F = _fwd()
+    for corp in (True, False):
+        r, _, made = _repair(F, corp=corp, owner="other")
+        check("corp=%-5s + user-pinned -> no-op" % corp, r.get("action"), "none")
+        check("...nothing written", made, [])
+        check("...and it says it is not ours", "NOT OURS" in (r.get("reason") or ""), True)
+
+
+def test_refuses_an_unverified_stub():
+    print("\n[fail closed: never link to a stub that is not demonstrably usable]")
+    F = _fwd()
+    r, rec, made = _repair(F, corp=False, owner="tailscale", stub_ok=False)
+    check("refused when the stub is unusable", r.get("action"), "refused")
+    check("...no symlink created", made, [])
+    check("...records E-RESOLVCONF-002", "E-RESOLVCONF-002" in rec, True)
+
+
+def test_flap_cap():
+    print("\n[flap cap: stop and shout rather than fight]")
+    F = _fwd()
+    import time as _t
+    now = int(_t.time())
+    r, rec, made = _repair(F, corp=False, owner="tailscale", hist=[now, now, now])
+    check("refused at the cap", r.get("action"), "refused")
+    check("...no symlink created", made, [])
+    check("...records E-RESOLVCONF-003", "E-RESOLVCONF-003" in rec, True)
+    r, rec, _ = _repair(F, corp=False, owner="tailscale", hist=[now - 700] * 5)
+    check("stale entries outside the window do NOT count", r.get("action"), "repaired")
+
+
+def test_repair_is_atomic_and_single_target():
+    print("\n[atomic replace, and ONE hard-coded target only]")
+    F = _fwd()
+    r, _, made = _repair(F, corp=False, owner="tailscale")
+    syms = [m for m in made if len(m) == 2]
+    rens = [m for m in made if len(m) == 3]
+    check("created exactly one symlink", len(syms), 1)
+    check("...to the ONE hard-coded target", syms[0][0], F.RESOLVCONF_TARGET)
+    check("...at a temp path, not resolv.conf directly", syms[0][1] != F.RESOLVCONF_PATH, True)
+    check("...then renamed over atomically", len(rens), 1)
+    check("...rename lands on /etc/resolv.conf", rens[0][2], F.RESOLVCONF_PATH)
+
+
+def test_repair_reports_when_it_did_not_help():
+    print("\n[a repair that does not restore DNS must say so]")
+    F = _fwd()
+    r, rec, _ = _repair(F, corp=False, owner="tailscale", resolution=False)
+    check("ok False when resolution still fails", r.get("ok"), False)
+    check("...resolution_recovered False", r.get("resolution_recovered"), False)
+    check("...records E-RESOLVCONF-004", "E-RESOLVCONF-004" in rec, True)
+
+
+def test_repair_registry_and_callsites():
+    print("\n[wired everywhere, and actually reached]")
+    F = _fwd()
+    check("dispatchable", callable(F.OPS.get("resolvconf_repair")), True)
+    check("in WRITE_OPS", "resolvconf_repair" in F.WRITE_OPS, True)
+    check("granted to vpn-dns-guard",
+          "resolvconf_repair" in F.PEER_POLICY["vpn-dns-guard"]["ops"], True)
+    others = [n for n, p in F.PEER_POLICY.items()
+              if n != "vpn-dns-guard" and "resolvconf_repair" in p["ops"]]
+    check("no other peer has it", others, [])
+    G = "core/vpn_dns_guard.py"
+    check("evaluate_magicdns() -> _magicdns_ask_repair()",
+          _calls_within(G, "evaluate_magicdns", "_magicdns_ask_repair"), True)
+    check("_magicdns_ask_repair() -> resolvconf_repair()",
+          _calls_within(G, "_magicdns_ask_repair", "resolvconf_repair"), True)
+    Fp = "alert_manager/nemesis_fwd.py"
+    check("op -> _stub_is_usable()",
+          _calls_within(Fp, "op_resolvconf_repair", "_stub_is_usable"), True)
+    check("op -> _await_resolution()",
+          _calls_within(Fp, "op_resolvconf_repair", "_await_resolution"), True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -1065,6 +1205,13 @@ if __name__ == "__main__":
     test_refuses_to_enable_when_release_path_is_broken()
     test_enable_allowed_once_the_release_path_is_sound()
     test_precondition_has_a_call_site()
+    test_repair_decision_table()
+    test_never_touches_a_user_pin()
+    test_refuses_an_unverified_stub()
+    test_flap_cap()
+    test_repair_is_atomic_and_single_target()
+    test_repair_reports_when_it_did_not_help()
+    test_repair_registry_and_callsites()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

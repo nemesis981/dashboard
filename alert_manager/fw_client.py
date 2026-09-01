@@ -178,6 +178,15 @@ def magicdns_switch(enable):
     return _request("magicdns_switch", {"enable": bool(enable)})
 
 
+def resolvconf_repair():
+    """Ask the helper to make on-disk resolv.conf ownership match the preference.
+
+    Takes no arguments BY DESIGN: the caller names no target and picks no action.
+    The helper measures everything and can only ever create one fixed symlink.
+    """
+    return _request("resolvconf_repair", {})
+
+
 # ── admin path (dashboard) — every write needs a fresh credential ────────────
 
 def deny_ip(ip, username, session_id, password):

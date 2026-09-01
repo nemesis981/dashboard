@@ -240,7 +240,7 @@ READ_OPS = {"list_blocked", "list_rules", "list_port_grants"}
 WRITE_OPS = {"block_ip", "deny_ip", "unblock_ip", "expire_quarantine",
              "write_env", "restart_dashboard", "reclaim_shm", "reap_zombie",
              "gateway_switch", "request_port", "release_port",
-             "magicdns_switch"}
+             "magicdns_switch", "resolvconf_repair"}
 # `failsafe_revert` carries no session credential BECAUSE the admin may be unable
 # to log in -- the firewall change under test can be what broke their path to the
 # dashboard. The revert TOKEN is the credential, validated inside
@@ -290,6 +290,7 @@ AUDIT_ACTION = {
     # dns_ rather than fw_ or svc_: this changes neither the firewall nor a
     # service lifecycle. It flips one Tailscale DNS preference.
     "magicdns_switch":   "dns_magicdns_switch",
+    "resolvconf_repair": "dns_resolvconf_repair",
     "block_ip":          "fw_block_ip",
     "deny_ip":           "fw_deny_ip",
     "unblock_ip":        "fw_unblock_ip",
@@ -423,7 +424,7 @@ PEER_POLICY = {
         #
         # NOT granted to the dashboard: this needs no HTTP surface, and the
         # dashboard is the only peer that has one.
-        "ops": {"magicdns_switch"},
+        "ops": {"magicdns_switch", "resolvconf_repair"},
         "require_credential": False,
         "audit_actor": "vpn-dns-guard",
     },
@@ -627,6 +628,21 @@ _ERR_CODES = {
     "E-MAGICDNS-002": ("magicdns_switch applied but verification showed the "
                        "preference did NOT change. A claimed change is not a "
                        "change", "HIGH", None),
+    "E-RESOLVCONF-001": ("repaired /etc/resolv.conf back to the systemd-resolved "
+                         "symlink after Tailscale released DNS without restoring "
+                         "it. Recorded on SUCCESS deliberately: a self-repair that "
+                         "leaves no trace is indistinguishable from a fault that "
+                         "never happened", "MEDIUM", None),
+    "E-RESOLVCONF-002": ("REFUSED to repair /etc/resolv.conf: the systemd-resolved "
+                         "stub could not be verified usable, so linking to it "
+                         "would risk a dangling symlink and total DNS loss. Fails "
+                         "closed", "HIGH", None),
+    "E-RESOLVCONF-003": ("REFUSED to repair /etc/resolv.conf: repair rate cap hit. "
+                         "Something is re-breaking it faster than we fix it, and "
+                         "flapping against it would be worse than stopping", "HIGH", None),
+    "E-RESOLVCONF-004": ("repaired /etc/resolv.conf but DNS resolution still did "
+                         "not recover -- the stuck symlink was not the only fault",
+                         "HIGH", None),
     "E-MAGICDNS-005": ("magicdns_switch REFUSED to enable MagicDNS because "
                        "/etc/resolv.conf is not a systemd-resolved symlink. "
                        "Enabling would arm a trap: Tailscale's release path "
@@ -2510,6 +2526,192 @@ def _await_resolution(attempts=5, delay=1.0):
     return ok
 
 
+# ── resolv.conf self-repair (ADR 0002 amendment 2, 2026-09-01) ───────────────
+#
+# WHY THIS EXISTS. Tailscale's directManager releases DNS by restoring
+# /etc/resolv.pre-tailscale-backup.conf and restarting systemd-resolved. Measured
+# on the clone: if that backup is MISSING, the release does nothing and the box is
+# left with accept-dns=false while /etc/resolv.conf still points at
+# 100.100.100.100 -- a TOTAL DNS OUTAGE that cannot self-correct. Reproduced on
+# demand in three commands; it recurred twice live and needed manual rescue both
+# times. `systemctl restart tailscaled` does NOT fix it (measured: the daemon has
+# no record that a restore is owed, so it correctly does nothing) and is mildly
+# harmful, since Tailscale keeps listening on 100.100.100.100 with no upstreams
+# and returns SERVFAIL. So the recovery has to be ours.
+#
+# ⛔ WHAT THIS DELIBERATELY DOES NOT DO -- and why the capability is this narrow.
+#
+# It NEVER authors DNS content. It creates ONE symlink to ONE hard-coded, OS-owned
+# target. There is no parameter, no caller input and no computed path, so the op is
+# physically incapable of pointing resolv.conf anywhere else.
+#
+# It ALSO never repairs the other direction. Measured: with accept-dns=true,
+# Tailscale re-asserts ownership of resolv.conf in UNDER TWO SECONDS -- the
+# restore-direction stuck state could not be held open at all. Takeover creates the
+# backup and depends on nothing; release depends on a backup that can go missing.
+# That asymmetry is mechanical, not stylistic, so the repair is asymmetric too.
+
+RESOLVCONF_PATH = "/etc/resolv.conf"
+#: The ONLY thing this op can ever create. Relative, exactly as the OS ships it.
+RESOLVCONF_TARGET = "../run/systemd/resolve/stub-resolv.conf"
+RESOLVCONF_STUB_ABS = "/run/systemd/resolve/stub-resolv.conf"
+RESOLVCONF_MAX_REPAIRS = 3
+RESOLVCONF_WINDOW_SECONDS = 600
+
+
+def _resolvconf_owner():
+    """Who owns /etc/resolv.conf right now: 'resolved' | 'tailscale' | 'other' | None."""
+    try:
+        if os.path.islink(RESOLVCONF_PATH) and "systemd/resolve" in os.readlink(RESOLVCONF_PATH):
+            return "resolved"
+        with open(RESOLVCONF_PATH) as fh:
+            txt = fh.read()
+    except Exception:  # noqa: BLE001
+        return None
+    servers = [l.split()[1] for l in txt.splitlines()
+               if l.strip().startswith("nameserver") and len(l.split()) >= 2]
+    if servers and all(s in ("100.100.100.100", "fd7a:115c:a1e0::53") for s in servers):
+        return "tailscale"
+    return "other"
+
+
+def _stub_is_usable():
+    """Is the resolved stub safe to link to? True only if it DEMONSTRABLY works.
+
+    ⛔ Four checks, all required. Linking to a missing or dead target converts a
+    broken-DNS box into a box with NO resolv.conf at all. Fails closed: any check
+    that cannot be completed returns False, never 'probably fine'.
+    """
+    try:
+        if systemctl_is_active("systemd-resolved") is not True:
+            return False, "systemd-resolved is not active"
+        if not os.path.exists(RESOLVCONF_STUB_ABS):
+            return False, "stub file %s does not exist" % RESOLVCONF_STUB_ABS
+        with open(RESOLVCONF_STUB_ABS) as fh:
+            ns = [l for l in fh if l.strip().startswith("nameserver")]
+        if not ns:
+            return False, "stub file has no nameserver lines"
+        if _resolution_via(ns[0].split()[1]) is not True:
+            return False, "stub's first nameserver does not answer"
+        return True, "stub verified usable"
+    except Exception as exc:  # noqa: BLE001
+        return False, "stub check errored: %s" % str(exc)[:120]
+
+
+def systemctl_is_active(unit):
+    try:
+        p = subprocess.run(["systemctl", "is-active", unit],
+                           capture_output=True, text=True, timeout=8)
+        return (p.stdout or "").strip() == "active"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolution_via(server, timeout=4.0):
+    """Does a real query through THIS server answer? True/False/None."""
+    try:
+        p = subprocess.run(["dig", "+short", "+time=2", "+tries=1",
+                            "@" + server, "example.com", "A"],
+                           capture_output=True, text=True, timeout=timeout)
+        return bool((p.stdout or "").strip())
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolvconf_rate_ok(state):
+    """Flap cap. A guard that fights something re-breaking the file is worse than
+    one that stops and shouts."""
+    now = int(time.time())
+    hist = [t for t in (state.get("resolvconf_repairs") or [])
+            if now - int(t) < RESOLVCONF_WINDOW_SECONDS]
+    return len(hist) < RESOLVCONF_MAX_REPAIRS, hist
+
+
+def op_resolvconf_repair(_params):
+    """Make the on-disk resolv.conf owner match the CURRENT accept-dns preference.
+
+    Takes no parameters, deliberately: the caller states no target and chooses no
+    action. Everything is measured here.
+    """
+    exe = _tailscale_bin()
+    if not exe:
+        _errors_record("E-MAGICDNS-003", {"stage": "locate-cli", "op": "resolvconf_repair"})
+        return {"ok": False, "reason": "tailscale CLI not found"}
+    corp = _magicdns_read_pref(exe)
+    owner = _resolvconf_owner()
+    base = {"corp_dns": corp, "resolvconf_owner": owner}
+
+    if corp is None or owner is None:
+        return dict(base, ok=False, action="none",
+                    reason="could not determine preference or ownership -- failing closed")
+    if owner == "other":
+        return dict(base, ok=True, action="none",
+                    reason="resolv.conf is neither resolved's symlink nor Tailscale's "
+                           "config -- it is someone else's (e.g. a deliberate pin). "
+                           "NOT OURS TO TOUCH")
+    if corp is True and owner == "tailscale":
+        return dict(base, ok=True, action="none", reason="consistent: Tailscale owns DNS")
+    if corp is False and owner == "resolved":
+        return dict(base, ok=True, action="none", reason="consistent: resolved owns DNS")
+    if corp is True and owner == "resolved":
+        # Restore direction. Measured self-healing in <2s; writing Tailscale's
+        # content is never done here. Report, do not act.
+        return dict(base, ok=True, action="none",
+                    reason="accept-dns is on but resolved still owns resolv.conf. "
+                           "Tailscale re-asserts within ~2s; not repairing, and this "
+                           "op never authors DNS content")
+
+    # corp is False and owner == "tailscale" -> THE OUTAGE CASE.
+    state = _magicdns_state_read()
+    allowed, hist = _resolvconf_rate_ok(state)
+    if not allowed:
+        _errors_record("E-RESOLVCONF-003", {"repairs_in_window": len(hist)})
+        log.error("fwd: resolvconf_repair REFUSED -- rate cap (%d in %ds)",
+                  len(hist), RESOLVCONF_WINDOW_SECONDS)
+        return dict(base, ok=False, action="refused",
+                    reason="repair rate cap hit (%d in %ds); something is re-breaking "
+                           "resolv.conf faster than repair can fix it"
+                           % (len(hist), RESOLVCONF_WINDOW_SECONDS))
+
+    usable, why = _stub_is_usable()
+    if not usable:
+        _errors_record("E-RESOLVCONF-002", {"reason": why})
+        log.error("fwd: resolvconf_repair REFUSED -- %s", why)
+        return dict(base, ok=False, action="refused",
+                    reason="refusing to link to an unverified stub: %s" % why)
+
+    try:
+        tmp = RESOLVCONF_PATH + ".nemesis-repair"
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        os.symlink(RESOLVCONF_TARGET, tmp)
+        os.rename(tmp, RESOLVCONF_PATH)   # atomic: resolv.conf is never absent
+    except Exception as exc:  # noqa: BLE001
+        _errors_record("E-RESOLVCONF-002", {"stage": "link", "error": str(exc)[:160]})
+        return dict(base, ok=False, action="failed",
+                    reason="could not create the symlink: %s" % str(exc)[:140])
+
+    hist.append(int(time.time()))
+    state["resolvconf_repairs"] = hist
+    _magicdns_state_write(state)
+
+    recovered = _await_resolution()
+    if recovered is not True:
+        _errors_record("E-RESOLVCONF-004", {"resolution": str(recovered)})
+        log.error("fwd: resolvconf_repair linked the symlink but DNS still fails")
+        return dict(base, ok=False, action="repaired", resolution_recovered=False,
+                    reason="symlink restored but resolution still fails -- the stuck "
+                           "symlink was not the only fault")
+
+    _errors_record("E-RESOLVCONF-001", {"repairs_in_window": len(hist)})
+    log.warning("fwd: resolvconf_repair REPAIRED resolv.conf -> %s; DNS recovered",
+                RESOLVCONF_TARGET)
+    return dict(base, ok=True, action="repaired", resolution_recovered=True,
+                reason="resolv.conf was Tailscale-owned while accept-dns is off "
+                       "(Tailscale's release did not restore it); relinked to the "
+                       "verified resolved stub and DNS recovered")
+
+
 def op_magicdns_switch(params):
     """Turn Tailscale's accept-dns off (fallback) or back on, after re-measuring.
 
@@ -2711,6 +2913,7 @@ OPS = {
     "release_port": op_release_port,
     "list_port_grants": op_list_port_grants,
     "magicdns_switch": op_magicdns_switch,
+    "resolvconf_repair": op_resolvconf_repair,
 }
 
 

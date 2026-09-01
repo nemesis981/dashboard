@@ -1066,7 +1066,32 @@ def evaluate_magicdns(fallback_addr="127.0.0.1", act=True):
                                  "reason": "not restoring: resolver_reachable=%r "
                                            "exclusive=%r" % (reachable,
                                                              verdict["exclusive"])}
+    # ⛔ CONSISTENCY SWEEP, every cycle, regardless of what happened above.
+    #
+    # Toggling the preference is not the same as the on-disk file following. Measured
+    # 2026-09-01: when Tailscale's backup file is missing, `accept-dns=false` leaves
+    # resolv.conf pointing at 100.100.100.100 -- a total DNS outage that CANNOT
+    # self-correct and needed manual rescue twice. Ask the helper to reconcile the
+    # file with the preference on every pass; it is a cheap read when consistent, and
+    # it is the only thing standing between that state and an outage.
+    verdict["repair"] = _magicdns_ask_repair()
     return verdict
+
+
+def _magicdns_ask_repair():
+    """Ask the privileged helper to reconcile resolv.conf. NEVER raises."""
+    try:
+        sys.path.insert(0, _ALERTMGR) if _ALERTMGR not in sys.path else None
+        import fw_client  # noqa: PLC0415
+        res = fw_client.resolvconf_repair()
+        if res.get("action") == "repaired":
+            log.warning("resolv.conf REPAIRED by helper: %s", str(res.get("reason"))[:200])
+        elif res.get("action") in ("refused", "failed"):
+            log.error("resolv.conf repair %s: %s", res.get("action"),
+                      str(res.get("reason"))[:200])
+        return res
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "reason": "helper unreachable: %s" % str(exc)[:120]}
 
 
 def _magicdns_ask_helper(enable, quiet=False):
