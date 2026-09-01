@@ -627,6 +627,13 @@ _ERR_CODES = {
     "E-MAGICDNS-002": ("magicdns_switch applied but verification showed the "
                        "preference did NOT change. A claimed change is not a "
                        "change", "HIGH", None),
+    "E-MAGICDNS-004": ("magicdns_switch changed the preference successfully but "
+                       "DNS RESOLUTION DID NOT RECOVER. A preference is not an "
+                       "outcome. Most often /etc/resolv.conf has been replaced by "
+                       "a hand-written regular file, which severs Tailscale's "
+                       "release path -- it restarts systemd-resolved and lets it "
+                       "regenerate, which cannot reach a plain file",
+                       "HIGH", None),
     "E-MAGICDNS-003": ("the tailscale CLI was unusable (absent, timeout or "
                        "permission), so MagicDNS state could be neither read "
                        "nor changed", "HIGH", None),
@@ -2444,6 +2451,58 @@ def _magicdns_read_pref(exe):
         return None
 
 
+def _resolution_works(timeout=4.0):
+    """Does SYSTEM DNS resolution actually work right now? True / False / None.
+
+    Uses `getent hosts` -- the real system resolver path a user experiences. A query
+    aimed at a chosen server would prove only that THAT server answers; what matters
+    after a DNS takeover or release is whether the box can resolve AT ALL.
+    """
+    for name in ("example.com", "cloudflare.com"):
+        try:
+            p = subprocess.run(["getent", "hosts", name],
+                               capture_output=True, text=True, timeout=timeout)
+            if p.returncode == 0 and (p.stdout or "").strip():
+                return True
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:  # noqa: BLE001
+            return None
+    return False
+
+
+def _resolv_conf_is_resolved_managed():
+    """Is /etc/resolv.conf still a symlink into systemd-resolved's runtime dir?
+
+    ⛔ THE DIAGNOSTIC FOR THE 2026-09-01 SAFETY-NET FAILURE. Tailscale's
+    directManager releases DNS by RESTARTING systemd-resolved and letting it
+    regenerate the file -- which only reaches /etc/resolv.conf while that path is
+    the SYMLINK. A hand-written regular file (`echo ... > /etc/resolv.conf`, used
+    as an emergency fix) silently severs it: accept-dns=false then succeeds at the
+    PREFERENCE level while DNS stays broken. Measured live: the same command
+    worked at 11:34 with a symlink and did not take at 14:20 with a regular file.
+    Naming this turns a baffling failure into a diagnosed one.
+    """
+    try:
+        if not os.path.islink("/etc/resolv.conf"):
+            return False
+        return "systemd/resolve" in os.readlink("/etc/resolv.conf")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _await_resolution(attempts=5, delay=1.0):
+    """Let DNS settle after a takeover/release before judging it."""
+    ok = None
+    for i in range(attempts):
+        ok = _resolution_works()
+        if ok is True:
+            return True
+        if i < attempts - 1:
+            time.sleep(delay)
+    return ok
+
+
 def op_magicdns_switch(params):
     """Turn Tailscale's accept-dns off (fallback) or back on, after re-measuring.
 
@@ -2558,6 +2617,32 @@ def op_magicdns_switch(params):
         log.error("fwd: magicdns_switch enable=%s but pref reads %s", enable, observed)
         return {"ok": False, "reason": "preference did not change (reads %s)" % observed}
 
+    # ⛔ A PREFERENCE IS NOT AN OUTCOME.
+    #
+    # Reading CorpDNS back proves the SETTING changed, not that DNS works. On
+    # 2026-09-01 exactly that gap bit: accept-dns=false flipped the preference
+    # correctly while /etc/resolv.conf -- replaced by a hand-written regular file --
+    # still pointed at an unreachable resolver, so DNS stayed dead and this op would
+    # have reported success. Verify the OUTCOME, and name the usual cause.
+    resolution = _await_resolution()
+    if resolution is not True:
+        managed = _resolv_conf_is_resolved_managed()
+        reason = "preference changed to %s but DNS RESOLUTION DID NOT RECOVER" % enable
+        if managed is False:
+            reason += (" -- /etc/resolv.conf is NOT a systemd-resolved symlink, which "
+                       "blocks Tailscale's release path. Fix: sudo ln -sf "
+                       "../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf")
+        _errors_record("E-MAGICDNS-004",
+                       {"enable": enable, "resolution": str(resolution),
+                        "resolv_conf_resolved_managed": str(managed)})
+        log.error("fwd: magicdns_switch %s", reason)
+        # Deliberately NOT auto-reverting: if disabling did not restore DNS then
+        # re-enabling will not either, and a second flip only adds churn to a box
+        # that is already not resolving. Report loudly and leave it alone.
+        return {"ok": False, "enable": enable, "packaging": packaging,
+                "verified_preference": True, "resolution_recovered": False,
+                "resolv_conf_resolved_managed": managed, "reason": reason}
+
     state = _magicdns_state_read()
     state["disabled_by_guard"] = (enable is False)
     state["last_change_ts"] = int(time.time())
@@ -2567,7 +2652,8 @@ def op_magicdns_switch(params):
     log.info("fwd: magicdns_switch enable=%s ok (packaging=%s, state_persisted=%s)",
              enable, packaging, persisted)
     return {"ok": True, "enable": enable, "packaging": packaging,
-            "verified": True, "state_persisted": persisted,
+            "verified": True, "resolution_recovered": True,
+            "state_persisted": persisted,
             "reason": verdict.get("reason", "")[:200]}
 
 

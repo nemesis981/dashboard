@@ -42,7 +42,7 @@ sys.path.insert(0, REPO)
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 124
+EXPECTED_CHECKS = 139
 
 SNAP_SOCK = "/var/snap/tailscale/common/socket/tailscaled.sock"
 APT_SOCK = "/var/run/tailscale/tailscaled.sock"
@@ -447,34 +447,43 @@ def _fwd():
 
 class _FakeProbe:
     """Stands in for vpn_dns_guard so every verdict can be FORCED."""
-    def __init__(self, conflict, packaging="apt", reason="forced"):
+    def __init__(self, conflict, packaging="apt", reason="forced", reachable=True):
         self._v = {"conflict": conflict, "packaging": packaging, "reason": reason}
+        self._reachable = reachable
     def magicdns_conflict(self, *a, **k):
         return dict(self._v)
+    def magicdns_resolver_reachable(self, *a, **k):
+        return self._reachable
 
 
 def _run_op(F, enable, conflict, packaging="apt", owned=False,
-            pref_after=None, cli="/usr/bin/tailscale", set_rc=0):
+            pref_after=None, cli="/usr/bin/tailscale", set_rc=0,
+            resolution=True, resolv_managed=True, reachable=True):
     """Invoke op_magicdns_switch with every external dependency forced."""
     import subprocess as _sp
     saved = (sys.modules.get("vpn_dns_guard"), F._tailscale_bin,
              F._magicdns_state_read, F._magicdns_state_write,
-             F._magicdns_read_pref, F._errors_record, _sp.run)
+             F._magicdns_read_pref, F._errors_record, _sp.run,
+             F._await_resolution, F._resolv_conf_is_resolved_managed)
     recorded = []
     try:
-        sys.modules["vpn_dns_guard"] = _FakeProbe(conflict, packaging)
+        sys.modules["vpn_dns_guard"] = _FakeProbe(conflict, packaging,
+                                                  reachable=reachable)
         F._tailscale_bin = lambda: cli
         F._magicdns_state_read = lambda: {"disabled_by_guard": owned}
         F._magicdns_state_write = lambda st: True
         F._magicdns_read_pref = lambda exe: (enable if pref_after is None else pref_after)
         F._errors_record = lambda code, ctx=None: recorded.append(code)
+        F._await_resolution = lambda *a, **k: resolution
+        F._resolv_conf_is_resolved_managed = lambda: resolv_managed
 
         class _R:
             def __init__(self): self.returncode = set_rc; self.stdout = "{}"; self.stderr = ""
         _sp.run = lambda *a, **k: _R()
         return F.op_magicdns_switch({"enable": enable}), recorded
     finally:
-        (mod, tb, sr, sw, rp, er, spr) = saved
+        (mod, tb, sr, sw, rp, er, spr, aw, rm) = saved
+        F._await_resolution, F._resolv_conf_is_resolved_managed = aw, rm
         if mod is None:
             sys.modules.pop("vpn_dns_guard", None)
         else:
@@ -882,6 +891,95 @@ def test_healthy_box_is_left_alone():
     check("accept-dns untouched", final, True)
 
 
+# --------------------------------------------------------------------------
+# 11. OUTCOME VERIFICATION -- "a preference is not an outcome".
+#
+# ⛔ 2026-09-01: `accept-dns=false` flipped CorpDNS correctly and DNS STAYED DEAD,
+# because /etc/resolv.conf had been replaced by a hand-written regular file --
+# which severs Tailscale's release path (it restarts systemd-resolved and lets it
+# regenerate, and a plain file is not reachable that way). The op verified the
+# PREFERENCE and would have reported success on a box that could not resolve.
+# --------------------------------------------------------------------------
+
+def test_resolv_conf_shape_detection():
+    print("\n[detect the resolv.conf shape that breaks the release path]")
+    F = _fwd()
+    got = F._resolv_conf_is_resolved_managed()
+    check("returns a definite True/False on this box", got in (True, False), True)
+    # Control: the checker must be able to say False, not only True.
+    real = os.path.islink
+    try:
+        os.path.islink = lambda p: False
+        check("CONTROL: a regular file is reported NOT resolved-managed",
+              F._resolv_conf_is_resolved_managed(), False)
+    finally:
+        os.path.islink = real
+
+
+def test_op_fails_when_resolution_does_not_recover():
+    print("\n[the op must FAIL when the pref changed but DNS did not come back]")
+    F = _fwd()
+    res, rec = _run_op(F, enable=False, conflict=True, resolution=False)
+    check("ok is False despite the preference changing", res.get("ok"), False)
+    check("...and it says the preference DID change",
+          res.get("verified_preference"), True)
+    check("...and reports resolution did NOT recover",
+          res.get("resolution_recovered"), False)
+    check("...and records E-MAGICDNS-004", "E-MAGICDNS-004" in rec, True)
+
+
+def test_op_names_the_resolv_conf_cause():
+    print("\n[when resolv.conf is the cause, SAY SO -- diagnosed, not baffling]")
+    F = _fwd()
+    res, _ = _run_op(F, enable=False, conflict=True,
+                     resolution=False, resolv_managed=False)
+    reason = res.get("reason") or ""
+    check("reason names the resolv.conf symlink problem",
+          "systemd-resolved symlink" in reason, True)
+    check("reason includes the exact fix command", "ln -sf" in reason, True)
+    check("reports resolv_conf_resolved_managed=False",
+          res.get("resolv_conf_resolved_managed"), False)
+
+
+def test_op_does_not_auto_revert_on_failed_resolution():
+    print("\n[no auto-revert: a second flip cannot help a box that is not resolving]")
+    F = _fwd()
+    calls = []
+    import subprocess as _sp
+    real = _sp.run
+    try:
+        class _R:
+            def __init__(self): self.returncode = 0; self.stdout = "{}"; self.stderr = ""
+        def rec(*a, **k):
+            if a and isinstance(a[0], list) and "set" in a[0]:
+                calls.append(a[0])
+            return _R()
+        _sp.run = rec
+        _run_op(F, enable=False, conflict=True, resolution=False)
+    finally:
+        _sp.run = real
+    check("exactly ONE 'tailscale set' issued (no revert flip)", len(calls) <= 1, True)
+
+
+def test_happy_path_reports_resolution_recovered():
+    print("\n[success must assert the OUTCOME, not just the setting]")
+    F = _fwd()
+    res, _ = _run_op(F, enable=False, conflict=True, resolution=True)
+    check("ok True", res.get("ok"), True)
+    check("resolution_recovered True", res.get("resolution_recovered"), True)
+
+
+def test_outcome_check_has_a_call_site():
+    print("\n[and the outcome check must actually RUN]")
+    Fp = "alert_manager/nemesis_fwd.py"
+    check("op_magicdns_switch() -> _await_resolution()",
+          _calls_within(Fp, "op_magicdns_switch", "_await_resolution"), True)
+    check("op_magicdns_switch() -> _resolv_conf_is_resolved_managed()",
+          _calls_within(Fp, "op_magicdns_switch", "_resolv_conf_is_resolved_managed"), True)
+    check("_await_resolution() -> _resolution_works()",
+          _calls_within(Fp, "_await_resolution", "_resolution_works"), True)
+
+
 if __name__ == "__main__":
     print("Tailscale packaging independence — apt/snap agnostic behaviour")
     test_socket_discovery_order()
@@ -912,6 +1010,12 @@ if __name__ == "__main__":
     test_no_oscillation_while_the_tunnel_stays_up()
     test_restores_once_the_blocker_actually_clears()
     test_healthy_box_is_left_alone()
+    test_resolv_conf_shape_detection()
+    test_op_fails_when_resolution_does_not_recover()
+    test_op_names_the_resolv_conf_cause()
+    test_op_does_not_auto_revert_on_failed_resolution()
+    test_happy_path_reports_resolution_recovered()
+    test_outcome_check_has_a_call_site()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))
