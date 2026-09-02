@@ -28,7 +28,7 @@ m = importlib.import_module("modules.lan_behavior_monitor.module")
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 32
+EXPECTED_CHECKS = 38
 
 SCANNER_MAC = "aa:bb:cc:00:00:01"
 SCANNER_IP = "192.0.2.50"
@@ -319,6 +319,61 @@ def test_old_events_are_pruned_not_flagged():
     check("CONTROL: same volume at current-timestamp DOES fire", s2["findings"], 1)
 
 
+def test_appliance_self_excluded():
+    print("\n[the appliance's OWN device-scanner ARP sweeps must NOT be flagged -- !@NEMESIS_HOST@ parity]")
+    _reset_rolling()
+    eve = os.path.join(_TMPDIR.name, "eve_self.json")
+    with m._db() as conn:
+        conn.execute("DELETE FROM lan_behavior_findings"); conn.commit()
+    m._set_state("module_started_at", "1.0")
+    # Disable the live resolver so the test controls what counts as "our own" identity,
+    # same monkeypatch pattern as the fail-closed selftest test.
+    orig = m._refresh_local_identity
+    m._refresh_local_identity = lambda: None
+    OWN_MAC = "8c:90:2d:00:00:99"
+    m._LOCAL_MACS.clear(); m._LOCAL_MACS.add(OWN_MAC)
+    m._LOCAL_IPS.clear(); m._LOCAL_IPS.add("192.0.2.200")
+    try:
+        # fan-out FROM the appliance's own MAC (device-scanner sweeping the LAN)
+        recs = [_arp_req(OWN_MAC, "192.0.2.200", "192.0.2.6%02d" % i)
+                for i in range(m.behavior.ARP_FANOUT_DISTINCT_IPS)]
+        _write_eve(eve, recs, mode="w")
+        m.EVE_LOG = eve
+        s = m._tail_cycle(now=900000.0)
+        check("appliance self-scan recorded ZERO arp events (excluded at source)",
+              s["arp_events"], 0)
+        check("appliance self-scan raised NO finding", s["findings"], 0)
+
+        # CONTROL: identical volume from a NON-local MAC still fires.
+        _reset_rolling()
+        m._LOCAL_MACS.clear(); m._LOCAL_MACS.add(OWN_MAC)   # keep OWN excluded
+        m._LOCAL_IPS.clear(); m._LOCAL_IPS.add("192.0.2.200")
+        eve2 = os.path.join(_TMPDIR.name, "eve_foreign.json")
+        recs2 = [_arp_req("aa:bb:cc:00:00:ff", "192.0.2.201", "192.0.2.7%02d" % i)
+                 for i in range(m.behavior.ARP_FANOUT_DISTINCT_IPS)]
+        _write_eve(eve2, recs2, mode="w")
+        m.EVE_LOG = eve2
+        s2 = m._tail_cycle(now=900100.0)
+        check("CONTROL: a NON-local source at the same volume DOES fire", s2["findings"], 1)
+
+        # sweep alert + mdns from OUR OWN ip must also be excluded at source
+        _reset_rolling()
+        m._LOCAL_MACS.clear(); m._LOCAL_MACS.add(OWN_MAC)
+        m._LOCAL_IPS.clear(); m._LOCAL_IPS.add("192.0.2.200")
+        eve3 = os.path.join(_TMPDIR.name, "eve_selfsweep.json")
+        _write_eve(eve3, [_sweep_alert("192.0.2.200")]
+                         + [_mdns("192.0.2.200") for _ in range(m.behavior.MDNS_FLOOD_COUNT)],
+                   mode="w")
+        m.EVE_LOG = eve3
+        s3 = m._tail_cycle(now=900200.0)
+        check("appliance's own sweep alert excluded (0 sweep events)", s3["sweep_events"], 0)
+        check("appliance's own mdns excluded (0 mdns events)", s3["mdns_events"], 0)
+        check("no finding from the appliance's own sweep/mdns", s3["findings"], 0)
+    finally:
+        m._refresh_local_identity = orig
+        m._LOCAL_MACS.clear(); m._LOCAL_IPS.clear()
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("lan_behavior_monitor — tail cycle integration")
@@ -334,6 +389,7 @@ if __name__ == "__main__":
     test_status_distinguishes_unproven_from_clean()
     test_first_run_seeks_to_end_not_backlog()
     test_old_events_are_pruned_not_flagged()
+    test_appliance_self_excluded()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))

@@ -44,6 +44,47 @@ _MDNS_STATE = {}   # src_ip  -> [ts, ...]
 _SWEEP_STATE = {}  # src_ip  -> last_sweep_ts
 _IP_TO_MAC = {}    # src_ip  -> src_mac (learned from ARP, to correlate sweep/mdns)
 
+# ── Appliance self-identity. The box's OWN device-scanner legitimately ARP-sweeps
+#    the whole LAN, so without excluding ourselves as a SOURCE we flag ourselves --
+#    exactly the false positive the Suricata sweep rules avoid with !@NEMESIS_HOST@
+#    (found live 2026-09-02: the appliance's own MAC raised an arp_fanout finding).
+#    Resolved at RUNTIME, never hardcoded (Rule 8): a MAC/IP written at install time
+#    goes stale. Layer 2 here (src is a MAC), so firewall._local_addresses() -- which
+#    is layer-3 IPs only -- cannot answer it; a shared _local_macs() sibling would be
+#    the right consolidation later, but a self-contained resolver unblocks the live
+#    false positive without coupling to the ufw chokepoint file.
+_LOCAL_MACS = set()   # lowercased MACs on every local interface
+_LOCAL_IPS = set()    # IPs on every local interface (zone id stripped)
+
+
+def _refresh_local_identity():
+    """Populate _LOCAL_MACS / _LOCAL_IPS from this host's interfaces. Best-effort:
+    on failure the sets are left as-is (a prior good read) rather than cleared, and
+    the failure is logged -- clearing them would silently re-enable self-flagging."""
+    import socket as _sock
+    macs, ips = set(), set()
+    try:
+        import psutil
+        for _iface, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                fam = snic.family
+                if fam == getattr(psutil, "AF_LINK", None) or fam == getattr(_sock, "AF_PACKET", None):
+                    mac = (snic.address or "").strip().lower()
+                    if mac and mac != "00:00:00:00:00:00":
+                        macs.add(mac)
+                elif fam in (_sock.AF_INET, _sock.AF_INET6):
+                    ip = (snic.address or "").split("%")[0]
+                    if ip:
+                        ips.add(ip)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("lan_behavior_monitor: could not enumerate local identity (%s) -- "
+                    "keeping the previous set; self-exclusion may be stale", exc)
+        return
+    if macs:
+        _LOCAL_MACS.clear(); _LOCAL_MACS.update(macs)
+    if ips:
+        _LOCAL_IPS.clear(); _LOCAL_IPS.update(ips)
+
 
 def _conn():
     # ADR 0006: all DB access through the Data Manager. Writes only lan_behavior_*
@@ -286,6 +327,7 @@ def _tail_cycle(now=None) -> dict:
         _set_state("eve_inode", st.st_ino)
         return summary
 
+    _refresh_local_identity()   # keep self-identity current; excludes our own scanning
     active_ips = set()      # sources touched this cycle
     active_macs = set()
     try:
@@ -303,7 +345,7 @@ def _tail_cycle(now=None) -> dict:
                     continue
                 if is_arp:
                     probe = behavior.parse_arp_probe(rec)
-                    if probe is not None:
+                    if probe is not None and probe["src_mac"] not in _LOCAL_MACS:
                         ev_ts = _event_epoch(rec, now)
                         behavior.record_probe(_ARP_STATE, probe, ev_ts)
                         summary["arp_events"] += 1
@@ -312,13 +354,13 @@ def _tail_cycle(now=None) -> dict:
                             _IP_TO_MAC[probe["src_ip"]] = probe["src_mac"]
                 elif is_alert:
                     a = behavior.parse_sweep_alert(rec)
-                    if a is not None:
+                    if a is not None and a["src_ip"] not in _LOCAL_IPS:
                         _SWEEP_STATE[a["src_ip"]] = _event_epoch(rec, now)
                         summary["sweep_events"] += 1
                         active_ips.add(a["src_ip"])
                 elif is_mdns:
                     ip = _mdns_src(rec)
-                    if ip:
+                    if ip and ip not in _LOCAL_IPS:
                         behavior.record_mdns(_MDNS_STATE, ip, _event_epoch(rec, now))
                         summary["mdns_events"] += 1
                         active_ips.add(ip)
