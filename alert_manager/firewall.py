@@ -89,26 +89,19 @@ _NEVER_BLOCK_ALWAYS = {"127.0.0.1", "::1"}
 def _local_addresses():
     """Every address currently configured on this host.
 
-    Best-effort by design: if the interface list cannot be read, the guard falls
-    back to loopback + NEMESIS_NEVER_BLOCK rather than failing the block. A
-    firewall that refuses to work because it could not enumerate interfaces would
-    be a worse failure than the one this guards against — but the degradation is
-    logged, never silent.
+    Thin delegation to net_identity.local_ip_addresses() -- the ONE definition of
+    "this host's IPs", shared with lan_behavior_monitor and post_detection_egress so
+    the three cannot silently drift (two of the 2026-09-02 self-flag false positives
+    came from them being separate copies). Behaviour is IDENTICAL to the historical
+    inline version: v4+v6, zone id stripped, empty-on-failure. Recompute per call is
+    preserved -- NOT cached -- because a stale set could miss a current address and
+    the never-block guard would then block the host's own new address.
+
+    Kept as a wrapper (rather than changing every caller) so ip_enrichment's
+    `from firewall import _local_addresses` keeps working unchanged.
     """
-    found = set()
-    try:
-        import psutil
-        for _iface, snics in psutil.net_if_addrs().items():
-            for snic in snics:
-                if snic.family in (socket.AF_INET, socket.AF_INET6):
-                    addr = (snic.address or "").split("%")[0]  # strip zone id
-                    if addr:
-                        found.add(addr)
-    except Exception as exc:
-        log.warning("firewall: could not enumerate local addresses (%s) — "
-                    "never-block guard falls back to loopback + "
-                    "NEMESIS_NEVER_BLOCK only", exc)
-    return found
+    import net_identity
+    return net_identity.local_ip_addresses()
 
 
 def _default_gateways():

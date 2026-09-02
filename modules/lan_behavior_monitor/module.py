@@ -57,29 +57,36 @@ _LOCAL_MACS = set()   # lowercased MACs on every local interface
 _LOCAL_IPS = set()    # IPs on every local interface (zone id stripped)
 
 
-def _refresh_local_identity():
-    """Populate _LOCAL_MACS / _LOCAL_IPS from this host's interfaces. Best-effort:
-    on failure the sets are left as-is (a prior good read) rather than cleared, and
-    the failure is logged -- clearing them would silently re-enable self-flagging."""
-    import socket as _sock
-    macs, ips = set(), set()
+def _net_identity():
+    """Import the shared self-identity resolver (alert_manager/net_identity.py).
+
+    Same path-bridge the modules package uses for data_manager: alert_manager is a
+    sys.path dir, not a package. Returns the module or None if unavailable."""
     try:
-        import psutil
-        for _iface, snics in psutil.net_if_addrs().items():
-            for snic in snics:
-                fam = snic.family
-                if fam == getattr(psutil, "AF_LINK", None) or fam == getattr(_sock, "AF_PACKET", None):
-                    mac = (snic.address or "").strip().lower()
-                    if mac and mac != "00:00:00:00:00:00":
-                        macs.add(mac)
-                elif fam in (_sock.AF_INET, _sock.AF_INET6):
-                    ip = (snic.address or "").split("%")[0]
-                    if ip:
-                        ips.add(ip)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("lan_behavior_monitor: could not enumerate local identity (%s) -- "
-                    "keeping the previous set; self-exclusion may be stale", exc)
-        return
+        import net_identity  # noqa: PLC0415
+        return net_identity
+    except Exception:  # noqa: BLE001
+        try:
+            import os as _os, sys as _sys  # noqa: PLC0415
+            amgr = _os.path.join(_os.path.dirname(_os.path.dirname(
+                _os.path.dirname(_os.path.abspath(__file__)))), "alert_manager")
+            if amgr not in _sys.path:
+                _sys.path.insert(0, amgr)
+            import net_identity  # noqa: PLC0415
+            return net_identity
+        except Exception as exc:  # noqa: BLE001
+            log.warning("lan_behavior_monitor: net_identity unavailable (%s)", exc)
+            return None
+
+
+def _refresh_local_identity():
+    """Refresh _LOCAL_MACS / _LOCAL_IPS from the shared resolver. Keep-previous on an
+    empty/failed read (clearing would silently re-enable self-flagging) -- the policy
+    stays HERE while the enumeration is shared (net_identity is empty-on-failure)."""
+    ni = _net_identity()
+    if ni is None:
+        return   # keep previous
+    ips, macs = ni.local_identity()
     if macs:
         _LOCAL_MACS.clear(); _LOCAL_MACS.update(macs)
     if ips:

@@ -2573,21 +2573,34 @@ HW_LOCAL_DEVICE_ID = "local"
 _PDE_LOCAL_IPS = set()
 
 
-def _pde_refresh_local_ips():
-    """Populate _PDE_LOCAL_IPS from this host's interfaces; best-effort, keep-previous on
-    failure (clearing would silently re-enable self-correlation)."""
-    import socket as _sock
-    ips = set()
+def _pde_net_identity():
+    """Import the shared self-identity resolver (alert_manager/net_identity.py), bridging
+    the sys.path the way the modules package does for data_manager."""
     try:
-        import psutil
-        for _iface, snics in psutil.net_if_addrs().items():
-            for snic in snics:
-                if snic.family in (_sock.AF_INET, _sock.AF_INET6):
-                    a = (snic.address or "").split("%")[0]
-                    if a:
-                        ips.add(a)
+        import net_identity  # noqa: PLC0415
+        return net_identity
     except Exception:  # noqa: BLE001
-        return
+        try:
+            import os as _os, sys as _sys  # noqa: PLC0415
+            amgr = _os.path.join(_os.path.dirname(_os.path.dirname(
+                _os.path.dirname(_os.path.abspath(__file__)))), "alert_manager")
+            if amgr not in _sys.path:
+                _sys.path.insert(0, amgr)
+            import net_identity  # noqa: PLC0415
+            return net_identity
+        except Exception as exc:  # noqa: BLE001
+            log.warning("post_detection_egress: net_identity unavailable (%s)", exc)
+            return None
+
+
+def _pde_refresh_local_ips():
+    """Refresh _PDE_LOCAL_IPS from the shared resolver; keep-previous on an empty/failed
+    read (clearing would silently re-enable self-correlation). Policy stays here; the
+    enumeration is shared (net_identity is empty-on-failure)."""
+    ni = _pde_net_identity()
+    if ni is None:
+        return   # keep previous
+    ips = ni.local_ip_addresses()
     if ips:
         _PDE_LOCAL_IPS.clear()
         _PDE_LOCAL_IPS.update(ips)
