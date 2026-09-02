@@ -6394,3 +6394,30 @@ exactly the ADR 0002 flakiness scenario the timeout exists to absorb, and with
 zone if the timeout is cut too aggressively. **Needs more samples before any change, not a
 guess** — explicitly not resolved by yesterday's `tries_per_zone` reduction, which addressed the
 retry count, not this timeout value. No action owed beyond continuing to hold it.
+
+### [HIGH] `lan_integrity` carries a LATENT version of today's eve.json backlog-replay bug (found 2026-09-02, Window 3; Window 1 fixing directly given urgency)
+`modules/lan_behavior_monitor/module.py` shipped and fixed a real live bug today (`10d2649`):
+first run replayed the full 1.1GB `eve.json` backlog and produced 43 false findings, because its
+tail offset defaulted to 0 with no bound. Fix was to seek to end on a genuine first run.
+
+**`modules/lan_integrity/module.py`'s `_tail_cycle()` has the identical exposure.** Its offset
+default is `_get_state("eve_offset", "0")` — the same zero-default that just caused the incident
+— with no baseline bound and no seek-to-end anywhere in the file (verified: no `baseline`,
+`first.run`, or `backlog` guard exists in `modules/lan_integrity/module.py`). Its own docstring
+claims safety by resemblance rather than by mechanism: *"Same shape as anomaly_detection's
+tailer, which is the proven one in this codebase."* That claim does not hold up —
+`anomaly_detection`'s tailer is not a bare zero-offset start; it runs `_build_initial_baseline()`
+first (a **bounded** historical read, capped by `INITIAL_BASELINE_MAX_DAYS`) and only then jumps
+to end (`modules/anomaly_detection/module.py:432-497`). `lan_integrity` has neither the bound nor
+the jump.
+
+**Not currently firing on this box** — live-verified, `lan_integrity`'s `eve_offset` is already
+at `1208032407`, established before the file grew large. **The exposure is real but latent**: it
+fires on any fresh install, or if `eve_offset`/`eve_inode` state is ever lost — a DB restore, a
+migration, or a manual reset would all trigger a full-backlog replay of rogue-DHCP and
+ARP-spoofing history collapsed into "now," on a detector whose entire job is flagging
+security-relevant network changes.
+
+Full detail, plus a related genuine (non-urgent) duplication finding in the same sweep — two
+independent `/proc/net/arp` parsers with already-measured drift in MAC normalisation:
+`docs/audits/duplicated-logic-sweep-2026-09-02.md`.
