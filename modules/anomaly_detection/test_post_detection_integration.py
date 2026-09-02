@@ -32,7 +32,7 @@ m = importlib.import_module("modules.anomaly_detection.module")
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 21
+EXPECTED_CHECKS = 28
 
 DEV_ID = "dev-aaaa"
 DEV_IP = "192.0.2.50"
@@ -57,15 +57,19 @@ def _setup_min_schema():
     rc.execute("CREATE TABLE IF NOT EXISTS malware_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, detected_at REAL)")
     rc.execute("CREATE TABLE IF NOT EXISTS lan_integrity_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, subject_ip TEXT, ts REAL)")
     rc.execute("CREATE TABLE IF NOT EXISTS lan_behavior_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, src_ip TEXT, ts REAL)")
+    rc.execute("CREATE TABLE IF NOT EXISTS hw_anomaly_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, captured_at TEXT)")
     rc.execute("INSERT OR REPLACE INTO agent_devices(device_id, ip_address) VALUES(?,?)", (DEV_ID, DEV_IP))
     rc.execute("DELETE FROM malware_findings")
     rc.execute("DELETE FROM lan_integrity_findings")
     rc.execute("DELETE FROM lan_behavior_findings")
+    rc.execute("DELETE FROM hw_anomaly_snapshots")
     rc.commit(); rc.close()
     with m._db() as conn:   # anomaly_* are anomaly's own -> write via the guarded conn
         conn.execute("DELETE FROM anomaly_incidents")
-        for k in ("pde_wm_malware_findings", "pde_wm_lan_integrity_findings", "pde_wm_anomaly_incidents"):
+        for k in ("pde_wm_malware_findings", "pde_wm_lan_integrity_findings",
+                  "pde_wm_anomaly_incidents", "pde_wm_hw_anomaly_snapshots"):
             conn.execute("DELETE FROM anomaly_state WHERE key=?", (k,))
+        conn.execute("DELETE FROM anomaly_state WHERE key LIKE 'pde_hw_last:%'")
         conn.commit()
 
 
@@ -225,6 +229,81 @@ def test_discovery_signal_correlates_stage2():
           ev["egress_type"], "lan_probe_scan")
 
 
+def test_hw_local_excluded_stage3():
+    print("\n[stage 3: the appliance's OWN hw anomalies (device_id=local) never trigger]")
+    _setup_min_schema()
+    now = 11_000_000.0
+    rc = _raw()
+    # give 'local' a REAL ip in agent_devices, so ONLY the device_id!='local' filter can
+    # stop it (otherwise a null-ip join would drop it regardless, and the filter would be
+    # untested -- a mutation removing it would pass).
+    rc.execute("INSERT OR REPLACE INTO agent_devices(device_id, ip_address) VALUES('local','192.0.2.1')")
+    for i in range(10):
+        rc.execute("INSERT INTO hw_anomaly_snapshots(device_id, captured_at) VALUES('local', ?)",
+                   (now + i,))
+    rc.commit(); rc.close()
+    with m._db() as conn:
+        dets = m._pde_new_detections(conn, now + 20); conn.commit()
+    hw_dets = [d for d in dets if d["source"].startswith("hw_anomaly_snapshots:")]
+    check("device_id=local produced ZERO hw triggers", len(hw_dets), 0)
+
+
+def test_hw_remote_debounced_stage3():
+    print("\n[stage 3: a REMOTE device's hw burst collapses to ONE trigger (debounce)]")
+    _setup_min_schema()
+    now = 12_000_000.0
+    rc = _raw()
+    # 12 hw anomalies for a remote device within the debounce window
+    for i in range(12):
+        rc.execute("INSERT INTO hw_anomaly_snapshots(device_id, captured_at) VALUES(?,?)",
+                   (DEV_ID, now + i))
+    rc.commit(); rc.close()
+    with m._db() as conn:
+        dets = m._pde_new_detections(conn, now + 20); conn.commit()
+    hw_dets = [d for d in dets if d["source"].startswith("hw_anomaly_snapshots:")]
+    check("a 12-row remote burst collapses to exactly ONE trigger", len(hw_dets), 1)
+    check("the trigger resolves to the device IP", hw_dets[0]["device_ip"], DEV_IP)
+
+    # a SECOND burst within the debounce window produces NO new trigger
+    rc = _raw()
+    for i in range(5):
+        rc.execute("INSERT INTO hw_anomaly_snapshots(device_id, captured_at) VALUES(?,?)",
+                   (DEV_ID, now + 100 + i))
+    rc.commit(); rc.close()
+    with m._db() as conn:
+        dets2 = m._pde_new_detections(conn, now + 120); conn.commit()
+    hw2 = [d for d in dets2 if d["source"].startswith("hw_anomaly_snapshots:")]
+    check("a second burst inside the debounce window is suppressed", len(hw2), 0)
+
+    # after the debounce window elapses, a new burst DOES trigger again
+    later = now + m.HW_DEBOUNCE_S + 200
+    rc = _raw()
+    rc.execute("INSERT INTO hw_anomaly_snapshots(device_id, captured_at) VALUES(?,?)",
+               (DEV_ID, later))
+    rc.commit(); rc.close()
+    with m._db() as conn:
+        dets3 = m._pde_new_detections(conn, later + 5); conn.commit()
+    hw3 = [d for d in dets3 if d["source"].startswith("hw_anomaly_snapshots:")]
+    check("after the debounce window, a new burst triggers again", len(hw3), 1)
+
+
+def test_hw_trigger_correlates_stage3():
+    print("\n[stage 3: a remote hw trigger + a DNS anomaly -> post_detection incident]")
+    _setup_min_schema()
+    now = 13_000_000.0
+    rc = _raw()
+    rc.execute("INSERT INTO hw_anomaly_snapshots(device_id, captured_at) VALUES(?,?)", (DEV_ID, now))
+    rc.commit(); rc.close()
+    with m._db() as conn:
+        _add_egress_incident(conn, "dns_exfiltration", DEV_IP, now + 60)
+    m._post_detection_pass(now=now + 70)
+    inc = _pde_incidents()
+    check("hw trigger correlated into an incident", len(inc), 1)
+    ev = json.loads(inc[0][2])
+    check("evidence names hw_anomaly as the detection",
+          ev["detection"].startswith("hw_anomaly_snapshots:"), True)
+
+
 def test_selftest_gate():
     print("\n[the pass runs the pure-core selftest and does not raise on a clean DB]")
     _setup_min_schema()
@@ -248,6 +327,9 @@ if __name__ == "__main__":
     test_watermark_actually_advances()
     test_anomaly_trigger_excludes_pde_and_nonegress_types()
     test_discovery_signal_correlates_stage2()
+    test_hw_local_excluded_stage3()
+    test_hw_remote_debounced_stage3()
+    test_hw_trigger_correlates_stage3()
     test_selftest_gate()
     print()
     if _count != EXPECTED_CHECKS:

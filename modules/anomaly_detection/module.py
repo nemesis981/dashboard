@@ -2556,6 +2556,15 @@ except Exception:
 # anomaly_incidents and its one-open-per-target index rather than a new alert path.
 # ─────────────────────────────────────────────────────────────────────────────
 _PDE_EGRESS_LOOKBACK_S = 3600   # how far back to pull egress signals to correlate against
+# Stage 3 -- hw_anomaly_snapshots is a CONTINUOUS sensor (~40-58 rows/hr, measured), not
+# discrete findings, so it needs a rate gate to be a usable trigger: exclude the appliance's
+# own hardware (device_id='local' -- 100% of live rows; its CPU spike is not a device
+# reaching across the LAN) AND debounce per device so a flapping device yields one trigger
+# per window, not one per row. Measured on today's fleet this produces ZERO triggers (all
+# local) -- correct, and the mechanism is proven against synthetic remote bursts so it works
+# when remote agents report hw anomalies.
+HW_DEBOUNCE_S = 600
+HW_LOCAL_DEVICE_ID = "local"
 
 
 def _pde_to_epoch(v):
@@ -2663,6 +2672,38 @@ def _pde_new_detections(conn, now):
             if ip and ts is not None:
                 dets.append({"device_ip": ip, "ts": ts,
                              "source": "anomaly_incidents:%d" % r[0]})
+
+    # Stage 3 -- hw_anomaly_snapshots, RATE-GATED. Exclude the appliance's own hardware,
+    # resolve remote device_id -> ip, then debounce per device so a burst collapses to one
+    # trigger per HW_DEBOUNCE_S. Tolerant of the table's absence.
+    try:
+        wm = int(_get_state("pde_wm_hw_anomaly_snapshots", "0") or 0)
+        hw_rows = conn.execute(
+            "SELECT h.id, h.captured_at, a.ip_address FROM hw_anomaly_snapshots h "
+            "LEFT JOIN agent_devices a ON a.device_id = h.device_id "
+            "WHERE h.id > ? AND h.device_id IS NOT NULL AND h.device_id != ? "
+            "ORDER BY h.id", (wm, HW_LOCAL_DEVICE_ID)).fetchall()
+    except Exception:  # noqa: BLE001
+        hw_rows = []
+    else:
+        maxid = wm
+        # earliest in-batch row per device (the debounced trigger uses the first sighting)
+        per_dev = {}
+        for r in hw_rows:
+            maxid = max(maxid, r[0])
+            ip, ts = r[2], _pde_to_epoch(r[1])
+            if not ip or ts is None:
+                continue
+            if ip not in per_dev or ts < per_dev[ip][1]:
+                per_dev[ip] = (r[0], ts)
+        _set_state("pde_wm_hw_anomaly_snapshots", str(maxid))
+        for ip, (rid, ts) in per_dev.items():
+            last = _pde_to_epoch(_get_state("pde_hw_last:%s" % ip, "") or None)
+            if last is not None and (now - last) < HW_DEBOUNCE_S:
+                continue   # debounced: already triggered for this device in the window
+            _set_state("pde_hw_last:%s" % ip, str(now))
+            dets.append({"device_ip": ip, "ts": ts,
+                         "source": "hw_anomaly_snapshots:%d" % rid})
     return dets
 
 
