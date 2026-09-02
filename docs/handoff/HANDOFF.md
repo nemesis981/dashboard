@@ -1,136 +1,167 @@
 # HANDOFF — current state
 
-> Last updated **2026-09-01, nightly closeout (Window 2)**. Overwritten each closeout (latest
-> state wins). Durable history: `docs/handoff/supplements/` (append-only). Real IPs/hosts/
-> accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per
-> Rule 8.
+> Last updated **2026-09-02, emergency pre-reboot checkpoint (Window 2)**. Written ahead of an
+> imminent system reboot, not a normal end-of-day closeout — see §7 for exactly what that
+> changes. Overwrites the 09-01 nightly closeout (Rule 9). Real IPs/hosts/accounts/keys live
+> ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
 >
-> Full detail: `docs/handoff/supplements/2026-09-01-001.md` (curated) and
-> `docs/handoff/worklog/2026-09-01-001.md` (raw chronology, reconstructed at closeout — see
-> that file's own header note). Session ran under an operator-issued tropical-storm/
-> power-loss warning from mid-morning; no power event occurred, nothing was lost.
+> Full detail: `docs/handoff/supplements/2026-09-02-001.md` (curated) and
+> `docs/handoff/worklog/2026-09-02-001.md` (raw chronology, reconstructed at this checkpoint —
+> today had no live worklog kept, same gap as 09-01).
 
 ---
 
-## 1. Push status
+## 1. Push status — READ THIS FIRST
 
-**Public repo:** `origin/main` == local `HEAD` (`faf7666`), verified. 14 commits landed and
-pushed today — the MagicDNS/killswitch DNS guard build (Window 1, 8 commits) plus this
-window's docs (elevated grants, the Tailscale-audit sudo grant closure, a user-facing DNS
-delay explainer, and a self-corrected PUNCHLIST follow-up).
+**Public repo (`/opt/nemesis`): `local` is AHEAD of `origin` by 1 commit.**
+- `local`: `07ace9e`
+- `origin/main`: `1e1cd00`
+- The one gap: `07ace9e` (`feat(usb-control): structured Windows USB collector (pure core) +
+  dispatch`, Window 1, committed 16:47:52) — **committed locally, NOT pushed, NOT confirmed
+  by the operator.** Do not push it on this note alone; get explicit confirmation first, per
+  this session's standing push-coordination discipline.
+- Working tree: **clean** (`git status --short` empty).
 
-**Private repo (`~/work/nemesis-internal`, local+usb remotes):** ⚠ **NOT pushed — 82 commits
-held.** Fully reviewed tonight (categorized summary in the supplement); the push itself was
-blocked by the harness's own permission classifier, most likely due to the scale of the
-action (82 commits in one push). `local` and `usb` remain in sync with each other but both
-82 commits behind `HEAD`. **Needs explicit operator action to complete** — re-approve the
-push or run it directly; nothing in the review found a reason to withhold any of it.
+**Private repo (`~/work/nemesis-internal`): `local` remote is 4 commits behind; `usb` remote
+is CURRENTLY UNREACHABLE.**
+- `local/main..HEAD`: 4 commits, all Window 1's own handoff docs (`6cc5c95`, `cdd8cab`,
+  `47ad3ef`, `1e2af28` — oldest to newest, 15:20–16:48 today). Not pushed, not confirmed.
+- `usb` remote: `fatal: couldn't find remote ref usb` on fetch — **the USB drive is not
+  mounted right now** (`mountpoint -q /run/media/paul/storage` → not mounted). This looks
+  like deliberate pre-reboot unmounting, not a fault — noted so nobody chases it as a bug.
+  Re-mount and re-fetch before trusting any private-repo push-sync claim.
+- Working tree: **uncommitted work present, not mine, flagged rather than touched:**
+  - `migration/magicdns-deploy.sh` — modified, uncommitted. Window 1's file, mid-edit as of
+    this checkpoint. **Not committed by me — I do not commit another window's in-flight,
+    unreviewed file.** If Window 1's session doesn't survive the reboot, this diff is at risk
+    per the standing "uncommitted work has zero protection" rule — whoever resumes should
+    check this file's state first.
+  - Six untracked files, all appear to be other windows' audit/mirror output, not mine:
+    `audits/community-reporter-identity-audit-2026-09-02.md`,
+    `audits/duplicated-logic-sweep-2026-09-02.md`,
+    `audits/proton-permanent-killswitch-RESOLVED-2026-09-02.md`,
+    `audits/roadmap-stale-premise-sweep-2026-09-02.md`,
+    `audits/tailer-and-arp-parser-consolidation-scope-2026-09-02.md`,
+    `briefing/2026-09-01.md`, `handoff/supplements/2026-08-31-001.md`,
+    `handoff/worklog/2026-08-31-001.md`. **Untracked files survive a reboot** (they're not at
+    the same risk as uncommitted tracked-file diffs), but they're also not backed up anywhere
+    until committed — worth a deliberate commit pass by whoever owns each one.
 
-## 2. ⚠ Deploy gap — `dashboard` has NOT restarted since 12:36:56 on 08-31
+**My own work: fully committed and pushed as of this checkpoint.** Nothing of mine is at risk.
 
-Still true, over 30 hours later. `vpn-dns-guard` (17:58:13 today) and `nemesis-fwd`
-(16:32:33 today) HAVE been restarted with current code — the MagicDNS guard build was
-live-tested and is genuinely running current logic. `dashboard` itself is the one process
-still on yesterday's build. Check `ExecMainStartTimestamp` against any commit's timestamp
-before trusting a dashboard-side live-behavior claim.
+## 2. Live service state (verified this checkpoint, not recalled)
 
-## 3. Today's shipped work, condensed (full detail in the supplement)
+All 8 core services `active`: `dashboard`, `watchdog`, `alert-watcher`, `malware-canary`,
+`diagnostics-watcher`, `vpn-dns-guard`, `nemesis-fwd`, `device-scanner`.
 
-- **MagicDNS/killswitch DNS guard (ADR 0002 amendment), Window 1.** The Tailscale
-  snap→apt migration (identity preserved byte-for-byte) exposed that PIA's killswitch
-  blocks the address Tailscale's DNS takeover installs, causing a total DNS outage on VPN
-  reconnect. Built, live-tested 6× against PIA + 1× against Proton (generalization test,
-  passed — detection is vendor-neutral, evidenced not asserted), found and fixed 5 real
-  root causes (a dead call site despite 82 passing tests, a socket-permission gap, an
-  oscillation bug, a severed DNS-release path, a Tailscale-side repeated-takeover backup
-  loss — closed by a self-repair op). **190 checks passing.** Current live state:
-  `accept-dns=True`, MagicDNS working, **safe only because the guard is live and proven** —
-  if the guard is ever stopped without also reverting this preference, DNS breaks on the
-  next VPN connect with nothing watching.
-- **Proton VPN installed on the daily driver** (Window 1, Rule-13-compliant: revert
-  written and verified offline-capable before connecting). Used to prove the guard's
-  detection generalizes beyond PIA. Cleanup/removal decision not yet made.
-- **Tailscale/PIA/snap DNS saga consolidated** into one private-mirror account
-  (`~/work/nemesis-internal/known-limitations/tailscale-magicdns-pia-saga-FULL-2026-09-01.md`)
-  — corrects a chain of misread symptoms back to 2026-08-01, mistakes kept in
-  deliberately. Self-corrected same day when its "not yet built" framing on Option B went
-  stale within hours of being written.
-- **User-facing doc**: `docs/operation/VPN_CONNECT_DNS_DELAY.md` — explains the existing,
-  already-shipped brief-DNS-pause-then-self-heal behavior on VPN connect/disconnect.
-  Deliberately scoped away from the MagicDNS-specific case, which didn't self-correct
-  without today's new guard.
-- **Piece F/G, Tier 2 TLS interception (Window 3, private repo, unpushed there — see §4).**
-  Upstream cert-fingerprint capture, gate-side IPC client, wired into the real gate, and a
-  randomized re-audit sweep — 169 new checks, Pieces E/F/G now all complete. Real-traffic
-  run and daemon deployment remain explicitly on hold (operator decision).
-- **Elevated grants**: re-checked live twice; production box clean both times. One closed
-  add/revoke cycle recorded (temporary Tailscale-audit sudo grant).
-- **Roadmap-vs-state audit**: baseline (08-31, 08:28am snapshot) found to already predate
-  ~70 commits of that same day's later shipping — flagged as drift, not corrected in
-  place (read-only per Rule 1).
+**Nothing observed in this session depends on any Claude Code process staying alive.** All
+work today (code, docs, deployments) was committed to disk and/or already deployed as
+systemd-managed services independent of this conversation. A reboot does not orphan
+in-progress work at the process level — the risk is entirely at the **uncommitted-diff**
+level described in §1, not at the running-process level.
 
-## 4. Open items, queued — not started, not forgotten
+## 3. What's actively in-flight (not mine, described for whoever resumes)
 
-- **Private-repo push (82 commits) still not landed** — blocked by the permission
-  classifier tonight; the only item genuinely blocking a clean state going into tomorrow.
-- **`l3-tier2-tls-interception` (separate private repo) has 16 unpushed commits** —
-  Window 3's Piece F/G work. NOT reviewed or pushed tonight (out of scope given the
-  `nemesis-internal` review already in progress); deserves its own dedicated review given
-  that repo's wider remote set (includes private GitHub) and higher disclosure
-  sensitivity.
-- **Roadmap audit baseline drift** — flagged this morning, not yet refreshed.
-- **Cleanup owed**: orphaned tailnet node `nuKHjHphBz11CNTRL` (non-ephemeral, does not
-  self-remove); VM `Nemesis TS-MIGRATION-REHEARSAL 09-01` (powered off, keep only if the
-  logged Option-D resolved-stub experiment is still wanted).
-- **PUNCHLIST follow-up, correctly not urgent**: verify the MagicDNS guard's design
-  against a simulated (non-PIA) killswitch — partially pre-answered by today's real Proton
-  test (detection generalizes; the disable/restore path was not exercised under Proton).
-- **~100+ untracked files in `~/work/nemesis-internal`** — RESOLVED today (bulk commit
-  `43961cb`, 109 files, reviewed as part of tonight's backlog review). No longer open.
-- **A1/A2 WebAuthn ceremony, Fork B's `reconcile()` caller gap, WRITE_OPS audit-trail
-  gap** — carried forward unchanged from 08-31, not touched today.
+**Window 1 — two build threads, both mid-flight:**
+1. **`net_identity.py` consolidation (shipped, `1e1cd00`, already pushed) → six-site
+   inventory follow-up (not yet actioned).** Consolidated 3 of 6 identified call sites for
+   "what are my own local addresses" logic (`firewall.py`, `lan_behavior_monitor`,
+   `post_detection_egress`). The other 3 (`agent_source_guard.py`, `remote_census.py`,
+   `nemesis_agent/agent.py`) were investigated this session and found to be **legitimately
+   different concerns**, not missed consumers — see `docs/handoff/supplements/2026-09-02-001.md`
+   for the full per-site reasoning. Window 1 said it would surface this to the operator
+   directly for a scope decision; unclear if that happened before this checkpoint.
+2. **USB device-control (`removable-media-device-control.md`)** — Linux/pyudev backend
+   already built per Window 1's own handoff (`cdd8cab`, "USB device-control v1 complete"); a
+   Windows backend just landed (`07ace9e`, unpushed — see §1) as "pure core," with **live VM
+   validation still pending** per that same commit's handoff (`1e2af28`).
+3. **`lan_integrity` option-2 fix + a shared-tree incident recovery** (`47ad3ef`) — title
+   only known at this checkpoint; read that commit/handoff directly for what happened, no
+   time to expand here before this note needed to ship.
+
+**VM test blocker, still open as of the last update I have:** Window 1 reported the
+appliance-master VM clone was inaccessible (GA at RunLevel 1, no `vboxnet0` lease) and that
+bridging a DHCP/DNS-serving appliance onto the real LAN isn't safe — relying on an in-process
+equivalence proof on the real box instead for the `net_identity` work. Unknown whether this
+blocker is resolved for the newer USB-control VM validation Window 1 flagged as pending.
+
+## 4. Today's shipped work, condensed (full detail in commit messages + the supplement)
+
+Very large session. Headline threads, each already pushed to `origin/main` unless noted:
+- **MagicDNS/killswitch DNS guard** — 05d27c9, d0d4fb2 (two more real bugs found/fixed:
+  the latch bug, the anti-fiction baseline bug), independently confirmed deployed.
+- **`lateral-movement-outbreak-detection.md`** naming/module placement finalized with
+  Window 1 (two finding types, new `lan_behavior_monitor` module, grounded in
+  `lan_integrity`'s own stated scoping principles, not assumed) — then **built and deployed
+  same day** (`17b0ec0` → `2f9124f` chain, `post_detection_egress` chain
+  `81aed37`→`36c3ddb`), independently verified live via `dashboard`'s restart timestamp.
+- **`threat_feeds` module** shipped (Window 3, `c741c85`/`fb22ec9`).
+- **Three new roadmap-tracked features** that had shipped with zero roadmap coverage:
+  `email-security-gateway.md`, `port-broker-access-control.md` (+ new ADR 0030),
+  `vpn-dns-guard-magicdns-killswitch.md`. Roadmap audit refreshed twice same day: **16
+  SHIPPED / 14 PARTIAL / 58 PARKED = 88** (was 13/13/59 at 08-31's baseline).
+- **ADR 0002's stale supersession banner fixed** (was still claiming a refuted diagnosis).
+- **`enrollment-modes-build-spec.md`**: 3 real corrections from a Window 3 audit applied
+  (stale `enrollment_status` value count, a non-existent `firewall.py` enforcement mapping
+  corrected to a stated dependency, an atomic-decrement claim that doesn't fit existing DM
+  ops) — file moved PARKED→PARTIAL (BULK-MANUAL, ADR 0012 step 1, shipped and deployed same
+  day, verified live via smoke test with a zero-rows-created control).
+- **New CLAUDE.md standing practice** (operator-confirmed directly, not via peer relay):
+  roadmap dependency claims must be verified against code at build-pickup time, not just a
+  file's build-status header — closes a gap that caused two real incidents this week.
+- **`CUSTOM_TAILSCALE_UNINSTALL.md`** written (an owed vendor-integration doc, flagged by
+  Window 1).
+- **Two compiled decision documents** written to the private mirror at operator request:
+  `decisions/2026-09-02-OPEN-business-legal-decisions-COMPILED.md` (8 items — Option B
+  venue/commercial legality, community-reporter-identity's tier-vocabulary and
+  salt/accountability questions, ADR 0022's still-draft license, two live Rule 10 flags,
+  ADR 0028's email-interception and shared-mailbox questions, the TLS-interception module's
+  3-remote exposure) and `...-OPEN-other-decisions-COMPILED.md` (4 items — scope/sequencing
+  calls). Both pushed to both private remotes.
+- **A source-protection scoping pass** (Nuitka/Cython/PyArmor, full/hybrid Go-Rust migration
+  feasibility) — reported in-conversation, not written to a file; if that analysis needs to
+  survive as a document, it does not currently exist as one and would need transcribing from
+  this conversation's history.
 
 ## 5. Roadmap-vs-state
 
-Baseline still `docs/audits/roadmap-state-audit-2026-08-31.md` (13 SHIPPED / 13 PARTIAL /
-59 PARKED, 85 tracked). Flagged this morning as predating a full day of further shipping;
-not refreshed today — today's work (the MagicDNS guard) is itself new roadmap-relevant
-material not yet reflected anywhere in `docs/roadmap/`.
+Baseline: `docs/audits/roadmap-state-audit-2026-09-02.md` (refreshed twice today via
+addenda, not a fresh dated file — see that file's own §3a and the later PARKED→PARTIAL note).
+**Tally: 16 SHIPPED / 14 PARTIAL / 58 PARKED = 88 total.** This does NOT yet reflect
+today's newest work (the six-site `net_identity` follow-up, the USB device-control build) —
+whoever runs tomorrow's Morning Status roadmap check should expect further drift already
+baked in, not a clean baseline.
 
 ## 6. Elevated grants
 
-See `docs/handoff/elevated-grants-tracking.md` (edited in place). Production box confirmed
-clean twice today. One grant closed (Tailscale-audit sudo, add+revoke both verified).
-`nemesis-vpndns`'s addition to group `nemesis-fw` (for the MagicDNS guard's socket access)
-now tracked there.
+Not re-checked at this checkpoint (emergency note, not a full Morning-Status pass). Last live
+check: 2026-09-02 morning, see `docs/handoff/elevated-grants-tracking.md` — no changes known
+since then, but "known since then" is not the same as "re-verified now."
 
-## 7. Closeout health check
+## 7. Why this checkpoint differs from a normal closeout
 
-1. **Working tree (public repo): clean** — confirmed via `git status --short` after this
-   closeout's own commit.
-2. **Closeout commit is HEAD**: confirmed after commit below.
-3. **local == origin (0/0)**: confirmed via `git fetch` + SHA comparison after push.
-4. **HEAD touched only expected docs**: this closeout commit touches only
-   `docs/handoff/HANDOFF.md`, `docs/handoff/worklog/2026-09-01-001.md`,
-   `docs/handoff/supplements/2026-09-01-001.md`.
-5. **Rule-8 spot-check**: no real IPs/hosts/keys/tokens in this file or its companions —
-   placeholders only.
-6. **Open items durably captured**: §4 above, plus `PUNCHLIST.md`'s VPN-agnosticism
-   follow-up entry (`750c806`).
-
-**Verdict:** clean + synced (public repo) — **private repo NOT synced, 82 commits held,
-flagged in §1 and needs operator action.** Not a full "clean + synced" close for tonight.
+This was written on request, ahead of an imminent reboot — not at a natural end-of-session
+point. Consequences for whoever reads this next:
+- **No closeout health check was run** (Rule 9's usual final step) — this file itself is the
+  check.
+- **Two other windows' work (Window 1's four private-repo handoffs, its one public commit,
+  and Window 3's private-repo audit outputs) are described but not evaluated for
+  push-readiness** — that's a decision for whoever resumes with the operator, not assumed
+  here.
+- **If the reboot is disruptive** (a session doesn't survive it), the uncommitted diff in
+  `migration/magicdns-deploy.sh` (§1) is the one piece of real, at-risk work identified this
+  checkpoint. Everything else on disk is either committed or untracked-and-therefore-inert
+  until someone acts on it.
 
 ## 8. Cross-references
-
-- `docs/handoff/worklog/2026-09-01-001.md` — raw chronology.
-- `docs/handoff/supplements/2026-09-01-001.md` — curated account, full day.
-- `docs/handoff/elevated-grants-tracking.md` — standing elevated-grants record.
-- `docs/briefing/2026-09-01.md` — this morning's Morning Status briefing.
-- `docs/audits/roadmap-state-audit-2026-08-31.md` — current (stale) roadmap baseline.
-- `~/work/nemesis-internal/known-limitations/tailscale-magicdns-pia-saga-FULL-2026-09-01.md`
-  — full saga account, private mirror, corrected same day.
-- `~/work/nemesis-internal/handoff/2026-09-01-window1-handoff.md` — Window 1's FINAL
-  closeout.
-- `~/work/nemesis-internal/handoff/2026-09-01-window3-handoff.md` — Window 3's NIGHT
-  closeout.
+- `docs/handoff/worklog/2026-09-02-001.md` — raw chronology (reconstructed at this
+  checkpoint).
+- `docs/handoff/supplements/2026-09-02-001.md` — curated account, fuller detail than this
+  file's condensed §4.
+- `docs/audits/roadmap-state-audit-2026-09-02.md` — today's roadmap baseline (refreshed
+  twice via addenda).
+- `~/work/nemesis-internal/decisions/2026-09-02-OPEN-business-legal-decisions-COMPILED.md`
+  and `...-OPEN-other-decisions-COMPILED.md` — the two compiled decision documents.
+- `~/work/nemesis-internal/handoff/2026-09-02-window1-handoff.md` and
+  `2026-09-02-window3-handoff.md` — the two build windows' own cold-start notes (read these
+  for anything this file compresses away).
