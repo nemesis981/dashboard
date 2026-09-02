@@ -27,6 +27,17 @@ the self-exclusion callers keep their last-good set.
 The Suricata @NEMESIS_HOST@ exclusion is intentionally NOT a consumer: it is resolved
 at rule-DEPLOY time (deploy-suricata-rules.sh) and baked literally into the rules file,
 because Suricata cannot call a Python function at match time. Different layer.
+
+Three OTHER `net_if_addrs()` call sites exist and are deliberately NOT consumers here —
+checked individually (2026-09-02 duplication sweep), not overlooked:
+  * hw_monitor.agent_source_guard -- RAISES on failure, by design. Folding it into
+    this module's empty-on-failure contract would silently weaken a fail-loud guard.
+  * remote_census._own_tailnet_addresses() -- answers a narrower question
+    (tailnet interfaces only), not "every local address".
+  * nemesis_agent/agent.py -- runs ON THE MONITORED DEVICE, a different machine and
+    package boundary; it cannot import this (server-side-only) module.
+If you're about to add a fourth "is this us" copy, check whether it is actually one of
+these three shapes before assuming it belongs here too.
 """
 import logging
 import socket
