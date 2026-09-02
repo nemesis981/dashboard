@@ -26,7 +26,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, "/opt/nemesis")
 sys.path.insert(0, "/opt/nemesis/alert_manager")
 
-EXPECTED_CHECKS = 50
+EXPECTED_CHECKS = 51
 _results = []
 
 
@@ -80,9 +80,36 @@ OPERATOR_LISTS = [
 
 def main():
     import importlib
+    import importlib.util
     F = importlib.import_module("modules.threat_feeds.feeds")
-    M = importlib.import_module("modules.threat_feeds.module")
     import roles as R
+
+    # ⛔ LOAD module.py THE WAY THE REAL LOADER DOES, not as a package member.
+    #
+    # `modules_loader.py:311` uses spec_from_file_location under a flat name, so
+    # the module gets NO package context and any relative import raises. The
+    # first version of this module used `from . import feeds` and imported
+    # perfectly here while being unloadable in production — the suite passed and
+    # the module was broken, which is the worst combination.
+    #
+    # Importing it the loader's way makes that class of bug fail HERE. It also
+    # means this check is not decoration: it is the only thing standing between
+    # a working test run and a module that cannot be enabled.
+    _spec = importlib.util.spec_from_file_location(
+        "nemesis_module_threat_feeds", os.path.join(_HERE, "module.py"))
+    M = importlib.util.module_from_spec(_spec)
+    try:
+        _spec.loader.exec_module(M)
+        _load_err = None
+    except Exception as e:  # noqa: BLE001
+        _load_err = "%s: %s" % (type(e).__name__, e)
+    check("THE PROPERTY: module.py loads the way modules_loader loads it",
+          _load_err, None)
+    if _load_err:
+        # Everything downstream would report confidently about a module that
+        # never loaded. Stop rather than emit a page of meaningless passes.
+        print("\n!! module failed to load; remaining checks skipped deliberately")
+        return 1
 
     # ── 1. ownership ────────────────────────────────────────────────────────
     print("ownership: a tag this module wrote, and nothing else")

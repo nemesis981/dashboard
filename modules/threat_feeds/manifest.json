@@ -1,0 +1,14 @@
+{
+  "name": "threat_feeds",
+  "display_name": "Threat Feeds",
+  "version": "0.1.0",
+  "description": "Adds curated malware-domain blocklists to Pi-hole and keeps track of them, so they can be removed again cleanly. Pi-hole can already take blocklists by hand; what this adds is management — each feed is checked to be something Pi-hole can actually use before it is added, tagged as Nemesis's own, and removable in one action if something turns out to over-block. It only ever touches lists it added itself: blocklists you configured by hand are never modified or removed, even if one has the same address as a feed offered here. Off by default, and enabling it applies nothing on its own — blocking is always a deliberate action, because a blocklist can break a site somebody needs.",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": false,
+  "config_keys": ["PIHOLE_IP", "PIHOLE_PASSWORD"],
+  "enabled_by_default": false,
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
+}

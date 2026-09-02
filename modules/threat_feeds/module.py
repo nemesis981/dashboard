@@ -30,8 +30,25 @@ import requests
 
 from modules import NemesisModule
 
-from . import feeds as F
-from .pihole_lists import PiholeLists, PiholeListsError
+# ⛔ PLAIN IMPORTS VIA sys.path, NOT `from . import feeds`. This looks like a
+# style regression and is not.
+#
+# `modules_loader.py:311` loads this file with
+# `spec_from_file_location("nemesis_module_threat_feeds", ...)`, i.e. under a
+# flat name with NO package context. A relative import therefore raises
+# "attempted relative import with no known parent package" the moment the loader
+# touches it — verified directly, not inferred.
+#
+# The trap is that the failure is invisible during development: the test suite
+# and any `import modules.threat_feeds.module` work fine, because THAT path does
+# have package context. Only the real loader breaks, and for an
+# `enabled_by_default: false` module that would surface whenever someone first
+# enabled it rather than at deploy. `modules/lan_integrity/module.py` uses this
+# same sys.path form for the same reason.
+import sys as _sys
+_sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import feeds as F                                           # noqa: E402
+from pihole_lists import PiholeLists, PiholeListsError      # noqa: E402
 
 log = logging.getLogger("nemesis.threat_feeds")
 
