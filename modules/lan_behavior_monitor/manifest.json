@@ -1,0 +1,14 @@
+{
+  "name": "lan_behavior_monitor",
+  "display_name": "LAN Probe & Scan Detection",
+  "version": "0.1.0",
+  "description": "Detects an unmanaged device — a guest phone, an infected IoT gadget, anything that cannot run the Nemesis agent — that starts probing or scanning the rest of your network, the signature of one compromised host looking for neighbours to reach or infect. It watches the device's own broadcast-visible behaviour (ARP fan-out to many addresses, multicast-discovery flooding) and the tuned host-defence sweep rules, so no agent and no prior detection are needed. Passive by default; it reads events Suricata already logs and changes nothing on the network. Honest by construction: a targeted one-to-one probe on a flat switched network is not visible to a passive appliance, and the module says so rather than implying a clean network — broad, noisy scan-and-spread is what it catches.",
+  "category": "security",
+  "provides_dashboard_card": true,
+  "requires_background_service": true,
+  "config_keys": [],
+  "enabled_by_default": true,
+  "confirmation_required": false,
+  "apt_deps": [],
+  "pip_deps": []
+}

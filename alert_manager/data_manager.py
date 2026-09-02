@@ -241,6 +241,14 @@ NAMESPACES = {
                                       "lan_integrity_findings",
                                       "lan_integrity_arp_bindings")},
 
+    # lan_behavior_monitor — the LAN Probe & Scan detector (scan-and-spread from
+    # broadcast-visible behaviour). EXACT-match names, same discipline as
+    # lan_integrity above: a new table is a deliberate edit here, and
+    # test_lan_behavior_registry.py asserts grant==created-tables both directions.
+    "lan_behavior_monitor": {"tables": ("lan_behavior_state",
+                                        "lan_behavior_findings",
+                                        "lan_behavior_seen_devices")},
+
     # ── Tier 2 gate state publication (2026-08-08) ───────────────────────────
     # The L3 Tier 2 inspection gate's fail-safe publishes its state here so the
     # dashboard can render a persistent degraded banner and so every transition

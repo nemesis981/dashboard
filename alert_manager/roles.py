@@ -434,6 +434,14 @@ ROUTE_MINIMUMS = {
     "module_lan_integrity__api_pin":      (_A, _A),
     "module_lan_integrity__api_close":    (_A, _A),
 
+    # lan_behavior_monitor — the LAN Probe & Scan detector. Read side VIEWONLY (a
+    # non-expert should see "a device is scanning your network"); close is ADMIN
+    # (dismissing a finding is a security-relevant action). No pin/allowlist route:
+    # unlike DHCP servers, a probing device is never "confirmed legitimate" here.
+    "module_lan_behavior_monitor__api_status":   (_V, _A),
+    "module_lan_behavior_monitor__api_findings": (_V, _A),
+    "module_lan_behavior_monitor__api_close":    (_A, _A),
+
     # email_security — BOTH admin, which is stricter than the dominant
     # (viewonly, admin) shape here, deliberately:
     #   * the quarantine LIST is not neutral metadata. It exposes who emails the
