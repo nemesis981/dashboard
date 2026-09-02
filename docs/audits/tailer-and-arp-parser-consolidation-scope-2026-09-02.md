@@ -122,15 +122,18 @@ def _norm_mac(m):
     return m if m and m not in _NULL_MACS else None
 ```
 
-`arp_watch` strips whitespace and rejects **both** the null MAC and the broadcast MAC.
-`device_scanner` only lowercases, never strips, and only rejects the literal null MAC — it has no
-broadcast-MAC guard. **Concrete consequence**: a broadcast ARP entry (`ff:ff:ff:ff:ff:ff`) in
-`/proc/net/arp` — not a hypothetical edge case, gratuitous/broadcast ARP traffic exists on real
-networks — would be silently discarded by `arp_watch` and could be recorded as a spurious device
-by `device_scanner`. Not observed to have fired; not checked against the live ARP table for this
-box. Worth its own line in the PUNCHLIST if the consolidation below doesn't happen soon, since
-this is now a verified defect, not a style question — smaller in stakes than A1, but the same
-species: a duplicated safety check that already drifted apart.
+**Corrected 2026-09-02, same day, after Window 1 independently re-checked this section**: the gap
+is narrower than first stated. `device_scanner`'s `parts = row.split()` (no-argument `split()`)
+already discards all whitespace during tokenisation, so `parts[3]` can never carry leading/
+trailing space — "never strips" was not a real second gap, it described behaviour that has no
+observable consequence. **The actual, sole defect is the missing broadcast-MAC guard**:
+`arp_watch` rejects both the null MAC and the broadcast MAC (`ff:ff:ff:ff:ff:ff`);
+`device_scanner` rejects only the literal null MAC. **Concrete consequence**: a broadcast ARP
+entry in `/proc/net/arp` — not a hypothetical edge case, gratuitous/broadcast ARP traffic exists
+on real networks — would be silently discarded by `arp_watch` and could be recorded as a spurious
+device by `device_scanner`. Not observed to have fired; not checked against the live ARP table
+for this box. A one-line fix (add the same `_NULL_MACS`-style check) closes it directly, without
+needing the full consolidation below — see the sequencing note at the end of this document.
 
 ### What is genuinely the same (worth sharing)
 
