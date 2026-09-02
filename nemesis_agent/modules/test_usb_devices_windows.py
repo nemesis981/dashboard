@@ -14,6 +14,7 @@ failure the repo's SHAPE checks exist to catch.
 
 Serial is sanitised (FAKESERIAL0HDD01), not a real device id -- Rule 8.
 """
+import json
 import os
 import sys
 
@@ -22,7 +23,7 @@ import usb_devices_windows as W  # noqa: E402
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 35
+EXPECTED_CHECKS = 45
 
 # A real USB HDD as Windows reports it: Win32_DiskDrive row + its parent USB PnP
 # entity. VEN_/PROD_ in the USBSTOR id are SCSI strings; the hex VID/PID (0bc2/ab62)
@@ -162,6 +163,74 @@ def test_output_shape_matches_linux_contract():
         check("contract check ran (control)", True, True)
 
 
+# --- Real-hardware regression sample -------------------------------------------
+# Captured LIVE 2026-09-02 from a real Windows 11 (build 26200) guest running the
+# collector's own _PS_QUERY against a genuine USB flash drive. Everything above this
+# point is hand-written fixture data; this is the shape Windows ACTUALLY emits, kept
+# verbatim except the serial, sanitized per Rule 8 (real value replaced consistently
+# in BOTH ids so the correlation it exercises stays intact).
+#
+# It exists because the correlation is the one assumption in this module that cannot
+# be proven by construction: that a USB storage device's USBSTOR-disk serial really
+# does appear inside its parent USB\VID PNPDeviceID. That was verified on real
+# hardware, and this pins the observed evidence so a future refactor cannot quietly
+# invalidate it.
+_REAL_WIN11_JSON = (
+    '{"usb":[{"PNPDeviceID":"USB\\\\VID_80EE\\u0026PID_0021\\\\5\\u002618F54CB7\\u00260\\u00261",'
+    '"Name":"USB Input Device"},'
+    '{"PNPDeviceID":"USB\\\\VID_9129\\u0026PID_1583\\\\FAKESERIAL0USB01",'
+    '"Name":"USB Mass Storage Device"}],'
+    '"disks":[{"Model":"General USB Flash Disk USB Device",'
+    '"SerialNumber":"FAKESERIAL0USB01",'
+    '"PNPDeviceID":"USBSTOR\\\\DISK\\u0026VEN_GENERAL\\u0026PROD_USB_FLASH_DISK'
+    '\\u0026REV_1.00\\\\FAKESERIAL0USB01\\u00260",'
+    '"InterfaceType":"USB","Manufacturer":"(Standard disk drives)"}]}'
+)
+
+
+def test_real_win11_sample():
+    """Pin the shape a real Win11 host emits, end to end through the pure core."""
+    data = json.loads(_REAL_WIN11_JSON)
+    disks = W._as_list(data.get("disks"))
+    usb = W._as_list(data.get("usb"))
+    # ConvertTo-Json escapes '&' as \u0026; json.loads must decode it back or every
+    # downstream '&'-delimited parse silently sees the wrong string.
+    check("real sample: one USB disk decoded", len(disks), 1)
+    check("real sample: two USB\\VID entities decoded", len(usb), 2)
+    check("real sample: '&' unescaped by json.loads",
+          "&" in disks[0]["PNPDeviceID"], True)
+
+    disk = disks[0]
+    check("real sample: recognised as USB storage", W.is_usb_storage_wmi(disk), True)
+    serial = W.parse_usbstor_serial(disk["PNPDeviceID"])
+    check("real sample: serial parsed, '&0' suffix stripped", serial, "FAKESERIAL0USB01")
+
+    # THE LOAD-BEARING ASSUMPTION, asserted against observed output rather than assumed.
+    parent = [e for e in usb if "VID_9129" in e["PNPDeviceID"]][0]
+    check("real sample: USBSTOR serial IS inside the parent USB\\VID id",
+          serial in parent["PNPDeviceID"], True)
+
+    check("real sample: correlation yields the real hex ids",
+          W._correlate_vidpid(disk["PNPDeviceID"], usb), ("9129", "1583"))
+    # The non-storage entity (a VirtualBox input device) shares the list; correlation
+    # must pick the mass-storage parent, not merely the first VID_ id it encounters.
+    check("real sample: correlation is not first-match-wins",
+          W._correlate_vidpid(disk["PNPDeviceID"], usb)
+          != W.parse_usb_vidpid(usb[0]["PNPDeviceID"]), True)
+
+    ev = W.structured_from_wmi(disk, W._correlate_vidpid(disk["PNPDeviceID"], usb))
+    check("real sample: full structured event", ev, {
+        "action": "present", "vendor_id": "9129", "product_id": "1583",
+        "serial": "FAKESERIAL0USB01", "model": "General USB Flash Disk",
+        "vendor": "(Standard disk drives)",
+        "devname": disk["PNPDeviceID"],
+    })
+    # Windows reports a generic Manufacturer for standard storage, so `vendor` is NOT
+    # a usable identity field there -- vid/pid/serial carry identity, as the key does.
+    check("real sample: vendor is generic on Windows, not identity",
+          ev["vendor"], "(Standard disk drives)")
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("usb_devices_windows -- structured USB-storage collector (pure core)")
@@ -173,6 +242,7 @@ if __name__ == "__main__":
     test_correlate_vidpid()
     test_as_list()
     test_output_shape_matches_linux_contract()
+    test_real_win11_sample()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))
