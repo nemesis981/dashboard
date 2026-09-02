@@ -298,14 +298,70 @@ def _open_finding_exists(conn, server_ip):
     return row is not None
 
 
-def _tail_cycle() -> dict:
+STALE_EVENT_MAX_AGE_S = 3600  # steady-state: an eve event older than this (by its
+# OWN timestamp) read in a normal/delayed cycle is history, not a current detection.
+FIRST_RUN_LOOKBACK_S = 3 * 3600  # first-run ONLY: how far back to read on a genuine
+# first run / state loss. Deliberately LARGER than the steady-state window: a fresh
+# install or reset is often triggered BY a network already misbehaving, so a rogue
+# server or ARP spoofer that began a few hours before install is exactly what the
+# operator wants surfaced (option 2, operator decision 2026-09-02). "A few hours",
+# not days -- long enough for "this is already going on", short enough that it is a
+# current problem, not archaeology.
+
+
+def _event_epoch(rec, fallback):
+    """Epoch seconds from an eve record's own `timestamp`, else `fallback`.
+
+    Used to reject historical events in a bulk read (see _tail_cycle). A missing
+    or unparseable timestamp returns `fallback` (the caller passes `now`), so a
+    malformed record is KEPT and processed, never silently dropped on a parse
+    quirk -- fail toward processing, not toward blindness."""
+    ts = rec.get("timestamp")
+    if not ts:
+        return fallback
+    try:
+        import datetime
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
+def _tail_cycle(now=None) -> dict:
     """One pass over the new bytes of eve.json. Returns a summary dict.
 
     Offset AND inode are tracked: on rotation the inode changes and the offset
     resets, so a rotated log is re-read from its start rather than skipped or
-    replayed from a meaningless offset. Same shape as anomaly_detection's tailer,
-    which is the proven one in this codebase.
+    replayed from a meaningless offset.
+
+    ⛔ FIRST-RUN / STATE-LOSS SAFETY. On a genuine first run (fresh install, or
+    the offset state lost via a DB restore/migration/manual reset) this reads a
+    BOUNDED lookback window (FIRST_RUN_LOOKBACK_S) from byte 0 and then jumps to
+    end -- it does NOT replay the whole log, and it does NOT plain-seek-to-end.
+    The bound matters because both detectors stamp findings with wall-clock `now`
+    (rogue_dhcp on the finding row, ARP on the binding table's first_seen/
+    last_change_ts): an unbounded replay would surface long-gone rogue servers and
+    old MAC changes as current and corrupt the ARP baseline. But a plain
+    seek-to-end is ALSO wrong HERE specifically (operator decision 2026-09-02,
+    option 2): a fresh install/reset is commonly triggered BY a network already
+    misbehaving, so a still-active rogue server or ARP spoofer that began before
+    install is exactly what the operator installed the tool to find -- seek-to-end
+    would silently skip it. The few-hour lookback surfaces it immediately instead
+    of waiting for its next transaction. In steady state a second, independent
+    guard windows every event by its OWN timestamp (the tighter
+    STALE_EVENT_MAX_AGE_S), so a delayed cycle or any large-span read still cannot
+    manufacture a "now" finding.
+
+    This mirrors anomaly_detection's _build_initial_baseline shape (read from 0,
+    filter by a timestamp cutoff, then set offset to size). An earlier version of
+    this docstring claimed parity with anomaly_detection's tailer while the code
+    had NEITHER a bound NOR a jump -- a false-by-resemblance claim that is exactly
+    what let this latent first-run replay bug hide until the cited file was
+    actually read (2026-09-02). The lan_behavior_monitor fix that day (10d2649)
+    chose plain seek-to-end because its rate-based scan detection has no use for
+    old bursts; this module's persistent/stateful threat model is why it takes the
+    bounded-lookback shape instead.
     """
+    now = time.time() if now is None else now
     summary = {"events": 0, "findings": 0, "servers": 0,
                "arp_events": 0, "arp_findings": 0, "error": None}
 
@@ -329,16 +385,34 @@ def _tail_cycle() -> dict:
         _set_state("last_error", summary["error"])
         return summary
 
-    offset = int(_get_state("eve_offset", "0") or 0)
-    inode = int(_get_state("eve_inode", "0") or 0)
-    if st.st_ino != inode or st.st_size < offset:
+    raw_offset = _get_state("eve_offset", "")
+    first_run = (raw_offset == "")
+    if first_run:
+        # GENUINE FIRST RUN or STATE LOSS (fresh install, DB restore, migration,
+        # manual reset). _get_state(key, default="") returns "" ONLY when the key
+        # is absent, which is exactly this condition; a persisted offset of 0
+        # reads as "0", not "". Read a BOUNDED lookback window from byte 0 (events
+        # within FIRST_RUN_LOOKBACK_S), then jump to end -- NOT a seek-to-end, and
+        # NOT an unbounded replay of the whole log. Same shape as
+        # anomaly_detection's _build_initial_baseline (read-from-0, filter by
+        # timestamp cutoff, then set offset to size). See the docstring for why a
+        # plain seek-to-end is wrong here specifically.
         offset = 0
+        max_age = FIRST_RUN_LOOKBACK_S
+    else:
+        offset = int(raw_offset or 0)
+        inode = int(_get_state("eve_inode", "0") or 0)
+        if st.st_ino != inode or st.st_size < offset:
+            offset = 0
+        max_age = STALE_EVENT_MAX_AGE_S
     if st.st_size <= offset:
-        _set_state("last_cycle_ts", time.time())
+        # Nothing to read (empty log, or already caught up). On first run still
+        # persist the offset so the next cycle is NOT treated as first-run again.
+        if first_run:
+            _set_state("eve_offset", str(st.st_size))
+        _set_state("last_cycle_ts", now)
         _set_state("eve_inode", st.st_ino)
         return summary
-
-    now = time.time()
     observations = []
     arp_observations = []
     try:
@@ -355,6 +429,17 @@ def _tail_cycle() -> dict:
                 try:
                     rec = json.loads(raw)
                 except Exception:
+                    continue
+                # WINDOW BY THE EVENT'S OWN TIMESTAMP, NOT WALL-CLOCK now.
+                # Findings are stamped `now`, so an event read outside its window
+                # would be recorded as a current detection. `max_age` is
+                # FIRST_RUN_LOOKBACK_S on a genuine first run (a deliberate few-
+                # hour lookback for an already-misbehaving network) and the
+                # tighter STALE_EVENT_MAX_AGE_S on every steady-state cycle (so a
+                # delayed cycle or any large-span read cannot manufacture a "now"
+                # finding). /proc/net/arp cache reads happen AFTER this loop and
+                # carry no event ts, so they are inherently live and unaffected.
+                if now - _event_epoch(rec, now) > max_age:
                     continue
                 if is_dhcp:
                     obs = rogue_dhcp.parse_event(rec)
