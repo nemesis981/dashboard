@@ -1,22 +1,32 @@
 # ADR 0002 — VPN-Aware Upstream DNS Routing for Pi-hole
 
-> **⚠️ ROOT-CAUSE SUPERSEDED by [0005-dns-firewall-device-auth-architecture](0005-dns-firewall-device-auth-architecture.md) (2026-06-27).**
-> This ADR's diagnosis — that the PIA/Pi-hole DNS failure is **upstream-blocking** (the
-> killswitch dropping Pi-hole's forwarding) — is **wrong**. The real cause is
-> **Pi-hole client-refusal-by-source**: with `dns.listeningMode = ALL` /
-> `dns.interface = enp131s0`, Pi-hole **REFUSES the local host's own queries** once PIA
-> changes the host source IP to the tunnel IP (`dig @127.0.0.1` from the tunnel source =
-> REFUSED/EDE-23 in ~1 ms; the same query `-b 127.0.0.1` from the loopback source =
-> NOERROR). The upstream guard (`core/vpn_dns_guard.py`) **works correctly but solves the
-> WRONG problem** — it reconciles a layer that was never broken. This ADR is retained as
-> **historical record**; see ADR 0005 for the corrected diagnosis and the firewall-engine
-> direction.
+> **✅ ROOT-CAUSE CONFIRMED CORRECT — 2026-08-30, after a month as (wrongly) superseded.**
+> This ADR's original diagnosis — that the PIA/Pi-hole DNS failure is **upstream-blocking**
+> (the killswitch dropping Pi-hole's forwarding) — **is right.** ADR 0005 superseded it on
+> 2026-06-27 with a "client-refusal-by-source" diagnosis; that diagnosis was itself refuted
+> by direct measurement on production on 2026-08-30 (its "decisive experiment" turned out to
+> compare the same source address against itself — see ADR 0005 §1 for the full account) and
+> ADR 0005 now records the correction. **The upstream guard (`core/vpn_dns_guard.py`)
+> reconciles exactly the layer that was actually broken.** This banner replaces the
+> 2026-06-27–2026-08-30 "superseded" text, which is preserved in git history rather than
+> silently deleted.
+>
+> **Since then, this ADR has grown a second, related amendment**, extending the same guard
+> to a different killswitch-vs-DNS conflict: Tailscale MagicDNS being blocked by a killswitch
+> VPN's own address-blocking (distinct from Pi-hole's *upstream* being blocked — see
+> `docs/roadmap/vpn-dns-guard-magicdns-killswitch.md` for that build's full history). Both
+> amendments live in the same file and the same service; this ADR now covers both.
 
-- **Status:** Superseded (root-cause) — guard implemented in `core/vpn_dns_guard.py`,
-  **live-verified on PIA** (but addresses the wrong layer; see ADR 0005)
-- **Date:** 2026-06-25
-- **Affects:** Core networking, Pi-hole upstream config, new core service
-- **Supersedes / depends on:** none
+- **Status:** Confirmed correct (root-cause), **shipped and live** — original mitigation
+  (`core/vpn_dns_guard.py`) live-verified on PIA since 2026-06-25; extended 2026-09-01/02
+  with the MagicDNS/killswitch amendment (see roadmap doc above)
+- **Date:** 2026-06-25 (original), root-cause confirmed correct 2026-08-30, MagicDNS
+  amendment 2026-09-01/02
+- **Affects:** Core networking, Pi-hole upstream config, new core service, (as of the
+  2026-09 amendment) Tailscale `accept-dns` preference + `resolv.conf` ownership
+- **Supersedes / depends on:** none. **Formerly marked superseded by ADR 0005** (2026-06-27
+  → 2026-08-30); that supersession was itself incorrect and has been reversed — see ADR
+  0005 §1 for the full corrected account.
 
 > All IPs/subnets are **placeholders** for the public repo. `HOST_IP` = the Nemesis
 > host's LAN address; `LAN_SUBNET` = its LAN; `GW_IP` = LAN gateway; `tunX` = the
