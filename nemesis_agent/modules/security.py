@@ -201,17 +201,22 @@ def _new_suspicious_files(platform_name: str):
 
 
 def _usb_events(platform_name: str):
+    # Linux: structured device identity via pyudev (VID/PID/serial/model), shared with
+    # the usb_inserted scan trigger AND the device-level operator alert. Replaces the
+    # old dmesg-string scrape, which needed root, was a fragile 200-line rolling window,
+    # and carried no stable identity. Windows/Darwin keep the legacy raw scrape until
+    # their structured backends are built (deferred to a VM session); the server
+    # tolerates both shapes.
+    if platform_name == "Linux":
+        try:
+            import usb_devices                          # noqa: PLC0415
+        except ImportError:                             # pragma: no cover
+            from . import usb_devices                   # type: ignore  # noqa: PLC0415
+        return usb_devices.list_usb_storage()
+
     events = []
     try:
-        if platform_name == "Linux":
-            out = win_run.run(
-                ["dmesg", "--time-format", "iso"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout
-            for line in out.splitlines()[-200:]:
-                if "usb" in line.lower() and ("new" in line.lower() or "disconnect" in line.lower()):
-                    events.append({"raw": line.strip()})
-        elif platform_name == "Darwin":
+        if platform_name == "Darwin":
             out = win_run.run(
                 ["system_profiler", "SPUSBDataType"],
                 capture_output=True, text=True, timeout=8,

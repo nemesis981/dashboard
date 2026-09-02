@@ -425,6 +425,7 @@ def init_db():
         # services, so every process that needs the tables creates them itself.
         conn.commit()
         database.init_scan_tables()
+        database.init_usb_events_table()   # removable-media device control (v1)
 
         # agent_devices migrations: add columns introduced after initial schema.
         existing_ag = {row[1] for row in c.execute("PRAGMA table_info(agent_devices)").fetchall()}
@@ -2064,16 +2065,83 @@ def _extract_usernames(login_events):
     return users
 
 
+def _usb_seen_key(ev):
+    """Stable dedup key for a USB event, structured OR legacy-raw.
+
+    Structured (new agent): usb:vid:pid:serial -- true device identity, stable across
+    re-enumeration and devname churn. Structured-but-no-ids: model/devname fallback.
+    Legacy raw (old agent, Windows/macOS not yet upgraded): raw:<first 80 chars>. Never
+    empty (an empty key would collapse distinct devices together)."""
+    if not isinstance(ev, dict):
+        return "raw:" + str(ev).strip()[:80]
+    vid, pid, ser = ev.get("vendor_id", ""), ev.get("product_id", ""), ev.get("serial", "")
+    if vid and pid and ser:
+        return "usb:%s:%s:%s" % (vid, pid, ser)
+    if ev.get("raw"):
+        return "raw:" + str(ev["raw"]).strip()[:80]
+    return "usb:%s:%s" % (ev.get("model") or "?", ev.get("devname") or "?")
+
+
 def _extract_usb_names(usb_events):
-    """Return a set of short USB device identifiers from usb_events list."""
+    """Set of stable USB keys for the scan-trigger diff. Structured-aware and
+    backward-compatible with legacy raw events (see _usb_seen_key)."""
     names = set()
-    for ev in usb_events:
-        raw = ev.get("raw", "") if isinstance(ev, dict) else str(ev)
-        raw = raw.strip()
-        if raw:
-            # Use first 80 chars as a stable key
-            names.add(raw[:80])
+    for ev in usb_events or []:
+        k = _usb_seen_key(ev)
+        if k:
+            names.add(k)
     return names
+
+
+def _record_usb_devices(conn, device_id, usb_events, now, alert_fn=None):
+    """Durable device-control record + operator alert on a genuinely new device.
+
+    First-sighting deduped per (device_id, seen_key): the SAME stick on TWO machines
+    is two records (each machine's operator should know), the same stick re-seen on one
+    machine is one. Returns the list of new events. alert_fn is injected for testing;
+    production passes _usb_alert. This is the v1 detect+alert tier -- NO block/policy
+    (deferred: a false block locking an operator out of their own drive is the risk)."""
+    new = []
+    for ev in usb_events or []:
+        key = _usb_seen_key(ev)
+        if conn.execute("SELECT 1 FROM usb_events WHERE device_id=? AND seen_key=?",
+                        (device_id, key)).fetchone():
+            conn.execute("UPDATE usb_events SET last_seen=? WHERE device_id=? AND seen_key=?",
+                         (now, device_id, key))
+            continue
+        d = ev if isinstance(ev, dict) else {}
+        conn.execute(
+            "INSERT INTO usb_events (device_id, seen_key, action, vendor_id, product_id, "
+            "serial, model, vendor, raw, first_seen, last_seen, actor) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (device_id, key, d.get("action"), d.get("vendor_id"), d.get("product_id"),
+             d.get("serial"), d.get("model"), d.get("vendor"), d.get("raw"),
+             now, now, "agent:%s" % device_id))
+        new.append(ev)
+        if alert_fn:
+            try:
+                alert_fn(device_id, ev)
+            except Exception as _ae:  # noqa: BLE001
+                log.warning("usb device alert failed for %s: %s", device_id, _ae)
+    conn.commit()
+    return new
+
+
+def _usb_alert(device_id, ev):
+    """Raise the operator alert for a newly-seen USB storage device (v1 detect+alert)."""
+    import database as _db                              # noqa: PLC0415
+    d = ev if isinstance(ev, dict) else {}
+    ident = " ".join(x for x in (d.get("vendor"), d.get("model")) if x) or "unknown device"
+    ser = d.get("serial") or ""
+    raw = d.get("raw") or ""
+    detail = ("Removable USB storage connected to %s: %s%s%s. Verify it is expected; an "
+              "unrecognised drive is a common malware-in / data-out vector."
+              % (device_id, ident,
+                 (" (serial %s)" % ser) if ser else "",
+                 (" [%s]" % raw[:60]) if (raw and not ident.strip()) else ""))
+    rule_id = "usb_device:%s:%s" % (device_id, _usb_seen_key(ev))
+    _db.add_alert(rule_id, "Removable USB storage connected", "policy", "medium",
+                  detail, "medium", "none", None, None, "usb")
 
 
 def _queue_scan(device_id, trigger_type, trigger_detail, scan_path):
@@ -4567,6 +4635,23 @@ def _start_windows_agent_listener():
 
                 metrics = _nemesis_payload_to_metrics(payload)
                 _check_and_queue_scan_triggers(payload)   # before update (needs prev state)
+                # Removable-media device control (v1): durable record + operator alert on
+                # a new USB storage device. Separate from the scan trigger above (that asks
+                # "scan the files?"; this asks "should the operator know a device appeared?")
+                # and runs regardless of scan-trigger config. Never breaks the beat.
+                try:
+                    _sec = payload.get("security") or {}
+                    _usb = _sec.get("usb_events")
+                    if _usb:
+                        _uconn = _db_connect()
+                        try:
+                            _record_usb_devices(_uconn, payload.get("device_id"), _usb,
+                                                time.time(), alert_fn=_usb_alert)
+                        finally:
+                            _uconn.close()
+                except Exception as _ue:  # noqa: BLE001
+                    log.warning("usb device-control ingest failed for %s: %s",
+                                payload.get("device_id"), _ue)
                 # Track C ingest. Deliberately AFTER the scan triggers and wrapped
                 # in its own never-raising handler: connection telemetry is
                 # opt-in and secondary, and must never be able to break heartbeat

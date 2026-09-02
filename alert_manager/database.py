@@ -1074,6 +1074,40 @@ def init_connectivity_episodes_table():
         conn.close()
 
 
+# ── Canonical DDL: usb_events (removable-media device control, v1). Written by
+# hw_monitor via its raw connection (core service, not Data-Manager-gated). Durable
+# record of USB storage devices seen per agent device, first-sighting deduped.
+USB_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS usb_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id   TEXT NOT NULL,
+    seen_key    TEXT NOT NULL,
+    action      TEXT,
+    vendor_id   TEXT,
+    product_id  TEXT,
+    serial      TEXT,
+    model       TEXT,
+    vendor      TEXT,
+    raw         TEXT,
+    first_seen  REAL,
+    last_seen   REAL,
+    actor       TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usb_events_dev_key ON usb_events(device_id, seen_key);
+CREATE INDEX IF NOT EXISTS idx_usb_events_first_seen ON usb_events(first_seen DESC);
+"""
+
+
+def init_usb_events_table():
+    """Apply USB_EVENTS_DDL. Canonical owner, mirroring init_scan_tables()."""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.executescript(USB_EVENTS_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def init_scan_tables():
     """Canonical DDL for `scan_threats` and `scan_schedules`.
 
