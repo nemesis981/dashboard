@@ -8,7 +8,18 @@
 > state, and the actual running app, not commit messages alone — every file that swept as a
 > real hit. Supersedes `roadmap-state-audit-2026-08-31.md` (kept as history).
 
-**Tally: 16 SHIPPED · 13 PARTIAL · 59 STUB/PARKED — 88 total.**
+**Tally: 16 SHIPPED · 14 PARTIAL · 58 STUB/PARKED — 88 total.**
+
+**Refreshed a second time, same day, same file** — `enrollment-modes-build-spec.md` moved
+PARKED → PARTIAL: its step 1 (BULK-MANUAL) shipped (`7a518ec`, `e29b173`, `f4bf5be`,
+2026-09-02), while steps 2–4 remain unbuilt. Net effect: PARTIAL 13→14, PARKED 59→58,
+SHIPPED and total unchanged (16, 88). Same commit also actioned 3 spec corrections found by
+Window 3's audit of that file (stale `enrollment_status` value count; an enforcement premise
+in §3 that doesn't exist in code, corrected to a stated dependency rather than silently
+rewritten as a security hole — see the file's own §3/§7 for the neutral public framing,
+detailed finding held in the private mirror per Rule 10) — see
+`docs/roadmap/enrollment-modes-build-spec.md`'s own change history for detail, not
+duplicated here.
 
 **Refreshed same day (2026-09-02, later), same audit file, not a new dated one** — this
 addendum records 3 new roadmap files created same-day to close the exact tracking gap §3
@@ -213,7 +224,7 @@ subject swept against all 86 roadmap filenames' significant keywords; every real
 unchanged) was verified directly: live route registration (`dashboard.py`, `url_map`),
 live kernel/service state (`cat /proc/sys/net/ipv4/ip_forward`, `systemctl show`), and
 direct code reads (not just commit-message claims) for the fields/functions each doc
-names as its deliverable. File-set arithmetic, after the §3a addendum (88 tracked + 1 excluded = 16 + 13 + 59 = 88) is
+names as its deliverable. File-set arithmetic, after both addenda (88 tracked + 1 excluded = 16 + 14 + 58 = 88) is
 internally consistent and confirmed against `ls docs/roadmap/*.md` = 89.
 
 Baseline doc for the next Morning Status: this file (2026-09-02, including the §3a
