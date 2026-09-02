@@ -25,11 +25,12 @@ import sys
 
 DASHBOARD = "/opt/nemesis/dashboard.py"
 HW_MONITOR = "/opt/nemesis/core_module/hw_monitor/hw_monitor.py"
+JS = "/opt/nemesis/static/agent-enroll.js"
 
 # Declared up front and asserted at the end: a suite whose shape changes between
 # runs is not comparable to a previous run, and a check that silently stops
 # running looks exactly like a check that passed.
-EXPECTED_CHECKS = 37
+EXPECTED_CHECKS = 45
 
 _results = []
 
@@ -227,6 +228,31 @@ def main():
           "api_agent_bulk_approve" in R.CAPABILITY_ROUTES["approve_enrollment"], True)
     check("CONTROL the registry was actually imported (non-trivial size)",
           len(R.ROUTE_MINIMUMS) > 50, True)
+
+    # ── UI wiring (cross-file: a selector mismatch is SILENT) ───────────────
+    # If the JS queries a class the HTML never emits, the button renders, the
+    # page looks correct, and nothing happens on click. Nothing else in the
+    # suite would notice, because each file is internally consistent.
+    print("\nUI wiring — the JS and the rendered HTML agree")
+    js = open(JS).read()
+    check("CONTROL the JS file was actually read", "agentBulkApprove" in js, True)
+    check("the class the JS selects is the class the page emits",
+          'querySelectorAll(\'.bulk-approve-cb' in js
+          and 'class="bulk-approve-cb"' in src, True)
+    for el in ("bulkApproveBtn", "bulkApproveCount"):
+        check("the JS looks up #%s and the page emits it" % el,
+              ("getElementById('%s')" % el) in js and ('id="%s"' % el) in src, True)
+    # THE point of the typed gate: the browser must send what the human typed,
+    # not a hardcoded value. A literal would make the prompt pure theatre while
+    # still passing every server-side test.
+    check("THE PROPERTY: the JS sends the TYPED value, not a hardcoded one",
+          "confirm: typed" in js, True)
+    check("CONTROL it does not hardcode the confirmation string",
+          bool(re.search(r"confirm:\s*['\"]yes['\"]", js)), False)
+    check("the JS checks r.ok (an error response must not reload as success)",
+          "if (!r.ok)" in js, True)
+    check("a findings device gets no checkbox (branch exists in the renderer)",
+          "individual approval only" in src, True)
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)

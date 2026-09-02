@@ -7012,6 +7012,27 @@ def _render_agent_devices_html() -> str:
          '<h3 style="color:#ffcc00;font-size:0.95em">Pending approval</h3>']
     if not pending:
         h.append('<p style="color:#888;font-size:0.86em">No devices awaiting approval.</p>')
+    else:
+        # BULK-MANUAL (ADR 0012 step 1): tick the reviewed devices, confirm once.
+        # Rendered only when there is something to select — an always-present bar
+        # with nothing to act on reads as a broken control rather than an idle one.
+        h.append(
+            '<div style="background:#0d0d1e;border:1px solid #ffcc0044;border-radius:8px;'
+            'padding:8px 12px;margin-bottom:10px;display:flex;align-items:center;'
+            'gap:10px;flex-wrap:wrap">'
+            '<label style="color:#ddd;font-size:0.85em;cursor:pointer">'
+            '<input type="checkbox" onchange="agentBulkToggleAll(this)" '
+            'style="margin-right:5px">Select all</label>'
+            '<span id="bulkApproveCount" style="color:#888;font-size:0.82em">'
+            '0 devices selected</span>'
+            '<button id="bulkApproveBtn" onclick="agentBulkApprove()" disabled '
+            'style="background:#00ff8822;color:#00ff88;border:1px solid #00ff88;'
+            'border-radius:6px;padding:5px 14px;cursor:pointer">Approve selected</button>'
+            '<span style="color:#888;font-size:0.78em;flex-basis:100%">'
+            'Review each device before selecting it &mdash; approving grants trusted '
+            'network access, and there is no bulk undo. You&#39;ll be asked to type a '
+            'confirmation.</span>'
+            '</div>')
     for r in pending:
         did = html.escape(r["device_id"], quote=True)
         scan = {}
@@ -7057,9 +7078,23 @@ def _render_agent_devices_html() -> str:
                 f'<button onclick="agentReject(\'{did}\')" style="background:#ff444422;color:#ff6666;'
                 'border:1px solid #ff4444;border-radius:6px;padding:5px 14px;cursor:pointer;margin-top:6px">Reject</button>')
         border = '#ff444466' if findings else '#ffcc0044'
+        # Only bulk-eligible devices get a checkbox. A findings device is
+        # excluded server-side (see _BULK_APPROVE_ELIGIBLE) because it needs its
+        # own stronger warning, so the tickbox is replaced by a short note
+        # rather than simply missing — an absent control with no explanation
+        # reads as a bug, and the operator would go looking for it.
+        if findings:
+            picker = ('<span style="color:#888;font-size:0.78em" '
+                      'title="Approve individually so the findings warning is shown">'
+                      '&#9888; individual approval only</span> ')
+        else:
+            picker = (f'<label style="cursor:pointer"><input type="checkbox" '
+                      f'class="bulk-approve-cb" value="{did}" '
+                      'onchange="agentBulkCount()" style="margin-right:6px"></label>')
         h.append(
             f'<div style="background:#0d0d1e;border:1px solid {border};border-radius:8px;'
             'padding:10px 12px;margin-bottom:8px">'
+            f'{picker}'
             f'<strong>{html.escape(r["device_name"] or "?")}</strong> '
             f'<span style="color:#aaa;font-size:0.84em">{html.escape((r["os"] or "") + " " + (r["os_version"] or "")[:40])}</span><br>'
             f'<span style="color:#888;font-size:0.82em">{html.escape(r["hardware_summary"] or "")}</span><br>'

@@ -152,3 +152,76 @@ function agentApproveAnyway(id) {
     .then(function () { location.reload(); })
     .catch(function () { alert('Approve failed — try again.'); });
 }
+
+/* ── BULK-MANUAL batch approve (ADR 0012 build-spec step 1) ─────────────────
+   The human is looking at the concrete list of pending devices, ticks the ones
+   they have reviewed, and types the confirmation once for the batch.
+
+   The typed value is sent to the server AS TYPED and validated there. This
+   prompt is the usability half, not the security half -- a browser-side check
+   is trivially bypassed, so the server is the authority and a wrong value comes
+   back as a 400 rather than being corrected here. */
+function agentBulkSelected() {
+  var out = [];
+  var boxes = document.querySelectorAll('.bulk-approve-cb:checked');
+  for (var i = 0; i < boxes.length; i++) { out.push(boxes[i].value); }
+  return out;
+}
+
+function agentBulkToggleAll(src) {
+  var boxes = document.querySelectorAll('.bulk-approve-cb');
+  for (var i = 0; i < boxes.length; i++) { boxes[i].checked = src.checked; }
+  agentBulkCount();
+}
+
+function agentBulkCount() {
+  var n = agentBulkSelected().length;
+  var el = document.getElementById('bulkApproveCount');
+  if (el) { el.textContent = n === 1 ? '1 device selected' : (n + ' devices selected'); }
+  var btn = document.getElementById('bulkApproveBtn');
+  if (btn) { btn.disabled = (n === 0); }
+}
+
+function agentBulkApprove() {
+  var ids = agentBulkSelected();
+  if (!ids.length) { alert('Select at least one device first.'); return; }
+  var typed = prompt('Approve ' + ids.length + ' device(s)?\n\n'
+                   + 'Each one is granted trusted network access. There is no bulk undo '
+                   + '— reversing this means revoking each device individually.\n\n'
+                   + 'Type yes to confirm:');
+  /* null = the operator cancelled. Distinct from an empty or wrong string,
+     which is a real refusal by the server and worth showing them. */
+  if (typed === null) return;
+  fetch('/api/agent/bulk-approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ device_ids: ids, confirm: typed })
+  })
+    .then(function (r) {
+      /* fetch does not reject on 4xx/5xx. Without this an error response would
+         reload the page and look exactly like success -- the agentRevoke
+         lesson, applied here rather than re-learned. */
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          throw new Error((j && j.error) ? j.error : ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
+    .then(function (j) {
+      var refused = (j && j.refused) || [];
+      if (!refused.length) { location.reload(); return; }
+      /* A partial result is never rendered as a complete one. Name each device
+         the server refused and why, then reload so the page shows the truth. */
+      var lines = refused.map(function (x) {
+        return '  • ' + x.device_id + ' — ' + x.reason
+             + (x.status ? ' (' + x.status + ')' : '');
+      }).join('\n');
+      alert('Approved ' + (j.approved_count || 0) + ' device(s).\n\n'
+          + refused.length + ' were NOT approved:\n' + lines);
+      location.reload();
+    })
+    .catch(function (e) {
+      alert('Bulk approve failed.\n\n' + (e && e.message ? e.message : 'Unknown error'));
+    });
+}
