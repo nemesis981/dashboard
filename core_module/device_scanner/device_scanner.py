@@ -75,8 +75,11 @@ def _arp_devices(net, path="/proc/net/arp"):
         ip, flags, mac = parts[0], parts[2], parts[3].lower()
         # Flags 0x0 is an INCOMPLETE entry — the kernel asked and nothing
         # answered, so the MAC reads 00:00:00:00:00:00. Recording that would
-        # invent a device that does not exist.
-        if flags == "0x0" or mac == "00:00:00:00:00:00":
+        # invent a device that does not exist. The broadcast MAC can also appear
+        # in /proc/net/arp and is likewise not a device — arp_watch excludes both
+        # via _NULL_MACS; keep this parser in agreement with it (Window 3 sweep,
+        # 2026-09-02: this was the one real gap between the two ARP parsers).
+        if flags == "0x0" or mac in ("00:00:00:00:00:00", "ff:ff:ff:ff:ff:ff"):
             continue
         try:
             if ipaddress.ip_address(ip) not in net:

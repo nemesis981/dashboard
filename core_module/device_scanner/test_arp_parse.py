@@ -30,6 +30,9 @@ ROWS = [
     "192.0.2.200      0x1         0x0         00:00:00:00:00:00     *        eth0\n",
     # complete flags but a zero MAC — belt and braces, same reasoning
     "192.0.2.201      0x1         0x2         00:00:00:00:00:00     *        eth0\n",
+    # broadcast MAC — a real /proc/net/arp entry can carry ff:ff:ff:ff:ff:ff; it is
+    # not a device. arp_watch already excludes it (_NULL_MACS); this parser must too.
+    "192.0.2.202      0x1         0x2         FF:FF:FF:FF:FF:FF     *        eth0\n",
     # out of subnet: docker bridge / VPN / another interface
     "198.51.100.2     0x1         0x2         02:00:00:00:00:F1     *        docker0\n",
     "203.0.113.1      0x1         0x2         02:00:00:00:00:F2     *        tun0\n",
@@ -70,6 +73,7 @@ def main():
     check("keeps 192.0.2.92", "192.0.2.92" in ips, repr(ips))
     check("drops INCOMPLETE (flags 0x0)", "192.0.2.200" not in ips, repr(ips))
     check("drops zero MAC even when flagged complete", "192.0.2.201" not in ips, repr(ips))
+    check("drops broadcast MAC ff:ff:ff:ff:ff:ff", "192.0.2.202" not in ips, repr(ips))
     check("drops out-of-subnet docker neighbour", "198.51.100.2" not in ips, repr(ips))
     check("drops out-of-subnet VPN neighbour", "203.0.113.1" not in ips, repr(ips))
     check("lowercases the MAC", "02:00:00:00:00:5c" in macs, repr(macs))
