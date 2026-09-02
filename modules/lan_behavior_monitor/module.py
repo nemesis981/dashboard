@@ -212,6 +212,29 @@ def _is_new_device(first_seen, now):
     return (now - float(first_seen)) <= behavior.NEW_DEVICE_WINDOW_S
 
 
+def _event_epoch(rec, fallback):
+    """Epoch seconds from an eve record's own timestamp, else `fallback`.
+
+    ⛔ WHY THE EVENT TIMESTAMP AND NOT WALL-CLOCK now. The rolling windows are
+    rate measurements. If every event in a cycle is stamped with the cycle's now,
+    then a cycle that reads a large span at once -- the initial backlog, or a
+    delayed cycle -- collapses that whole span into one window and manufactures a
+    fan-out/flood that never happened. Stamping each event with its OWN time, then
+    pruning against wall-clock now, means stale events fall out of the window
+    instead of piling up. Found live 2026-09-02: the first cycle read 1.1GB of
+    history and raised 43 false findings; this is half the fix (the other half is
+    the first-run seek-to-end below).
+    """
+    ts = rec.get("timestamp")
+    if not ts:
+        return fallback
+    try:
+        import datetime
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def _mdns_src(rec):
     ip = (rec.get("src_ip") or "").strip()
     return ip or None
@@ -244,7 +267,17 @@ def _tail_cycle(now=None) -> dict:
         _set_state("last_error", summary["error"])
         return summary
 
-    offset = int(_get_state("eve_offset", "0") or 0)
+    raw_offset = _get_state("eve_offset", "")
+    if raw_offset == "":
+        # FIRST EVER RUN: start at the current END of the log. A rate-based scan
+        # detector must not replay history -- a week-old ARP burst is not a scan
+        # happening now, and processing the 1.1GB backlog collapses it into one
+        # window (found live 2026-09-02, 43 false findings). Begin fresh next cycle.
+        _set_state("eve_offset", str(st.st_size))
+        _set_state("eve_inode", str(st.st_ino))
+        _set_state("last_cycle_ts", now)
+        return summary
+    offset = int(raw_offset or 0)
     inode = int(_get_state("eve_inode", "0") or 0)
     if st.st_ino != inode or st.st_size < offset:
         offset = 0
@@ -271,7 +304,8 @@ def _tail_cycle(now=None) -> dict:
                 if is_arp:
                     probe = behavior.parse_arp_probe(rec)
                     if probe is not None:
-                        behavior.record_probe(_ARP_STATE, probe, now)
+                        ev_ts = _event_epoch(rec, now)
+                        behavior.record_probe(_ARP_STATE, probe, ev_ts)
                         summary["arp_events"] += 1
                         active_macs.add(probe["src_mac"])
                         if probe.get("src_ip"):
@@ -279,13 +313,13 @@ def _tail_cycle(now=None) -> dict:
                 elif is_alert:
                     a = behavior.parse_sweep_alert(rec)
                     if a is not None:
-                        _SWEEP_STATE[a["src_ip"]] = now
+                        _SWEEP_STATE[a["src_ip"]] = _event_epoch(rec, now)
                         summary["sweep_events"] += 1
                         active_ips.add(a["src_ip"])
                 elif is_mdns:
                     ip = _mdns_src(rec)
                     if ip:
-                        behavior.record_mdns(_MDNS_STATE, ip, now)
+                        behavior.record_mdns(_MDNS_STATE, ip, _event_epoch(rec, now))
                         summary["mdns_events"] += 1
                         active_ips.add(ip)
             new_offset = fh.tell()

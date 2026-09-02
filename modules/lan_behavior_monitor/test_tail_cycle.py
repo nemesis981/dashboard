@@ -28,7 +28,7 @@ m = importlib.import_module("modules.lan_behavior_monitor.module")
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 27
+EXPECTED_CHECKS = 32
 
 SCANNER_MAC = "aa:bb:cc:00:00:01"
 SCANNER_IP = "192.0.2.50"
@@ -261,6 +261,64 @@ def test_status_distinguishes_unproven_from_clean():
     check("status carries a human detail", bool(st.get("detail")), True)
 
 
+def _iso(epoch):
+    import datetime
+    return datetime.datetime.fromtimestamp(epoch).astimezone().isoformat()
+
+
+def test_first_run_seeks_to_end_not_backlog():
+    print("\n[first run with NO saved offset seeks to END -- a rate detector must not replay history]")
+    _reset_rolling()
+    eve = os.path.join(_TMPDIR.name, "eve_firstrun.json")
+    # a big pre-existing backlog: one source fanning out, as if a week of history
+    with m._db() as conn:
+        conn.execute("DELETE FROM lan_behavior_findings"); conn.commit()
+    m._set_state("module_started_at", "1.0")
+    _write_eve(eve, [_arp_req("aa:bb:cc:00:00:0b", "192.0.2.130", "192.0.2.3%02d" % i)
+                     for i in range(m.behavior.ARP_FANOUT_DISTINCT_IPS)], mode="w")
+    m.EVE_LOG = eve
+    # simulate a genuinely-never-run module: clear the offset state entirely
+    with m._db() as conn:
+        conn.execute("DELETE FROM lan_behavior_state WHERE key IN ('eve_offset','eve_inode')")
+        conn.commit()
+    s = m._tail_cycle(now=700000.0)
+    check("first run processed ZERO events (seeked to end)", s["events"], 0)
+    check("first run raised NO findings from the backlog", s["findings"], 0)
+    check("offset was set to the file end", int(m._get_state("eve_offset", "0")) > 0, True)
+
+
+def test_old_events_are_pruned_not_flagged():
+    print("\n[events with OLD timestamps are pruned by the window, never flagged]")
+    _reset_rolling()
+    eve = os.path.join(_TMPDIR.name, "eve_old.json")
+    with m._db() as conn:
+        conn.execute("DELETE FROM lan_behavior_findings"); conn.commit()
+    m._set_state("module_started_at", "1.0")
+    # fan-out volume, but every event stamped WELL before the cycle's now -> outside window
+    old = 800000.0 - (m.behavior.ARP_FANOUT_WINDOW_S * 100)
+    recs = []
+    for i in range(m.behavior.ARP_FANOUT_DISTINCT_IPS):
+        r = _arp_req("aa:bb:cc:00:00:0c", "192.0.2.140", "192.0.2.4%02d" % i)
+        r["timestamp"] = _iso(old)
+        recs.append(r)
+    _write_eve(eve, recs, mode="w")
+    m.EVE_LOG = eve
+    s = m._tail_cycle(now=800000.0)
+    check("old-timestamp fan-out raised NO finding (pruned)", s["findings"], 0)
+    # control: the SAME volume stamped at ~now DOES fire
+    _reset_rolling()
+    eve2 = os.path.join(_TMPDIR.name, "eve_now.json")
+    recs2 = []
+    for i in range(m.behavior.ARP_FANOUT_DISTINCT_IPS):
+        r = _arp_req("aa:bb:cc:00:00:0d", "192.0.2.150", "192.0.2.5%02d" % i)
+        r["timestamp"] = _iso(800100.0)
+        recs2.append(r)
+    _write_eve(eve2, recs2, mode="w")
+    m.EVE_LOG = eve2
+    s2 = m._tail_cycle(now=800100.0)
+    check("CONTROL: same volume at current-timestamp DOES fire", s2["findings"], 1)
+
+
 if __name__ == "__main__":
     print("=" * 74)
     print("lan_behavior_monitor — tail cycle integration")
@@ -274,6 +332,8 @@ if __name__ == "__main__":
     test_rotation_resets_offset()
     test_selftest_failure_fails_closed()
     test_status_distinguishes_unproven_from_clean()
+    test_first_run_seeks_to_end_not_backlog()
+    test_old_events_are_pruned_not_flagged()
     print()
     if _count != EXPECTED_CHECKS:
         print("SUITE DRIFT: ran %d checks, expected %d" % (_count, EXPECTED_CHECKS))
