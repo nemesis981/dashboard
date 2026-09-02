@@ -47,6 +47,18 @@ def _load_manifest(path=MANIFEST):
         return {}
 
 
+def _start_menu_path(manifest):
+    """Where the Start Menu folder actually is, per the manifest (R2).
+
+    The manifest wins; START_MENU is only a fallback for installs predating the
+    start_menu component. Pure so the precedence is testable -- asserting merely that
+    the SOURCE mentions "start_menu" is satisfied by a comment, which is how the first
+    version of this check passed against code that ignored the manifest entirely.
+    """
+    path = ((manifest.get("components") or {}).get("start_menu") or {}).get("path")
+    return path or START_MENU
+
+
 def _tailscale_component(manifest):
     return ((manifest.get("components") or {}).get("tailscale") or {})
 
@@ -74,6 +86,52 @@ def _sign_deenroll(keys_dir, device_id, signed_at):
     if backend is None:
         raise keyprotect.NotProvisioned("no key material in %s" % keys_dir)
     return backend.sign("uninstall|%s|%s" % (device_id, signed_at))
+
+
+def _wait_then_delete(is_alive, delete, sleep=None, max_wait=120):
+    """Wait for a process to exit, THEN delete. Never deletes while it is alive.
+
+    ⛔ THIS ORDERING IS THE WHOLE FIX (R1). The previous code scheduled
+    `timeout /t 3 & rmdir` and then let the GUI sit on a completion screen until the
+    user clicked Close — so the delete fired, essentially always, while
+    NemesisUninstall.exe was still running out of the directory being deleted. Windows
+    cannot delete a running executable's file, so the rmdir failed and both the exe and
+    %APPDATA%\\Nemesis survived. It was a fixed timer racing an indefinite human.
+
+    REFUSES rather than forcing on timeout. If the process somehow never exits, leaving
+    the directory intact is the better failure: a half-deleted install directory is
+    worse than an untouched one, and the uninstaller already reports residue honestly.
+
+    Pure and injectable so the sequencing contract is testable off-Windows — the
+    Windows deletion itself is exercised by Test-plan §7, not here.
+    """
+    if sleep is None:
+        import time
+        sleep = time.sleep
+    waited = 0
+    while waited < max_wait:
+        if not is_alive():
+            return bool(delete())
+        sleep(1)
+        waited += 1
+    return False
+
+
+def _deferred_removal_command(install_dir, pid):
+    """Detached command that deletes `install_dir` once THIS process (pid) has exited.
+
+    Keyed to the pid, not to a delay: `Wait-Process` blocks until the uninstaller is
+    actually gone, however long the user leaves the completion screen open. The
+    -ErrorAction SilentlyContinue on Wait-Process covers the race where we have already
+    exited by the time PowerShell starts -- that is the good case, and it must not abort
+    the delete.
+    """
+    ps = (
+        "Wait-Process -Id {pid} -ErrorAction SilentlyContinue; "
+        "Start-Sleep -Milliseconds 750; "
+        "Remove-Item -LiteralPath '{d}' -Recurse -Force -ErrorAction SilentlyContinue"
+    ).format(pid=int(pid), d=install_dir)
+    return ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps]
 
 
 def _read_conf(path=CONF):
@@ -248,10 +306,13 @@ class UninstallerApp:
                            check=False, capture_output=True, timeout=30)
         except Exception:
             pass
-        # schedule install-dir deletion AFTER we exit (can't delete our own running exe's dir)
+        # Schedule install-dir deletion for AFTER WE EXIT. Keyed to our own pid, not to a
+        # fixed delay: the GUI stays open on its completion screen until the user clicks
+        # Close, so any timer short enough to feel responsive fires while this exe is still
+        # running inside the directory it is trying to delete (R1).
         try:
-            subprocess.Popen('cmd /c timeout /t 3 /nobreak >nul & rmdir /s /q "%s"' % INSTALL_DIR,
-                             shell=True)
+            subprocess.Popen(_deferred_removal_command(INSTALL_DIR, os.getpid()),
+                             close_fds=True)
         except Exception:
             pass
 
@@ -263,11 +324,15 @@ class UninstallerApp:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, ARP_KEY)
             except Exception:
                 pass
-        # Start Menu folder
+        # Start Menu folder — path comes FROM THE MANIFEST (R2: one definition of what we
+        # installed). The module constant remains only as a fallback for installs made
+        # before start_menu was recorded; a manifest path always wins, so renaming the
+        # folder installer-side can no longer orphan it here.
         try:
             import shutil
-            if os.path.isdir(START_MENU):
-                shutil.rmtree(START_MENU, ignore_errors=True)
+            target = _start_menu_path(self.manifest)
+            if os.path.isdir(target):
+                shutil.rmtree(target, ignore_errors=True)
         except Exception:
             pass
 

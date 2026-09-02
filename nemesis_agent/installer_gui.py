@@ -24,6 +24,12 @@ import tkinter as tk
 from tkinter import ttk
 
 APPDATA = os.environ.get("APPDATA", os.path.expanduser("~"))
+# ONE definition of the Start Menu folder. It is used BOTH to create the shortcuts and
+# to fill the manifest's start_menu.path, so the uninstaller removes exactly what was
+# created. It previously existed twice -- here and again as a constant in the
+# uninstaller -- identical by luck, and silently divergent the moment either was edited.
+START_MENU_DIR = os.path.join(APPDATA, "Microsoft", "Windows", "Start Menu",
+                              "Programs", "Nemesis")
 INSTALL_DIR = os.path.join(APPDATA, "Nemesis")
 
 #: PRODUCT DISPLAY version — Add/Remove Programs' `DisplayVersion` and the
@@ -239,6 +245,15 @@ def _build_manifest(install_dir, ts_pre_existing, ts_now, ts_path=None, ts_versi
             "defender_exclusion": {
                 "kind": "defender_exclusion", "pre_existing": False,
                 "installed_by_nemesis": True, "path": install_dir, "removal": "auto",
+            },
+            "start_menu": {
+                # R2 (manifest coverage): the installer creates this folder, so the
+                # uninstaller must learn the path from HERE rather than redefining it.
+                "kind": "start_menu",
+                "pre_existing": False,
+                "installed_by_nemesis": True,
+                "path": START_MENU_DIR,
+                "removal": "auto",
             },
             "registry": {
                 "kind": "registry", "arp_key": "HKCU\\" + ARP_KEY,
@@ -1151,8 +1166,7 @@ class InstallerApp:
         """Start Menu 'Nemesis' folder: 'Open Nemesis Dashboard' (.url) + 'Uninstall Nemesis'."""
         if os.name != "nt":
             return
-        folder = os.path.join(APPDATA, "Microsoft", "Windows", "Start Menu",
-                              "Programs", "Nemesis")
+        folder = START_MENU_DIR
         try:
             os.makedirs(folder, exist_ok=True)
             self._make_shortcut(os.path.join(folder, "Uninstall Nemesis.lnk"),
