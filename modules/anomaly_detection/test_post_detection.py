@@ -20,7 +20,7 @@ import post_detection as P  # noqa: E402
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 27
+EXPECTED_CHECKS = 28
 
 WIN = P.CORRELATION_WINDOW_S
 DEV = "192.0.2.50"
@@ -70,6 +70,13 @@ def test_signal_before_detection_is_none():
     det = _det(1000.0)
     sig = _sig(7, "dns_exfiltration", [DEV], 1000.0 - 1)
     check("pre-detection signal -> None", P.correlate(det, [sig], WIN), None)
+
+
+def test_simultaneous_is_none():
+    print("\n[egress at the SAME instant as detection is NOT post-detection (same cycle)]")
+    det = _det(1000.0)
+    sig = _sig(7, "dns_exfiltration", [DEV], 1000.0)   # exact same ts
+    check("simultaneous signal -> None (must strictly follow)", P.correlate(det, [sig], WIN), None)
 
 
 def test_wrong_device_is_none():
@@ -162,6 +169,7 @@ if __name__ == "__main__":
     test_valid_correlation()
     test_signal_outside_window_is_none()
     test_signal_before_detection_is_none()
+    test_simultaneous_is_none()
     test_wrong_device_is_none()
     test_wrong_signal_type_is_none()
     test_no_self_correlation()

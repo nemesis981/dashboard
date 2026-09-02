@@ -67,7 +67,10 @@ def correlate(detection, egress_signals, window=CORRELATION_WINDOW_S):
         if dev not in (s.get("ips") or ()):
             continue
         sts = s.get("ts")
-        if sts is None or sts < dts or sts > dts + window:
+        # STRICTLY after: a reach-out at the same instant as the detection is the same
+        # cycle's output, not a subsequent behaviour change (found live 2026-09-02 --
+        # two anomaly incidents from one cycle correlated with a 0s gap).
+        if sts is None or sts <= dts or sts > dts + window:
             continue
         if best is None or sts < best.get("ts"):
             best = s

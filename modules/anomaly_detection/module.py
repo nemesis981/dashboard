@@ -2566,6 +2566,32 @@ _PDE_EGRESS_LOOKBACK_S = 3600   # how far back to pull egress signals to correla
 HW_DEBOUNCE_S = 600
 HW_LOCAL_DEVICE_ID = "local"
 
+# Appliance self-exclusion. The box's own resolver DNS activity is scored as anomalies,
+# so without excluding its own IPs it correlates with ITSELF -- the same !@NEMESIS_HOST@
+# false positive lan_behavior_monitor hit (found live 2026-09-02: 6 incidents, all the
+# appliance's own IP, gap 0). Resolved at runtime (never hardcoded).
+_PDE_LOCAL_IPS = set()
+
+
+def _pde_refresh_local_ips():
+    """Populate _PDE_LOCAL_IPS from this host's interfaces; best-effort, keep-previous on
+    failure (clearing would silently re-enable self-correlation)."""
+    import socket as _sock
+    ips = set()
+    try:
+        import psutil
+        for _iface, snics in psutil.net_if_addrs().items():
+            for snic in snics:
+                if snic.family in (_sock.AF_INET, _sock.AF_INET6):
+                    a = (snic.address or "").split("%")[0]
+                    if a:
+                        ips.add(a)
+    except Exception:  # noqa: BLE001
+        return
+    if ips:
+        _PDE_LOCAL_IPS.clear()
+        _PDE_LOCAL_IPS.update(ips)
+
 
 def _pde_to_epoch(v):
     """Tolerant timestamp -> epoch. Trigger tables mix REAL epoch and ISO text."""
@@ -2731,8 +2757,11 @@ def _post_detection_pass(now=None):
     if not ok:
         log.error("post_detection_egress: selftest failed (%s) -- pass abandoned", detail)
         return
+    _pde_refresh_local_ips()
     with _db() as conn:
         detections = _pde_new_detections(conn, now)
+        # Drop the appliance's own IPs -- its resolver traffic is not a device reaching out.
+        detections = [d for d in detections if d["device_ip"] not in _PDE_LOCAL_IPS]
         if not detections:
             conn.commit()   # persist advanced watermarks even with nothing to correlate
             return

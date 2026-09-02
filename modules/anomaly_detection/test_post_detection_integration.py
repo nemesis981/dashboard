@@ -32,7 +32,7 @@ m = importlib.import_module("modules.anomaly_detection.module")
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 28
+EXPECTED_CHECKS = 30
 
 DEV_ID = "dev-aaaa"
 DEV_IP = "192.0.2.50"
@@ -304,6 +304,33 @@ def test_hw_trigger_correlates_stage3():
           ev["detection"].startswith("hw_anomaly_snapshots:"), True)
 
 
+def test_appliance_ip_excluded():
+    print("\n[the appliance's own IP must not be treated as a reaching-out device]")
+    _setup_min_schema()
+    now = 14_000_000.0
+    orig = m._pde_refresh_local_ips
+    m._pde_refresh_local_ips = lambda: None
+    m._PDE_LOCAL_IPS.clear(); m._PDE_LOCAL_IPS.add(DEV_IP)
+    try:
+        rc = _raw(); rc.execute("INSERT INTO malware_findings(device_id, detected_at) VALUES(?,?)", (DEV_ID, now)); rc.commit(); rc.close()
+        with m._db() as conn:
+            _add_egress_incident(conn, "dns_exfiltration", DEV_IP, now + 120)
+        m._post_detection_pass(now=now + 130)
+        check("appliance IP produced NO incident even with a correlating signal",
+              len(_pde_incidents()), 0)
+        # control: a non-local device with the same shape DOES fire
+        m._PDE_LOCAL_IPS.clear(); m._PDE_LOCAL_IPS.add("192.0.2.254")   # some OTHER local ip
+        _setup_min_schema()
+        rc = _raw(); rc.execute("INSERT INTO malware_findings(device_id, detected_at) VALUES(?,?)", (DEV_ID, now)); rc.commit(); rc.close()
+        with m._db() as conn:
+            _add_egress_incident(conn, "dns_exfiltration", DEV_IP, now + 120)
+        m._post_detection_pass(now=now + 130)
+        check("CONTROL: a non-local device still fires", len(_pde_incidents()), 1)
+    finally:
+        m._pde_refresh_local_ips = orig
+        m._PDE_LOCAL_IPS.clear()
+
+
 def test_selftest_gate():
     print("\n[the pass runs the pure-core selftest and does not raise on a clean DB]")
     _setup_min_schema()
@@ -330,6 +357,7 @@ if __name__ == "__main__":
     test_hw_local_excluded_stage3()
     test_hw_remote_debounced_stage3()
     test_hw_trigger_correlates_stage3()
+    test_appliance_ip_excluded()
     test_selftest_gate()
     print()
     if _count != EXPECTED_CHECKS:
