@@ -6354,20 +6354,28 @@ from today's investigation, and make sure the check **forces** the simulated-kil
 rather than merely being reachable by it (the same "a green suite that never walked the new
 code proves nothing" standard applied throughout today's saga).
 
-### [MEDIUM] Anti-fiction baseline guard cannot fire on the no-tunnel-DNS path (found 2026-09-02, Window 1; filed by Window 2, operator-directed: track, do not fix yet)
-`core/vpn_dns_guard.py`'s `apply_fix()` guards against re-baselining its own prior write with
-`if tun_dns and current == tun_dns:`. **When `tun_dns` is empty there is nothing to compare
-against, so the guard is structurally unable to fire on that path.** If `applied` is `False` on
-disk (e.g. after a state-persistence failure — this file already has 5,655 consecutive
-occurrences of exactly that shape) while Pi-hole still holds a tunnel resolver from an earlier
+### [FIXED 2026-09-02] Anti-fiction baseline guard could not fire on the no-tunnel-DNS path (found 2026-09-02, Window 1; filed by Window 2, then fixed same day — `d0d4fb2`)
+`core/vpn_dns_guard.py`'s `apply_fix()` guarded against re-baselining its own prior write with
+`if tun_dns and current == tun_dns:`. **When `tun_dns` was empty there was nothing to compare
+against, so the guard was structurally unable to fire on that path.** If `applied` was `False`
+on disk (e.g. after a state-persistence failure — this file already has 5,655 consecutive
+occurrences of exactly that shape) while Pi-hole still held a tunnel resolver from an earlier
 cycle, the no-DNS path would baseline the guard's **own previous write** as though it were the
 pre-VPN value — precisely the fiction the anti-fiction guard exists to prevent.
 
-**⚠ Code inference, not observed in any log or live test.** Surfaced during the `05d27c9`
-latch-fix work as an adjacent structural gap, not something that has actually fired. Deferred
-by explicit operator decision on 2026-09-02 — real and reasoned, but needs its own dedicated
-look rather than a same-day fix bundled into the latch commit. Related:
-`~/work/nemesis-internal/handoff/2026-09-02-window1-to-window2-latch-fix.md`.
+**⚠ Originally filed as "code inference, not observed in any log or live test," deferred by
+operator decision to track rather than fix same-day. Superseded within hours**: Window 1
+audited it, found the real defect was WIDER than filed (an empty `tun_dns` was never actually
+required — a discovered resolver merely *differing* from the guard's own earlier write hits
+the same bug, and tunnel resolvers routinely differ between servers), measured it live by
+driving the real functions (`restore()` demonstrably wrote the guard's own prior write back
+into Pi-hole as a fake "pre-VPN" value), and fixed it same day in `d0d4fb2` — an in-process
+primary marker with a persisted secondary copy, mutation-proved across all six failure
+mechanisms (37 new checks in `test_vpn_dns_guard_baseline.py`). Pushed to `origin/main`
+2026-09-02. **Not yet deployed** — commit/push/deploy are separate stages here; check
+`ExecMainStartTimestamp` on `vpn-dns-guard` before trusting a live-behavior claim about this
+fix. Related: `~/work/nemesis-internal/handoff/2026-09-02-window1-to-window2-latch-fix.md`,
+`~/work/nemesis-internal/handoff/2026-09-02-window1-handoff.md`.
 
 ### [MEDIUM] `test_masquerade_egress.py` — 3 pre-existing failures, needs separate investigation (found 2026-09-02, Window 1; filed by Window 2, operator-directed)
 Three failures, all `got=None want='eth0'`: `returns the physical interface` (×2) and `the
