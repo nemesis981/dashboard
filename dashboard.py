@@ -15636,6 +15636,35 @@ def api_scan_trigger():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/usb-events")
+def api_usb_events():
+    """GET /api/usb-events[?device_id=<id>][&limit=N] — removable-media device control v1.
+
+    Read-only operator view of USB storage devices seen per agent device (durable
+    usb_events table, first-sighting deduped by hw_monitor). Auth-required by default
+    (NOT in _AUTH_EXEMPT). Parameterised query, no interpolation."""
+    device_id = request.args.get("device_id", "")
+    try:
+        limit = min(int(request.args.get("limit", "200")), 1000)
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        conn = _dm_conn()
+        cols = ["id", "device_id", "action", "vendor_id", "product_id", "serial",
+                "model", "vendor", "raw", "first_seen", "last_seen"]
+        sel = "SELECT %s FROM usb_events" % ", ".join(cols)
+        if device_id:
+            rows = conn.execute(sel + " WHERE device_id=? ORDER BY first_seen DESC LIMIT ?",
+                                (device_id, limit)).fetchall()
+        else:
+            rows = conn.execute(sel + " ORDER BY first_seen DESC LIMIT ?",
+                                (limit,)).fetchall()
+        conn.close()
+        return jsonify({"usb_events": [dict(zip(cols, r)) for r in rows]})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/scan/status")
 def api_scan_status():
     """GET /api/scan/status?scan_id=<id>"""
