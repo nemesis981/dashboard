@@ -17,8 +17,11 @@ Two instances in one week raised the question: **is this systemic?**
 
 ## Answer, with its limits stated
 
-**The pattern does not appear to be widespread.** Three passes produced **zero confirmed
-findings** beyond the two already known. That is a real negative result, not an empty one — pass
+**The pattern does not appear to be widespread — ONE confirmed finding in 89 files.**
+⛔ **This section was first published claiming ZERO, and that was wrong.** See the same-day
+correction in Pass 3: `removable-media-device-control.md` carries a real stale claim that this
+sweep surfaced as a candidate and that I then dismissed unverified. Corrected below; the
+conclusion survives, the arithmetic behind it did not. That is a real negative result, not an empty one — pass
 2's instrument was proven against the known-bad case before its clean result was accepted.
 
 **But the coverage is syntactic, and that is a genuine limit.** These passes find claims that
@@ -90,6 +93,50 @@ are FALSE POSITIVES, and the documents are correct as written.**
 
 The remaining 10 are the same shape — shared vocabulary between a built table and an unbuilt
 policy or consumer that uses it (e.g. `audit_log` exists; its *retention policy* does not).
+
+> ## ⛔ CORRECTION, same day — THE SENTENCE ABOVE WAS WRONG, AND IT IS THE WHOLE POINT
+>
+> **"The remaining 10 are the same shape" was a GUESS, presented as a finding.** I verified three
+> candidates and generalised to ten. Within hours, Window 1 built against
+> `removable-media-device-control.md` and found it carries a **real** stale claim — one of the
+> ten I waved through.
+>
+> The doc states the `usb_inserted` scan-trigger is "unbuilt" (lines 12 and 88) and describes
+> itself as "capture-only — nothing built anywhere". Both are false, verified in code:
+>
+> * `nemesis_agent/modules/security.py:203` `_usb_events()` — built, gated, ships `usb_events`
+>   in the heartbeat.
+> * `core_module/hw_monitor/hw_monitor.py:2544` — `usb_inserted` → `_queue_scan(...)` plus
+>   `known_usb_json` dedup via `_persist_known_set`.
+>
+> What is genuinely unbuilt is this doc's *actual* scope — device-level operator alerting with
+> identifying detail, and policy/blocking — which is a different claim from the one it makes.
+>
+> **CORRECTED TALLY: one confirmed finding, not zero.** Of the 5 documents behind the 13
+> candidates, I verified 3 (all genuine false positives) and dismissed 2 unverified. Re-checked
+> now: `data-retention-and-archival-policy.md` IS a false positive — it says outright that those
+> tables are "already effectively infinite by ABSENCE of any retention policy", so the unbuilt
+> part is a guard, not the tables. `removable-media-device-control.md` is not.
+>
+> **THE SWEEP'S MECHANISM WORKED. MY TRIAGE DID NOT.** This document catalogues instruments that
+> could only return one answer — and then reached a conclusion its own instrument did not
+> support. Pass 3 surfaced `removable-media-device-control.md` as candidate #6, with the right
+> identifier, for the right reason. It was discarded by a human judgement that pattern-matched it
+> to the three cases already examined. That is a *different* failure from the ones tabulated
+> above, and arguably worse: those were broken tools, this was a working tool whose output was
+> overruled by an assumption.
+>
+> **The rule this earns: a heuristic pass produces candidates, and a candidate is either VERIFIED
+> or it stays OPEN. It is never closed by resemblance to a verified sibling.** The method note at
+> the foot of this audit already said "every candidate above was read in context before being
+> called a false positive" — true of the three in the table, and not true of the ten in this
+> sentence. The claim outran the work.
+>
+> **Consequence for the headline finding:** "the pattern does not appear to be widespread" is
+> still defensible — one confirmed hit in 89 files is not systemic — but it now rests on 5 of 5
+> documents verified rather than 3 of 5 asserted. The confirmed hit was found by someone building
+> against the doc, which is exactly where the standing dependency-claim practice (CLAUDE.md,
+> `42bc600`) says these surface.
 
 ---
 
