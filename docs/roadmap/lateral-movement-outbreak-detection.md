@@ -7,6 +7,17 @@ real spec/ADR (thresholds, baseline windows, false-positive handling) before cod
 not that spec, it's the input to it. Lives in the **network / anomaly** subsystem, **not** the
 malware module.
 
+**⚠ Corrected 2026-09-02 — the gateway-mode hold is RESOLVED, but not the way it was expected
+to resolve.** `gateway-mode-scoping.md` shipped, and Gateway Mode does **not** restore
+peer-to-peer LAN visibility on a flat, unsegmented network (this box's own topology included) —
+that requires VLAN-capable switch hardware, which is a per-install hardware question, not
+something any Nemesis software release provides. **The reduced-scope detection form (already
+detailed below) is therefore the PERMANENT shape for non-VLAN installs, not a temporary
+compromise.** Both tiers are unblocked to build in that form now. See the "RESOLVED 2026-09-02"
+sections below (Tier 1 and the Tier 2 signal table) for the full technical reasoning. **Naming
+must be coordinated with Window 1 before or alongside the build so the shipped code and this
+doc agree** — see that section for the proposed working name.
+
 **PUNCHLIST fix folded in, decided but not applied — see "PUNCHLIST fix" section below.**
 Naming decision made; the mechanical edit to `config/suricata/local.rules` +
 `test_local_rules.py` is Window 1's (rule-file content + its test suite, same role boundary as
@@ -118,10 +129,63 @@ discovery-behaviour correlator* — genuinely valuable, materially narrower than
 documented for what it actually observes, or it becomes a detector that reads as covering
 device-to-device movement while structurally never seeing it.
 
-**Build status: HELD pending `gateway-mode-scoping.md`** (Window 1, in progress). That decision
-determines whether Tier 1 ships in the reduced form above or in its full originally-scoped form.
-Not finalizing either shape until it lands — building the reduced version now risks either
-rework or a permanently mis-named detector.
+### ⛔ RESOLVED 2026-09-02 — the gateway-mode hold is lifted, and the answer is NOT what it was
+waiting for
+
+`gateway-mode-scoping.md` shipped 2026-09-01/02 (an operator-flippable toggle: `/api/gateway/
+switch`, a real UI control, an install-time role prompt — see that file). **The hold this section
+named is resolved. Its premise, however, does not hold: Gateway Mode does NOT restore unicast
+peer-to-peer LAN visibility on a flat, unsegmented L2 network — which is the common case,
+including this box's own topology.**
+
+**Why "become the gateway" doesn't fix the switched-LAN blind spot described above.** A switch
+delivers a unicast frame directly to its destination MAC, on the same L2 segment, without ever
+consulting the default gateway — that is what a switch *is*. Two devices on the same flat
+subnet talking to each other never touch the gateway, whether Nemesis holds that role or not.
+**Gateway Mode only puts Nemesis on-path for traffic that must already cross a router** —
+i.e. traffic between two *different* subnets/VLANs. A network with a single flat subnet and no
+VLANs (the common home/SMB shape, and this box's own) has no such crossing to be on-path for.
+Enabling Gateway Mode on a flat network changes which device forwards internet-bound and
+inter-subnet traffic; it does not create visibility into same-subnet unicast conversations,
+because those conversations structurally never leave the switch.
+
+**What would actually unblock full-form Tier 1/Tier 2, stated so it isn't confused with what
+just shipped:**
+- **VLAN-capable switching + Nemesis routing between VLANs** — segmenting the LAN into VLANs and
+  making Nemesis (in gateway role) the router between them would put inter-VLAN unicast traffic
+  on-path. This requires **managed, VLAN-capable switch hardware the operator does not control
+  by default** — a real hardware dependency, not a software toggle, and one this project cannot
+  assume any given install has.
+- **Port mirroring / SPAN**, if the LAN's switch supports it and is configured to mirror traffic
+  to Nemesis — a different, also-hardware-dependent path to the same visibility, independent of
+  whether Nemesis holds the gateway role at all.
+
+**Neither is "ship this after gateway mode lands" work — both are hardware-capability
+questions specific to each install's switch, not a Nemesis software gate.**
+
+**Consequence, stated plainly: the reduced-scope form (items 1-4 under "Available now, without
+gateway mode" above) is the PERMANENT shape of this detector for any install without
+VLAN-capable switching or port-mirroring — not a temporary compromise pending a later Nemesis
+build.** Gateway Mode shipping resolves the *scheduling* dependency (there is no more "wait for
+gateway mode" reason to hold the build) without resolving the *capability* gap the original
+Tier 1 framing assumed. The two were conflated in the original hold; they are different
+questions with different answers.
+
+**Naming, therefore, is not merely a launch-time nicety — it is now a permanent-shape decision
+that should be settled before the build, not adjusted after.** The detector that ships must be
+named for what it durably is on a flat network: **a post-detection egress-and-discovery-
+behaviour correlator**, not "lateral-movement detection." A working name for coordination
+purposes: **"Post-Detection Behavior Correlator"** (or similar — the exact label is a joint
+call, not decided unilaterally here). **This needs to land alongside or ahead of the build,
+coordinated with Window 1 so the shipped code's naming (module name, alert type strings, UI
+labels) and this doc's naming agree from day one** — not reconciled after the fact, which is
+exactly the "permanently mis-named detector" risk this section already warned about before the
+hold was even resolved.
+
+**Build status: UNBLOCKED for the reduced/permanent form.** The full originally-scoped form
+remains blocked on VLAN-capable hardware + inter-VLAN routing, or port mirroring — neither of
+which any current or planned Nemesis software work provides. Do not re-open this hold pending
+a future Nemesis release; the blocker is the install's own network hardware, not this codebase.
 
 **Spec (steps 2-6 below stand; step 1 is superseded by the revision above):**
 1. ~~**Verify flow-event availability live.**~~ **DONE 2026-08-30 — flow logging confirmed on and
@@ -244,17 +308,19 @@ above: the appliance cannot see unicast peer-to-peer traffic at all on a switche
 
 | Signal | Current visibility | Gap |
 |---|---|---|
-| Connection fan-out | **Gated on gateway mode, not on flow logging.** Fan-out means one host opening connections to many *peers* — the exact unicast traffic the appliance never sees. Partially visible in one narrow form: fan-out broad enough to include the appliance is detectable by self-inclusion (see Tier 1 revision item 4), which catches noisy sweeps and misses targeted ones. | `gateway-mode-scoping.md` (Window 1, in progress) |
+| Connection fan-out | **Gated on VLAN-capable hardware, not on gateway mode or flow logging — corrected 2026-09-02.** Fan-out means one host opening connections to many *peers* — the exact unicast traffic the appliance never sees on a flat L2 network, regardless of which device holds the gateway role. Partially visible in one narrow form: fan-out broad enough to include the appliance is detectable by self-inclusion (see Tier 1 revision item 4), which catches noisy sweeps and misses targeted ones. | VLAN-capable switch hardware + inter-VLAN routing, or port mirroring — a hardware dependency, not a Nemesis software gate. **Permanent gap on flat-L2 installs.** |
 | Peer port-scan / sweep | Rule-authoring on proven mechanics (`local.rules` rules 1-6). **Caveat the original scoping missed:** a *broad* sweep is detectable because it includes the appliance among its targets; a *targeted* probe A→B that never touches the appliance is not. So this is buildable now, but its honest claim is "detects broad subnet sweeps," not "detects peer port-scanning." | Buildable now, at the reduced claim. No visibility dependency for the sweep case |
 | SMB/RDP probing | Same shape and same caveat as above. A subnet-wide 445/3389 sweep self-includes the appliance and is detectable; a single A→B SMB probe is invisible. Worth stating explicitly because worm-style lateral movement is often exactly the targeted case. | Buildable now, at the reduced claim |
-| ARP anomalies | **Ownership resolved 2026-08-30: Window 1's, in `lan_integrity`** — they own that module and found the visibility caveat. Operator decision: **build it now**, deliberately overriding the gateway-mode dependency rather than waiting for it (the dependency is overridden, not removed — if gateway mode later changes the module's vantage point this may need rework, and that constraint stays on record here). **Tier 2 consumes this as a component; Tier 2's build does not implement it.** Note ARP is broadcast, so it is one of the few signals the appliance genuinely sees today. | Not Tier 2's to build. Consumed as a dependency |
-| New-device-immediately-noisy | **Split by visibility.** Device-join detection exists (`device_scanner`/`agent_devices`/`devices`, first-seen already tracked) and the *broadcast* half of "immediately noisy" (a new device instantly ARP/mDNS/SSDP-flooding) is visible today. The *unicast* half (instantly opening peer connections) is not — same gate as fan-out. | Broadcast half buildable now; unicast half gated on gateway mode |
+| ARP anomalies | **Ownership resolved 2026-08-30: Window 1's, in `lan_integrity`** — they own that module and found the visibility caveat. Operator decision: **build it now**, deliberately overriding the gateway-mode dependency rather than waiting for it. **Corrected 2026-09-02: gateway mode has since shipped and, as expected, did not change this module's vantage point** — ARP is broadcast, so it was and remains one of the few signals the appliance genuinely sees, independent of gateway role. **Tier 2 consumes this as a component; Tier 2's build does not implement it.** | Not Tier 2's to build. Consumed as a dependency |
+| New-device-immediately-noisy | **Split by visibility.** Device-join detection exists (`device_scanner`/`agent_devices`/`devices`, first-seen already tracked) and the *broadcast* half of "immediately noisy" (a new device instantly ARP/mDNS/SSDP-flooding) is visible today. The *unicast* half (instantly opening peer connections) is not — same gate as fan-out, **corrected 2026-09-02**: gated on VLAN-capable hardware, not on gateway mode, and permanent on a flat-L2 install. | Broadcast half buildable now; unicast half permanently gated on VLAN hardware/port-mirroring for flat-L2 installs |
 
-**Net, revised 2026-08-30:** of five signals — **one (ARP) is now Window 1's to build and Tier 2's
-to consume**, decision made; **two (port-sweep, SMB/RDP) are buildable now but only at a reduced
-claim** (broad sweeps via appliance self-inclusion, not targeted probes); **two (fan-out,
-new-device-noisy) split** — their broadcast-observable half is buildable now, their unicast half
-is gated on `gateway-mode-scoping.md` alongside Tier 1's core correlation.
+**Net, revised 2026-09-02 (supersedes the 2026-08-30 note below on the gateway-mode point
+specifically):** of five signals — **one (ARP) is Window 1's, built, and Tier 2's to consume**;
+**two (port-sweep, SMB/RDP) are buildable now but only at a reduced claim** (broad sweeps via
+appliance self-inclusion, not targeted probes); **two (fan-out, new-device-noisy) split** —
+their broadcast-observable half is buildable now, their unicast half is **permanently** gated on
+VLAN-capable switch hardware + inter-VLAN routing (or port mirroring) for any flat-L2 install,
+now that gateway mode has shipped and confirmed it does not change this vantage point.
 
 **The through-line across both tiers:** every signal that depends on watching two *other* devices
 converse is gated on the same topological question, and no amount of Suricata configuration
@@ -263,8 +329,12 @@ appliance, broadcast, or broad enough to include the appliance as a target. That
 defensible detection surface — it is simply not the surface either tier's original framing
 described, and the naming has to follow the capability rather than the intent.
 
-**Not finalizing either tier's shape** until `gateway-mode-scoping.md` returns (Window 1, in
-progress) — it determines whether these signals ship in reduced form now or full form later.
+**⛔ RESOLVED 2026-09-02 — `gateway-mode-scoping.md` has returned, and both tiers' shape is now
+determined, not still pending:** the reduced form (broadcast/self-inclusion/egress signals,
+detailed above) is the permanent shape for any flat-L2 install without VLAN-capable switching or
+port mirroring. Both tiers can and should proceed to build in that form — see the Tier 1
+"RESOLVED 2026-09-02" section above for the full reasoning and the naming coordination this
+implies before build starts.
 
 ### Outbound-only IoT case (botnet/C2 beaconing, no LAN-neighbor attacks) — flagged, not resolved
 
@@ -303,10 +373,13 @@ favour, and the reasoning is recorded here rather than left in a session transcr
   implication would still be the silent scope-widening this doc warns against. It should be its
   own line item when built — the recommendation is unchanged, only the cost ranking behind it.
 
-**Practical consequence worth stating plainly:** if `gateway-mode-scoping.md` returns as
-expensive or long-dated, this item becomes the highest-value remaining IoT-compromise coverage
-available in the meantime, rather than the deferred extra it was assessed as. Weigh it against
-gateway mode's answer, not in isolation.
+**Resolved 2026-09-02: `gateway-mode-scoping.md` has returned, and the answer is the
+unfavorable one this section anticipated — it does not restore peer-to-peer visibility on a
+flat-L2 install (see the Tier 1 "RESOLVED" section above).** This item is therefore now, on any
+flat-L2 install, **the highest-value remaining IoT-compromise coverage available at all** — not
+a temporary placeholder pending gateway mode, but a standing gap that outbound-beacon detection
+is the only remaining signal on this page that closes without VLAN-capable hardware. Weigh
+build priority accordingly, not as a wait-and-see item.
 
 ## PUNCHLIST fix — Suricata rule mislabel (`PUNCHLIST.md:3203-3218`), decided, not applied
 
