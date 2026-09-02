@@ -52,3 +52,9 @@ this:
 If any of those match what you're seeing, check your Nemesis dashboard or reach out
 to whoever manages your Nemesis setup — that's a different situation than the normal,
 self-correcting delay described here.
+
+## Which VPNs this applies to
+
+For guidance on specific VPN apps — which ones you'll never notice at all, and which
+ones produce the pause described here — see
+[`PERSONAL_VPN_GUIDE.md`](PERSONAL_VPN_GUIDE.md).
