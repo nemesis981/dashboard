@@ -8,12 +8,20 @@
 > state, and the actual running app, not commit messages alone — every file that swept as a
 > real hit. Supersedes `roadmap-state-audit-2026-08-31.md` (kept as history).
 
-**Tally: 14 SHIPPED · 12 PARTIAL · 59 STUB/PARKED — 85 total.**
+**Tally: 16 SHIPPED · 13 PARTIAL · 59 STUB/PARKED — 88 total.**
 
-**Why 85, not the 86 files on disk:** unchanged from 08-31 — `product-thesis-built-in-it-
-expertise.md` stays excluded (operator decision 2026-08-31, still in force). File-set
-check: `ls docs/roadmap/*.md` = 86 today, same as 08-31. `git log --diff-filter=A,D
---since="2026-08-31 08:28" -- docs/roadmap/` returns nothing — **zero file-set drift.**
+**Refreshed same day (2026-09-02, later), same audit file, not a new dated one** — this
+addendum records 3 new roadmap files created same-day to close the exact tracking gap §3
+originally flagged, so a second same-day audit doc would be redundant rather than useful.
+Original 08:xx-generated content above (tally line included) is left as first written, per
+this project's "corrections are visible additions, not silent edits" convention; this
+addendum states what changed and why. The original tally (14/12/59=85) is superseded by the
+line above.
+
+**Why 88, not the 89 files on disk:** `product-thesis-built-in-it-expertise.md` stays
+excluded (operator decision 2026-08-31, unchanged) = 85 tracked + 1 excluded = 86 on disk as
+of the original 09-02 pass, **+3 new files added same day** (see §3 addendum below) = 89 on
+disk, 88 tracked + 1 excluded. `ls docs/roadmap/*.md` = 89, confirmed.
 
 ## What moved since 08-31
 
@@ -153,13 +161,36 @@ None of these are classification errors — they're real gaps in what gets a roa
 in the first place. Flagged per this audit's own standing instruction to flag rather than
 guess; not something this read-only pass will fix by creating new roadmap docs.
 
+### 3a. ⚠ ADDENDUM, same day — all three gaps closed, operator-directed
+
+Per explicit operator direction, all three now have roadmap tracking (and, for the two that
+needed one, an ADR):
+
+| Feature | New file(s) | Classification |
+|---|---|---|
+| `core/vpn_dns_guard.py` MagicDNS/killswitch guard | `docs/roadmap/vpn-dns-guard-magicdns-killswitch.md` (references the amendment already inside ADR 0002) | **SHIPPED** — deployed and live (`accept-dns=True`), full build-history table, explicit proven-vs-open split (detection generalizes across 2 VPNs/3 killswitch behaviors, tested; repair thoroughly proven for PIA specifically, never fired under a non-PIA VPN) |
+| `core/port_broker` policy evaluator | `docs/architecture/0030-port-broker-access-control.md` (new ADR — this one genuinely had none) + `docs/roadmap/port-broker-access-control.md` | **SHIPPED** — policy logic fully proven (41 checks), execution built/tested (27 checks), but the actual privileged `ufw` calls are VM-measured only, not yet independently re-confirmed in production — noted in both new docs, not glossed over |
+| `modules/email_security/` | `docs/roadmap/email-security-gateway.md` (ADR 0028 already existed) | **PARTIAL** — the bare-provider (Gmail/IMAP-IDLE) path is genuinely shipped and scanning mail end-to-end (`d4d7fdf`, 699 assertions at time of shipping); the owned-domain MTA-relay path, link/attachment detonation, and the account-security-monitoring pillar are NOT started — stated as two very different states under one module, not blurred into a single "shipped" claim |
+
+**Also found and fixed in the course of this addendum, not itself a roadmap-file change:**
+`docs/architecture/0002-vpn-aware-dns-routing.md`'s own header was stale — it still claimed
+its root-cause diagnosis was wrong and superseded by ADR 0005, a claim that was itself
+refuted by measurement on 2026-08-30 and which ADR 0005 already says should have been
+corrected in ADR 0002 but apparently never was. Fixed (`3a49863`) before writing the new
+MagicDNS roadmap doc, which would otherwise have directly contradicted the ADR it points to.
+
+**Net tally effect of this addendum:** SHIPPED 14→16 (+2: port-broker, magicdns-guard),
+PARTIAL 12→13 (+1: email-security), PARKED 59→59 (unchanged), total 85→88 (+3 new files, +1
+excluded unchanged = 89 on disk). All 4 commits (`3a49863`, `2062efc`, `ebcd798`, `909950d`)
+pushed and verified `local == origin` same day.
+
 ## 4. Push-boundary note (relevant to trusting any "shipped" claim above)
 
-As of this audit, `origin/main` is at `bd58f25`. Two same-day items are **local-committed
-but not yet pushed to the public repo**: `9334d16` (the personal-VPN compatibility guide)
-and `bd58f25` itself (this session's PUNCHLIST correction) — both awaiting explicit
-operator confirmation per this session's live push-coordination discipline, unrelated to
-audit accuracy but worth knowing before treating "committed" as "public."
+**Updated at the same-day addendum (§3a):** `origin/main` is now at `909950d`, which
+includes everything referenced in this audit and its addendum — the `bd58f25`/`9334d16`
+items originally flagged here as unpushed landed earlier the same day, and the addendum's
+own 4 commits are confirmed pushed (`local == origin`, verified). No push-boundary caveat
+remains open as of this addendum.
 
 ## 5. Not independently re-verified this pass (scope boundary, stated plainly)
 
@@ -182,8 +213,8 @@ subject swept against all 86 roadmap filenames' significant keywords; every real
 unchanged) was verified directly: live route registration (`dashboard.py`, `url_map`),
 live kernel/service state (`cat /proc/sys/net/ipv4/ip_forward`, `systemctl show`), and
 direct code reads (not just commit-message claims) for the fields/functions each doc
-names as its deliverable. File-set arithmetic (85 tracked + 1 excluded = 14 + 12 + 59 =
-85) is internally consistent and confirmed against `ls docs/roadmap/*.md` = 86.
+names as its deliverable. File-set arithmetic, after the §3a addendum (88 tracked + 1 excluded = 16 + 13 + 59 = 88) is
+internally consistent and confirmed against `ls docs/roadmap/*.md` = 89.
 
-Baseline doc for the next Morning Status: this file (2026-09-02), superseding
-`roadmap-state-audit-2026-08-31.md`.
+Baseline doc for the next Morning Status: this file (2026-09-02, including the §3a
+same-day addendum), superseding `roadmap-state-audit-2026-08-31.md`.
