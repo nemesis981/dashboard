@@ -29,7 +29,7 @@ HW_MONITOR = "/opt/nemesis/core_module/hw_monitor/hw_monitor.py"
 # Declared up front and asserted at the end: a suite whose shape changes between
 # runs is not comparable to a previous run, and a check that silently stops
 # running looks exactly like a check that passed.
-EXPECTED_CHECKS = 33
+EXPECTED_CHECKS = 37
 
 _results = []
 
@@ -168,8 +168,12 @@ def main():
     # Vacuity guards FIRST. An empty set is disjoint from everything, so the
     # disjointness assertion below would pass loudest exactly when both reads
     # had failed -- the failure mode this codebase treats as a broken instrument.
-    check("CONTROL the eligible set was actually read (non-empty)",
-          bool(eligible) and len(eligible) >= 3, True)
+    # Liveness proof by CONTENT, not by a magic count: a threshold calibrated to
+    # today's size goes stale the moment the set is deliberately narrowed (it
+    # did exactly that when pending_with_findings was excluded), and a stale
+    # control fails for a reason unrelated to what it guards.
+    check("CONTROL the eligible set was actually read (contains 'pending')",
+          "pending" in (eligible or ()), True)
     check("CONTROL the trust-withdrawn set was actually read (non-empty)",
           bool(withdrawn) and len(withdrawn) >= 3, True)
     check("CONTROL the two reads produced DIFFERENT sets (not the same constant twice)",
@@ -185,11 +189,28 @@ def main():
     check("the route does NOT call the rescan helper (unreachable by construction)",
           "queue_reinstatement_scan" in call_names(fn), False)
 
-    # The eligible set must stay in step with what the review page actually
-    # shows as pending -- the page is where the human picks the batch.
+    # The eligible set must be a SUBSET of what the review page shows as
+    # pending -- the page is where the human picks the batch -- but it is
+    # deliberately a PROPER subset, see below.
     page_pending = literal_tuple(src, "PENDING_STATUSES")
-    check("eligible set matches the review page's pending bucket",
-          sorted(eligible or ()), sorted(page_pending or ("__unread__",)))
+    check("CONTROL the review page's pending bucket was actually read",
+          bool(page_pending) and len(page_pending) >= 3, True)
+    check("every eligible status is one the review page shows as pending",
+          sorted(set(eligible or ()) - set(page_pending or ())), [])
+
+    # ── the SECOND deliberate narrowing ─────────────────────────────────────
+    # A findings device is approvable only via agentApproveAnyway(), which
+    # carries its own stronger warning. A generic batch confirmation is weaker,
+    # so admitting findings devices here would make bulk approve the cheap way
+    # around the one warning built for them.
+    print("\na findings device stays a single-device, individually-warned decision")
+    check("THE PROPERTY: pending_with_findings is NOT bulk-eligible",
+          "pending_with_findings" in (eligible or ()), False)
+    check("CONTROL it IS a status the review page treats as pending "
+          "(so the exclusion is a real narrowing, not a typo)",
+          "pending_with_findings" in (page_pending or ()), True)
+    check("CONTROL the per-device findings gate still exists",
+          "agentApproveAnyway" in src, True)
 
     # ── registry completeness (a missing entry 404s, and that reads as
     #    "no such route" rather than "misconfigured") ─────────────────────────

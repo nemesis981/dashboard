@@ -4751,7 +4751,16 @@ def api_agent_approve(device_id):
 # asserted by test_bulk_approve.py rather than trusted to this comment.
 # Widening the eligible set without also carrying the rescan across turns that
 # test red, which is the point.
-_BULK_APPROVE_ELIGIBLE = ("pending", "pending_with_findings", "pending_unverified")
+# ⛔ 'pending_with_findings' is EXCLUDED, and that is a second deliberate
+# narrowing rather than an oversight. A device whose pre-enrollment scan raised
+# findings is approvable today only through `agentApproveAnyway()`, which puts a
+# specific, stronger warning in front of the human ("This device has security
+# findings..."). A generic batch confirmation is WEAKER than that gate, so
+# admitting findings devices to the batch would make bulk approve the cheap way
+# to skip the one warning that exists precisely for them — the same
+# sibling-divergence shape the standing route audit exists to catch. They stay a
+# single-device, individually-warned decision.
+_BULK_APPROVE_ELIGIBLE = ("pending", "pending_unverified")
 _BULK_APPROVE_MAX = 200
 _BULK_APPROVE_CONFIRM = "yes"
 
