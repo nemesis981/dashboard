@@ -21,8 +21,12 @@ Two instances in one week raised the question: **is this systemic?**
 ⛔ **This section was first published claiming ZERO, and that was wrong.** See the same-day
 correction in Pass 3: `removable-media-device-control.md` carries a real stale claim that this
 sweep surfaced as a candidate and that I then dismissed unverified. Corrected below; the
-conclusion survives, the arithmetic behind it did not. That is a real negative result, not an empty one — pass
-2's instrument was proven against the known-bad case before its clean result was accepted.
+conclusion survives, the arithmetic behind it did not.
+
+Passes 1 and 2 returned genuine negatives rather than empty ones — pass 2's instrument was proven
+against a known-bad case before its clean result was accepted, and that proof still stands. Pass
+3 returned candidates, and it is the handling of those candidates, not the passes themselves,
+that was wrong.
 
 **But the coverage is syntactic, and that is a genuine limit.** These passes find claims that
 *name a file or identifier*. A document that describes a capability in prose without naming
