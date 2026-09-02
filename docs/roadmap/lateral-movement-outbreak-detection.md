@@ -192,13 +192,34 @@ actively wrong for its own headline case.
 - **`lan_probe_scan`** / **`unmanaged_device_probe`** — the Tier 2 mechanism and the actual
   primary target: **any** device (managed or not), triggered by its own broadcast-visible
   scan/sweep/spread behavior, no prior finding required. Placement: a **new module**,
-  `lan_behavior_monitor` — extending `lan_integrity`'s charter to cover this would repeat the
-  exact scope-widening already ruled out for Tier 1 (`lan_integrity`'s own docstring scopes it
-  to "who's claiming authority" — rogue DHCP, ARP-spoofing, rogue-RA — not general
-  reconnaissance/scan behavior; "confirmed by reading its own stated scope rather than assumed
-  from the name" is the standing discipline, applied consistently here). `lan_integrity`'s
-  existing ARP-anomaly output is unchanged — produced there, **consumed** by
-  `lan_behavior_monitor` as one input among several, no charter change to `lan_integrity`.
+  `lan_behavior_monitor`.
+
+  **Checked against `lan_integrity`'s own stated reason for its narrow scope, per the operator's
+  explicit instruction not to let convenience drive this — 2026-09-02.** `lan_integrity/module.py`'s
+  own docstring gives two DELIBERATE founding principles, not an accident of how the module
+  happened to grow:
+  1. **Scoped by CLASS, not by mechanism.** *"It is deliberately named for the CLASS, not for
+     DHCP, because two siblings are already scoped and parked for it: IPv4 ARP spoofing and
+     IPv6 rogue Router Advertisements."* The class is devices/servers **falsely claiming
+     network-infrastructure authority** — a rogue DHCP server, a spoofed ARP/gateway identity,
+     a rogue Router Advertisement. All three were named as belonging to this class from the
+     module's creation, not added ad hoc.
+  2. **A conflict-of-interest boundary, stated explicitly.** *"It is NOT part of `modules/dhcp`
+     ... that module SERVES DHCP; this one watches who else is answering. Ownership follows the
+     concern, and a serving module that also judged its competitors would be a poor place to
+     look when the serving module itself is the thing in doubt."* The judge is kept structurally
+     separate from the server, per protocol.
+
+  **Probe/scan/behavioral detection fits NEITHER principle.** It is not "is this device
+  impersonating infrastructure" (principle 1's class) — it is "is this device's traffic pattern
+  anomalous," a materially different question. And there is no single serving module whose
+  competitors it would be judging (principle 2's conflict-of-interest shape doesn't apply — no
+  module "serves" generic LAN scanning the way `modules/dhcp` serves DHCP). **Both of
+  `lan_integrity`'s own founding reasons argue against folding this in, not merely fail to argue
+  for it.** New module confirmed, on the module's own stated logic rather than an inference from
+  its name. `lan_integrity`'s existing ARP-anomaly output is unchanged — produced there,
+  **consumed** by `lan_behavior_monitor` as one input among several, no charter change to
+  `lan_integrity`.
 
 **UI label: "LAN Probe & Scan Detection"** — deliberately avoids "correlator" (opaque to a home
 user) and makes no claim about unicast visibility.
