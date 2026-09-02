@@ -135,6 +135,14 @@ device by `device_scanner`. Not observed to have fired; not checked against the 
 for this box. A one-line fix (add the same `_NULL_MACS`-style check) closes it directly, without
 needing the full consolidation below — see the sequencing note at the end of this document.
 
+**⛔ CLOSED 2026-09-02, `c372b5b`.** Operator approved the standalone one-liner; Window 1 landed
+it directly rather than waiting on the consolidation below. `device_scanner._arp_devices` now
+excludes both the null and broadcast MAC, matching `arp_watch._NULL_MACS`. Test-first
+(`test_arp_parse.py`, +1 in-subnet broadcast row), RED-before/GREEN-after against exactly the
+one-line change, 11/11 passing. **The full `parse_proc_arp_text()` consolidation in Part 2 below
+is UNCHANGED and still stands as a separate, unbuilt item** — this closed only the concrete drift
+that had already fired, so it can't bite before the consolidation lands, if it lands.
+
 ### What is genuinely the same (worth sharing)
 
 Parsing `/proc/net/arp` text into `(ip, mac)` pairs, with INCOMPLETE/null/broadcast filtering.
