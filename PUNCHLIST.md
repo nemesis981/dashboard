@@ -6353,3 +6353,36 @@ simulated condition, not against PIA's specific mechanism. Extend
 from today's investigation, and make sure the check **forces** the simulated-killswitch branch
 rather than merely being reachable by it (the same "a green suite that never walked the new
 code proves nothing" standard applied throughout today's saga).
+
+### [MEDIUM] Anti-fiction baseline guard cannot fire on the no-tunnel-DNS path (found 2026-09-02, Window 1; filed by Window 2, operator-directed: track, do not fix yet)
+`core/vpn_dns_guard.py`'s `apply_fix()` guards against re-baselining its own prior write with
+`if tun_dns and current == tun_dns:`. **When `tun_dns` is empty there is nothing to compare
+against, so the guard is structurally unable to fire on that path.** If `applied` is `False` on
+disk (e.g. after a state-persistence failure — this file already has 5,655 consecutive
+occurrences of exactly that shape) while Pi-hole still holds a tunnel resolver from an earlier
+cycle, the no-DNS path would baseline the guard's **own previous write** as though it were the
+pre-VPN value — precisely the fiction the anti-fiction guard exists to prevent.
+
+**⚠ Code inference, not observed in any log or live test.** Surfaced during the `05d27c9`
+latch-fix work as an adjacent structural gap, not something that has actually fired. Deferred
+by explicit operator decision on 2026-09-02 — real and reasoned, but needs its own dedicated
+look rather than a same-day fix bundled into the latch commit. Related:
+`~/work/nemesis-internal/handoff/2026-09-02-window1-to-window2-latch-fix.md`.
+
+### [MEDIUM] `test_masquerade_egress.py` — 3 pre-existing failures, needs separate investigation (found 2026-09-02, Window 1; filed by Window 2, operator-directed)
+Three failures, all `got=None want='eth0'`: `returns the physical interface` (×2) and `the
+no-VPN answer is reached the new way too`. **Confirmed pre-existing, not caused by `05d27c9`**
+— the same 3 fail against `git show HEAD:core/vpn_dns_guard.py` run from a separate tree, with
+a control confirming the two file versions actually differed (so the control-comparison itself
+is trustworthy, not vacuous). Looks like stub/fixture drift rather than a live product defect,
+but **unverified** — needs its own investigation pass, not folded into the latch-fix work that
+found it. Related: `~/work/nemesis-internal/handoff/2026-09-02-window1-to-window2-latch-fix.md`.
+
+### [LOW] `+time=3` `dig` verification timeout — still HELD, not a decision yet (carried 2026-09-01 → 2026-09-02)
+Latency data collected against the daily driver: **n=10, median 16ms, max 3010ms.** The typical
+case argues for shortening the timeout (most zones answer fast); the single 3010ms outlier is
+exactly the ADR 0002 flakiness scenario the timeout exists to absorb, and with
+`tries_per_zone=1` (landed `faf7666`, 2026-09-01) there is no second attempt left to save a slow
+zone if the timeout is cut too aggressively. **Needs more samples before any change, not a
+guess** — explicitly not resolved by yesterday's `tries_per_zone` reduction, which addressed the
+retry count, not this timeout value. No action owed beyond continuing to hold it.
