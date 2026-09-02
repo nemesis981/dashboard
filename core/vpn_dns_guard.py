@@ -671,6 +671,54 @@ def verify_upstream_resolves(tries_per_zone=1):
 # State persistence
 # --------------------------------------------------------------------------- #
 
+# ⛔ WHAT THIS PROCESS LAST WROTE TO PI-HOLE. Deliberately IN-PROCESS, and deliberately
+# the PRIMARY defence rather than the persisted copy below.
+#
+# Every route into the "baseline our own write as pre-VPN" defect runs through a FAILED
+# STATE WRITE: `applied` never reaches disk, so the next cycle reloads `applied: False`
+# while Pi-hole already holds the resolver we installed. A marker written to the same file
+# that just failed to write is unavailable exactly when it is needed. Process memory is
+# not, which is why this exists in addition to `last_applied_upstreams` in the state dict.
+#
+# FAIL-SAFE ONLY. This may cause a REFUSAL to baseline and nothing else. It must never be
+# read as evidence that a fix IS applied -- it can add protection, never remove it. Same
+# invariant shape as ADR 0019's failsafe response.
+_session_applied_upstreams = None
+
+
+def _same_upstreams(a, b):
+    """Order-insensitive set comparison, matching restore()'s readback check.
+
+    Pi-hole is free to return the same servers in a different order, and treating that as
+    a different value would let our own write slip past the refusal below -- the exact
+    "instrument that can only say no" shape, inverted.
+    """
+    if a is None or b is None:
+        return False
+    return sorted(map(str, a)) == sorted(map(str, b))
+
+
+def _is_our_own_write(current, tun_dns):
+    """Is `current` a value THIS guard installed, rather than a genuine pre-VPN one?
+
+    Three independent signals, any of which is sufficient. They are checked together
+    because each covers a case the others miss:
+
+      1. `current == tun_dns` -- the original check. Only recognises our write when it
+         happens to equal what we are about to apply, so it MISSES a tunnel that hands
+         out a different resolver (10.96.0.1 vs 10.2.0.1 were both seen on 2026-09-01)
+         and misses an empty discovery result entirely.
+      2. the in-process marker -- survives a failed state write, which is the gateway to
+         this whole defect.
+      3. the persisted marker -- survives a guard restart, when the disk is healthy.
+    """
+    if tun_dns and _same_upstreams(current, tun_dns):
+        return True
+    if _same_upstreams(current, _session_applied_upstreams):
+        return True
+    return False
+
+
 def _load_state():
     """Current state, reading the legacy location once so the move is not a reset.
 
@@ -691,7 +739,7 @@ def _load_state():
             log.exception("state at %s unreadable; treating as absent", path)
             continue
     return {"applied": False, "saved_upstreams": None, "tunnel_iface": None,
-            "tunnel_dns_absent": False}
+            "tunnel_dns_absent": False, "last_applied_upstreams": None}
 
 
 def _save_state(state) -> bool:
@@ -746,6 +794,14 @@ def apply_fix(ph, tunnel, state):
     """
     current = ph.get_upstreams()
 
+    # Carry the in-process marker INTO the freshly-loaded state, so that whichever save
+    # happens next persists it. reconcile() reloads state from disk every cycle, so a
+    # marker recorded in an earlier cycle's dict is otherwise confined to this process
+    # and never reaches the file — leaving a guard restart with no marker at all, which
+    # is exactly the gap the persisted copy exists to cover.
+    if _session_applied_upstreams and not state.get("last_applied_upstreams"):
+        state["last_applied_upstreams"] = list(_session_applied_upstreams)
+
     if state.get("applied"):
         # Already applied earlier; just make sure DNS still resolves.
         if verify_upstream_resolves():
@@ -779,13 +835,21 @@ def apply_fix(ph, tunnel, state):
     # rule as the canary planter refusing a baseline it cannot verify — record
     # nothing rather than record a fiction.
     if not state.get("applied"):
-        if tun_dns and current == tun_dns:
+        # Consult the persisted marker too — it covers a guard RESTART, where the
+        # in-process one is gone but the disk survived.
+        persisted_mark = state.get("last_applied_upstreams")
+        own_write = (_is_our_own_write(current, tun_dns)
+                     or _same_upstreams(current, persisted_mark))
+        if own_write:
             log.error(
-                "REFUSING to baseline upstreams %s: identical to the tunnel resolver "
-                "we are about to apply, so this is our own earlier write, not a "
-                "pre-VPN value. saved_upstreams left unset — restore-on-disconnect "
-                "will NOT be able to roll back until a genuine pre-VPN value is "
-                "supplied (see PUNCHLIST).", current)
+                "REFUSING to baseline upstreams %s: this is our OWN earlier write, not a "
+                "pre-VPN value (equals-tun_dns=%s in-process-marker=%s persisted-marker=%s). "
+                "saved_upstreams left unset — restore-on-disconnect will NOT be able to "
+                "roll back until a genuine pre-VPN value is supplied (see PUNCHLIST).",
+                current,
+                bool(tun_dns and _same_upstreams(current, tun_dns)),
+                _same_upstreams(current, _session_applied_upstreams),
+                _same_upstreams(current, persisted_mark))
             state["saved_upstreams"] = None
         else:
             # First time, and the current value is genuinely not ours: remember it.
@@ -821,7 +885,13 @@ def apply_fix(ph, tunnel, state):
                       state.get("saved_upstreams"))
         return ok
 
+    # Record BEFORE verifying: the write to Pi-hole has already happened, so from this
+    # instant `tun_dns` is what Pi-hole holds and must never be baselined as "pre-VPN".
+    # Recording it only on the success path would leave the rollback path below — which
+    # runs when verify FAILS — with Pi-hole holding a value nothing remembers writing.
     ph.set_upstreams(tun_dns)
+    globals()["_session_applied_upstreams"] = list(tun_dns)
+    state["last_applied_upstreams"] = list(tun_dns)
     if verify_upstream_resolves():
         state.update({"applied": True, "tunnel_iface": tunnel["iface"],
                       "tunnel_dns_absent": False})
@@ -863,9 +933,12 @@ def restore(ph, state):
         # that outlives its session is later read as a pre-VPN value from a network
         # state that no longer exists, which is the same class of fiction the
         # REFUSING-to-baseline guard in apply_fix() exists to prevent.
-        if state.get("tunnel_dns_absent") or state.get("saved_upstreams") is not None:
+        if (state.get("tunnel_dns_absent") or state.get("saved_upstreams") is not None
+                or state.get("last_applied_upstreams") is not None):
             state.update({"applied": False, "saved_upstreams": None,
-                          "tunnel_iface": None, "tunnel_dns_absent": False})
+                          "tunnel_iface": None, "tunnel_dns_absent": False,
+                          "last_applied_upstreams": None})
+            globals()["_session_applied_upstreams"] = None
             if not _save_state(state):
                 log.error("cleared the no-tunnel-DNS session state but it did NOT "
                           "persist — a stale baseline may survive into the next "
@@ -916,7 +989,8 @@ def restore(ph, state):
                   "and DNS is probably broken for its clients. Set upstreams "
                   "manually, then supply a genuine pre-VPN value.")
     state.update({"applied": False, "saved_upstreams": None, "tunnel_iface": None,
-                  "tunnel_dns_absent": False})
+                  "tunnel_dns_absent": False, "last_applied_upstreams": None})
+    globals()["_session_applied_upstreams"] = None
     if not _save_state(state):
         log.error("restore completed but state did NOT persist — the next cycle "
                   "may treat the tunnel as still applied")
