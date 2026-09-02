@@ -5524,6 +5524,29 @@ def api_agent_installer_generate():
     # a bound that silently failed to parse would be stored, look like a
     # restriction in the UI, and enforce nothing -- a security control that
     # exists only as text. Enforcement then fails closed on top of that.
+    # ── TYPED GATE on auto-approval (ADR 0012 FLEET-auto, build spec §5/§6) ──
+    #
+    # The gate belongs HERE, at campaign/token SETUP, because that is where the
+    # human is. No human is present when an individual device later redeems this
+    # token -- that is the entire point of auto-approve -- so a per-device
+    # confirmation is impossible and the acknowledgement has to be captured at
+    # the moment the grant is created.
+    #
+    # Enforced SERVER-SIDE. There has been a checkbox and a warning beside it
+    # for some time; a checkbox is a click, and this token grants trusted network
+    # access to whatever presents it, unattended. The typed word is what makes it
+    # a deliberate act rather than a default someone tabbed past.
+    #
+    # Only gates the auto_approve path. A normal (manual-approval) installer is
+    # unchanged -- no new friction for the safe default.
+    if auto_approve and str(data.get("confirm") or "").strip().lower() != "yes":
+        return jsonify({
+            "error": "confirmation required",
+            "expected": "yes",
+            "warning": ("Auto-approve grants FULL TRUSTED NETWORK ACCESS without review "
+                        "to any device presenting this installer. Use it only for devices "
+                        "you physically own and control."),
+        }), 400
     source_subnet = (str(data.get("source_subnet") or "").strip() or None)
     if source_subnet:
         try:
@@ -7016,7 +7039,17 @@ def _render_agent_devices_html() -> str:
          'style="vertical-align:middle;margin-right:5px">'
          'Auto-approve devices enrolled with this installer</label>'
          '<div style="color:#ffcc00;font-size:0.78em;margin:2px 0 0 20px">&#9888; '
-         'Only enable for devices you own and physically control.</div>'
+         'Grants FULL TRUSTED NETWORK ACCESS with no review to any device that uses '
+         'this installer. Only enable for devices you own and physically control. '
+         'You&#39;ll be asked to type a confirmation.</div>'
+         '<input id="installerSubnet" type="text" maxlength="64" '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:220px;margin:6px 0 0 20px" '
+         'placeholder="Restrict to subnet, e.g. 192.0.2.0/24">'
+         '<div style="color:#666;font-size:0.78em;margin:2px 0 0 20px">Optional but '
+         'recommended with auto-approve: only auto-approve devices connecting from '
+         'this network. Blank = anywhere. Checked against the address Nemesis '
+         'observes, not one the device claims.</div>'
          '</div>'
          '<button onclick="genWindowsInstaller()" style="background:#00d4ff22;color:#00d4ff;'
          'border:1px solid #00d4ff;border-radius:6px;padding:5px 14px;cursor:pointer">'

@@ -96,13 +96,30 @@ function genWindowsInstaller() {
   var pre = (document.getElementById('installerPreauth') || {}).value || '';
   var auto = !!(document.getElementById('installerAutoApprove') || {}).checked;
   var poll = ((document.getElementById('installerPoll') || {}).value || '').trim();
+  var subnet = ((document.getElementById('installerSubnet') || {}).value || '').trim();
   var out = document.getElementById('installerResult');
+  /* Typed gate on auto-approve only (ADR 0012). The value is sent AS TYPED and
+     validated server-side -- this prompt is the usability half. Ticking a box is
+     a click; this token grants trusted network access, unattended, to whatever
+     presents it. A normal installer is not gated and sends no confirmation. */
+  var confirmWord = '';
+  if (auto) {
+    confirmWord = prompt('This installer will AUTO-APPROVE any device that uses it, '
+                       + 'granting full trusted network access with no review.\n\n'
+                       + 'Use it only for devices you physically own and control.\n\n'
+                       + 'Type yes to confirm:');
+    if (confirmWord === null) {
+      if (out) { out.textContent = 'Cancelled.'; out.style.color = '#888'; }
+      return;
+    }
+  }
   if (out) { out.textContent = 'Generating...'; out.style.color = '#888'; }
   fetch('/api/agent/installer/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ device_name_hint: hint, preauth_key: pre, auto_approve: auto,
-                           poll_interval: poll })
+                           poll_interval: poll, source_subnet: subnet,
+                           confirm: confirmWord })
   })
     .then(function (r) { return r.json(); })
     .then(function (d) {
