@@ -13148,7 +13148,7 @@ def settings_page():
         function _wizStep4() {{
             var c = _wiz.cfg;
             var h = '<p class="tier-text" style="color:#ccc;font-size:0.88em;margin-bottom:14px"'
-              + ' data-beginner="Pi-hole is the DNS ad-blocker running on your network. Nemesis connects to it to show stats and control blocklists."'
+              + ' data-beginner="Pi-hole is the DNS ad-blocker running on your network. Nemesis connects to it to show you its stats."'
               + ' data-intermediate="Pi-hole admin credentials for the stats API and dashboard integration."'
               + ' data-pro="PIHOLE_PASSWORD for /api/auth. Pi-hole URL auto-detected from PIHOLE_IP env var.">'
               + 'Pi-hole credentials for dashboard integration and stats display.</p>';
