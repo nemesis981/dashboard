@@ -5518,6 +5518,20 @@ def api_agent_installer_generate():
     _aa = data.get("auto_approve")
     auto_approve = 1 if (_aa in (True, 1)
                          or str(_aa).strip().lower() in ("1", "true", "on", "yes")) else 0
+    # Optional WHERE-FROM bound on auto-approval (ADR 0012 FLEET-auto). Blank =>
+    # NULL => unbounded, which is the pre-existing behaviour and stays the
+    # default. VALIDATED HERE, at creation, and rejected outright if malformed:
+    # a bound that silently failed to parse would be stored, look like a
+    # restriction in the UI, and enforce nothing -- a security control that
+    # exists only as text. Enforcement then fails closed on top of that.
+    source_subnet = (str(data.get("source_subnet") or "").strip() or None)
+    if source_subnet:
+        try:
+            import ipaddress as _ipa
+            source_subnet = str(_ipa.ip_network(source_subnet, strict=False))
+        except Exception:
+            return jsonify({"error": "source_subnet is not a valid network "
+                                     "(examples: 192.0.2.0/24, 2001:db8::/32)"}), 400
     # Optional custom heartbeat cadence (seconds). Floor-clamped at 15s so a mis-typed
     # tiny value can't hammer the server; blank/invalid => NULL (agent uses its 300s
     # default). The agent re-clamps on read (defence in depth).
@@ -5587,10 +5601,10 @@ def api_agent_installer_generate():
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
             " device_name_hint, revoked, preauth_key, poll_interval, preauth_key_id, "
-            " remote_enabled) "
-            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?,?)",
+            " remote_enabled, source_subnet) "
+            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?,?,?)",
             (token, creator, now, expires, auto_approve, hint, preauth_key or None,
-             poll_interval, preauth_key_id or None, remote_enabled))
+             poll_interval, preauth_key_id or None, remote_enabled, source_subnet))
         # Bound how long any OTHER key lingers in plaintext. A token that is spent,
         # revoked, or expired can never legitimately serve a zip again (see
         # `_valid_installer_token`'s condition, which this is the exact complement of),

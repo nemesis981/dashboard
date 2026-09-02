@@ -1482,7 +1482,11 @@ def init_enrollment_tokens_table():
                 revoked          INTEGER DEFAULT 0,
                 preauth_key      TEXT,
                 preauth_key_id   TEXT,
-                preauth_key_minted_at REAL
+                preauth_key_minted_at REAL,
+                -- Optional WHERE-FROM bound on auto-approval (ADR 0012).
+                -- NULL = unbounded. See the guarded ALTER below for why NULL is
+                -- the correct default rather than a restrictive one.
+                source_subnet    TEXT
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_token "
@@ -1553,6 +1557,25 @@ def init_enrollment_tokens_table():
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN revoked_at REAL")
         if "revoked_by" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN revoked_by TEXT")
+        # Migration (ADR 0001 guarded ALTER): source_subnet = an optional
+        # WHERE-FROM bound on auto-approval (ADR 0012 FLEET-auto).
+        #
+        # The token already bounds HOW MANY (max_uses) and HOW LONG
+        # (expires_at). This bounds FROM WHERE: a token that auto-approves is a
+        # credential that grants trusted network access without review, and
+        # "only from the office subnet" is the constraint an owner most often
+        # actually means when they enable it.
+        #
+        # Checked against the SERVER-OBSERVED source address, never a
+        # client-reported one -- a bound the enrolling device could assert for
+        # itself would be decoration.
+        #
+        # NULL on every existing row, and NULL means UNBOUNDED. That is the
+        # honest migration value: no historic token was ever issued under a
+        # subnet restriction, so inventing one would retroactively narrow grants
+        # nobody agreed to narrow, and could silently stop working installers.
+        if "source_subnet" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN source_subnet TEXT")
 
         # ── enrollment_auto_audit (ADR 0012 FLEET-auto, §1) ──────────────────
         #

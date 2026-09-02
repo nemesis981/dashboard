@@ -4091,12 +4091,50 @@ def _create_enrollment(payload, remote_ip):
         conn = _db_connect()
         if token:
             try:
+                # ── WHERE-FROM bound, checked BEFORE the claim (ADR 0012) ────
+                #
+                # Read first, deliberately. The subnet is fixed at token
+                # creation and never changes, so there is no race in reading it
+                # ahead of the atomic claim -- and checking AFTER would burn a
+                # use on every rejected attempt, handing anyone who can reach
+                # /enroll a way to exhaust a legitimate token from outside its
+                # own subnet. Failing the bound must cost the token nothing.
+                #
+                # FAILS CLOSED: an unparseable bound or an unparseable source
+                # address withholds auto-approval rather than allowing it.
+                # "Cannot determine" is never treated as "permitted".
+                subnet_ok = True
+                try:
+                    _sb = conn.execute(
+                        "SELECT source_subnet FROM enrollment_tokens WHERE token=?",
+                        (token,)).fetchone()
+                    _bound = (_sb[0] if _sb else None) or ""
+                    if _bound.strip():
+                        import ipaddress as _ipa
+                        subnet_ok = _ipa.ip_address(remote_ip) in _ipa.ip_network(
+                            _bound.strip(), strict=False)
+                except Exception as _e:
+                    subnet_ok = False
+                    log.warning("enrollment token subnet bound could not be evaluated "
+                                "(src=%s): %s -- withholding auto-approve", remote_ip, _e)
+                if not subnet_ok:
+                    # Plain conditional, NOT an exception. The enclosing
+                    # `except Exception:` below deliberately swallows failures so
+                    # a bad token can never break enrollment -- which would make
+                    # a raise here indistinguishable from a genuine error, and
+                    # silently skip the claim for reasons nobody could tell apart.
+                    # A refusal is a decision, so it is expressed as one.
+                    auto_approve_withheld = True
+                    log.warning("installer token presented from OUTSIDE its source_subnet "
+                                "bound (src=%s) -- auto-approve withheld, enrollment "
+                                "continues as pending", remote_ip)
+
                 cur = conn.execute(
                     "UPDATE enrollment_tokens SET uses = uses + 1 "
                     "WHERE token=? AND revoked=0 AND auto_approve=1 "
                     "AND uses < max_uses AND expires_at > ?",
-                    (token, _time.time()))
-                if cur.rowcount == 1:
+                    (token, _time.time())) if subnet_ok else None
+                if subnet_ok and cur.rowcount == 1:
                     r = conn.execute(
                         "SELECT created_by, device_name_hint, id FROM enrollment_tokens "
                         "WHERE token=?", (token,)).fetchone()
