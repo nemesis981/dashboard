@@ -47,7 +47,7 @@ instruction.
 
 ---
 
-## Current state (last live check: 2026-09-01, Window 2 Morning Status)
+## Current state (last live check: 2026-09-02, Window 2 Morning Status)
 
 ### Production box (`sudo -n -l`, `getent group`, `id <user>`) — CONFIRMED CLEAN
 - No broad `(ALL) NOPASSWD:` grants. (The class revoked 2026-08-19 — `systemctl restart
@@ -92,13 +92,18 @@ once that tool's current use is done — not urgent, but genuinely open, not for
 
 ### `<user>`'s `nemesis-db` / `nemesis-fw` group memberships — expected, not flagged
 Operator's own product-operation groups (DB access, firewall chokepoint). Confirmed live
-2026-08-31. Not a revocation candidate — this is the intended operator access model, not
-an incidentally-granted elevated permission. **New this check:** `nemesis-fw` group now also
-lists `nemesis-alertw,nemesis-dash` as members alongside `paul` (`getent group nemesis-fw` →
-`nemesis-fw:x:971:paul,nemesis-alertw,nemesis-dash`) — service accounts, not operator-elevated
-access; consistent with the firewall chokepoint needing write access from those two services.
-Not flagged as a concern, noted because it's a change in the group's membership list since the
-last time this file was written (service accounts weren't previously called out here).
+2026-09-02. Not a revocation candidate — this is the intended operator access model, not
+an incidentally-granted elevated permission. `nemesis-fw` group lists `nemesis-alertw`,
+`nemesis-dash` as members alongside `paul`, consistent with the firewall chokepoint needing
+write access from those services — carried forward, unchanged in kind since 08-31's note.
+**New this check (2026-09-02):** `nemesis-fw` now ALSO lists `nemesis-vpndns`
+(`getent group nemesis-fw` → `nemesis-fw:x:971:paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`)
+— a service account, not operator-elevated access. Plausible cause: today's shipped
+MagicDNS/killswitch DNS-guard work (HANDOFF.md §4, `05d27c9`/`d0d4fb2`) needing firewall
+write access for the killswitch path — **not verified against the code, flagged as
+inference only**, consistent with this table's own instrument-must-prove-its-premise
+discipline. Not flagged as a concern either way; recorded because it's a real membership
+change since the last check, same standard applied to the prior two additions.
 
 *(Rule 8: `<user>` above is a placeholder for the operator's real production-box account —
 not written literally in this public-repo file.)*
@@ -153,3 +158,13 @@ rule), needs a session with root access to actually `ls` it.
   investigation. Revocation independently confirmed via live `sudo -n -l` (no
   `tailscale`-related NOPASSWD entry present), corroborating the operator's own
   interactive-auth re-test.
+- **2026-09-02** (Window 2, Morning Status — session resumed from the 09-02 emergency
+  pre-reboot checkpoint; that checkpoint itself did not re-check grants, see HANDOFF.md §6).
+  Production box re-checked live: 70 NOPASSWD entries, same narrowly-scoped classes as prior
+  sessions (systemd unit mgmt, `/var/lib/nemesis` perms, Suricata rule deploy, `ufw`,
+  `nemesis-*` user/group creation) — no broad `(ALL) NOPASSWD:` grant present. `tcpdump`
+  file capability unchanged (`cap_net_admin,cap_net_raw=eip`), still active Tier 2 use.
+  `pihole` group membership still open (unchanged, no new decision). `nemesis-fw` group
+  gained `nemesis-vpndns` as a member since the last check — recorded above, inference-only
+  on cause. Polkit rules still unreadable from this session (5th consecutive session).
+  Gateway-VM entry not re-checked (production-box scope, open question unresolved).
