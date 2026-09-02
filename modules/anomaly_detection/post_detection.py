@@ -26,9 +26,17 @@ signal, reusing that module rather than re-tailing eve.json.
 # thresholds.
 CORRELATION_WINDOW_S = 600
 
-# The incident types that count as a "reach-out" / egress-intent signal. Both are
-# produced by anomaly_detection's own DNS analysis.
+# The types that count as a "reach-out" signal, correlated against a detection.
+#   DNS-intent (anomaly_detection's own DNS analysis): dns_exfiltration, volume_spike.
+#   DISCOVERY (stage 2, reused from lan_behavior_monitor): lan_probe_scan -- the device,
+#     after being flagged, is now actively scanning the LAN. Host/file detection PLUS
+#     active discovery is the strongest post-detection shape.
+# EGRESS_SIGNAL_TYPES stays the DNS-only subset used to scan anomaly_incidents (so a
+# post_detection_egress row can never be a signal); REACH_OUT_TYPES is the full set
+# correlate() accepts, including the discovery signal that lives in lan_behavior_findings.
 EGRESS_SIGNAL_TYPES = frozenset({"dns_exfiltration", "volume_spike"})
+DISCOVERY_SIGNAL_TYPES = frozenset({"lan_probe_scan"})
+REACH_OUT_TYPES = EGRESS_SIGNAL_TYPES | DISCOVERY_SIGNAL_TYPES
 
 POST_DETECTION_TYPE = "post_detection_egress"
 
@@ -52,7 +60,7 @@ def correlate(detection, egress_signals, window=CORRELATION_WINDOW_S):
         return None
     best = None
     for s in egress_signals:
-        if s.get("type") not in EGRESS_SIGNAL_TYPES:
+        if s.get("type") not in REACH_OUT_TYPES:
             continue
         if s.get("source") == dsrc:          # no self-correlation
             continue
@@ -105,10 +113,13 @@ def build_incident(detection, signal, now):
 
 def _score(detection, signal):
     """A post-detection correlation is inherently high-signal: two independent
-    detectors agreeing on one device within a short window. Base high; a
-    dns_exfiltration reach-out scores above a volume_spike."""
+    detectors agreeing on one device within a short window. Base high; active
+    discovery (lan_probe_scan) is the strongest reach-out, dns_exfiltration next."""
     base = 70
-    if signal.get("type") == "dns_exfiltration":
+    t = signal.get("type")
+    if t == "lan_probe_scan":
+        base += 20   # host/file detection + active LAN scanning
+    elif t == "dns_exfiltration":
         base += 15
     return base
 

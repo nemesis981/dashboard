@@ -32,7 +32,7 @@ m = importlib.import_module("modules.anomaly_detection.module")
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 19
+EXPECTED_CHECKS = 21
 
 DEV_ID = "dev-aaaa"
 DEV_IP = "192.0.2.50"
@@ -56,9 +56,11 @@ def _setup_min_schema():
     rc.execute("CREATE TABLE IF NOT EXISTS agent_devices (device_id TEXT PRIMARY KEY, ip_address TEXT)")
     rc.execute("CREATE TABLE IF NOT EXISTS malware_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT, detected_at REAL)")
     rc.execute("CREATE TABLE IF NOT EXISTS lan_integrity_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, subject_ip TEXT, ts REAL)")
+    rc.execute("CREATE TABLE IF NOT EXISTS lan_behavior_findings (id INTEGER PRIMARY KEY AUTOINCREMENT, src_ip TEXT, ts REAL)")
     rc.execute("INSERT OR REPLACE INTO agent_devices(device_id, ip_address) VALUES(?,?)", (DEV_ID, DEV_IP))
     rc.execute("DELETE FROM malware_findings")
     rc.execute("DELETE FROM lan_integrity_findings")
+    rc.execute("DELETE FROM lan_behavior_findings")
     rc.commit(); rc.close()
     with m._db() as conn:   # anomaly_* are anomaly's own -> write via the guarded conn
         conn.execute("DELETE FROM anomaly_incidents")
@@ -206,6 +208,23 @@ def test_anomaly_trigger_excludes_pde_and_nonegress_types():
     check("exactly one anomaly-sourced detection (pde row excluded)", len(anomaly_sourced), 1)
 
 
+def test_discovery_signal_correlates_stage2():
+    print("\n[stage 2: malware finding, then a lan_behavior scan finding for A -> incident]")
+    _setup_min_schema()
+    now = 10_000_000.0
+    rc = _raw()
+    rc.execute("INSERT INTO malware_findings(device_id, detected_at) VALUES(?,?)", (DEV_ID, now))
+    # a discovery finding (device actively scanning) shortly AFTER the detection
+    rc.execute("INSERT INTO lan_behavior_findings(src_ip, ts) VALUES(?,?)", (DEV_IP, now + 90))
+    rc.commit(); rc.close()
+    m._post_detection_pass(now=now + 100)
+    inc = _pde_incidents()
+    check("discovery correlation produced an incident", len(inc), 1)
+    ev = json.loads(inc[0][2])
+    check("evidence names lan_behavior discovery as the reach-out",
+          ev["egress_type"], "lan_probe_scan")
+
+
 def test_selftest_gate():
     print("\n[the pass runs the pure-core selftest and does not raise on a clean DB]")
     _setup_min_schema()
@@ -228,6 +247,7 @@ if __name__ == "__main__":
     test_does_not_retrigger_off_its_own_incident()
     test_watermark_actually_advances()
     test_anomaly_trigger_excludes_pde_and_nonegress_types()
+    test_discovery_signal_correlates_stage2()
     test_selftest_gate()
     print()
     if _count != EXPECTED_CHECKS:

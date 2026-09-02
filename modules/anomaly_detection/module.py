@@ -2575,7 +2575,8 @@ def _pde_to_epoch(v):
 
 
 def _pde_recent_egress_signals(conn, now):
-    """Egress-class anomaly incidents within the lookback, shaped for correlate().
+    """Recent reach-out signals within the lookback, shaped for correlate(): DNS-intent
+    (egress-class anomaly incidents) plus discovery (lan_behavior_findings, stage 2).
 
     Excludes post_detection_egress by construction (EGRESS_SIGNAL_TYPES holds only
     dns_exfiltration/volume_spike), so our own incidents can never be a signal."""
@@ -2592,6 +2593,19 @@ def _pde_recent_egress_signals(conn, now):
         ips = {d.get("ip") for d in devs if isinstance(d, dict) and d.get("ip")}
         sigs.append({"id": r[0], "type": r[1], "ips": ips, "ts": r[3],
                      "source": "anomaly_incidents:%d" % r[0]})
+
+    # Stage 2 -- DISCOVERY signals, reused from lan_behavior_monitor rather than
+    # re-tailing eve.json. A device that starts actively scanning the LAN after being
+    # flagged is the strongest post-detection shape. Read-any (cross-module read);
+    # lan_behavior_findings may be absent on installs where that module never ran.
+    try:
+        for r in conn.execute(
+                "SELECT id, src_ip, ts FROM lan_behavior_findings "
+                "WHERE ts >= ? AND src_ip IS NOT NULL", (cutoff,)).fetchall():
+            sigs.append({"id": r[0], "type": "lan_probe_scan", "ips": {r[1]}, "ts": r[2],
+                         "source": "lan_behavior_findings:%d" % r[0]})
+    except Exception:  # noqa: BLE001
+        pass   # module/table not present -> no discovery signals, DNS correlation unaffected
     return sigs
 
 

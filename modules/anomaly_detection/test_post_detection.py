@@ -20,7 +20,7 @@ import post_detection as P  # noqa: E402
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 23
+EXPECTED_CHECKS = 27
 
 WIN = P.CORRELATION_WINDOW_S
 DEV = "192.0.2.50"
@@ -133,6 +133,20 @@ def test_build_incident_shape():
     check("a score is assigned", inc["score"] > 0, True)
 
 
+def test_discovery_signal_correlates_stage2():
+    print("\n[stage 2: a lan_probe_scan (discovery) after a detection also correlates]")
+    det = _det(1000.0, source="malware_findings:5")
+    sig = {"id": 3, "type": "lan_probe_scan", "ips": {DEV}, "ts": 1000.0 + 90,
+           "source": "lan_behavior_findings:3"}
+    got = P.correlate(det, [sig], WIN)
+    check("discovery signal correlates", got is not None and got["id"], 3)
+    check("lan_probe_scan is a reach-out type", "lan_probe_scan" in P.REACH_OUT_TYPES, True)
+    inc = P.build_incident(det, sig, now=1000.0 + 100)
+    check("discovery scores highest (host detection + active scanning)", inc["score"], 90)
+    check("egress-only set still excludes discovery (anomaly scan can't ingest it)",
+          "lan_probe_scan" in P.EGRESS_SIGNAL_TYPES, False)
+
+
 def test_selftest_proves_both_answers():
     print("\n[selftest: a real correlation matches, a non-correlation does not]")
     ok, detail = P.selftest()
@@ -154,6 +168,7 @@ if __name__ == "__main__":
     test_earliest_match_wins()
     test_window_is_a_documented_constant()
     test_build_incident_shape()
+    test_discovery_signal_correlates_stage2()
     test_selftest_proves_both_answers()
     print()
     if _count != EXPECTED_CHECKS:
