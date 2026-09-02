@@ -1,167 +1,179 @@
 # HANDOFF — current state
 
-> Last updated **2026-09-02, emergency pre-reboot checkpoint (Window 2)**. Written ahead of an
-> imminent system reboot, not a normal end-of-day closeout — see §7 for exactly what that
-> changes. Overwrites the 09-01 nightly closeout (Rule 9). Real IPs/hosts/accounts/keys live
-> ONLY in `~/work/nemesis-private/local-config.md` — placeholders here per Rule 8.
+> Last updated **2026-09-02, end-of-session closeout (Window 2)**. Supersedes the earlier
+> 09-02 "emergency pre-reboot checkpoint" — that reboot never happened (see §7). Real IPs/
+> hosts/accounts/keys live ONLY in `~/work/nemesis-private/local-config.md` — placeholders
+> here per Rule 8.
 >
-> Full detail: `docs/handoff/supplements/2026-09-02-001.md` (curated) and
-> `docs/handoff/worklog/2026-09-02-001.md` (raw chronology, reconstructed at this checkpoint —
-> today had no live worklog kept, same gap as 09-01).
+> Full detail: `docs/handoff/supplements/2026-09-02-001.md` (curated, appended through the
+> day) and `docs/handoff/worklog/2026-09-02-001.md` (raw chronology, appended through the
+> day).
 
 ---
 
 ## 1. Push status — READ THIS FIRST
 
-**Public repo (`/opt/nemesis`): `local` is AHEAD of `origin` by 1 commit.**
-- `local`: `07ace9e`
+**Public repo (`/opt/nemesis`): `local` is 16 commits AHEAD of `origin`. NOT PUSHED.**
+- `local` HEAD: `ef90806`
 - `origin/main`: `1e1cd00`
-- The one gap: `07ace9e` (`feat(usb-control): structured Windows USB collector (pure core) +
-  dispatch`, Window 1, committed 16:47:52) — **committed locally, NOT pushed, NOT confirmed
-  by the operator.** Do not push it on this note alone; get explicit confirmation first, per
-  this session's standing push-coordination discipline.
-- Working tree: **clean** (`git status --short` empty).
+- Working tree: **clean**.
+- Full unpushed range (`git log --oneline origin/main..HEAD`), newest first:
+  ```
+  ef90806 test(usb-control): pin the real Win11 collector output as a regression sample   [Window 1]
+  468cc46 docs(handoff): elevated-grants re-check -- 2026-09-02 Morning Status              [Window 2]
+  82b5247 docs(handoff): emergency pre-reboot checkpoint -- 2026-09-02                      [Window 2]
+  07ace9e feat(usb-control): structured Windows USB collector (pure core) + dispatch        [Window 1]
+  17ce5ab docs(audit): mark the ARP broadcast-MAC gap CLOSED (c372b5b)                      [Window 1]
+  c372b5b fix(device_scanner): exclude broadcast MAC from /proc/net/arp parse               [Window 1]
+  547234f docs(audit): correct the ARP finding -- one gap, not two (Window 1 caught it)     [Window 1]
+  d919936 fix(lan_integrity): bounded first-run lookback + event-ts staleness in eve tailer [Window 1]
+  a2aaada docs(audit): scope two consolidations from the duplication sweep -- design only   [Window 1]
+  34e7d04 docs(net-identity): record why 3 other net_if_addrs sites are NOT consumers       [Window 1]
+  dd6eef0 docs(punchlist): file the lan_integrity eve.json latent-bug finding               [Window 1]
+  f3202bd docs(audit): codebase-wide duplicated/drifting-logic sweep                        [Window 1]
+  86a3c83 feat(usb-control): read-only /api/usb-events operator view (v1 final piece)       [Window 1]
+  0ca9f8e feat(usb-control): removable-media device control v1 -- structured Linux build    [Window 1]
+  a89270f docs(audit): repair a self-contradicting sentence left by the correction          [Window 1]
+  1119c75 docs(audit): correct my own sweep -- it claimed zero findings on a guess          [Window 1]
+  ```
+  Attribution confirmed via `Claude-Session` trailer (shared git identity `Nemesis981` makes
+  the author field unusable — see standing shared-tree discipline), not inferred from subject
+  alone. Window 1's own 2026-09-02 closeout handoff (`~/work/nemesis-internal/handoff/
+  2026-09-02-window1-handoff.md`, "PRODUCTION STATE" section, written ~18:43) independently
+  lists this exact same 16-commit range and names `468cc46` as the one that's not its own —
+  matches what this window found independently. Reads as effectively ready-to-land, but
+  **still requires a fresh listing + explicit operator confirmation immediately before the
+  push itself**, per standing discipline — not done as part of this closeout.
+- Deploy status (separate from push): `05d27c9` (vpn_dns_guard latch fix) and `d0d4fb2`
+  (anti-fiction baseline fix) are committed but **NOT deployed** — the running guard has
+  neither. Window 1 flagged deploy as state-changing, needing a USB snapshot + operator
+  go-ahead first, unrelated to the push question above.
 
-**Private repo (`~/work/nemesis-internal`): `local` remote is 4 commits behind; `usb` remote
-is CURRENTLY UNREACHABLE.**
-- `local/main..HEAD`: 4 commits, all Window 1's own handoff docs (`6cc5c95`, `cdd8cab`,
-  `47ad3ef`, `1e2af28` — oldest to newest, 15:20–16:48 today). Not pushed, not confirmed.
-- `usb` remote: `fatal: couldn't find remote ref usb` on fetch — **the USB drive is not
-  mounted right now** (`mountpoint -q /run/media/paul/storage` → not mounted). This looks
-  like deliberate pre-reboot unmounting, not a fault — noted so nobody chases it as a bug.
-  Re-mount and re-fetch before trusting any private-repo push-sync claim.
-- Working tree: **uncommitted work present, not mine, flagged rather than touched:**
-  - `migration/magicdns-deploy.sh` — modified, uncommitted. Window 1's file, mid-edit as of
-    this checkpoint. **Not committed by me — I do not commit another window's in-flight,
-    unreviewed file.** If Window 1's session doesn't survive the reboot, this diff is at risk
-    per the standing "uncommitted work has zero protection" rule — whoever resumes should
-    check this file's state first.
-  - Six untracked files, all appear to be other windows' audit/mirror output, not mine:
-    `audits/community-reporter-identity-audit-2026-09-02.md`,
-    `audits/duplicated-logic-sweep-2026-09-02.md`,
-    `audits/proton-permanent-killswitch-RESOLVED-2026-09-02.md`,
-    `audits/roadmap-stale-premise-sweep-2026-09-02.md`,
-    `audits/tailer-and-arp-parser-consolidation-scope-2026-09-02.md`,
-    `briefing/2026-09-01.md`, `handoff/supplements/2026-08-31-001.md`,
-    `handoff/worklog/2026-08-31-001.md`. **Untracked files survive a reboot** (they're not at
-    the same risk as uncommitted tracked-file diffs), but they're also not backed up anywhere
-    until committed — worth a deliberate commit pass by whoever owns each one.
+**Private repo (`~/work/nemesis-internal`): FULLY SYNCED across both remotes.**
+- `HEAD` = `local/main` = `usb/main` = `fed3b68`. Verified live this session (fetched both,
+  compared SHAs directly, not recalled).
+- `usb` remote drive confirmed this session: **Seagate One Touch** (`/dev/sda2`, exFAT,
+  mounted at `/run/media/paul/storage`) — not the WD Blue, which is VM-archive only
+  (`/mnt/nemesis-vmarchive`, unrelated to any git remote).
+- Working tree: **not** clean — see below. None of this blocks the sync claim above; sync is
+  about commits, and all commits are pushed. The uncommitted material is separate.
+  - `migration/magicdns-deploy.sh` — modified, uncommitted, Window 1's, still in-flight per
+    Window 1's own handoff (not flagged there as abandoned). Not mine to commit.
+  - `handoff/elevated-grants-tracking.md` — modified, uncommitted. **This one is mine** — the
+    mirror copy from this session's Morning Status update. Left uncommitted deliberately;
+    the source of truth is the committed copy in `/opt/nemesis` (`468cc46`), this is just the
+    local mirror per Rule 12 and mirrors are not independently version-controlled.
+  - 5 untracked files — other windows' audit/briefing output not yet committed by their
+    owners: `audits/proton-permanent-killswitch-RESOLVED-2026-09-02.md`,
+    `briefing/2026-09-01.md`, `briefing/2026-09-02.md` (this window's own mirror, untracked
+    same reason as above), `handoff/supplements/2026-08-31-001.md`,
+    `handoff/worklog/2026-08-31-001.md`.
 
-**My own work: fully committed and pushed as of this checkpoint.** Nothing of mine is at risk.
+**My own committed work: fully pushed where I control the remote** (the elevated-grants
+tracking-file commit `468cc46` is public-repo-local only pending the origin push above, same
+as everything else in that range — I have no separate push channel of my own for the public
+repo).
 
-## 2. Live service state (verified this checkpoint, not recalled)
+## 2. Live service state (verified this session)
 
 All 8 core services `active`: `dashboard`, `watchdog`, `alert-watcher`, `malware-canary`,
 `diagnostics-watcher`, `vpn-dns-guard`, `nemesis-fwd`, `device-scanner`.
 
-**Nothing observed in this session depends on any Claude Code process staying alive.** All
-work today (code, docs, deployments) was committed to disk and/or already deployed as
-systemd-managed services independent of this conversation. A reboot does not orphan
-in-progress work at the process level — the risk is entirely at the **uncommitted-diff**
-level described in §1, not at the running-process level.
-
 ## 3. What's actively in-flight (not mine, described for whoever resumes)
 
-**Window 1 — two build threads, both mid-flight:**
-1. **`net_identity.py` consolidation (shipped, `1e1cd00`, already pushed) → six-site
-   inventory follow-up (not yet actioned).** Consolidated 3 of 6 identified call sites for
-   "what are my own local addresses" logic (`firewall.py`, `lan_behavior_monitor`,
-   `post_detection_egress`). The other 3 (`agent_source_guard.py`, `remote_census.py`,
-   `nemesis_agent/agent.py`) were investigated this session and found to be **legitimately
-   different concerns**, not missed consumers — see `docs/handoff/supplements/2026-09-02-001.md`
-   for the full per-site reasoning. Window 1 said it would surface this to the operator
-   directly for a scope decision; unclear if that happened before this checkpoint.
-2. **USB device-control (`removable-media-device-control.md`)** — Linux/pyudev backend
-   already built per Window 1's own handoff (`cdd8cab`, "USB device-control v1 complete"); a
-   Windows backend just landed (`07ace9e`, unpushed — see §1) as "pure core," with **live VM
-   validation still pending** per that same commit's handoff (`1e2af28`).
-3. **`lan_integrity` option-2 fix + a shared-tree incident recovery** (`47ad3ef`) — title
-   only known at this checkpoint; read that commit/handoff directly for what happened, no
-   time to expand here before this note needed to ship.
+**Window 1 — USB device-control thread, now CLOSED per its own handoff:**
+Both platforms (Linux + Windows) built and live-validated on real hardware; the earlier VM
+accessibility blocker was resolved and closed (`b68c2c1`). Windows backend proven: the
+USBSTOR-disk-serial-inside-parent-USB\VID correlation holds on real hardware, and the same
+physical stick keys identically through both OS backends. **One hop explicitly NOT
+exercised and stated as such by Window 1: agent→server HTTP** — not to be read as fully
+end-to-end. `ef90806` pins a real Windows 11 (build 26200) collector output as a regression
+fixture, mutation-proven (4 mutants detected, `EXPECTED_CHECKS` 35→45).
 
-**VM test blocker, still open as of the last update I have:** Window 1 reported the
-appliance-master VM clone was inaccessible (GA at RunLevel 1, no `vboxnet0` lease) and that
-bridging a DHCP/DNS-serving appliance onto the real LAN isn't safe — relying on an in-process
-equivalence proof on the real box instead for the `net_identity` work. Unknown whether this
-blocker is resolved for the newer USB-control VM validation Window 1 flagged as pending.
+**Window 1 — `net_identity.py` six-site follow-up: still open, scope decision pending.**
+3 of 6 identified "what are my own local addresses" call sites consolidated
+(`firewall.py`, `lan_behavior_monitor`, `post_detection_egress`). The other 3
+(`agent_source_guard.py`, `remote_census.py`, `nemesis_agent/agent.py`) independently
+verified by both windows to be legitimately different concerns, not missed consumers.
+Window 1 said it would surface the full six-site picture to the operator for a scope call;
+not confirmed whether that reached the operator.
 
-## 4. Today's shipped work, condensed (full detail in commit messages + the supplement)
+**Window 1 — 4 items owed to Window 2**, per its own handoff: see
+`~/work/nemesis-internal/handoff/2026-09-02-window1-to-window2-latch-fix.md`. Not reviewed
+by this window this session — flagged so it isn't dropped.
 
-Very large session. Headline threads, each already pushed to `origin/main` unless noted:
-- **MagicDNS/killswitch DNS guard** — 05d27c9, d0d4fb2 (two more real bugs found/fixed:
-  the latch bug, the anti-fiction baseline bug), independently confirmed deployed.
-- **`lateral-movement-outbreak-detection.md`** naming/module placement finalized with
-  Window 1 (two finding types, new `lan_behavior_monitor` module, grounded in
-  `lan_integrity`'s own stated scoping principles, not assumed) — then **built and deployed
-  same day** (`17b0ec0` → `2f9124f` chain, `post_detection_egress` chain
-  `81aed37`→`36c3ddb`), independently verified live via `dashboard`'s restart timestamp.
-- **`threat_feeds` module** shipped (Window 3, `c741c85`/`fb22ec9`).
-- **Three new roadmap-tracked features** that had shipped with zero roadmap coverage:
-  `email-security-gateway.md`, `port-broker-access-control.md` (+ new ADR 0030),
-  `vpn-dns-guard-magicdns-killswitch.md`. Roadmap audit refreshed twice same day: **16
-  SHIPPED / 14 PARTIAL / 58 PARKED = 88** (was 13/13/59 at 08-31's baseline).
-- **ADR 0002's stale supersession banner fixed** (was still claiming a refuted diagnosis).
-- **`enrollment-modes-build-spec.md`**: 3 real corrections from a Window 3 audit applied
-  (stale `enrollment_status` value count, a non-existent `firewall.py` enforcement mapping
-  corrected to a stated dependency, an atomic-decrement claim that doesn't fit existing DM
-  ops) — file moved PARKED→PARTIAL (BULK-MANUAL, ADR 0012 step 1, shipped and deployed same
-  day, verified live via smoke test with a zero-rows-created control).
-- **New CLAUDE.md standing practice** (operator-confirmed directly, not via peer relay):
-  roadmap dependency claims must be verified against code at build-pickup time, not just a
-  file's build-status header — closes a gap that caused two real incidents this week.
-- **`CUSTOM_TAILSCALE_UNINSTALL.md`** written (an owed vendor-integration doc, flagged by
-  Window 1).
-- **Two compiled decision documents** written to the private mirror at operator request:
-  `decisions/2026-09-02-OPEN-business-legal-decisions-COMPILED.md` (8 items — Option B
-  venue/commercial legality, community-reporter-identity's tier-vocabulary and
-  salt/accountability questions, ADR 0022's still-draft license, two live Rule 10 flags,
-  ADR 0028's email-interception and shared-mailbox questions, the TLS-interception module's
-  3-remote exposure) and `...-OPEN-other-decisions-COMPILED.md` (4 items — scope/sequencing
-  calls). Both pushed to both private remotes.
-- **A source-protection scoping pass** (Nuitka/Cython/PyArmor, full/hybrid Go-Rust migration
-  feasibility) — reported in-conversation, not written to a file; if that analysis needs to
-  survive as a document, it does not currently exist as one and would need transcribing from
-  this conversation's history.
+**Window 3** — posted a "full pre-reboot rewrite -- final true state, not a patch"
+(`c2db944` in the private repo, pushed) reacting to the same never-happened reboot this
+window's checkpoint was written for. Not read in full this session; check that commit
+directly for anything current beyond what's summarized here.
+
+## 4. Today's shipped work — see the supplement for full detail
+
+Very large session (see `docs/handoff/supplements/2026-09-02-001.md`, appended through the
+day, for the full account). Headline threads: MagicDNS/killswitch DNS guard (2 real bugs
+found/fixed, deployed independently confirmed); `lateral-movement-outbreak-detection.md`
+scoped, built, and deployed same day (`lan_behavior_monitor` module, two finding types);
+`threat_feeds` module shipped (Window 3); three roadmap-tracked features found shipped with
+zero roadmap coverage, closed (3 new roadmap docs + ADR 0030); ADR 0002's stale supersession
+banner fixed; `enrollment-modes-build-spec.md` corrected and moved PARKED→PARTIAL, shipped
+same day; new CLAUDE.md standing practice added (roadmap dependency claims must be verified
+against code at build-pickup time); `CUSTOM_TAILSCALE_UNINSTALL.md` written; two compiled
+decision documents written to the private mirror; USB device-control (Linux + Windows)
+built and live-validated end-to-end on real hardware (see §3).
 
 ## 5. Roadmap-vs-state
 
 Baseline: `docs/audits/roadmap-state-audit-2026-09-02.md` (refreshed twice today via
-addenda, not a fresh dated file — see that file's own §3a and the later PARKED→PARTIAL note).
-**Tally: 16 SHIPPED / 14 PARTIAL / 58 PARKED = 88 total.** This does NOT yet reflect
-today's newest work (the six-site `net_identity` follow-up, the USB device-control build) —
-whoever runs tomorrow's Morning Status roadmap check should expect further drift already
-baked in, not a clean baseline.
+addenda). **Tally: 16 SHIPPED / 14 PARTIAL / 58 PARKED = 88 total.** File-set check this
+session: `docs/roadmap/*.md` → 90 files (2 more than the 88 tracked; not reconciled
+item-by-item, flagged as inference not verified drift). Does NOT yet reflect today's newest
+work (the `net_identity` six-site follow-up, the completed USB device-control build) —
+tomorrow's Morning Status should expect further drift already baked in.
 
 ## 6. Elevated grants
 
-Not re-checked at this checkpoint (emergency note, not a full Morning-Status pass). Last live
-check: 2026-09-02 morning, see `docs/handoff/elevated-grants-tracking.md` — no changes known
-since then, but "known since then" is not the same as "re-verified now."
+Full live re-check this session (production box). See
+`docs/handoff/elevated-grants-tracking.md` (updated in place, committed `468cc46`):
+- `sudo -n -l`: 70 NOPASSWD entries, all narrowly scoped, unchanged in kind from prior
+  sessions. No broad `(ALL) NOPASSWD:` grant.
+- `tcpdump` file capabilities unchanged, still active Tier 2 use.
+- `pihole` group membership on the operator account — still open, no new decision.
+- **New this check:** `nemesis-fw` group gained `nemesis-vpndns` as a member (alongside
+  the existing `nemesis-alertw`, `nemesis-dash`). Plausible but **unverified** cause: today's
+  shipped MagicDNS/killswitch work needing firewall write access.
+- Polkit rules (`/etc/polkit-1/rules.d/`) — still unreadable from this session's privilege
+  level, 5th consecutive session.
+- Gateway-VM fleet grant — not re-checked (production-box-only scope, open question
+  unresolved).
 
-## 7. Why this checkpoint differs from a normal closeout
+## 7. Why this closeout differs from a routine one
 
-This was written on request, ahead of an imminent reboot — not at a natural end-of-session
-point. Consequences for whoever reads this next:
-- **No closeout health check was run** (Rule 9's usual final step) — this file itself is the
-  check.
-- **Two other windows' work (Window 1's four private-repo handoffs, its one public commit,
-  and Window 3's private-repo audit outputs) are described but not evaluated for
-  push-readiness** — that's a decision for whoever resumes with the operator, not assumed
-  here.
-- **If the reboot is disruptive** (a session doesn't survive it), the uncommitted diff in
-  `migration/magicdns-deploy.sh` (§1) is the one piece of real, at-risk work identified this
-  checkpoint. Everything else on disk is either committed or untracked-and-therefore-inert
-  until someone acts on it.
+Written at the end of a session that resumed past its own earlier "emergency pre-reboot"
+checkpoint (`docs/handoff/supplements/2026-09-02-001.md`'s original text) once it became
+clear, live, that the anticipated reboot never happened (`uptime` continuous since 08-28).
+Both other windows kept working across that gap — this file reflects the fully current
+state as of this closeout, not a patch on top of the stale checkpoint.
+
+**Two items intentionally NOT resolved this session, both requiring the operator:**
+1. Whether to push the public repo's 16 unpushed commits to `origin` — see §1's full listing.
+   Effectively ready per both windows' independent accounting, but push-coordination
+   discipline requires a confirmation cycle immediately before the push, not a decision
+   inferred from a closeout note.
+2. Whether to deploy the two committed-but-undeployed `vpn_dns_guard` fixes (§1) — state-
+   changing, needs a USB snapshot first per the State Snapshots discipline.
 
 ## 8. Cross-references
-- `docs/handoff/worklog/2026-09-02-001.md` — raw chronology (reconstructed at this
-  checkpoint).
-- `docs/handoff/supplements/2026-09-02-001.md` — curated account, fuller detail than this
-  file's condensed §4.
-- `docs/audits/roadmap-state-audit-2026-09-02.md` — today's roadmap baseline (refreshed
-  twice via addenda).
+- `docs/handoff/worklog/2026-09-02-001.md` — raw chronology, appended through the day
+  (checkpoint + this closeout's continuation).
+- `docs/handoff/supplements/2026-09-02-001.md` — curated account, appended through the day
+  (includes a correction section for what changed after the original checkpoint text).
+- `docs/audits/roadmap-state-audit-2026-09-02.md` — today's roadmap baseline.
+- `docs/briefing/2026-09-02.md` — this session's Morning Status briefing (gitignored,
+  local-only; mirrored to `~/work/nemesis-internal/briefing/`).
+- `docs/handoff/elevated-grants-tracking.md` — elevated-access running record, updated in
+  place this session.
 - `~/work/nemesis-internal/decisions/2026-09-02-OPEN-business-legal-decisions-COMPILED.md`
   and `...-OPEN-other-decisions-COMPILED.md` — the two compiled decision documents.
-- `~/work/nemesis-internal/handoff/2026-09-02-window1-handoff.md` and
-  `2026-09-02-window3-handoff.md` — the two build windows' own cold-start notes (read these
-  for anything this file compresses away).
+- `~/work/nemesis-internal/handoff/2026-09-02-window1-handoff.md` (updated ~18:43, the most
+  current Window 1 note) and `2026-09-02-window3-handoff.md` — the two build windows' own
+  cold-start notes; read these directly for anything this file compresses away.
