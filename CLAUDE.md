@@ -1363,6 +1363,30 @@ have a test that exercises it, not just one that could?**
 **Grep for this shape in every retro/review pass**, alongside the other three above. Four
 standing checks now — see the tally at the end of the SHAPE section above for the full set.
 
+### A roadmap item picked up for build needs its dependency claims verified against code, not just its build status (standing practice, added 2026-09-02)
+
+**The existing roadmap-audit discipline — classify against code and git log, never against a
+file's own `Status:` header — genuinely works, and has already caught drift on its own** (e.g.
+`malware-yara-rule-autoupdate.md`). But two incidents this week found a gap the header-check
+cannot see by construction: **a file can be correctly classified and still rest on a false
+premise stated in its BODY, describing infrastructure it depends on, not its own build state.**
+`enrollment-modes-build-spec.md`'s PARKED classification was accurate the whole time — the
+audit had nothing wrong to catch — while its §3 stated a `firewall.py` trusted/guest posture
+mapping as existing fact when it does not exist, and it (along with ADR 0012) described
+FLEET-auto's core mechanism as unbuilt when per-token `auto_approve` had already been doing it
+in production. Both stale claims changed what actually got built, and both escaped the
+standard audit because the audit checks a file's *classification*, not the *claims inside it*
+about the code it assumes is there.
+
+**The check: before building against a roadmap item, verify its dependency/infrastructure
+claims against the actual code, not just its build-status bucket.** A claim that another
+module, chokepoint, or mechanism "already does X" is itself a testable assertion — grep for
+it, read the code it names, confirm the claim rather than inheriting it. This is a build-time
+discipline (triggered when a PARKED/PARTIAL item is about to be built, not only during the
+daily roadmap-vs-state audit) — the existing audit's incremental/full-re-derivation cadence
+does not by itself reach into a file's body claims on every pass, which is exactly why this
+gap stayed open across multiple prior audits.
+
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
   credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
