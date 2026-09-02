@@ -42,6 +42,7 @@ _HERE_AD = _os_npfa.path.dirname(_os_npfa.path.abspath(__file__))
 if _HERE_AD not in _sys_npfa.path:
     _sys_npfa.path.insert(0, _HERE_AD)
 import dns_exfil                                 # noqa: E402  (DNS tunnelling scorer)
+import post_detection                            # noqa: E402  (post-detection egress correlator, stage 1)
 
 from modules.ai_engine import (
     is_enabled as ai_is_enabled,
@@ -194,6 +195,7 @@ class Module(NemesisModule):
         while not self._stop_evt.is_set():
             try:
                 _detection_cycle()
+                _post_detection_pass()
             except Exception:
                 log.exception("anomaly_detection: cycle error")
             self._stop_evt.wait(POLL_INTERVAL)
@@ -2542,3 +2544,152 @@ except Exception:
     # simply no chat affordance on this surface, which is a degraded feature,
     # not a broken detector.
     log.exception("anomaly_detection: could not register chat anchor")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# post_detection_egress — trigger-table watcher + correlation (stage 1)
+#
+# A detection FINDING about device A -> is A now reaching out (DNS-intent) within a
+# window? Correlation logic is pure in post_detection.py; this is the DB glue: watch
+# the trigger tables by a per-table id watermark, resolve each finding's device IP,
+# pull recent egress-class anomaly incidents, correlate, and emit -- reusing
+# anomaly_incidents and its one-open-per-target index rather than a new alert path.
+# ─────────────────────────────────────────────────────────────────────────────
+_PDE_EGRESS_LOOKBACK_S = 3600   # how far back to pull egress signals to correlate against
+
+
+def _pde_to_epoch(v):
+    """Tolerant timestamp -> epoch. Trigger tables mix REAL epoch and ISO text."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        pass
+    try:
+        return datetime.fromisoformat(str(v)).timestamp()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _pde_recent_egress_signals(conn, now):
+    """Egress-class anomaly incidents within the lookback, shaped for correlate().
+
+    Excludes post_detection_egress by construction (EGRESS_SIGNAL_TYPES holds only
+    dns_exfiltration/volume_spike), so our own incidents can never be a signal."""
+    cutoff = now - _PDE_EGRESS_LOOKBACK_S
+    types = tuple(post_detection.EGRESS_SIGNAL_TYPES)
+    q = ("SELECT id, incident_type, devices_json, updated_at FROM anomaly_incidents "
+         "WHERE incident_type IN (%s) AND updated_at >= ?" % ",".join("?" * len(types)))
+    sigs = []
+    for r in conn.execute(q, types + (cutoff,)).fetchall():
+        try:
+            devs = json.loads(r[2] or "[]")
+        except Exception:  # noqa: BLE001
+            devs = []
+        ips = {d.get("ip") for d in devs if isinstance(d, dict) and d.get("ip")}
+        sigs.append({"id": r[0], "type": r[1], "ips": ips, "ts": r[3],
+                     "source": "anomaly_incidents:%d" % r[0]})
+    return sigs
+
+
+def _pde_new_detections(conn, now):
+    """New detection findings since each table's watermark, as correlate() detections.
+
+    ⛔ anomaly_incidents is scanned ONLY for the egress/detection types, never for
+    post_detection_egress rows -- otherwise our own incident would re-trigger itself
+    and grow without bound."""
+    dets = []
+
+    def _advance(table, rows, key):
+        wm = int(_get_state("pde_wm_%s" % key, "0") or 0)
+        maxid = wm
+        out = []
+        for row in rows:
+            maxid = max(maxid, row[0])
+            out.append(row)
+        _set_state("pde_wm_%s" % key, str(maxid))
+        return out
+
+    wm = int(_get_state("pde_wm_malware_findings", "0") or 0)
+    rows = conn.execute(
+        "SELECT m.id, m.detected_at, a.ip_address FROM malware_findings m "
+        "LEFT JOIN agent_devices a ON a.device_id = m.device_id "
+        "WHERE m.id > ? ORDER BY m.id", (wm,)).fetchall()
+    for r in _advance("malware_findings", rows, "malware_findings"):
+        ip, ts = r[2], _pde_to_epoch(r[1])
+        if ip and ts is not None:
+            dets.append({"device_ip": ip, "ts": ts, "source": "malware_findings:%d" % r[0]})
+
+    wm = int(_get_state("pde_wm_lan_integrity_findings", "0") or 0)
+    rows = conn.execute(
+        "SELECT id, ts, subject_ip FROM lan_integrity_findings WHERE id > ? ORDER BY id",
+        (wm,)).fetchall()
+    for r in _advance("lan_integrity_findings", rows, "lan_integrity_findings"):
+        ip, ts = r[2], _pde_to_epoch(r[1])
+        if ip and ts is not None:
+            dets.append({"device_ip": ip, "ts": ts,
+                         "source": "lan_integrity_findings:%d" % r[0]})
+
+    wm = int(_get_state("pde_wm_anomaly_incidents", "0") or 0)
+    types = tuple(post_detection.EGRESS_SIGNAL_TYPES)
+    q = ("SELECT id, updated_at, devices_json FROM anomaly_incidents "
+         "WHERE id > ? AND incident_type IN (%s) ORDER BY id" % ",".join("?" * len(types)))
+    rows = conn.execute(q, (wm,) + types).fetchall()
+    for r in _advance("anomaly_incidents", rows, "anomaly_incidents"):
+        ts = _pde_to_epoch(r[1])
+        try:
+            devs = json.loads(r[2] or "[]")
+        except Exception:  # noqa: BLE001
+            devs = []
+        for d in devs:
+            ip = d.get("ip") if isinstance(d, dict) else None
+            if ip and ts is not None:
+                dets.append({"device_ip": ip, "ts": ts,
+                             "source": "anomaly_incidents:%d" % r[0]})
+    return dets
+
+
+def _pde_emit(conn, inc, now):
+    """Write/refresh a post_detection_egress incident. One open per namespaced target
+    via the existing partial-unique index (INSERT .. ON CONFLICT)."""
+    conn.execute(
+        "INSERT INTO anomaly_incidents(created_at, updated_at, incident_type, "
+        "offending_target, score, status, device_count, devices_json, evidence_json, actor) "
+        "VALUES(?,?,?,?,?,'open',1,?,?,?) "
+        "ON CONFLICT(offending_target) WHERE status='open' DO UPDATE SET "
+        "updated_at=excluded.updated_at, score=MAX(anomaly_incidents.score, excluded.score), "
+        "evidence_json=excluded.evidence_json",
+        (now, now, inc["incident_type"], inc["offending_target"], inc["score"],
+         json.dumps([{"ip": inc["device_ip"], "name": inc["device_ip"]}]),
+         json.dumps({**inc["evidence"], "reason": inc["reason"],
+                     "confidence_note": inc["confidence_note"]}),
+         inc["actor"]))
+
+
+def _post_detection_pass(now=None):
+    """One correlation pass. Safe no-op on a clean DB; fail-closed on a broken core."""
+    now = time.time() if now is None else now
+    ok, detail = post_detection.selftest()
+    if not ok:
+        log.error("post_detection_egress: selftest failed (%s) -- pass abandoned", detail)
+        return
+    with _db() as conn:
+        detections = _pde_new_detections(conn, now)
+        if not detections:
+            conn.commit()   # persist advanced watermarks even with nothing to correlate
+            return
+        signals = _pde_recent_egress_signals(conn, now)
+        emitted = 0
+        for det in detections:
+            match = post_detection.correlate(det, signals)
+            if match is None:
+                continue
+            inc = post_detection.build_incident(det, match, now)
+            _pde_emit(conn, inc, now)
+            emitted += 1
+        conn.commit()
+        if emitted:
+            log.warning("post_detection_egress: %d correlated incident(s) this pass", emitted)
