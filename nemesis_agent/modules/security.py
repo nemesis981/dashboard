@@ -201,18 +201,25 @@ def _new_suspicious_files(platform_name: str):
 
 
 def _usb_events(platform_name: str):
-    # Linux: structured device identity via pyudev (VID/PID/serial/model), shared with
-    # the usb_inserted scan trigger AND the device-level operator alert. Replaces the
-    # old dmesg-string scrape, which needed root, was a fragile 200-line rolling window,
-    # and carried no stable identity. Windows/Darwin keep the legacy raw scrape until
-    # their structured backends are built (deferred to a VM session); the server
-    # tolerates both shapes.
+    # Linux + Windows: structured device identity (VID/PID/serial/model), shared with
+    # the usb_inserted scan trigger AND the device-level operator alert, both emitting
+    # the SAME event shape so the server is platform-agnostic. Replaces the old scrapes,
+    # which carried no stable identity (Linux dmesg rolling window; Windows `wmic`
+    # Win32_USBHub -- deprecated, and hubs are not storage). Darwin keeps the legacy raw
+    # scrape until a structured backend exists (no agent candidate for that platform
+    # yet); the server tolerates both shapes.
     if platform_name == "Linux":
         try:
             import usb_devices                          # noqa: PLC0415
         except ImportError:                             # pragma: no cover
             from . import usb_devices                   # type: ignore  # noqa: PLC0415
         return usb_devices.list_usb_storage()
+    if platform_name == "Windows":
+        try:
+            import usb_devices_windows                  # noqa: PLC0415
+        except ImportError:                             # pragma: no cover
+            from . import usb_devices_windows           # type: ignore  # noqa: PLC0415
+        return usb_devices_windows.list_usb_storage()
 
     events = []
     try:
@@ -223,14 +230,6 @@ def _usb_events(platform_name: str):
             ).stdout
             for line in out.splitlines():
                 if "Product ID:" in line or "Vendor ID:" in line:
-                    events.append({"raw": line.strip()})
-        elif platform_name == "Windows":
-            out = win_run.run(
-                ["wmic", "path", "Win32_USBHub", "get", "DeviceID,Description"],
-                capture_output=True, text=True, timeout=8,
-            ).stdout
-            for line in out.splitlines()[1:]:
-                if line.strip():
                     events.append({"raw": line.strip()})
     except Exception as e:
         log.debug("usb_events error: %s", e)
