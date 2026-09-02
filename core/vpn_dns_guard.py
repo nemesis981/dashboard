@@ -690,7 +690,8 @@ def _load_state():
         except Exception:  # noqa: BLE001
             log.exception("state at %s unreadable; treating as absent", path)
             continue
-    return {"applied": False, "saved_upstreams": None, "tunnel_iface": None}
+    return {"applied": False, "saved_upstreams": None, "tunnel_iface": None,
+            "tunnel_dns_absent": False}
 
 
 def _save_state(state) -> bool:
@@ -724,6 +725,24 @@ def apply_fix(ph, tunnel, state):
     """
     Tunnel is up. Move Pi-hole upstream onto a tunnel-reachable resolver, verify,
     roll back on failure. Idempotent: if already applied, only re-verify.
+
+    ⛔ `applied` MEANS "A FIX IS IN PLACE", AND NOTHING ELSE. It gates the early
+    return below, which skips rediscovery -- correct when we really did point Pi-hole
+    at a tunnel resolver, and wrong for every other reason a cycle might have nothing
+    to do.
+
+    It used to be set on the no-tunnel-DNS path too, so "I found no resolver" and "I
+    installed a resolver" wrote the same flag. Since the early return sits ABOVE
+    discover_tunnel_dns(), one empty verdict then froze discovery for the whole VPN
+    session: measured live 2026-09-01, 59 consecutive cycles with discovery never
+    re-running, ended only by the tunnel dropping. Ten minutes later the same VPN and
+    protocol, sampled at the same offset after tun0 appeared, found the resolver
+    normally -- so the empty verdict is transient and re-checking is what recovers it.
+
+    The no-DNS case now records `tunnel_dns_absent` instead: a marker that is
+    RE-EXAMINED every cycle rather than a claim that a fix exists. See
+    test_vpn_dns_guard_latch.py, whose call-count assertion is what distinguishes the
+    two behaviours -- no single cycle's return value can.
     """
     current = ph.get_upstreams()
 
@@ -734,6 +753,16 @@ def apply_fix(ph, tunnel, state):
         log.warning("previously-applied fix no longer resolves; re-applying")
 
     tun_dns = discover_tunnel_dns(tunnel["iface"])
+
+    # The empty -> found transition, stated explicitly. WHY IT IS WORTH A LINE: what
+    # makes discovery come back empty on one cycle and populated on the next is still
+    # an open question (a systemd-resolved restart racing the sample is the leading
+    # candidate, not proven). Re-checking is what makes that question ANSWERABLE at
+    # all -- this line is where the recovery becomes visible instead of being inferred
+    # from upstreams silently changing.
+    if tun_dns and state.get("tunnel_dns_absent"):
+        log.info("tunnel DNS now discoverable on %s: %s -- earlier cycles this session "
+                 "found none; applying now", tunnel["iface"], tun_dns)
 
     # BASELINE CAPTURE — deliberately AFTER tunnel-DNS discovery, so the value we
     # are about to write can be compared against what is already there.
@@ -760,25 +789,42 @@ def apply_fix(ph, tunnel, state):
             state["saved_upstreams"] = None
         else:
             # First time, and the current value is genuinely not ours: remember it.
+            # Logged only when it CHANGES: the no-DNS path is now re-entered every
+            # cycle by design, and an unconditional line here would emit the same
+            # baseline every few seconds, burying the events that matter.
+            if state.get("saved_upstreams") != current:
+                log.info("baselined pre-VPN upstreams %s", current)
             state["saved_upstreams"] = current
-            log.info("baselined pre-VPN upstreams %s", current)
     if not tun_dns:
         # No tunnel-reachable resolver found. Re-verify with the existing public
         # upstreams (they may already egress via the tunnel); if they fail there is
         # no Pi-hole-config-only remedy and we leave config untouched.
-        log.warning("no tunnel-reachable DNS discovered on %s; leaving upstreams=%s",
-                    tunnel["iface"], current)
+        #
+        # ⛔ DELIBERATELY DOES NOT SET `applied`. Nothing was applied -- Pi-hole's
+        # config is untouched on this path -- and setting it would make the early
+        # return above skip discovery for the rest of the tunnel session, freezing a
+        # verdict that live measurement shows is transient. `tunnel_dns_absent` records
+        # the same fact WITHOUT gating rediscovery, so the next cycle looks again.
+        log.warning("no tunnel-reachable DNS discovered on %s; leaving upstreams=%s "
+                    "(will re-check next cycle)", tunnel["iface"], current)
         ok = verify_upstream_resolves()
-        if ok:
-            state.update({"applied": True, "tunnel_iface": tunnel["iface"]})
-            if not _save_state(state):
-                log.error("marked applied (no tunnel DNS needed) but state did NOT "
-                          "persist — this cycle will repeat indefinitely")
+        # Persisted regardless of `ok`, unlike the flag it replaces. The valuable part
+        # is `saved_upstreams`: a genuine pre-VPN baseline captured while the tunnel is
+        # up. Losing it to a guard restart mid-session would leave restore() with
+        # nothing to roll back to, and that is true whether or not this cycle's verify
+        # happened to pass.
+        state.update({"tunnel_dns_absent": True, "tunnel_iface": tunnel["iface"]})
+        if not _save_state(state):
+            log.error("no tunnel DNS found and the pre-VPN baseline %s did NOT "
+                      "persist — a guard restart before the tunnel drops would lose "
+                      "the value restore-on-disconnect needs",
+                      state.get("saved_upstreams"))
         return ok
 
     ph.set_upstreams(tun_dns)
     if verify_upstream_resolves():
-        state.update({"applied": True, "tunnel_iface": tunnel["iface"]})
+        state.update({"applied": True, "tunnel_iface": tunnel["iface"],
+                      "tunnel_dns_absent": False})
         persisted = _save_state(state)
         if persisted:
             log.info("fix applied: upstreams now %s (verified resolving)", tun_dns)
@@ -803,6 +849,27 @@ def apply_fix(ph, tunnel, state):
 def restore(ph, state):
     """Tunnel is down (or stale state). Put the saved upstreams back."""
     if not state.get("applied"):
+        # NOTHING WAS APPLIED -- but a no-tunnel-DNS session still leaves state behind:
+        # `tunnel_dns_absent` and a `saved_upstreams` baseline captured while the tunnel
+        # was up. Both are scoped to THAT tunnel session and are meaningless once it
+        # ends, so clear them here.
+        #
+        # Deliberately NOT a Pi-hole write. On this path the guard never changed
+        # upstreams, so there is nothing to put back; writing anyway would be an
+        # unnecessary config change on every VPN disconnect, and would make the logs
+        # claim a restore that never had to happen.
+        #
+        # Leaving them was the alternative, and it is worse than untidy: a baseline
+        # that outlives its session is later read as a pre-VPN value from a network
+        # state that no longer exists, which is the same class of fiction the
+        # REFUSING-to-baseline guard in apply_fix() exists to prevent.
+        if state.get("tunnel_dns_absent") or state.get("saved_upstreams") is not None:
+            state.update({"applied": False, "saved_upstreams": None,
+                          "tunnel_iface": None, "tunnel_dns_absent": False})
+            if not _save_state(state):
+                log.error("cleared the no-tunnel-DNS session state but it did NOT "
+                          "persist — a stale baseline may survive into the next "
+                          "tunnel session")
         return True
     saved = state.get("saved_upstreams")
     if saved is not None:
@@ -848,7 +915,8 @@ def restore(ph, state):
                   "cannot restore. Pi-hole is still pointed at the tunnel resolver "
                   "and DNS is probably broken for its clients. Set upstreams "
                   "manually, then supply a genuine pre-VPN value.")
-    state.update({"applied": False, "saved_upstreams": None, "tunnel_iface": None})
+    state.update({"applied": False, "saved_upstreams": None, "tunnel_iface": None,
+                  "tunnel_dns_absent": False})
     if not _save_state(state):
         log.error("restore completed but state did NOT persist — the next cycle "
                   "may treat the tunnel as still applied")
