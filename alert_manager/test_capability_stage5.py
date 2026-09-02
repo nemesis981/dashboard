@@ -36,11 +36,28 @@ def check(label, cond, detail=""):
         print("  [PASS] %s" % label)
     else:
         _fail += 1
-        print("  [FAIL] %s%s" % (label, ("  " + detail) if detail else ""))
+        # str() on the detail, deliberately: callers pass non-strings (a sorted
+        # list, for one), and the old form raised TypeError inside the FAIL
+        # branch -- so the harness crashed exactly when a check finally failed
+        # and the detail was most needed. Found 2026-09-02 when the
+        # approve_enrollment set legitimately changed; the branch had evidently
+        # never been exercised before.
+        print("  [FAIL] %s%s" % (label, ("  " + str(detail)) if detail else ""))
 
 
 CAP = "approve_enrollment"
-EPS = ("api_agent_approve", "api_agent_revoke")
+# Grew from the approve/revoke pair to include the BULK-MANUAL batch route
+# (ADR 0012 build-spec step 1, 2026-09-02). Updated DELIBERATELY, not loosened:
+# the assertion below is still exact-set equality, because the point of it is
+# that this capability's reach cannot drift unnoticed.
+#
+# Bulk approve belongs here on security grounds rather than tidiness. Capability
+# membership is what makes an endpoint require the unlock; an endpoint in no
+# capability is gated by ROLE alone. Leaving the batch route out would mean
+# approving fifty devices needed LESS than approving one -- the batch route
+# would become the cheaper path to the same action, which is exactly the
+# sibling-divergence shape the standing route audit exists to catch.
+EPS = ("api_agent_approve", "api_agent_revoke", "api_agent_bulk_approve")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -48,7 +65,7 @@ print("\n== THE CAPABILITY IS REAL, AND THE OTHERS ARE STILL NOT ==")
 
 check("%s is BUILT, not merely declared" % CAP,
       R.capability_state(CAP) == R.CAP_BUILT)
-check("  ...covering exactly the approve/revoke pair",
+check("  ...covering exactly the approve/revoke/bulk-approve set",
       set(R.CAPABILITY_ROUTES[CAP]) == set(EPS), sorted(R.CAPABILITY_ROUTES[CAP]))
 for other in ("push_and_run", "firewall_change"):
     check("%s remains DECLARED (deliberately empty)" % other,

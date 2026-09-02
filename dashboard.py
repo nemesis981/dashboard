@@ -4733,6 +4733,122 @@ def api_agent_approve(device_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ── BULK-MANUAL approve (ADR 0012 mode 2 of 4; build-spec step 1) ────────────
+#
+# One typed confirmation, many devices. The gate sits at the REVIEW PAGE because
+# that is where the human actually is (build spec §5) — unlike FLEET/VENUE auto,
+# where nobody is present at enroll time and the gate has to move to campaign
+# setup instead.
+#
+# ⛔ WHY THIS ROUTE DOES NOT CARRY api_agent_approve's TRUST-BOUNDARY RESCAN.
+# That is deliberate, and it must not be "fixed" by copying the block across.
+# The single-device route can readmit a device from 'revoked' / 'uninstalled' /
+# 'rejected' — a re-crossing of the trust boundary, which mandates a scan. This
+# route cannot reach any of those states: _BULK_APPROVE_ELIGIBLE is the pending
+# set, enforced server-side against a fresh read of each row, so a
+# trust-withdrawn device is REFUSED rather than approved. The rescan is
+# unreachable here because the two sets are disjoint — so that disjointness is
+# asserted by test_bulk_approve.py rather than trusted to this comment.
+# Widening the eligible set without also carrying the rescan across turns that
+# test red, which is the point.
+_BULK_APPROVE_ELIGIBLE = ("pending", "pending_with_findings", "pending_unverified")
+_BULK_APPROVE_MAX = 200
+_BULK_APPROVE_CONFIRM = "yes"
+
+
+@app.route("/api/agent/bulk-approve", methods=["POST"])
+def api_agent_bulk_approve():
+    """Approve a reviewed batch of PENDING devices behind one typed confirmation.
+
+    Security posture is deliberately identical to its siblings — POST-only,
+    auth-gated (absent from `_AUTH_EXEMPT`), parameterized SQL, one audit row per
+    device — plus two gates they do not need:
+
+      * the typed confirmation is checked HERE, not only in the browser. A
+        client-side-only gate is not a gate, it is a prompt.
+      * eligibility is re-read from the database per device. The client sends
+        ids and never statuses, so a caller cannot promote a revoked device into
+        the batch by lying about what it is.
+
+    Fails closed on every ambiguity: malformed JSON, missing confirmation, an
+    empty or oversized list, an unknown device, an ineligible status. A refused
+    device is REPORTED with its reason and never silently dropped from the
+    result — a dropped id reads to the operator as an approved one.
+    """
+    try:
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "expected a JSON object"}), 400
+        # Typed confirmation (build spec §5). Case-insensitive after a strip so
+        # "Yes" works, but a MISSING or different value is refused — "cannot
+        # determine" is never treated as "permitted".
+        confirm = body.get("confirm")
+        if not isinstance(confirm, str) or confirm.strip().lower() != _BULK_APPROVE_CONFIRM:
+            return jsonify({"error": "confirmation required",
+                            "expected": _BULK_APPROVE_CONFIRM}), 400
+        ids = body.get("device_ids")
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"error": "device_ids must be a non-empty list"}), 400
+        if len(ids) > _BULK_APPROVE_MAX:
+            return jsonify({"error": "batch too large",
+                            "max": _BULK_APPROVE_MAX, "got": len(ids)}), 400
+        # De-duplicate, preserving order: the same id sent twice is one decision
+        # and must not produce two audit rows.
+        seen, device_ids = set(), []
+        for d in ids:
+            if isinstance(d, str) and d and d not in seen:
+                seen.add(d)
+                device_ids.append(d)
+        if not device_ids:
+            return jsonify({"error": "device_ids must be a non-empty list"}), 400
+
+        actor = _actor()
+        now_iso = datetime.now().isoformat(timespec="seconds")
+        approved, refused = [], []
+        conn = _dm_conn()
+        try:
+            for did in device_ids:
+                row = conn.execute(
+                    "SELECT enrollment_status FROM agent_devices WHERE device_id=?",
+                    (did,)).fetchone()
+                if row is None:
+                    refused.append({"device_id": did, "reason": "no such device"})
+                    continue
+                status = (row[0] or "").strip()
+                if status not in _BULK_APPROVE_ELIGIBLE:
+                    # Named rather than lumped into a generic refusal: "revoked"
+                    # and "already approved" mean very different things to
+                    # whoever reads this result.
+                    refused.append({"device_id": did, "reason": "not pending",
+                                    "status": status or "unknown"})
+                    continue
+                conn.execute(
+                    "UPDATE agent_devices SET enrollment_status='approved', "
+                    "enrolled_by=?, enrolled_at=? WHERE device_id=?",
+                    (actor, now_iso, did))
+                approved.append(did)
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Audited after the commit, one row per device, through the SAME
+        # _audit(action="agent_approve") path the single-device route uses — so a
+        # bulk approval is indistinguishable from N individual ones in the audit
+        # trail. That is what keeps the trail complete rather than summarised.
+        for did in approved:
+            _audit(action="agent_approve", rule_id=did)
+        if refused:
+            log.warning("bulk approve by %s: %d approved, %d refused (%s)",
+                        actor, len(approved), len(refused),
+                        ", ".join("%s=%s" % (r["device_id"], r["reason"])
+                                  for r in refused[:10]))
+        return jsonify({"ok": True,
+                        "approved": approved, "approved_count": len(approved),
+                        "refused": refused, "refused_count": len(refused)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/agent/<device_id>/reject", methods=["POST"])
 def api_agent_reject(device_id):
     try:

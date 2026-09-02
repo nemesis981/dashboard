@@ -314,6 +314,11 @@ ROUTE_MINIMUMS = {
 
     # ── Admin: agents, consent, and anything that reaches a remote machine ───
     "api_agent_approve":              (_A, _A),
+    # Batch form of api_agent_approve (ADR 0012 BULK-MANUAL). Same floor as the
+    # single-device route, deliberately: approving ten devices at once is not a
+    # lesser action than approving one, and a looser floor here would make the
+    # batch route the cheaper way to do the same thing.
+    "api_agent_bulk_approve":         (_A, _A),
     "api_agent_reject":               (_A, _A),
     "api_agent_revoke":               (_A, _A),
     "api_agent_installer_generate":   (_A, _A),
@@ -702,7 +707,8 @@ CAPABILITY_ROUTES = {
     # Approving and revoking a device: one coherent concept, both actions
     # reversible, both already route-audited, and both admin-only today. That
     # bounded blast radius is why this is the capability that goes first.
-    "approve_enrollment": frozenset({"api_agent_approve", "api_agent_revoke"}),
+    "approve_enrollment": frozenset({"api_agent_approve", "api_agent_revoke",
+                                     "api_agent_bulk_approve"}),
     # ADR 0028 D11.6, ruled 2026-08-29. Registered WITH its endpoint, never ahead
     # of it: an empty frozenset yields CAP_DECLARED, and offering a quiz for a
     # capability that unlocks nothing reads as a broken reward.
