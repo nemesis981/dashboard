@@ -15,8 +15,8 @@ something any Nemesis software release provides. **The reduced-scope detection f
 detailed below) is therefore the PERMANENT shape for non-VLAN installs, not a temporary
 compromise.** Both tiers are unblocked to build in that form now. See the "RESOLVED 2026-09-02"
 sections below (Tier 1 and the Tier 2 signal table) for the full technical reasoning. **Naming
-must be coordinated with Window 1 before or alongside the build so the shipped code and this
-doc agree** — see that section for the proposed working name.
+is now settled (coordinated with Window 1, 2026-09-02, before build)** — see the Tier 1
+"RESOLVED" section for the final finding-type split, module placement, and UI label.
 
 **PUNCHLIST fix folded in, decided but not applied — see "PUNCHLIST fix" section below.**
 Naming decision made; the mechanical edit to `config/suricata/local.rules` +
@@ -171,16 +171,49 @@ gateway mode" reason to hold the build) without resolving the *capability* gap t
 Tier 1 framing assumed. The two were conflated in the original hold; they are different
 questions with different answers.
 
-**Naming, therefore, is not merely a launch-time nicety — it is now a permanent-shape decision
-that should be settled before the build, not adjusted after.** The detector that ships must be
-named for what it durably is on a flat network: **a post-detection egress-and-discovery-
-behaviour correlator**, not "lateral-movement detection." A working name for coordination
-purposes: **"Post-Detection Behavior Correlator"** (or similar — the exact label is a joint
-call, not decided unilaterally here). **This needs to land alongside or ahead of the build,
-coordinated with Window 1 so the shipped code's naming (module name, alert type strings, UI
-labels) and this doc's naming agree from day one** — not reconciled after the fact, which is
-exactly the "permanently mis-named detector" risk this section already warned about before the
-hold was even resolved.
+**Naming, therefore, is not merely a launch-time nicety — it is now a permanent-shape decision,
+and it is now SETTLED (coordinated with Window 1, 2026-09-02, before build) rather than a
+single proposed name.**
+
+**⚠ The first proposed name here ("Post-Detection Behavior Correlator") was WRONG, and the
+correction is worth keeping visible rather than silently replaced.** It described only the
+Tier 1 mechanism (a managed device correlated against its own prior finding) and misdescribed
+the primary Tier 2 use case — unmanaged/unenrolled-device probe-and-scan detection has **no**
+prior finding to correlate against; it is a primary signal-based detector, not a correlator.
+Calling the whole reduced-scope capability a "correlator" would have shipped a name that is
+actively wrong for its own headline case.
+
+**Final naming, two distinct finding types (not one detector, one name):**
+- **`post_detection_egress`** — the Tier 1 mechanism: a managed/enrolled device, already
+  flagged by an existing finding, correlated against its own subsequent egress/discovery
+  behavior. Placement: `modules/anomaly_detection/` (unchanged from §6 below — this is the
+  same "fleet-internal behavioral correlation" that placement decision already covers, not a
+  fresh call).
+- **`lan_probe_scan`** / **`unmanaged_device_probe`** — the Tier 2 mechanism and the actual
+  primary target: **any** device (managed or not), triggered by its own broadcast-visible
+  scan/sweep/spread behavior, no prior finding required. Placement: a **new module**,
+  `lan_behavior_monitor` — extending `lan_integrity`'s charter to cover this would repeat the
+  exact scope-widening already ruled out for Tier 1 (`lan_integrity`'s own docstring scopes it
+  to "who's claiming authority" — rogue DHCP, ARP-spoofing, rogue-RA — not general
+  reconnaissance/scan behavior; "confirmed by reading its own stated scope rather than assumed
+  from the name" is the standing discipline, applied consistently here). `lan_integrity`'s
+  existing ARP-anomaly output is unchanged — produced there, **consumed** by
+  `lan_behavior_monitor` as one input among several, no charter change to `lan_integrity`.
+
+**UI label: "LAN Probe & Scan Detection"** — deliberately avoids "correlator" (opaque to a home
+user) and makes no claim about unicast visibility.
+
+**Naming attaches to CAPABILITY, not deployment mode.** The reopened Option B (hybrid
+ARP-detection design, Window 1) does not get its own detector name or finding type — it is a
+visibility SOURCE that can feed either finding type additional data when active, tagged via a
+`source: active_monitoring` field on the findings that used it. This keeps the finding-type
+names stable regardless of whether Option B is active on a given install, matching this
+project's existing "detect the observed condition, use packaging/mechanism only for reporting,
+never for deciding" pattern (see the 2026-09-01/02 MagicDNS-guard work for the precedent).
+
+**This is now settled, not still coordinating** — the shipped code's module names, finding-type
+strings, and UI label should match the above from first commit, not be reconciled after the
+fact.
 
 **Build status: UNBLOCKED for the reduced/permanent form.** The full originally-scoped form
 remains blocked on VLAN-capable hardware + inter-VLAN routing, or port mirroring — neither of
