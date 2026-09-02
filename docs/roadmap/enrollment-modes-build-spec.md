@@ -1,15 +1,20 @@
 # Build spec — ADR 0012 Enrollment Mode System
 
-**Status:** BUILD-READY (design locked; **not yet built**). Execute-ready **post-trip**. This
+**Status:** PARTIAL (moved from PARKED 2026-09-02) — **Step 1 (BULK-MANUAL) SHIPPED**
+2026-09-02, design remains locked for steps 2–4, which are **not yet built.** See §7 for the
+current dependency picture, corrected same day (§3's enforcement-premise finding below).
+"Execute-ready post-trip" is satisfied and the conditional is dropped — the Wisconsin trip
+referenced was a mid-July 2026 deployment, well past. This
 turns [ADR 0012 — enrollment trust modes](../architecture/0012-enrollment-trust-modes.md) into a
-buildable spec. Pre-trip, only MANUAL (`auto_approve = 0`) is live per
-[ADR 0011](../architecture/0011-enrollment-security-model.md); everything here is post-trip work.
+buildable spec. Only MANUAL (`auto_approve = 0`) and BULK-MANUAL are live per
+[ADR 0011](../architecture/0011-enrollment-security-model.md); steps 2–4 remain future work.
 
 **References:** [ADR 0012](../architecture/0012-enrollment-trust-modes.md) (the four-mode
 decision this spec implements); [ADR 0009 — security inspection proxy](../architecture/0009-security-inspection-proxy.md)
 (the route-and-inspect verdict loop VENUE-auto consumes — **NOT BUILT**);
 [ADR 0005](../architecture/0005-dns-firewall-device-auth-architecture.md) (`firewall.py`
-chokepoint enforcing the trusted-vs-guest posture); [ADR 0001](../architecture/0001-database-and-module-architecture.md)
+chokepoint — the trusted-vs-guest posture mapping this spec needs is undesigned as of this
+writing, see §3 and §7); [ADR 0001](../architecture/0001-database-and-module-architecture.md)
 (canonical DDL init); [ADR 0006](../architecture/0006-data-manager.md) (atomic ops → Data Manager).
 
 **Rule 8:** placeholders only (`<account>`, `<subnet>`, `<tailnet-ip>`, `<campaign-id>`,
@@ -21,8 +26,20 @@ chokepoint enforcing the trusted-vs-guest posture); [ADR 0001](../architecture/0
 
 ## 0. Grounding (current state, from code)
 
-- `agent_devices.enrollment_status` real values today: `approved`, `rejected`, `pending`,
-  `pending_with_findings` (column `DEFAULT 'approved'`, grandfathering existing devices).
+- **⚠ Corrected 2026-09-02** — `agent_devices.enrollment_status` has **at least seven** live
+  values today, not four. The original four: `approved`, `rejected`, `pending`,
+  `pending_with_findings` (column `DEFAULT 'approved'`, grandfathering existing devices). Three
+  more exist and must be accounted for when placing the two NEW values this spec adds
+  (`guest_monitored`, `guest_expired`) into this space: `pending_unverified`
+  (`core_module/hw_monitor/hw_monitor.py:4034` write site; `dashboard.py`'s `PENDING_STATUSES`
+  read site), `revoked` (`dashboard.py:4833` write site), and `uninstalled`
+  (`diagnostics/agent_enrollment_integrity.py:209` write site) — 13 non-test files reference
+  `enrollment_status` in total, not the ~4 the original grounding implied. **Any new status must
+  also be registered in `dashboard.py`'s `PENDING_STATUSES` bucketing** — that bucketing exists
+  specifically because an unlisted status used to silently disappear from the dashboard (its own
+  comment documents the recurring bug); it now renders an unmatched status as `unknown` instead,
+  so an unregistered new value fails visibly rather than silently, but registering it is still a
+  required build step this spec did not previously name.
 - Manual + bulk-manual approvals already write an audit row via the existing
   `_audit(action="agent_approve")` path in `POST /api/agent/<device_id>/approve` — the human
   actor (`enrolled_by`) is the implicit record.
@@ -100,7 +117,17 @@ AND (remaining     IS NULL OR remaining   > 0)
 AND (source_subnet IS NULL OR admit_source_ip ∈ source_subnet)
 ```
 On each admit, atomically decrement `remaining` (when `max_devices` set) — **Data Manager atomic
-op** (ADR 0006), same claim pattern as the existing `enrollment_tokens` `uses` bump. When the last
+op** (ADR 0006). **⚠ Corrected 2026-09-02 — this is NOT the same claim pattern as the existing
+`enrollment_tokens` `uses` bump, and that difference is real scoping work, not a detail.** The
+existing DM ops (`next_sequence`, `increment_counter`, `upsert`) have no `WHERE`-guarded
+conditional decrement — `increment_counter` cannot express "refuse the admit if the bound is
+already spent," which is the actual security property this self-termination check depends on.
+Building this needs either a new Data Manager op (a `WHERE remaining > 0` guarded decrement,
+consistent with ADR 0006's existing atomic-op pattern) or a documented raw-connection exception
+— estimate it as new work, not reuse. **Both new tables (`enrollment_campaigns`,
+`enrollment_auto_audit`) also need Data Manager allowlist registration before either can be
+written** — the loader refuses ungranted writes by design, same class of requirement as
+`ROUTE_MINIMUMS` for new endpoints. When the last
 in-force bound trips (window passed / `remaining` hits 0 / campaign stopped), flip `status` to
 `expired` / `exhausted` / `stopped` and **enrollment reverts to MANUAL automatically.** There is no
 setting left flipped — the unsafe condition cannot persist by neglect.
@@ -120,8 +147,22 @@ FLEET and VENUE write **different `agent_devices` states — never a shared `app
 
 **Hard rule:** no code path may write `approved` for a VENUE admit. `guest_monitored` is a
 first-class distinct state so any read-any consumer (dashboard, `firewall.py`) cannot accidentally
-treat a guest as trusted. The `firewall.py` chokepoint (ADR 0005) maps `guest_monitored` → the
-contained/inspected segment; `approved` → the trusted segment.
+treat a guest as trusted.
+
+**⚠ Corrected 2026-09-02 — the paragraph below describes a DEPENDENCY, not existing
+infrastructure.** `firewall.py` today has no `guest_monitored`/trusted-segment mapping of any
+kind — it is a `ufw` rule-manipulation library (allow/deny by address and port), and ADR 0005's
+own status line already says the firewall-rules engine itself is undesigned. What actually gates
+trust today is a heartbeat check
+(`core_module/hw_monitor/hw_monitor.py:3689`, `_agent_approved()`): any non-`approved` status —
+including a future `guest_monitored` — stops that device's heartbeats, which is a fail-safe
+outcome (a guest is never accidentally trusted) but not the contained-and-monitored guest tier
+this section's VENUE design assumes. **Building VENUE therefore depends on ADR 0005's posture
+mapping existing, not just on ADR 0009's inspection-proxy verdict loop (§7) — the `firewall.py`
+chokepoint below is what that dependency would need to provide, once built:**
+
+The `firewall.py` chokepoint (ADR 0005, once its posture-mapping is built) would map
+`guest_monitored` → the contained/inspected segment; `approved` → the trusted segment.
 
 **Build decision (recommend option A):**
 - **A —** encode tier in `enrollment_status` literals (`guest_monitored` / `guest_expired`).
@@ -172,12 +213,21 @@ contained/inspected segment; `approved` → the trusted segment.
 
 ## 7. Dependency callout + build order
 
-**VENUE-auto is blocked on ADR 0009 (NOT BUILT).** VENUE admits devices into a guest/monitored
-tier whose safety *is* the route-and-inspect containment — that verdict loop is
-[ADR 0009 — security inspection proxy](../architecture/0009-security-inspection-proxy.md), which
-does not exist yet. VENUE-auto therefore **cannot ship until ADR 0009 exists** (also depends on the
-guest-network segment). Admitting guests without the inspection path would be admitting untrusted
-strangers with no containment — the exact thing the VENUE warning promises against.
+**VENUE-auto is blocked on TWO things, not one — corrected 2026-09-02.** VENUE admits devices
+into a guest/monitored tier whose safety *is* the route-and-inspect containment:
+
+1. **ADR 0009 (NOT BUILT)** — the route-and-inspect verdict loop,
+   [ADR 0009 — security inspection proxy](../architecture/0009-security-inspection-proxy.md).
+2. **ADR 0005's posture-enforcement mapping (NOT BUILT — see §3's correction above).** Even with
+   ADR 0009's verdict loop in place, nothing today maps a `guest_monitored` device onto an
+   actual contained network segment — `firewall.py` has no such mapping, and ADR 0005 itself
+   states the firewall-rules engine is undesigned. Today's only enforcement is a heartbeat gate
+   that cuts an unapproved device off entirely, which is safe (never accidentally trusted) but
+   is not the "contained and monitored" tier the VENUE warning describes.
+
+VENUE-auto therefore **cannot ship until both exist.** Admitting guests without either the
+inspection path or the posture mapping would be admitting untrusted strangers with no real
+containment — the exact thing the VENUE warning promises against.
 
 **FLEET-auto and BULK-MANUAL have no such dependency** — they operate entirely within the existing
 trusted tier + `agent_devices` states and can ship first.
