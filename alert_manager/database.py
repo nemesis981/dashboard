@@ -1554,6 +1554,55 @@ def init_enrollment_tokens_table():
         if "revoked_by" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN revoked_by TEXT")
 
+        # ── enrollment_auto_audit (ADR 0012 FLEET-auto, §1) ──────────────────
+        #
+        # WHAT WAS ADMITTED WHILE NO HUMAN WAS WATCHING, AND WHICH GRANT LET IT IN.
+        #
+        # This is the gap that made the whole FLEET-auto item worth building.
+        # MANUAL and BULK-MANUAL approvals are attributed already — they run
+        # through `_audit(action="agent_approve")` with a real human actor. An
+        # AUTO-approved enrollment went through hw_monitor's token claim and was
+        # recorded NOWHERE: audited 2026-09-02, there is no `_audit` call on that
+        # path at all, and the only log line fires when auto-approve is WITHHELD.
+        # So the one class of admission with no human in the loop was also the one
+        # class with no trail — exactly backwards.
+        #
+        # Deliberately NOT the spec's original shape. The spec assumed a separate
+        # `enrollment_campaigns` table and made `campaign_id` a NOT NULL FK to it.
+        # Campaigns were not built: the token itself already IS the scoped,
+        # expiring, revocable grant the spec wanted (bounded by max_uses /
+        # expires_at / revoked), so the grant reference here is the TOKEN. One
+        # admit path, one grant concept. See the 2026-09-02 audit.
+        #
+        # Rule 8: `token_prefix`, never the token. Mirrors the existing
+        # `_audit(rule_id=token[:8])` convention — enough to correlate an admit
+        # with the installer that caused it, useless if this table leaks.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS enrollment_auto_audit (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts              REAL    NOT NULL,   -- epoch secs; when the auto-admit fired
+                device_id       TEXT    NOT NULL,   -- agent_devices.device_id admitted
+                device_name     TEXT,               -- as reported at enrollment
+                hw_stable_id    TEXT,               -- TOFU fingerprint stable id
+                hw_is_virtual   INTEGER DEFAULT 0,  -- virtualised-environment flag
+                source_ip       TEXT,               -- SERVER-observed source, not client-claimed
+                source_subnet   TEXT,               -- the token's subnet bound, if one was set
+                token_prefix    TEXT,               -- granting token PREFIX only (Rule 8)
+                token_id        INTEGER,            -- enrollment_tokens.id that granted it
+                created_by      TEXT,               -- who generated that installer token
+                mode            TEXT    NOT NULL,   -- 'fleet-auto' (venue-auto is unbuilt)
+                network_posture TEXT    NOT NULL,   -- resulting posture: 'trusted'
+                scan_verified   INTEGER DEFAULT 0,  -- was clean-scan evidence present
+                has_findings    INTEGER DEFAULT 0   -- did the pre-enrollment scan raise any
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_enroll_auto_audit_device "
+                  "ON enrollment_auto_audit(device_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_enroll_auto_audit_token "
+                  "ON enrollment_auto_audit(token_id)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_enroll_auto_audit_ts "
+                  "ON enrollment_auto_audit(ts)")
+
         # backup_media_status: last-known free space per backup destination.
         #
         # Why a cache rather than a live poll: ADR 0018 specifies the backup
