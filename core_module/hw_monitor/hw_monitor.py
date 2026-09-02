@@ -4078,6 +4078,11 @@ def _create_enrollment(payload, remote_ip):
     # scan-derived enroll_status untouched → normal pending flow. Never errors out.
     token = (payload.get("enrollment_token") or "").strip()
     token_creator = None
+    token_row_id = None
+    # Set ONLY on the path where a token claim actually admitted this device
+    # without human review -- the one class of admission that had no audit trail
+    # at all before ADR 0012's enrollment_auto_audit (2026-09-02).
+    auto_admitted = False
     # Set when a VALID token was claimed but approval was withheld for lack of
     # scan evidence. Distinct from "no token at all": the owner needs to know the
     # install was authorised and still stopped, or the hold looks like a bug.
@@ -4093,9 +4098,15 @@ def _create_enrollment(payload, remote_ip):
                     (token, _time.time()))
                 if cur.rowcount == 1:
                     r = conn.execute(
-                        "SELECT created_by, device_name_hint FROM enrollment_tokens "
+                        "SELECT created_by, device_name_hint, id FROM enrollment_tokens "
                         "WHERE token=?", (token,)).fetchone()
                     token_creator = r[0] if r else None
+                    # `id` is carried for the auto-admit audit row (ADR 0012
+                    # FLEET-auto): it is the grant reference -- WHICH installer
+                    # token let this device in. Read here, inside the successful
+                    # claim, because that is the only place the granting token is
+                    # unambiguously known.
+                    token_row_id = (r[2] if r and len(r) > 2 else None)
                     # ── auto-approve requires COMPLETED, CLEAN scan evidence ──
                     #
                     # A valid installer token proves the INSTALL was authorised.
@@ -4117,6 +4128,15 @@ def _create_enrollment(payload, remote_ip):
                     # meaning almost-the-same thing.
                     if scan_verified and not has_findings:
                         enroll_status = "approved"
+                        # Flag the auto-admit explicitly rather than re-deriving it
+                        # later from `enroll_status == "approved"`. That test is
+                        # true today only on this path, but it is a VALUE, not a
+                        # statement of how the device got here -- and the audit row
+                        # exists precisely to record admissions no human witnessed.
+                        # If "approved" ever becomes reachable another way, a
+                        # value-based test would start logging the wrong thing as
+                        # an unattended admit, which is worse than not logging it.
+                        auto_admitted = True
                     else:
                         auto_approve_withheld = True
                         log.warning(
@@ -4230,6 +4250,42 @@ def _create_enrollment(payload, remote_ip):
              (now if token_remote else None),
              (token_creator if token_remote else None)))
         _persist_lan_macs(conn, device_id, payload.get("lan_macs"), now=_time.time())
+
+        # ── AUTO-ADMIT AUDIT (ADR 0012 FLEET-auto) ───────────────────────────
+        #
+        # Written INSIDE the same transaction as the device insert and the token
+        # claim, deliberately: a device admitted with no audit row is exactly the
+        # state this table exists to make impossible, so the two must not be able
+        # to disagree. It commits with them, or it rolls back with them.
+        #
+        # `source_ip` is `remote_ip` -- the SERVER-observed connection source
+        # passed into this function, never a client-reported value. That is the
+        # one fact in the row an enrolling device cannot forge, which is what
+        # makes "where did this come from" answerable at all.
+        #
+        # Rule 8: token PREFIX only, mirroring _audit(rule_id=token[:8]).
+        #
+        # Best-effort by design. An enrollment that succeeded must not be undone
+        # because its audit row failed to write -- but the failure is LOGGED at
+        # error, never swallowed, because a silently missing audit row is the
+        # exact failure this table was built to end.
+        if auto_admitted:
+            try:
+                conn.execute(
+                    "INSERT INTO enrollment_auto_audit "
+                    "(ts, device_id, device_name, hw_stable_id, hw_is_virtual, "
+                    " source_ip, source_subnet, token_prefix, token_id, created_by, "
+                    " mode, network_posture, scan_verified, has_findings) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (_time.time(), device_id, device_name, hw_stable_id, hw_is_virtual,
+                     remote_ip, None, (token[:8] if token else None), token_row_id,
+                     token_creator, "fleet-auto", "trusted",
+                     1 if scan_verified else 0, 1 if has_findings else 0))
+            except Exception as e:
+                log.error("device %s was AUTO-ADMITTED but its audit row did NOT "
+                          "write: %s -- the admission stands; the trail does not",
+                          device_id, e)
+
         conn.commit()   # token claim + device insert commit together (or both roll back)
         conn.close()
     except Exception:

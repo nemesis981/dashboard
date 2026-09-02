@@ -372,6 +372,19 @@ NAMESPACES = {
             # first real run — precisely the transcription error a static list
             # cannot catch about itself.
             "fan_status",
+            # `enrollment_auto_audit` ADDED 2026-09-02 (ADR 0012 FLEET-auto).
+            # hw_monitor writes one row per unattended token auto-admit, inside
+            # the same transaction as the device insert.
+            #
+            # ⚠ THE SAME TRAP THE TWO NOTES ABOVE DESCRIBE, AND IT BITES HARDER
+            # HERE. A missing name is a silent WOULD-DENY: the enrollment still
+            # succeeds, the device is still trusted, and only the AUDIT ROW goes
+            # missing -- so the failure mode of forgetting this line is precisely
+            # the condition the table was built to eliminate, arriving quietly
+            # and looking like a system with nothing to report. Asserted directly
+            # against allowed() in test_fleet_auto_audit.py, with a control, and
+            # mutation-verified.
+            "enrollment_auto_audit",
             # `scan_tasks` ADDED 2026-08-05. Not a transcription miss like
             # `fan_status` above — a DRIFT miss, which is a different failure and
             # worth recording as such. This list was derived 2026-07-28 (c10a9d3)
