@@ -434,6 +434,21 @@ ROUTE_MINIMUMS = {
     "module_lan_integrity__api_pin":      (_A, _A),
     "module_lan_integrity__api_close":    (_A, _A),
 
+    # threat_feeds — curated blocklists into Pi-hole. Read side VIEWONLY: "which
+    # blocklists are active" is exactly the kind of thing a non-expert should be
+    # able to see without being able to change it.
+    #
+    # BOTH writes are ADMIN, including remove-all, and the removal one is worth
+    # justifying because the instinct is to make undo cheap. Removing every feed
+    # UNBLOCKS known-malicious domains network-wide — it is a
+    # security-defaults change in the permissive direction, which is precisely
+    # the class this codebase gates hardest. It stays one click for an admin so
+    # an over-blocking incident is fixable under pressure; it does not become
+    # available to a standard user because it is labelled "undo".
+    "module_threat_feeds_api_status":     (_V, _A),
+    "module_threat_feeds_api_apply":      (_A, _A),
+    "module_threat_feeds_api_remove_all": (_A, _A),
+
     # lan_behavior_monitor — the LAN Probe & Scan detector. Read side VIEWONLY (a
     # non-expert should see "a device is scanning your network"); close is ADMIN
     # (dismissing a finding is a security-relevant action). No pin/allowlist route:
