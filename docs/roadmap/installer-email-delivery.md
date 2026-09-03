@@ -34,7 +34,12 @@ manual setup.
   sent via `send_email(to=recipient)`.
 - **Schema (guarded migration, ADR 0001 — on the core `enrollment_tokens` table):**
   `recipient_email TEXT`, `support_contact TEXT`, `custom_message TEXT`, `delivered_at REAL`
-  (and any send-status). Writes route through the Data Manager once built (ADR 0006);
+  (and any send-status). Same guarded-ALTER pattern already used twice on this table
+  (`auto_approve`, `source_subnet` — `alert_manager/database.py:1594-1612`).
+  **Corrected 2026-09-03 — Data Manager dependency was stale, not future:** DM v1 shipped
+  2026-07-25, and `api_agent_installer_generate`'s own `INSERT INTO enrollment_tokens`
+  already goes through `_dm_conn()` (`dashboard.py:5621`). Nothing to wait on — the new
+  columns just follow the write path already in use on this exact statement.
   `created_by`/actor already present for attribution.
 
 ## Connects to
@@ -52,3 +57,9 @@ manual setup.
   short `expires_at` + `max_uses=1` defaults so an intercepted email can't enroll a rogue device.
 - **Bounce/failure handling:** `send_email()` failures should mark `delivered_at` NULL + surface
   to the admin (don't silently "succeed").
+- **No-SMTP-configured precondition (added 2026-09-03, gap the above didn't cover):** SMTP setup
+  is optional at install time (`install.sh:236`, "or Enter to skip email setup"). `send_email()`
+  degrades gracefully (`False`, logged) when `WATCHDOG_EMAIL`/`WATCHDOG_PASSWORD` are unset, but
+  that's a different case from a delivery failure — it's a per-install precondition, true or
+  false for the whole box, not per-send. The admin form should check it upfront (grey out /
+  warn) rather than let every send fail one at a time with the same generic error.
