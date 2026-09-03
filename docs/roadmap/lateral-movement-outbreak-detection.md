@@ -294,6 +294,19 @@ immediately. Enrollment data is the difference between guessing and knowing.
 baseline, cautious alerts. Month 6 — precise behavioral model, near-zero false positives.
 **The longer Nemesis runs, the smarter it gets** — per device, per network, per user pattern.
 
+**Forward-looking hook, resolved 2026-09-03 (`adr-0009-l3-behavioral-trigger-scope.md` Piece 2 /
+Open Item #2):** if ADR 0009's agent-side flow-telemetry pipeline (Piece 1) ever ships, its
+server-side scoring engine (Piece 2) will **not** share this detector's engine — different
+trigger shape (continuous per-connection vs. event-triggered post-detection), different consumer
+(a routing decision vs. a human-facing incident), different data fidelity (Piece 2 would see a
+real per-connection graph; this detector runs on the DNS-intent/discovery proxy signals above
+*because* the appliance can't see unicast peer traffic). What genuinely should be shared, when
+Piece 1 exists: **one enrollment-baseline store (connection history, typical ports/hours per
+device), consumed independently by both engines** — Piece 2 for live novelty-scoring, this
+detector for post-detection correlation. Not a shared scorer. This is a design note for that
+future build, not a dependency of anything on this page today — Tier 1/Tier 2 as shipped need
+nothing from Piece 1/Piece 2 and are unaffected if that work never happens.
+
 ## Tier 2 — Venue / epidemic spread (v2 target, reopened 2026-08-30)
 The broader "outbreak on a shared/public LAN" detection described below — unknown devices,
 baseline-from-scratch, agentless-guest protection. Everything from here down describes

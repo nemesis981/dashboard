@@ -54,25 +54,62 @@ streaming (the closest analog, hw-monitor heartbeat, is periodic snapshot, not f
 
 ---
 
-## Piece 2 — Server-side correlation/scoring engine (extends or parallels the lateral-movement table)
+## Piece 2 — Server-side correlation/scoring engine (runs parallel to the lateral-movement work, one shared data layer)
 **What:** the continuous rule-based behavioral/pattern scorer described in the addendum's
-Layer (a). **Open Item #2 (unresolved, from the addendum): does this reuse the EXISTING
-lateral-movement risk-weight table (ADR 0009 "Enrollment enriches detection" — exact
-weights/thresholds documented internally, not in the public repo) or run as a separate,
-parallel scoring system?**
+Layer (a).
 
-- **If reused:** the existing table is scoped for **post-detection correlation between fleet
-  devices** (lateral movement) — a different signal shape than "is this destination/pattern
-  newly suspicious." Reuse would mean generalizing the table's inputs, which is itself
-  non-trivial design work, not just a config change.
-- **If parallel:** a second scoring engine means two systems to maintain, tune, and explain to
-  the user — worth avoiding if the signal shapes are close enough to unify, but that unification
-  question is exactly what's unresolved.
-- **Either way:** this is server-side only (hard principle, addendum §3) — the agent contributes
-  telemetry (Piece 1), never scores.
+**⛔ RESOLVED 2026-09-03 — Open Item #2 closed: PARALLEL, not reuse.** Full reasoning:
+`adr-0009-build-scope.md`'s Phase 5 note and the analysis below; the durable version lives here
+since this is the doc Open Item #2 was raised in.
 
-**Confidence:** low — blocked on the reuse-vs-parallel decision (Open Item #2), which is itself
-unresolved and out of scope for this doc to settle.
+- **Visibility is not the deciding factor, and resolving it doesn't make reuse correct.** Piece
+  1's telemetry is agent-reported (the connecting device's own OS stack), so Piece 2 does **not**
+  inherit the appliance's flat-L2 unicast blind spot that permanently constrains the shipped
+  lateral-movement detectors (`post_detection_egress`, `lan_behavior_monitor` —
+  `lateral-movement-outbreak-detection.md`). That gap being irrelevant to Piece 2 was the
+  question this item was raised to answer, and the answer is yes — but three independent,
+  non-visibility differences still rule out a shared engine:
+  1. **Trigger shape.** Piece 2 is *continuous* — it scores every new connection from every
+     agent, all the time (Piece 1's "report all new outbound connections"). The shipped
+     lateral-movement mechanism is *event-triggered* — it only activates after an existing
+     finding lands, over a bounded post-detection window (`CORRELATION_WINDOW_S = 600`,
+     `modules/anomaly_detection/post_detection.py`). "Is this new connection suspicious" and
+     "did this already-flagged device just start acting differently" are different questions,
+     independent of what either can see.
+  2. **Consumer and latency budget.** Piece 2's output feeds Fork B's Piece 3 cache
+     invalidation — a routing/enforcement decision ("does the *next* connection get redirected
+     to Suricata") that must be fast and mechanical. The lateral-movement table's output is a
+     human-facing incident on a multi-minute window with no latency requirement. One engine
+     serving both means one score semantics satisfying a real-time router and a slow alerting
+     path — genuinely non-trivial, not a config change.
+  3. **Data shape, not just data source.** The shipped detector was never built against a real
+     connection graph — it runs on a narrower proxy (DNS-intent signals `dns_exfiltration`/
+     `volume_spike`, plus `lan_probe_scan` discovery events) *because* the appliance couldn't see
+     unicast peer traffic. Piece 2, if built, would produce the actual per-connection
+     classification ADR 0009's original table envisioned but that was never shipped in any form.
+     "Reuse" would not be reusing an existing engine at equal fidelity — there is no engine at
+     that fidelity to reuse.
+- **The one thing that should genuinely be shared: enrollment-baseline data, not the scorer.**
+  "Has device X talked to Y before," typical ports/hours per device (ADR 0009's "Enrollment
+  enriches detection" factors) — if Piece 1 ships, both systems want this baseline: Piece 2 for
+  live novelty-scoring, lateral-movement detection for post-detection correlation. **One
+  baseline store, two independent consumers** — see the forward-looking hook now in
+  `lateral-movement-outbreak-detection.md`'s "Enrollment enriches detection" section.
+- **Permanent floor, unaffected by this decision either way:** `lan_behavior_monitor` covers
+  unmanaged/agentless devices (IoT, guest phones) that can never produce Piece 1 telemetry — no
+  agent, no flow report. Piece 2 can never supersede that coverage in any future world, parallel
+  or otherwise.
+- This is server-side only (hard principle, addendum §3) — the agent contributes telemetry
+  (Piece 1), never scores.
+
+**Why this stays closed even if revisited:** if Piece 1/Fork-B never ships, this is moot. If it
+does, the trigger-shape, consumer, and latency differences are architectural facts about what
+each system is *for*, not artifacts of a visibility limit that better sensors could dissolve —
+they don't go away once agent telemetry exists. The permanent-floor point above holds
+independently of both.
+
+**Confidence:** low on Piece 2's own build cost (still gated on Piece 1 and the whole Fork-B
+program) — no longer blocked on an open design question.
 
 ---
 
@@ -169,8 +206,10 @@ a foundation, the same mistake the original build-scope doc's "small selective-r
 line made for Fork B.
 
 ## Biggest unknowns (explicit)
-1. **Reuse-vs-parallel scoring engine (Piece 2 / Open Item #2)** — unresolved; changes the
-   shape of the whole server-side half of this work depending on the answer.
+1. ~~**Reuse-vs-parallel scoring engine (Piece 2 / Open Item #2)**~~ **RESOLVED 2026-09-03 —
+   PARALLEL**, with one shared data layer (enrollment-baseline data, not the scorer). See Piece
+   2 above for the full reasoning. Piece 2's own build cost is unaffected — still gated on Piece
+   1 and the whole Fork-B program.
 2. **Continuous telemetry volume at scale (Piece 1)** — no precedent in this codebase for
    flow-level streaming; unknown whether "report all new connections" is tolerable bandwidth/
    load at MSP multi-site scale vs. a single home network.
@@ -191,11 +230,12 @@ line made for Fork B.
 scopes, incl. the now-RESOLVED Open Item 1 that Piece 5 depends on),
 [adr-0009-l3-fork-b-scope.md](adr-0009-l3-fork-b-scope.md) (the transport this trigger feeds
 into, esp. Piece 1's reputation-verdict selection, and Pieces 2–3's MIRROR mechanism,
-decided 2026-07-26), ADR 0009's "Enrollment enriches detection" table (the existing lateral-movement scoring
-this may or may not extend), [community-signal-dedup.md](community-signal-dedup.md),
+decided 2026-07-26), ADR 0009's "Enrollment enriches detection" table (Piece 2 runs **parallel**
+to this, RESOLVED 2026-09-03 — see Piece 2 above), [community-signal-dedup.md](community-signal-dedup.md),
 [open-source-threat-feeds.md](open-source-threat-feeds.md) (flagged overlap, Piece 4),
-[lateral-movement-outbreak-detection.md](lateral-movement-outbreak-detection.md) (the
-post-detection correlation work this may share an engine with),
+[lateral-movement-outbreak-detection.md](lateral-movement-outbreak-detection.md) (shipped,
+separate engine from Piece 2 — **not** shared, per the 2026-09-03 resolution; shares only the
+enrollment-baseline data layer, once Piece 1 exists),
 [tls-interception-sterilization-scope.md](tls-interception-sterilization-scope.md) (Tier 2 —
 Piece H there feeds evasion-probing signals into this doc's Piece 2 scoring engine),
 [adr-0009-l3-tier3-local-triggers-scope.md](adr-0009-l3-tier3-local-triggers-scope.md) (Tier 3 —

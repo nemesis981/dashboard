@@ -213,10 +213,34 @@ Explicitly **out of scope** for a V1 Mode-2 build. Recorded here for completenes
 - **ZTNA / captive portal** ("no enrolled agent = no internet") needs a **captive portal + router
   firewall integration + a mobile agent** — none exist. Multi-phase program on its own.
 - **Venue guest network** — needs the mobile/guest app + auto-approve flow. V2.
-- **Lateral-movement scoring** — the risk-weight table (ADR 0009) is server-side and self-contained
-  (**~2–3 sessions**) *if the enrolled-device connection graph existed* — but that graph is fed by
-  Mode-2 traffic metadata, which doesn't exist until L2/L3 land. So it's genuinely downstream, not
-  a quick win. Feeds/fed-by [ADR 0008](../architecture/0008-impossible-travel-detection.md).
+- **Lateral-movement scoring — reconciled 2026-09-03, this line was stale.** The full connection-
+  graph risk-weight table this bullet describes still hasn't been built and is **not** a quick
+  win — but the reason is more specific than originally written, and a real, reduced-scope
+  substitute has since shipped **entirely outside this ADR's program**, using zero Mode-2
+  infrastructure:
+  - **Shipped, independent of Mode-2:** `post_detection_egress` + `lan_behavior_monitor`
+    (`lateral-movement-outbreak-detection.md`, 2026-09-02) — built on Suricata `eve.json`, the
+    appliance's own DNS-resolver visibility, and broadcast traffic, all of which this doc's own
+    "what already exists" section already lists as pre-existing. No config-pull, no tunnel, no
+    driver. Measured limitation: a passive appliance on a flat switched LAN sees ~0.1–0.7% true
+    peer-to-peer traffic, confirmed permanent (not fixed by Gateway Mode, which shipped and was
+    checked) absent VLAN-capable switch hardware or port mirroring — hardware questions, not a
+    Nemesis software gate. So the shipped detectors cover appliance-directed probing, DNS-visible
+    egress, broadcast-visible discovery, and self-included broad sweeps — real coverage, but
+    structurally never the unicast A→B connection graph ADR 0009's table assumes.
+  - **The full connection graph's *only* viable path is the L2(b) driver specifically, not
+    "L2/L3" generically.** An agent-side WFP/WinDivert interceptor observes a device's own
+    outbound connections from its OS stack, which sidesteps the switched-LAN blind spot the
+    passive appliance can't get past. The recommended MVP path — L2(a), DNS-enforced, no driver
+    — produces no per-connection metadata at all, so it does not move this forward regardless of
+    whether it ships. **Full detail:** `adr-0009-l3-behavioral-trigger-scope.md`'s Piece 2
+    (Open Item #2, resolved 2026-09-03: this future engine runs **parallel** to the shipped
+    lateral-movement detectors, sharing only an enrollment-baseline data layer, not the scorer).
+  - **Estimate, if pursued:** unchanged at server-side ~2–3 sessions for the scoring logic itself
+    *if* the connection graph existed — but that graph now has a named, singular prerequisite
+    (the L2(b) driver, this doc's single biggest cost/risk item, §"Bigger-unknown-than-they-look
+    flags" #1) rather than a vague "until L2/L3 land."
+  - Feeds/fed-by [ADR 0008](../architecture/0008-impossible-travel-detection.md).
 
 ---
 
