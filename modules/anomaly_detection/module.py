@@ -1343,6 +1343,32 @@ def _submit_abuseipdb_report(api_key: str, ip: str, comment: str) -> bool:
         return False
 
 
+def _ad_ip_scope():
+    """Import the shared address-scope predicate (alert_manager/ip_scope.py), bridging
+    the sys.path the way the modules package does for data_manager.
+
+    Returns None on failure, and the caller treats None as "report nothing" -- the
+    fail-closed direction. An address this module cannot classify must not be handed
+    to AbuseIPDB on the strength of a failed import.
+    """
+    try:
+        import ip_scope  # noqa: PLC0415
+        return ip_scope
+    except Exception:  # noqa: BLE001
+        try:
+            import os as _os, sys as _sys  # noqa: PLC0415
+            amgr = _os.path.join(_os.path.dirname(_os.path.dirname(
+                _os.path.dirname(_os.path.abspath(__file__)))), "alert_manager")
+            if amgr not in _sys.path:
+                _sys.path.insert(0, amgr)
+            import ip_scope  # noqa: PLC0415
+            return ip_scope
+        except Exception as exc:  # noqa: BLE001
+            log.warning("anomaly_detection: ip_scope unavailable (%s) — "
+                        "skipping AbuseIPDB report rather than guessing", exc)
+            return None
+
+
 def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -> None:
     """
     Full AbuseIPDB auto-report flow: dedup check → DNS resolve → POST each public IP.
@@ -1373,7 +1399,6 @@ def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -
 
         # Resolve domain → IPs (stdlib only, no external dependency)
         import socket as _sock
-        import ipaddress as _ipmod
         try:
             raw_addrs = {ai[4][0] for ai in _sock.getaddrinfo(domain, None,
                                                                type=_sock.SOCK_STREAM)}
@@ -1381,15 +1406,16 @@ def _auto_report_abuseipdb(inc_id: int, domain: str, itype: str, score: float) -
             log.warning("anomaly_detection: DNS resolution failed for %s — skipping AbuseIPDB", domain)
             return
 
-        public_ips = []
-        for addr in raw_addrs:
-            try:
-                obj = _ipmod.ip_address(addr)
-                if not (obj.is_private or obj.is_loopback or obj.is_link_local
-                        or obj.is_reserved or obj.is_multicast):
-                    public_ips.append(str(addr))
-            except ValueError:
-                pass
+        # ⛔ Shared predicate, NOT a local copy (2026-09-03). This filter excluded
+        # private/loopback/link-local/reserved/multicast but NOT CGNAT, so a domain
+        # resolving into 100.64.0.0/10 -- the tailnet range -- was reportable to
+        # AbuseIPDB. Note the fix is NOT a bare `is_global`: stdlib reports
+        # is_global=True for multicast, which would have re-opened the exclusion this
+        # site already had. ip_scope.is_public_ip is globally-routable UNICAST.
+        # Fail closed: if the shared predicate cannot be imported, report nothing.
+        _scope = _ad_ip_scope()
+        public_ips = [str(a) for a in raw_addrs
+                      if _scope is not None and _scope.is_public_ip(a)]
 
         if not public_ips:
             log.info("anomaly_detection: %s resolves to no public IPs — skipping AbuseIPDB", domain)

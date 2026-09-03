@@ -10,6 +10,7 @@ from urllib.error import URLError, HTTPError
 _HERE = os.path.dirname(os.path.abspath(__file__))
 import nemesis_paths
 import data_manager
+import ip_scope
 
 log = logging.getLogger("nemesis.ip_enrichment")
 DB_PATH = nemesis_paths.db_path(os.path.join(_HERE, "alerts.db"))
@@ -220,11 +221,7 @@ def _own_public_addresses():
 
     out = set()
     for addr in _local_addresses():
-        try:
-            obj = ipaddress.ip_address(addr)
-        except ValueError:
-            continue
-        if not (obj.is_private or obj.is_loopback or obj.is_link_local):
+        if ip_scope.is_public_ip(addr):
             out.add(addr)
     return frozenset(out)
 
@@ -235,8 +232,13 @@ def enrich_ip(ip_address):
     except ValueError:
         return _empty_result(ip_address, reason=f"{ip_address} - invalid IP address")
 
-    if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local:
-        result = _empty_result(ip_address, reason=f"{ip_address} - private/local address")
+    # ⛔ NOT `is_private` — see alert_manager/ip_scope.py. This gate read
+    # `is_private or is_loopback or is_link_local` until 2026-09-03 and called itself
+    # public-only; Python reports is_private=False for CGNAT 100.64.0.0/10, so every
+    # TAILNET peer address passed straight through to AbuseIPDB and ipinfo.
+    if not ip_scope.is_public_ip(ip_address):
+        result = _empty_result(
+            ip_address, reason=f"{ip_address} - not a globally-routable address")
         return result
 
     # ── This appliance's OWN public address is never sent out (2026-08-23) ────
