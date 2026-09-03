@@ -3,6 +3,37 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [MEDIUM] `_guard_never_block` is exact-string match, not CIDR containment (filed 2026-09-03)
+Found during review of a design draft for a future firewall-rule-schema stub (Window 1 →
+Window 2, `docs/roadmap/firewall-rule-schema-and-precedence.md` §5). Verified independently
+against live code, not taken on the draft's word.
+
+`_guard_never_block` (`alert_manager/firewall.py:160-170`) is the single guard preventing
+`block_ip`/`deny_ip` from cutting the host off from its own network — it tests
+`if ip in never_block_set()`, plain Python set membership over exact address strings
+(`never_block_set()`, `:148-157`: loopback + this host's own addresses + default gateways +
+`NEMESIS_NEVER_BLOCK` env entries).
+
+**Not exploitable today, confirmed by reading both call sites:** `ufw_insert_top` (`:174-185`)
+and `ufw_deny_append` (`:239-251`) both gate their `ip` argument through `_valid_ip()`
+(`:49-54`), which calls `ipaddress.ip_address(ip)` — this raises on a CIDR/network string, so
+no value wider than a single address can reach `_guard_never_block` through either existing
+caller. This is a hardening item for a gap in the guard's own generality, not a live bug.
+
+**Why it's tracked now rather than deferred to the rule-engine build:** the guard itself, not
+just today's callers, is what has to be trusted the moment ANY future code path accepts a
+CIDR and routes it through this chokepoint (the firewall-rule-schema stub's proposed `source`/
+`scope_value` fields are exactly such a path) — `ip in never_block_set()` would silently pass
+a CIDR containing the host's own address or gateway straight through, defeating the guard's
+entire purpose. Fixing the guard once, generically, is cheaper and safer than relying on every
+future caller to remember to pre-check containment itself.
+
+**Fix shape (not yet built):** extend `_guard_never_block` to accept either a single address or
+a network, and test containment (`ipaddress.ip_network(candidate).overlaps(...)` or equivalent)
+against each entry in `never_block_set()`, not just exact-string membership. Test-first: assert
+a CIDR containing a never-block address is refused, and that today's existing single-IP
+behavior is unchanged (regression coverage for the current callers).
+
 ### [HIGH] install.sh's generated nginx vhost is missing two things the live one has (filed 2026-08-30)
 Found while removing Basic Auth from the installer. A **fresh install today produces a materially
 different — and weaker — nginx config than this box runs**, in two ways that are invisible until
