@@ -18,7 +18,9 @@
 - **Depends on:** [0001-database-and-module-architecture](0001-database-and-module-architecture.md)
 - **Related:** [0004-scan-task-orchestration](0004-scan-task-orchestration.md)
   (same convergence pattern — a foundational primitive that many features ride on);
-  roadmap `/firewall-rules`
+  [firewall-rule-schema-and-precedence.md](../roadmap/firewall-rule-schema-and-precedence.md)
+  (schema/precedence reservation for this engine, capture-only, 2026-09-03 — corrected from a
+  dead `/firewall-rules` pointer, which named a file that never existed)
 
 > Paths/IPs are sanitized for the public repo. `HOST_IP` = the Nemesis host's LAN address;
 > `tunX` = the VPN tunnel interface; `TUN_IP` = the tunnel's local address; `TUN_DNS` = the
@@ -134,9 +136,12 @@ not separate subsystems; they are **POLICIES that ride on the engine**. The engi
 **authoritative home for network-access policy**, the same convergence pattern ADR 0004
 established for the scheduler (one authoritative dispatcher many features ride on).
 
-This is **already on the roadmap** (`/firewall-rules`); this ADR **promotes it from a
-feature to a load-bearing primitive** — the DNS fix and device access control are *expressed
-on it*, not built beside it.
+This engine does not exist yet — **corrected 2026-09-03**, the prior text here pointed at a
+roadmap file (`/firewall-rules`) that was never created. The schema/precedence shape it will
+need, if built, is reserved (capture-only, not a build) in
+[firewall-rule-schema-and-precedence.md](../roadmap/firewall-rule-schema-and-precedence.md).
+This ADR **promotes it from a feature to a load-bearing primitive** — the DNS fix and device
+access control are *expressed on it*, not built beside it.
 
 **HIGH-STAKES — non-negotiable engine properties:**
 - **Default-deny** posture.

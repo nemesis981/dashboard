@@ -160,6 +160,10 @@ outcome (a guest is never accidentally trusted) but not the contained-and-monito
 this section's VENUE design assumes. **Building VENUE therefore depends on ADR 0005's posture
 mapping existing, not just on ADR 0009's inspection-proxy verdict loop (§7) — the `firewall.py`
 chokepoint below is what that dependency would need to provide, once built:**
+**If/when this mapping is designed, it should adopt the shared rule schema reserved in
+[firewall-rule-schema-and-precedence.md](firewall-rule-schema-and-precedence.md) (2026-09-03,
+capture-only) rather than a bespoke posture table — that stub exists specifically because this
+gap and user-created custom rules turned out to need the same primitive.**
 
 The `firewall.py` chokepoint (ADR 0005, once its posture-mapping is built) would map
 `guest_monitored` → the contained/inspected segment; `approved` → the trusted segment.
@@ -223,7 +227,10 @@ into a guest/monitored tier whose safety *is* the route-and-inspect containment:
    actual contained network segment — `firewall.py` has no such mapping, and ADR 0005 itself
    states the firewall-rules engine is undesigned. Today's only enforcement is a heartbeat gate
    that cuts an unapproved device off entirely, which is safe (never accidentally trusted) but
-   is not the "contained and monitored" tier the VENUE warning describes.
+   is not the "contained and monitored" tier the VENUE warning describes. Schema/precedence
+   shape reserved (not designed) in
+   [firewall-rule-schema-and-precedence.md](firewall-rule-schema-and-precedence.md) — whoever
+   builds this mapping should start there rather than a bespoke table.
 
 VENUE-auto therefore **cannot ship until both exist.** Admitting guests without either the
 inspection path or the posture mapping would be admitting untrusted strangers with no real
