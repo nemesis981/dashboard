@@ -583,12 +583,68 @@ def _read_proc_arp(path="/proc/net/arp"):
         return []
 
 
+def _collapse_arp_observations(observations):
+    """Group observations by IP, collapsing RUNS of identical consecutive MACs.
+
+    Returns ``{ip: [representative, ...]}`` in arrival order, each representative
+    carrying ``_raw_count`` (how many raw observations it stands for) and
+    ``_last_source`` (the source of the most recent one in its run).
+
+    ⛔ RUNS, NOT "THE LAST OBSERVATION PER IP". The obvious de-duplication -- keep
+    one observation per IP -- silently destroys flap detection: within one cycle
+    A -> B -> A collapses to "A", which equals the stored prior, so `classify()`
+    returns None and a binding two hosts are actively contesting reports as quiet.
+    BINDING_FLAP is a CRITICAL signal; that would trade a real detection for a
+    write count. Collapsing only CONSECUTIVE IDENTICAL macs keeps every transition
+    while still reducing a steady-state cycle to one entry per address.
+
+    The representative is the FIRST of its run deliberately: that is the
+    observation that caused the transition, so its confidence/gratuitous flags are
+    the ones a finding should record. `_last_source` is tracked separately because
+    the binding row's `last_source` means "most recently seen via", which is the
+    LAST of the run -- the two are different questions and were the same value
+    only by accident when every observation was written individually.
+    """
+    out = {}
+    for o in observations or ():
+        if not isinstance(o, dict):
+            continue
+        ip, mac = o.get("ip"), o.get("mac")
+        if not ip or not mac:
+            continue
+        run = out.setdefault(ip, [])
+        if run and run[-1]["mac"] == mac:
+            run[-1]["_raw_count"] += 1
+            run[-1]["_last_source"] = o.get("source")
+        else:
+            rep = dict(o)
+            rep["_raw_count"] = 1
+            rep["_last_source"] = o.get("source")
+            run.append(rep)
+    return out
+
+
 def _arp_cycle(conn, observations, now):
     """Apply ARP observations to the binding table and raise findings.
 
     Returns the number of findings written. FAILS CLOSED on a broken detector,
     for the same reason the DHCP pass does: an ARP detector on a healthy LAN is
     silent, so a broken one is indistinguishable from a clean network.
+
+    ⚠ ONE WRITE PER ADDRESS PER CYCLE, NOT ONE PER OBSERVATION (2026-09-03).
+    This loop used to issue a SELECT and an UPDATE for every raw observation.
+    Measured live: ~1.24M UPDATEs in 24h against a 33-row table -- the largest
+    single writer in the system, each one also inserting a `dm_operation_log` row,
+    for a table whose content changes almost never. Suricata's `arp` eve logger
+    (enabled here, `no` by default) outnumbers the /proc cache read ~19:1.
+
+    The observations are collapsed by `_collapse_arp_observations` first, and the
+    evolving prior is then carried IN MEMORY across a cycle's transitions rather
+    than being re-read from the row it just wrote. The persisted end state is
+    identical -- change_count progression, previous_mac, last_change_ts,
+    observed_count totals and the per-transition findings all match what the
+    per-observation loop produced; only the number of statements differs. The
+    intermediate row states were never observable: the whole cycle commits once.
     """
     ok, detail = arp_watch.selftest()
     if not ok:
@@ -598,35 +654,55 @@ def _arp_cycle(conn, observations, now):
     gateways = _gateways()
     written = 0
 
-    for obs in observations:
+    for ip, run in _collapse_arp_observations(observations).items():
         row = conn.execute(
             "SELECT mac, change_count, last_change_ts FROM lan_integrity_arp_bindings "
-            "WHERE ip=?", (obs["ip"],)).fetchone()
-        prior = None if row is None else {
+            "WHERE ip=?", (ip,)).fetchone()
+        existed = row is not None
+        state = None if row is None else {
             "mac": row[0], "change_count": row[1], "last_change_ts": row[2]}
 
-        verdict = arp_watch.classify(obs, prior, gateways=gateways, now=now)
+        total_raw = sum(rep["_raw_count"] for rep in run)
+        last_source = run[-1].get("_last_source")
+        previous_mac = None
+        changed = False
 
-        if prior is None:
+        for rep in run:
+            verdict = arp_watch.classify(rep, state, gateways=gateways, now=now)
+            if state is None:
+                # First sighting: learn, never alert. Mirrors the INSERT branch's
+                # starting values (change_count 0, no last_change_ts) so a later
+                # transition in this same cycle sees exactly what it would have
+                # re-read from the freshly inserted row.
+                state = {"mac": rep["mac"], "change_count": 0, "last_change_ts": None}
+            elif verdict is not None:
+                previous_mac = state["mac"]
+                state = {"mac": rep["mac"],
+                         "change_count": verdict["change_count"],
+                         "last_change_ts": now}
+                changed = True
+            if verdict is not None and _write_finding(conn, verdict, now):
+                written += 1
+
+        if not existed:
             conn.execute(
-                "INSERT INTO lan_integrity_arp_bindings(ip, mac, first_seen, last_seen, "
-                "observed_count, change_count, last_source) VALUES(?,?,?,?,1,0,?)",
-                (obs["ip"], obs["mac"], now, now, obs.get("source")))
-        elif verdict is None:
+                "INSERT INTO lan_integrity_arp_bindings(ip, mac, previous_mac, "
+                "first_seen, last_seen, observed_count, change_count, last_change_ts, "
+                "last_source) VALUES(?,?,?,?,?,?,?,?,?)",
+                (ip, state["mac"], previous_mac, now, now, total_raw,
+                 state["change_count"], state["last_change_ts"], last_source))
+        elif not changed:
             conn.execute(
                 "UPDATE lan_integrity_arp_bindings SET last_seen=?, "
-                "observed_count=observed_count+1, last_source=? WHERE ip=?",
-                (now, obs.get("source"), obs["ip"]))
+                "observed_count=observed_count+?, last_source=? WHERE ip=?",
+                (now, total_raw, last_source, ip))
         else:
             conn.execute(
                 "UPDATE lan_integrity_arp_bindings SET mac=?, previous_mac=?, last_seen=?, "
-                "observed_count=observed_count+1, change_count=?, last_change_ts=?, "
+                "observed_count=observed_count+?, change_count=?, last_change_ts=?, "
                 "last_source=? WHERE ip=?",
-                (obs["mac"], prior["mac"], now, verdict["change_count"], now,
-                 obs.get("source"), obs["ip"]))
-
-        if verdict is not None and _write_finding(conn, verdict, now):
-            written += 1
+                (state["mac"], previous_mac, now, total_raw, state["change_count"],
+                 state["last_change_ts"], last_source, ip))
 
     # Multi-claim is evaluated ACROSS bindings, not per observation -- a MAC
     # holding many addresses is invisible from any single event.
