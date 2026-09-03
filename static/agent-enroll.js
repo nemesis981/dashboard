@@ -1,4 +1,17 @@
 /* Settings -> Devices: approve/reject pending agent enrollments. */
+
+/* recipient_email is admin-typed free text echoed back by the server and inserted
+   into innerHTML (genWindowsInstaller's email-outcome banner) -- unlike zip_url/
+   exe_url/transport_warning/preauth_warning in that same response, which are all
+   server-authored, not user input. _valid_email's server-side check only enforces
+   an @-and-dot SHAPE, not an HTML-safe character set, so escape before display
+   rather than rely on that validation to double as sanitization. */
+function nemesisEscapeHtml(s) {
+  var d = document.createElement('div');
+  d.textContent = String(s == null ? '' : s);
+  return d.innerHTML;
+}
+
 function agentApprove(id) {
   fetch('/api/agent/' + encodeURIComponent(id) + '/approve', { method: 'POST' })
     .then(function () { location.reload(); })
@@ -97,6 +110,12 @@ function genWindowsInstaller() {
   var auto = !!(document.getElementById('installerAutoApprove') || {}).checked;
   var poll = ((document.getElementById('installerPoll') || {}).value || '').trim();
   var subnet = ((document.getElementById('installerSubnet') || {}).value || '').trim();
+  /* Installer email delivery (roadmap: installer-email-delivery.md) -- OPTIONAL.
+     Blank recipient = the pre-existing "just give me the link" behaviour, unchanged.
+     The server re-validates everything here; these fields are convenience only. */
+  var recipient = ((document.getElementById('installerRecipient') || {}).value || '').trim();
+  var supportContact = ((document.getElementById('installerSupportContact') || {}).value || '').trim();
+  var customMessage = ((document.getElementById('installerCustomMessage') || {}).value || '').trim();
   var out = document.getElementById('installerResult');
   /* Typed gate on auto-approve only (ADR 0012). The value is sent AS TYPED and
      validated server-side -- this prompt is the usability half. Ticking a box is
@@ -119,9 +138,20 @@ function genWindowsInstaller() {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ device_name_hint: hint, preauth_key: pre, auto_approve: auto,
                            poll_interval: poll, source_subnet: subnet,
+                           recipient_email: recipient, support_contact: supportContact,
+                           custom_message: customMessage,
                            confirm: confirmWord })
   })
-    .then(function (r) { return r.json(); })
+    .then(function (r) {
+      /* fetch does not reject on 4xx/5xx -- the email_not_configured / bad-address
+         400s from the server must surface here, not read as a generic failure. */
+      if (!r.ok) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          throw new Error((j && (j.detail || j.error)) || ('HTTP ' + r.status));
+        });
+      }
+      return r.json();
+    })
     .then(function (d) {
       if (!d || !d.ok) { throw new Error((d && d.error) || 'failed'); }
       _nemesisZipUrl = d.zip_url || '';
@@ -143,8 +173,26 @@ function genWindowsInstaller() {
           'border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:0.82em">' +
           '⚠ ' + d.transport_warning + '</div>';
       }
+      /* Email outcome, when a recipient was given. Never silently "succeeds" --
+         installer-email-delivery.md's bounce/failure-handling requirement -- and
+         the link below is always shown too, so a failed send doesn't strand the
+         admin without a way to share the install. */
+      var emailNote = '';
+      if (d.recipient_email) {
+        if (d.email_sent) {
+          emailNote =
+            '<div style="background:#00ff8822;border:1px solid #00ff88;color:#9cffcf;' +
+            'border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:0.82em">' +
+            '✓ Emailed to ' + nemesisEscapeHtml(d.recipient_email) + '.</div>';
+        } else {
+          emailNote =
+            '<div style="background:#ff444422;border:1px solid #ff4444;color:#ff9999;' +
+            'border-radius:6px;padding:6px 10px;margin-bottom:6px;font-size:0.82em">' +
+            '⚠ ' + nemesisEscapeHtml(d.email_error || 'Could not send the email.') + '</div>';
+        }
+      }
       out.style.color = '#ddd';
-      out.innerHTML = transportNote +
+      out.innerHTML = transportNote + emailNote +
         '<div style="color:#aaa;font-size:0.82em;margin-bottom:4px">Share this link with your user ' +
         '(self-contained Windows installer; expires ' + when + ').' + keyNote + '</div>' +
         '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
@@ -157,8 +205,11 @@ function genWindowsInstaller() {
         '<div style="color:#666;font-size:0.78em;margin-top:6px">Advanced: ' +
         '<a href="' + d.exe_url + '" style="color:#888">generic .exe only (no baked config)</a></div>';
     })
-    .catch(function () {
-      if (out) { out.style.color = '#ff6666'; out.textContent = 'Could not generate installer — try again.'; }
+    .catch(function (e) {
+      if (out) {
+        out.style.color = '#ff6666';
+        out.textContent = (e && e.message) ? e.message : 'Could not generate installer — try again.';
+      }
     });
 }
 

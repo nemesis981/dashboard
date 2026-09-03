@@ -1520,7 +1520,14 @@ def init_enrollment_tokens_table():
                 -- Optional WHERE-FROM bound on auto-approval (ADR 0012).
                 -- NULL = unbounded. See the guarded ALTER below for why NULL is
                 -- the correct default rather than a restrictive one.
-                source_subnet    TEXT
+                source_subnet    TEXT,
+                -- installer-email-delivery.md: NULL on every row this feature never
+                -- touched (the pre-existing "just copy the link" path). See the guarded
+                -- ALTER below for the full reasoning.
+                recipient_email  TEXT,
+                support_contact  TEXT,
+                custom_message   TEXT,
+                delivered_at     REAL
             )
         """)
         c.execute("CREATE INDEX IF NOT EXISTS idx_enrollment_tokens_token "
@@ -1610,6 +1617,23 @@ def init_enrollment_tokens_table():
         # nobody agreed to narrow, and could silently stop working installers.
         if "source_subnet" not in _cols:
             c.execute("ALTER TABLE enrollment_tokens ADD COLUMN source_subnet TEXT")
+
+        # Migration (ADR 0001 guarded ALTER): installer-email-delivery.md. NULL on
+        # every existing row -- NULL means "this token was never sent by email", the
+        # honest value for every token minted before this feature existed and for
+        # every "just copy the link" generate call after it. recipient_email is the
+        # audit-trail tie a delivered token was sent to; delivered_at NULL means
+        # either never attempted or the send failed (see dashboard.py's
+        # api_agent_installer_generate -- failure is surfaced to the admin, not
+        # silently marked delivered).
+        if "recipient_email" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN recipient_email TEXT")
+        if "support_contact" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN support_contact TEXT")
+        if "custom_message" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN custom_message TEXT")
+        if "delivered_at" not in _cols:
+            c.execute("ALTER TABLE enrollment_tokens ADD COLUMN delivered_at REAL")
 
         # ── enrollment_auto_audit (ADR 0012 FLEET-auto, §1) ──────────────────
         #

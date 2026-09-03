@@ -5172,6 +5172,35 @@ def _scrub_spent_preauth_keys(conn):
     return cur.rowcount or 0
 
 
+def _valid_email(addr):
+    """Loose email-shape check -- same bar as install.sh's SMTP-setup prompt
+    (`[^@]+@[^@]+\\.[^@]+`), good enough to catch a typo, not full RFC 5322
+    validation. Pure, no I/O -- used to gate installer-email-delivery input."""
+    return bool(re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", addr or ""))
+
+
+def _build_installer_email_body(hint, support_contact, custom_message, zip_url, expires_at):
+    """Pure: compose the personalized installer-delivery email body. No DB, no
+    Flask -- testable by direct extraction, same technique as _classify_transport.
+    `hint` is already truncated/defaulted by the caller (installer generate route)."""
+    when = datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M")
+    lines = [
+        "Hi,",
+        "",
+        f"You've been sent a Nemesis security installer for \"{hint}\".",
+        "",
+        "Download and run it here (no technical setup needed):",
+        zip_url,
+        "",
+        f"This link expires {when} and can only be used once.",
+    ]
+    if custom_message:
+        lines += ["", custom_message]
+    if support_contact:
+        lines += ["", f"Questions? Contact {support_contact}."]
+    return "\n".join(lines)
+
+
 def _valid_installer_token(token):
     """Return the token row if it exists, is not revoked, not expired, and not yet used.
     A spent (used), revoked, or expired token HARD-FAILS the download — no fallback
@@ -5484,6 +5513,28 @@ def api_agent_installer_generate():
     token/pre-auth-key are never logged."""
     data = request.get_json(silent=True) or request.form
     hint = (data.get("device_name_hint") or "Windows Device").strip()[:60] or "Windows Device"
+    # Installer email delivery (roadmap: installer-email-delivery.md) — OPTIONAL. A blank
+    # recipient_email means "just give me the link", the pre-existing behaviour, unchanged.
+    #
+    # Checked FIRST, before any Tailscale/remote-cap work below, and fails CLOSED with a
+    # clear 400 rather than minting a token that can never be delivered: SMTP is optional
+    # at install time (install.sh "Enter to skip email setup"), so an admin filling in this
+    # field on an install that never configured it must be told plainly, not left to wonder
+    # why nothing arrived (the no-SMTP-configured precondition, distinct from a per-send
+    # delivery failure -- see installer-email-delivery.md's "Open questions").
+    recipient_email = (data.get("recipient_email") or "").strip()[:254]
+    support_contact = (data.get("support_contact") or "").strip()[:200]
+    custom_message = (data.get("custom_message") or "").strip()[:2000]
+    if recipient_email:
+        if not _valid_email(recipient_email):
+            return jsonify({"error": "recipient_email is not a valid email address"}), 400
+        if not (os.environ.get("WATCHDOG_EMAIL") and os.environ.get("WATCHDOG_PASSWORD")):
+            return jsonify({
+                "error": "email_not_configured",
+                "detail": ("Email is not set up on this install (WATCHDOG_EMAIL/"
+                           "WATCHDOG_PASSWORD are unset) -- copy the link instead, or "
+                           "configure SMTP in nemesis.env."),
+            }), 400
     # Tailscale pre-auth key — HYBRID (ADR 0011): prefer programmatic minting via the
     # Tailscale OAuth API; on failure fall back to an admin-pasted key; else no baked key
     # (the installer hand-joins via _ensure_tailscale). NEVER hard-fail generate. Rule 8:
@@ -5624,10 +5675,12 @@ def api_agent_installer_generate():
             "INSERT INTO enrollment_tokens "
             "(token, created_by, created_at, expires_at, max_uses, uses, auto_approve, "
             " device_name_hint, revoked, preauth_key, poll_interval, preauth_key_id, "
-            " remote_enabled, source_subnet) "
-            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?,?,?)",
+            " remote_enabled, source_subnet, recipient_email, support_contact, "
+            " custom_message) "
+            "VALUES (?,?,?,?,1,0,?,?,0,?,?,?,?,?,?,?,?)",
             (token, creator, now, expires, auto_approve, hint, preauth_key or None,
-             poll_interval, preauth_key_id or None, remote_enabled, source_subnet))
+             poll_interval, preauth_key_id or None, remote_enabled, source_subnet,
+             recipient_email or None, support_contact or None, custom_message or None))
         # Bound how long any OTHER key lingers in plaintext. A token that is spent,
         # revoked, or expired can never legitimately serve a zip again (see
         # `_valid_installer_token`'s condition, which this is the exact complement of),
@@ -5673,6 +5726,39 @@ def api_agent_installer_generate():
             "make this certain.")
     if transport_warning:
         log.warning("installer link transport: %s (%s)", _t_verdict, _t_detail)
+    zip_url = f"{base}/install/windows/{token}/zip"
+    exe_url = f"{base}/install/windows/{token}/exe"
+    # Send the personalized email, if requested. NOT routed through notify.py's
+    # bundling/digest layer -- this is an admin-initiated transactional send tied to a
+    # one-time token, not a monitoring alert, so notify.py's CRITICAL/LOW-bundling
+    # questions don't apply here. Failure is surfaced to the admin, never swallowed
+    # (installer-email-delivery.md "Bounce/failure handling") -- the token and link are
+    # still returned either way, so a failed send doesn't strand the admin without a
+    # way to share the install.
+    email_sent = False
+    email_error = ""
+    if recipient_email:
+        subject = f"Your Nemesis security installer — {hint}"
+        body = _build_installer_email_body(hint, support_contact, custom_message,
+                                            zip_url, expires)
+        email_sent = email_utils.send_email(subject, body, to=recipient_email)
+        if email_sent:
+            try:
+                conn = _dm_conn()   # §9 batch 4 (api_agent_installer_generate)
+                conn.execute("UPDATE enrollment_tokens SET delivered_at=? WHERE token=?",
+                             (time.time(), token))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                # The email went out; only the audit-trail write failed. Don't turn
+                # that into a false "email_sent: false" -- the admin's recipient did
+                # get it. Log for the record, keep the outcome true.
+                log.error("installer email: sent but delivered_at write failed: %s", e)
+        else:
+            email_error = ("Could not send the email — check SMTP settings in "
+                           "nemesis.env. The link below still works.")
+        # Rule 8: never log recipient_email or custom_message (PII) or the token itself.
+        _audit(action="installer_email_send", rule_id=token[:8])
     return jsonify({
         "ok": True,
         "token": token,
@@ -5687,8 +5773,11 @@ def api_agent_installer_generate():
         "preauth_key_baked": bool(preauth_key) or preauth_source == "api_at_download",
         "preauth_source": preauth_source,       # api_at_download | pasted | none
         "preauth_warning": preauth_warning,     # non-empty => show the user a caution note
-        "zip_url": f"{base}/install/windows/{token}/zip",   # primary: frozen exe + baked conf
-        "exe_url": f"{base}/install/windows/{token}/exe",   # advanced: generic exe, no baked conf
+        "zip_url": zip_url,   # primary: frozen exe + baked conf
+        "exe_url": exe_url,   # advanced: generic exe, no baked conf
+        "email_sent": email_sent,           # only meaningful when recipient_email was sent
+        "email_error": email_error,         # non-empty => show the admin why it failed
+        "recipient_email": recipient_email,  # echoed back for the success/failure message
     })
 
 
@@ -6969,6 +7058,19 @@ def _render_agent_devices_html() -> str:
     except Exception:
         return ('<div class="card" id="section-devices-enroll"><h2>&#128421; Devices</h2>'
                 '<p style="color:#888">No device data available.</p></div>')
+    # installer-email-delivery.md's no-SMTP-configured precondition: a per-install
+    # true/false check, made ONCE at render time -- not per-send. SMTP setup is
+    # optional at install time (install.sh "Enter to skip email setup"), so this
+    # renders disabled with an explanation rather than letting every send fail one
+    # at a time with the same generic error (see the route's own server-side gate,
+    # which is the actual enforcement -- this is only the render-time UX half).
+    smtp_configured = bool(os.environ.get("WATCHDOG_EMAIL") and os.environ.get("WATCHDOG_PASSWORD"))
+    _email_disabled_attr = "" if smtp_configured else " disabled"
+    _email_note = (
+        '<div style="color:#ffcc00;font-size:0.78em;margin:2px 0 0 20px">&#9888; Email '
+        'delivery is not set up on this install (WATCHDOG_EMAIL/WATCHDOG_PASSWORD are '
+        'unset in nemesis.env) &mdash; copy the link instead, below.</div>'
+        if not smtp_configured else "")
     # ── EXHAUSTIVE partition, not a set of independent allowlists ──
     #
     # This grouping has silently swallowed devices three times: 'revoked' first
@@ -7050,6 +7152,25 @@ def _render_agent_devices_html() -> str:
          'recommended with auto-approve: only auto-approve devices connecting from '
          'this network. Blank = anywhere. Checked against the address Nemesis '
          'observes, not one the device claims.</div>'
+         '</div>'
+         '<div style="margin:8px 0 8px;padding-top:8px;border-top:1px solid #222">'
+         '<label style="color:#ddd;font-size:0.82em">Email this installer to someone, '
+         'instead of copying the link (optional):</label>'
+         + _email_note +
+         '<br>'
+         f'<input id="installerRecipient" type="email" maxlength="254"{_email_disabled_attr} '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:220px;margin-top:4px" '
+         'placeholder="Recipient email"> '
+         f'<input id="installerSupportContact" type="text" maxlength="200"{_email_disabled_attr} '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:220px;margin-left:6px" '
+         'placeholder="Support contact (optional)">'
+         f'<textarea id="installerCustomMessage" maxlength="2000"{_email_disabled_attr} '
+         'style="background:#11111f;border:1px solid #333;color:#ddd;border-radius:6px;'
+         'padding:5px 8px;font-size:0.85em;width:460px;height:44px;display:block;'
+         'margin-top:6px;resize:vertical" '
+         'placeholder="Custom message to include in the email (optional)"></textarea>'
          '</div>'
          '<button onclick="genWindowsInstaller()" style="background:#00d4ff22;color:#00d4ff;'
          'border:1px solid #00d4ff;border-radius:6px;padding:5px 14px;cursor:pointer">'
