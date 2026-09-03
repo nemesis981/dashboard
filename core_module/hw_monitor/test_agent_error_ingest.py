@@ -119,6 +119,34 @@ def main():
             raised = True
         check("no-raise on %.24r" % (bad,), raised, False)
 
+    # ── Data Manager namespace grant — THE TRAP EVERY CHECK ABOVE IS BLIND TO ──
+    #
+    # Everything above builds `agent_error_reports` on a PLAIN sqlite3 connection,
+    # so none of it passes through the Data Manager's write guard. A missing grant
+    # is therefore invisible to this entire suite and surfaces only in production,
+    # as a `WOULD DENY (warn-only)` log line with the write silently not happening
+    # — and once hw_monitor is flipped to MODE_ENFORCE, as the ingest silently
+    # dropping every agent-reported error. The registry's own notes ask for exactly
+    # this treatment for each table added to it; the behavioural tests still cannot
+    # see that file.
+    #
+    # Asserted DIRECTLY against allowed(), with controls proving the grant is an
+    # exact-match rather than a prefix, and that a read-only consumer gets nothing.
+    print("Data Manager namespace grant (invisible to the plain-sqlite3 checks above)")
+    import data_manager as _dm                                # noqa: PLC0415
+    check("hw_monitor may WRITE agent_error_reports",
+          _dm.allowed("hw_monitor", "agent_error_reports"), True)
+    check("CONTROL sibling grant still intact (agent_devices)",
+          _dm.allowed("hw_monitor", "agent_devices"), True)
+    check("CONTROL exact-match, not a truncated prefix",
+          _dm.allowed("hw_monitor", "agent_error_report"), False)
+    check("CONTROL exact-match, not a startswith extension",
+          _dm.allowed("hw_monitor", "agent_error_reports_evil"), False)
+    check("CONTROL tickets only READS it (ADR 0001 read-any), so no write grant",
+          _dm.allowed("tickets", "agent_error_reports"), False)
+    check("CONTROL dashboard only READS it too, so no write grant",
+          _dm.allowed("dashboard", "agent_error_reports"), False)
+
     conn.close()
     os.unlink(db)
     passed = sum(1 for _, ok in _results if ok)

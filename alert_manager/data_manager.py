@@ -393,6 +393,31 @@ NAMESPACES = {
             # against allowed() in test_fleet_auto_audit.py, with a control, and
             # mutation-verified.
             "enrollment_auto_audit",
+            # `agent_error_reports` ADDED 2026-09-03. A DRIFT miss of the same
+            # shape as `scan_tasks` below, not a transcription miss: this list was
+            # derived 2026-07-28 (c10a9d3) and was correct then; the table did not
+            # exist until 2026-08-20 (f812583, agent self-reported error ingest,
+            # stages c/d), and nothing re-ran the derivation when it arrived.
+            #
+            # GRANTED rather than split into its own namespace, which is the
+            # opposite call from `mem_appliance` above — and the difference is
+            # ownership, not convenience. hw_monitor owns the DDL
+            # (hw_monitor.py:170) AND is the only writer (hw_monitor.py:1821).
+            # dashboard.py:7050 and modules/tickets/module.py:512 only SELECT from
+            # it, which ADR 0001 read-any already permits without a grant. So this
+            # entry states a fact about ownership; it does not invent one. A column
+            # grant would not be narrower — the ingest INSERTs whole rows.
+            #
+            # ⚠ SAME TRAP AS THE NOTES ABOVE, AND IT WAS LIVE. Every check in
+            # test_agent_error_ingest.py builds this table on a plain sqlite3
+            # connection, so the whole suite passed while the real write path was
+            # emitting `WOULD DENY (warn-only)` on every boot of both dashboard and
+            # hw-monitor. Warn mode is the only reason agent-error ingest still
+            # worked; under MODE_ENFORCE it would have silently dropped every
+            # agent-reported error — a detector going quiet, which reads as good
+            # news. Now asserted directly against allowed(), with controls, in
+            # test_agent_error_ingest.py, and mutation-verified.
+            "agent_error_reports",
             # `scan_tasks` ADDED 2026-08-05. Not a transcription miss like
             # `fan_status` above — a DRIFT miss, which is a different failure and
             # worth recording as such. This list was derived 2026-07-28 (c10a9d3)
