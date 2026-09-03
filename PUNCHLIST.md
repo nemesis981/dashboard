@@ -3,6 +3,30 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [LOW] `list_listening_ports` READ_OP on `nemesis_fwd` — root-level DNS-process attribution (filed 2026-09-03)
+Window 1's own deferral, routed here per the operator's call. Full reasoning already recorded
+inline at `alert_manager/port_risk.py:70-78` (the `ROLE_DNS_RESOLVER` docstring) — not
+duplicated in full here, just tracked so it isn't lost.
+
+**The gap:** `8fe95f2`'s device-scoped DNS-port suppression (port 53) means "this device is
+expected to serve DNS," not "the process actually answering on 53 is genuinely pihole-FTL."
+Measured 2026-09-03: 0 of 12 privileged (<1024) ports are attributable at the port-exposure
+collector's own (non-root) privilege, vs. 48/59 unprivileged — structural, not a bug, since a
+non-root process cannot read another user's socket→pid link. A malicious process that
+preempted or replaced the real resolver **on the appliance itself** would be suppressed by the
+same role-based exemption that legitimately covers pihole-FTL.
+
+**Accepted tradeoff, not an oversight:** the alternative (alerting on the operator's own DNS
+appliance by default) is worse, and every other device on the network is still covered
+normally by the unprivileged-attribution path. Recorded as an accepted limitation per the
+"limitations are a last resort" discipline — the real fix (root attribution) is scoped and
+deferred, not abandoned.
+
+**Fix shape, when picked up:** a `list_listening_ports` READ_OP on `nemesis_fwd` — already
+runs as root, already carries `READ_OPS` (no new peer-policy grant class, just a new read-only
+op). Would let the appliance's own privileged-port bindings be attributed the same way
+unprivileged ones already are, closing the one case the device-scoped suppression can't see.
+
 ### [MEDIUM] `_guard_never_block` is exact-string match, not CIDR containment (filed 2026-09-03)
 Found during review of a design draft for a future firewall-rule-schema stub (Window 1 →
 Window 2, `docs/roadmap/firewall-rule-schema-and-precedence.md` §5). Verified independently
