@@ -1,8 +1,12 @@
-# Installer Email Delivery (v2)
+# Installer Email Delivery
 
-> Roadmap capture — small/mostly-wiring feature, **v2 (build after the Wisconsin trip).**
-> Records concept + intent; does not design the implementation. Most of the plumbing already
-> exists — this is largely an admin form + email-composition wiring on top of it.
+**Status:** SHIPPED (`9c5eef2`, 2026-09-03) — `api_agent_installer_generate` (`dashboard.py`),
+guarded migration in `alert_manager/database.py`, JS wiring in `static/agent-enroll.js`. Tests:
+`nemesis_agent/test_installer_email_delivery.py` (45 checks). Originally captured as a v2 item
+(below); built ahead of schedule once the doc corrections below cleared the (stale) blockers.
+
+> Original roadmap capture, kept for design intent — most of the plumbing already existed; this
+> was largely an admin form + email-composition wiring on top of it.
 
 ## Concept
 
@@ -38,7 +42,8 @@ manual setup.
   (`auto_approve`, `source_subnet` — `alert_manager/database.py:1594-1612`).
   **Corrected 2026-09-03 — Data Manager dependency was stale, not future:** DM v1 shipped
   2026-07-25, and `api_agent_installer_generate`'s own `INSERT INTO enrollment_tokens`
-  already goes through `_dm_conn()` (`dashboard.py:5621`). Nothing to wait on — the new
+  already goes through `_dm_conn()` (`dashboard.py:5673` — corrected from a stale `:5621`
+  citation, 2026-09-03 full-project audit). Nothing to wait on — the new
   columns just follow the write path already in use on this exact statement.
   `created_by`/actor already present for attribution.
 
