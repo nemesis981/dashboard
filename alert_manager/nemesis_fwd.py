@@ -344,6 +344,38 @@ def audit_action_for(op):
     """
     return AUDIT_ACTION.get(op, op)
 
+
+def audit_suppressed(result):
+    """True when a result is a SUCCESSFUL no-op that should not write an audit row.
+
+    `vpn-dns-guard` runs `resolvconf_repair` as an every-cycle consistency sweep.
+    The op is correct -- it looks, finds nothing to do, returns `action="none"` --
+    but the dispatch audited unconditionally, so a sweep that changed nothing wrote
+    a row anyway: ~17K rows/day, 98% of `audit_log` (measured 2026-09-03). An audit
+    trail that is 98% no-ops is one nobody reads, which is the same outcome as not
+    keeping one.
+
+    ⛔ `ok is True` IS LOAD-BEARING -- do not simplify this to `action == "none"`.
+    Five sites return `action="none"`; four are successful no-ops, but
+    `op_resolvconf_repair`'s first branch returns `ok=False, action="none"` for
+    "could not determine preference or ownership -- failing closed". That is a
+    FAILURE, and it is exactly the event worth keeping: a surface with no logged
+    failures is indistinguishable from one nobody exercised. Suppressing it would
+    delete the only record that the guard could not read the system's state.
+
+    Keyed on the RESULT SHAPE, not the op name, deliberately: an op-name allowlist
+    would silently stop working the day the op is renamed, and would have to be
+    edited by anyone adopting the same convention. `is True` rather than truthiness
+    so a stray `ok=1` from some future caller cannot suppress an audit row by
+    accident.
+
+    Non-dict results (an op returning None or a bare bool) are never suppressed --
+    the guard must not assume a shape it did not verify.
+    """
+    if not isinstance(result, dict):
+        return False
+    return result.get("action") == "none" and result.get("ok") is True
+
 #: Authorisation is a property of WHICH PROCESS CONNECTED, resolved from the
 #: kernel-supplied peer uid — never from anything in the request, so a caller
 #: cannot claim to be a different peer.
@@ -3014,8 +3046,12 @@ class Helper:
             params = req.get("params") or {}
             result = OPS[op](params)
             actor = policy["audit_actor"]
-            audit(audit_action_for(op), actor, ip=params.get("ip"),
-                  detail=req.get("request_id"))
+            # A successful no-op writes no row -- see audit_suppressed(). Every
+            # failure and every action-taken outcome still audits, including the
+            # fail-closed `action="none"` case, which is NOT a no-op.
+            if not audit_suppressed(result):
+                audit(audit_action_for(op), actor, ip=params.get("ip"),
+                      detail=req.get("request_id"))
             if peer_name == "fail2ban" and op == "block_ip":
                 # See record_fail2ban_quarantine's docstring: this makes the
                 # ban dashboard-visible and liftable. It does not give fail2ban
