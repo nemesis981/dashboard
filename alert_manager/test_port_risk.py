@@ -23,6 +23,26 @@ import port_risk as R                                              # noqa: E402
 
 _pass = _fail = 0
 
+#: The appliance's own device record: it IS us, and it legitimately runs the resolver.
+APPLIANCE = {"is_appliance": True, "roles": ("dns_resolver",)}
+
+
+_RAISED = object()
+
+
+def safe(fn):
+    """Call fn, converting an exception into a sentinel.
+
+    Without this, a mutation that makes assess() raise ABORTS the run: exit is
+    non-zero but zero checks report FAIL and the EXPECTED_CHECKS guard never runs,
+    so a crash is indistinguishable from a suite that simply ended early. Observed
+    live while mutation-testing this file (M10, dropping the non-dict guard).
+    """
+    try:
+        return fn()
+    except Exception:
+        return _RAISED
+
 
 def check(label, cond, detail=""):
     global _pass, _fail
@@ -36,11 +56,11 @@ def check(label, cond, detail=""):
 
 N = len(R.CATALOGUE)
 # 1 (size) + 7 (drift) + N*5 (exposure matrix) + N*2 (finding shape) + 12 (edges)
-EXPECTED_CHECKS = 1 + 7 + N * 5 + N * 2 + 12
+EXPECTED_CHECKS = 1 + 7 + N * 5 + N * 2 + 12 + 4 + 15
 
 print("\n0. catalogue size is asserted, so silent shrinkage fails")
-check("catalogue has 25 entries (update this number deliberately, never to match)",
-      N == 25, str(N))
+check("catalogue has 28 entries (update this number deliberately, never to match)",
+      N == 28, str(N))
 
 # ── 1. wire-constant drift against the AGENT module ──────────────────────────
 # The server duplicates these strings rather than importing the agent package.
@@ -135,6 +155,80 @@ finally:
     R.CATALOGUE[(23, "tcp")] = _saved
 check("selftest DETECTS a gutted catalogue (it can fail, so passing means something)",
       _detected)
+
+# ── 5. SSH: info level, and DELIBERATELY not suppressed ──────────────────────
+print("\n5. SSH (22/tcp) is info-level and carries no suppression logic")
+
+ssh = R.assess({"port": 22, "proto": "tcp", "exposure": R.EXPOSURE_ALL,
+                "process": "sshd", "attribution": R.ATTR_OK})
+check("22/tcp fires when exposed", ssh is not None, repr(ssh))
+check("  ...at info level, not high/medium",
+      ssh is not None and ssh["risk"] == R.RISK_INFO, repr(ssh))
+check("  ...as a question, not an accusation",
+      ssh is not None and ssh["needs_operator_intent"] is True, repr(ssh))
+# The whole point of SSH needing no suppression: it is correct at ANY privilege,
+# including on the appliance itself, where attribution is 0% for privileged ports.
+check("  ...and is NOT suppressed on the appliance (no role explains 22)",
+      R.assess({"port": 22, "proto": "tcp", "exposure": R.EXPOSURE_ALL},
+               context=APPLIANCE) is not None)
+
+# ── 6. device-scoped suppression for DNS ─────────────────────────────────────
+print("\n6. DNS suppression is DEVICE-scoped, narrow, and fails closed")
+
+dns_ev = lambda proto: {"port": 53, "proto": proto, "exposure": R.EXPOSURE_ALL,
+                        "process": "", "attribution": R.ATTR_DENIED}
+
+check("53/tcp fires with NO context (an unknown device is not the appliance)",
+      R.assess(dns_ev("tcp")) is not None)
+check("53/udp fires with NO context", R.assess(dns_ev("udp")) is not None)
+check("  ...at high risk -- an open resolver is an amplification vector",
+      R.assess(dns_ev("udp"))["risk"] == R.RISK_HIGH)
+check("53/tcp SUPPRESSED on the appliance running the resolver role",
+      R.assess(dns_ev("tcp"), context=APPLIANCE) is None)
+check("53/udp SUPPRESSED on the appliance running the resolver role",
+      R.assess(dns_ev("udp"), context=APPLIANCE) is None)
+
+# Narrowness: the appliance is not blanket-exempt.
+check("3306 on the SAME appliance still fires (not a blanket exemption)",
+      R.assess({"port": 3306, "proto": "tcp", "exposure": R.EXPOSURE_ALL},
+               context=APPLIANCE) is not None)
+check("23/tcp Telnet on the appliance still fires",
+      R.assess({"port": 23, "proto": "tcp", "exposure": R.EXPOSURE_ALL},
+               context=APPLIANCE) is not None)
+
+# Fail-closed: every way of not-being-the-known-appliance must still fire.
+check("a NON-appliance device with the resolver role still fires",
+      R.assess(dns_ev("udp"),
+               context={"is_appliance": False,
+                        "roles": (R.ROLE_DNS_RESOLVER,)}) is not None)
+check("the appliance WITHOUT the resolver role still fires",
+      R.assess(dns_ev("udp"),
+               context={"is_appliance": True, "roles": ()}) is not None)
+check("an empty context dict still fires", R.assess(dns_ev("udp"), context={}) is not None)
+_mal = safe(lambda: R.assess(dns_ev("udp"), context="appliance"))
+check("a malformed (non-dict) context still fires, does not raise",
+      _mal is not _RAISED and _mal is not None,
+      "raised" if _mal is _RAISED else repr(_mal))
+check("an unknown role name does not suppress",
+      R.assess(dns_ev("udp"),
+               context={"is_appliance": True, "roles": ("nonsense",)}) is not None)
+
+# The predicate is public so the suppression surface can be enumerated/audited --
+# a suppression nobody can list cannot be reviewed.
+# The deliberate ordering: device expectation is checked BEFORE the exposure class,
+# so an unparseable bind address on the appliance's own resolver port does not
+# manufacture a self-alert. This is the branch that documents that choice.
+check("UNKNOWN exposure on the appliance's own resolver port is still suppressed",
+      R.assess({"port": 53, "proto": "udp", "exposure": R.EXPOSURE_UNKNOWN},
+               context=APPLIANCE) is None)
+check("device_expects() is public and agrees with assess()",
+      R.device_expects(53, "udp", APPLIANCE) is True
+      and R.device_expects(3306, "tcp", APPLIANCE) is False)
+check("  ...and the role->ports map is narrow (resolver explains ONLY 53)",
+      R.APPLIANCE_ROLE_PORTS[R.ROLE_DNS_RESOLVER]
+      == frozenset({(53, "tcp"), (53, "udp")}),
+      repr(R.APPLIANCE_ROLE_PORTS))
+
 
 print("\n%d passed, %d failed" % (_pass, _fail))
 if _pass + _fail != EXPECTED_CHECKS:

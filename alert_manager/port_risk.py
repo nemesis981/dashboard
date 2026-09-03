@@ -47,10 +47,68 @@ ATTR_DENIED = "unattributed"
 
 RISK_HIGH = "high"
 RISK_MEDIUM = "medium"
+RISK_INFO = "info"
 
 BASIS_PROTOCOL = "protocol"     # unsafe however deployed -- a verdict
 BASIS_EXPOSURE = "exposure"     # legitimate service, reachable -- a question
 BASIS_UNDETERMINED = "undetermined"   # could not classify the bind address
+
+#: Device ROLES that legitimately explain an otherwise-reportable port.
+#:
+#: ⛔ SCOPED BY DEVICE, NOT BY PROCESS -- read this before extending it.
+#: The obvious design is "suppress 53 when the owning process is pihole-FTL". It does
+#: not work here, and the reason is measured, not theoretical: on this appliance
+#: **0 of 12 privileged ports (<1024) are attributable** at the privilege the collector
+#: runs at, versus 48/59 unprivileged (2026-09-03). That is structural -- a privileged
+#: port is bound by a root-owned daemon, and a non-root process cannot read another
+#: user's socket->pid link -- so the ports needing suppression are exactly the ports
+#: that cannot be attributed. A process-name allowlist would therefore fail to suppress
+#: 100% of the time in the default configuration, producing the confusing self-alert it
+#: was built to prevent. It is also the weaker signal: a bare process name is freely
+#: chosen, and psutil.exe() (the strong one) is gated behind the same privilege.
+#:
+#: ⚠ HONEST LIMITATION -- this does NOT detect a rogue resolver on the appliance.
+#: Suppression here means "this device is expected to serve DNS", not "the process
+#: answering on 53 is genuinely pihole-FTL". A malicious process that replaced or
+#: preempted the real resolver ON THE APPLIANCE would be suppressed too. Closing that
+#: needs real attribution, which needs root: the scoped follow-up is a
+#: `list_listening_ports` READ_OP on `nemesis_fwd` (already root, already carries
+#: READ_OPS), deliberately NOT built here. Accepted 2026-09-03: the alternative --
+#: alerting on the operator's own DNS appliance by default -- is worse, and every other
+#: device on the network is still covered normally.
+ROLE_DNS_RESOLVER = "dns_resolver"
+
+#: role -> the EXACT (port, proto) pairs it explains. Narrow and enumerable on purpose:
+#: a role is never a blanket exemption for a device, only for the ports it accounts for.
+#: A suppression surface nobody can list cannot be reviewed -- same reasoning as
+#: nemesis_fwd's port-grant registry.
+APPLIANCE_ROLE_PORTS = {
+    ROLE_DNS_RESOLVER: frozenset({(53, "tcp"), (53, "udp")}),
+}
+
+
+def device_expects(port, proto, context):
+    """True when this device's KNOWN ROLE accounts for this exact port.
+
+    Public so the suppression surface can be enumerated and audited directly.
+
+    Fails CLOSED in every ambiguous case: no context, a non-dict context, a device
+    that is not the appliance, the appliance with no roles, or an unrecognised role
+    name all return False, i.e. the finding still fires. An unknown device is never
+    assumed to be ours.
+    """
+    if not isinstance(context, dict):
+        return False
+    if not context.get("is_appliance"):
+        return False
+    roles = context.get("roles") or ()
+    if isinstance(roles, str):          # a bare string is a caller bug, not one role
+        return False
+    for role in roles:
+        if (port, proto) in APPLIANCE_ROLE_PORTS.get(role, ()):
+            return True
+    return False
+
 
 #: (port, proto) -> (service, risk, basis, why)
 #:
@@ -120,6 +178,26 @@ CATALOGUE = {
                    "File sharing reachable beyond this host."),
     (139, "tcp"): ("NetBIOS session", RISK_MEDIUM, BASIS_EXPOSURE,
                    "Legacy file sharing reachable beyond this host."),
+
+    # ---- added 2026-09-03 after fleet validation found them uncovered ----
+    (53, "tcp"): ("DNS resolver", RISK_HIGH, BASIS_EXPOSURE,
+                  "A DNS resolver answering beyond this host. An open resolver is "
+                  "abused as a traffic-amplification source against third parties, "
+                  "and is a hijack surface for every lookup this network makes. "
+                  "Expected on a device whose job IS DNS -- see APPLIANCE_ROLE_PORTS."),
+    (53, "udp"): ("DNS resolver", RISK_HIGH, BASIS_EXPOSURE,
+                  "A DNS resolver answering beyond this host. An open resolver is "
+                  "abused as a traffic-amplification source against third parties, "
+                  "and is a hijack surface for every lookup this network makes. "
+                  "Expected on a device whose job IS DNS -- see APPLIANCE_ROLE_PORTS."),
+    # INFO, and deliberately carries NO suppression: SSH is encrypted and legitimate,
+    # so this is worth knowing rather than worth alerting on. Needing no attribution
+    # is the point -- it is correct at any privilege, including the 0%-attribution
+    # case above, which is exactly why it needs no role exemption.
+    (22, "tcp"): ("SSH", RISK_INFO, BASIS_EXPOSURE,
+                  "Remote shell reachable beyond this host. Encrypted and often "
+                  "intended -- worth confirming it is meant to be reachable from "
+                  "everywhere, and that it uses keys rather than passwords."),
 }
 
 #: Exposure classes that mean "not reachable from anywhere else", so nothing on the
@@ -128,8 +206,14 @@ CATALOGUE = {
 _NOT_REACHABLE = frozenset({EXPOSURE_LOOPBACK, EXPOSURE_MULTICAST})
 
 
-def assess(event):
+def assess(event, context=None):
     """Assess one structured listening-port event. Returns a finding dict, or None.
+
+    `context` is the DEVICE the event came from, passed in rather than discovered --
+    same discipline as port_policy.evaluate(): no live-state reads, so the whole
+    decision is testable without privilege. Shape:
+    `{"is_appliance": bool, "roles": (ROLE_*, ...)}`. Omitted or malformed means
+    "unknown device", which never suppresses.
 
     None means "nothing to report", and is returned ONLY for reasons that are
     positively safe: a loopback bind, a multicast group join, or a port that is not
@@ -149,6 +233,13 @@ def assess(event):
     if entry is None:
         return None
     service, risk, basis, why = entry
+
+    # Checked BEFORE exposure, deliberately. "This device's job accounts for this
+    # port" is positive knowledge about the device; the exposure class is an
+    # inference about the socket. The stronger signal wins, so an unparseable bind
+    # address on the appliance's own resolver port does not manufacture a self-alert.
+    if device_expects(port, proto, context):
+        return None
 
     # ⛔ Order matters: UNKNOWN is checked BEFORE the not-reachable set, so a bind
     # address we failed to parse can never be filed under "safe". If this check
