@@ -1476,8 +1476,17 @@ gap stayed open across multiple prior audits.
   dependent; `scripts/migrate_to_opt.sh` is the one-way move, `alert_manager/nemesis_paths.py`
   is what code actually resolves against, not these paths computed ad hoc):
   - dashboard: `/opt/nemesis/dashboard.py`
-  - `/opt/nemesis/alert_manager/` — core services (alert-watcher, hw-monitor,
-    device-scanner, watchdog, dashboard)
+  - `/opt/nemesis/core_module/<name>/<name>.py` — core services: `alert_watcher`,
+    `hw_monitor`, `device_scanner`, `watchdog` (`dashboard` is the one exception, at the
+    top-level path above, not under `core_module/`). **Corrected 2026-09-04** — the prior
+    wording named `alert_manager/` as where all five live; live `ExecStart` was checked for
+    all five (`systemctl show <unit> -p ExecStart --value`) and none resolve there. This was
+    a stale holdover from before the `core_module/` layout landed (2026-07-29) — a partial
+    fix naming only one service would have left the other four wrong while looking
+    freshly-reviewed, so the whole line was corrected rather than patched.
+  - `/opt/nemesis/alert_manager/` — shared support modules the services above import
+    (`firewall.py`, `database.py`, `data_manager.py`, `nemesis_paths.py`, etc.), not the
+    services' own location.
   - `/opt/nemesis/modules/` — pluggable modules
   - `/var/lib/nemesis/alerts.db` — shared DB (moved out of the tree 2026-07-27; group
     `nemesis-db`, directory mode `0770` — SQLite WAL's `-wal`/`-shm` siblings need directory
