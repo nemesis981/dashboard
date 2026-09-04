@@ -281,7 +281,7 @@ def _canary():
             return False, "model normalisation is wrong"
 
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(dir=_canary_harness.scratch_dir()) as d:
             with open(os.path.join(d, "page.py"), "w") as fh:
                 fh.write('label = "%s"\n' % _fixture_model_prose("Sonnet", "4.6"))
             with open(os.path.join(d, "ok.py"), "w") as fh:

@@ -181,7 +181,8 @@ def _now_iso(now=None):
 # ── canary: the instrument must prove it can distinguish ─────────────────────
 def _tmpdb(with_table=True):
     import tempfile
-    fd, path = tempfile.mkstemp(suffix=".canary.db")
+    fd, path = tempfile.mkstemp(suffix=".canary.db",
+                                dir=_canary_harness.scratch_dir())
     os.close(fd)
     if with_table:
         c = sqlite3.connect(path)

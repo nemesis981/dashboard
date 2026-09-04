@@ -117,6 +117,59 @@ def run_cases(cases):
                   % (n_good, n_bad))
 
 
+def scratch_dir():
+    """A directory this process has PROVEN it can write, for canary fixtures.
+
+    ⛔ WHY THIS EXISTS — a plain `tempfile` call is NOT portable across sandboxes.
+        The dashboard unit runs `ProtectSystem=strict` with `ReadWritePaths=/var/lib/nemesis`
+        and `PrivateTmp=no`. `strict` mounts the WHOLE hierarchy read-only apart from
+        /dev, /proc and /sys — so /tmp, /var/tmp and the /opt/nemesis working directory are
+        all read-only for the service, and `tempfile.gettempdir()` itself raises
+        FileNotFoundError ("No usable temporary directory found in ...").
+
+        That took down a live check on 2026-09-04: audit_write_liveness reported
+        [PROBE-FAILED] in production while passing everywhere it was tested, because every
+        test ran OUTSIDE the sandbox — from a shell, as a user with a writable /tmp. The
+        code was correct; the environment it was verified in was not the one it runs in.
+
+    ⛔ IT PROBES, IT DOES NOT INFER. Each candidate is accepted only after actually
+        creating and deleting a file in it. Checking `os.access` or a mode bit would report
+        /tmp as writable here — the read-only MOUNT is invisible to a permission test, so a
+        premise check that reads permissions would confirm exactly the wrong answer.
+
+    Raises OSError naming every candidate tried, so a total failure is a loud environmental
+    finding rather than a silent fallback to somewhere unexpected.
+    """
+    import os
+    import tempfile
+
+    candidates = []
+    try:
+        candidates.append(tempfile.gettempdir())
+    except Exception:                                        # noqa: BLE001
+        pass                                                 # the sandboxed case: no ambient tmp
+    db = (os.environ.get("NEMESIS_DB_PATH") or "").strip()
+    if db:
+        candidates.append(os.path.dirname(db))
+    candidates.append("/var/lib/nemesis")                    # the unit's ReadWritePaths
+
+    tried = []
+    seen = set()
+    for d in candidates:
+        if not d or d in seen:
+            continue
+        seen.add(d)
+        try:
+            fd, probe = tempfile.mkstemp(prefix=".canary-writeprobe-", dir=d)
+            os.close(fd)
+            os.unlink(probe)
+            return d
+        except Exception as exc:                             # noqa: BLE001
+            tried.append("%s (%s)" % (d, type(exc).__name__))
+    raise OSError("no writable scratch directory for canary fixtures; tried: %s"
+                  % (", ".join(tried) or "no candidates"))
+
+
 def guard(meta, canary_fn, produce_fn, subject="this"):
     """Run `produce_fn` only if `canary_fn` vouches for the instrument.
 

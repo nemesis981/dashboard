@@ -220,5 +220,69 @@ check("the five new tools are all guarded",
                        "agent_enrollment_integrity", "dependency_preflight",
                        "config_drift"}, sorted(guarded))
 
+print("\n-- scratch_dir() survives a sandbox with no usable temp directory --")
+# REGRESSION GUARD, 2026-09-04. Four registered diagnostics called tempfile on their
+# canary self-test path. The dashboard unit runs ProtectSystem=strict with
+# ReadWritePaths=/var/lib/nemesis and PrivateTmp=no, so /tmp, /var/tmp and the working
+# directory are read-only for the service and tempfile.gettempdir() itself RAISES.
+# All four reported [PROBE-FAILED] in production while passing every test, because the
+# tests ran from a shell with a writable /tmp. The sandbox was never in the test.
+import tempfile as _tf
+
+_real_gettempdir = _tf.gettempdir
+
+
+def _no_ambient_tmp():
+    """Exactly what production raised, not an approximation of it."""
+    raise FileNotFoundError(
+        2, "No usable temporary directory found in "
+           "['/tmp', '/var/tmp', '/usr/tmp', '/opt/nemesis']")
+
+
+# Control FIRST: prove the ambient path is what is normally taken, so a pass below
+# cannot come from the fallback having been used all along.
+check("control: with a working tmp, scratch_dir uses it",
+      cy.scratch_dir() == _real_gettempdir())
+
+_tf.gettempdir = _no_ambient_tmp
+try:
+    _sandboxed = cy.scratch_dir()
+    check("with no ambient tmp, scratch_dir still returns a directory",
+          isinstance(_sandboxed, str) and os.path.isdir(_sandboxed), repr(_sandboxed))
+    check("  ...and it is NOT the unusable ambient one",
+          _sandboxed != "/tmp", repr(_sandboxed))
+    # It must be writable in fact, not merely named: os.access and mode bits both
+    # report /tmp writable under a read-only MOUNT, which is the trap this avoids.
+    _wrote = False
+    try:
+        _fd, _pr = _tf.mkstemp(prefix=".canary-test-", dir=_sandboxed)
+        os.close(_fd); os.unlink(_pr); _wrote = True
+    except Exception:                                        # noqa: BLE001
+        pass
+    check("  ...and a file can actually be created and removed there", _wrote)
+
+    # And it must FAIL LOUDLY when nothing is writable, rather than returning a path
+    # that does not work — a default that reads as a real answer is the whole hazard.
+    _saved_env = os.environ.get("NEMESIS_DB_PATH")
+    os.environ["NEMESIS_DB_PATH"] = "/nonexistent-canary-root/db.sqlite"
+    _real_mkstemp = _tf.mkstemp
+    _tf.mkstemp = lambda *a, **k: (_ for _ in ()).throw(OSError("read-only file system"))
+    try:
+        cy.scratch_dir()
+        check("with NOTHING writable, scratch_dir raises", False, "it returned instead")
+    except OSError as _e:
+        check("with NOTHING writable, scratch_dir raises", True)
+        check("  ...and the error names what it tried", "tried:" in str(_e), str(_e)[:90])
+    finally:
+        _tf.mkstemp = _real_mkstemp
+        if _saved_env is None:
+            os.environ.pop("NEMESIS_DB_PATH", None)
+        else:
+            os.environ["NEMESIS_DB_PATH"] = _saved_env
+finally:
+    _tf.gettempdir = _real_gettempdir
+
+check("teardown: ambient tmp restored", cy.scratch_dir() == _real_gettempdir())
+
 print("\n%d passed, %d failed" % (passed, failed))
 sys.exit(1 if failed else 0)

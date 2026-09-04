@@ -393,7 +393,7 @@ def _canary():
         # It was, on the first run: `{SOME_UNKNOWN_NAME}` appeared in the live
         # output, sourced from this very canary.
         _ct = "CREATE" + " TABLE"
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(dir=_canary_harness.scratch_dir()) as d:
             with open(os.path.join(d, "m.py"), "w") as fh:
                 fh.write('OP_LOG_TABLE = "resolved_via_constant"\n'
                          'q = f"%s IF NOT EXISTS {OP_LOG_TABLE} (id INTEGER)"\n'

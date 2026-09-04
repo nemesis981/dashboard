@@ -255,7 +255,7 @@ def _canary():
         # Strongest-category wins: a binary used by BOTH a test and real code is
         # a real dependency.
         import tempfile
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(dir=_canary_harness.scratch_dir()) as d:
             os.makedirs(os.path.join(d, "sub"), exist_ok=True)
             with open(os.path.join(d, "test_x.py"), "w") as fh:
                 fh.write(_fixture_call("dualuse"))
