@@ -558,6 +558,19 @@ number.
     someone else moments ago" from "about to be published by me" — a genuinely useful timing
     signal, unaffected by the shared-identity problem above since it reads ref history rather
     than authorship.
+  - **A commit's `Claude-Session:` trailer is a fourth signal, genuinely better than the author
+    field, but ONE-DIRECTIONAL — added 2026-09-04.** It identifies a SESSION, not a WINDOW, and
+    a window spans several sessions in a day (a restart, a crash, a fresh launch each start a
+    new one). Confirmed live 2026-09-04: Window 1's own three same-day commits carried two
+    different session ids, and so did Window 2's two. **Used as a positive test it is sound: a
+    trailer matching a session id you know is yours (your own current session, or one of your
+    own prior ones you can name) means the commit is reliably yours.** Used as a negative test
+    it manufactures phantom authors: a DIFFERENT session id tells you nothing — it could be
+    another window, or could be you before a restart — treating it as "therefore not mine" would
+    have split that single day's Window 1 commits across two false "people." When a commit's
+    trailer matches none of your own known session ids, that's consistent with another window
+    but is not proof — confirm with the window it's inferred to belong to, the same as any other
+    unconfirmed attribution above.
 - **⛔ DO NOT CROSS-VERIFY ANOTHER WINDOW'S UNCOMMITTED FILE — commit it first, even locally
   (added 2026-08-29 after it produced a false regression report).** A file that is untracked or
   mid-edit has no stable content: the verifying window reads whatever happened to be on disk at
