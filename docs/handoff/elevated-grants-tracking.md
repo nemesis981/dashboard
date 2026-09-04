@@ -122,7 +122,7 @@ fleet VMs; this entry is carried forward from the last time it was actually chec
   (e.g. folded into Window 3's VM-fleet closeout sweep instead). Flagging again here
   rather than letting it silently drop a second time.
 
-### `dashboard` NOPASSWD verb asymmetry — flagged 2026-09-04, OPEN (confirm-or-add, not a revoke)
+### `dashboard` NOPASSWD verb asymmetry — flagged 2026-09-04, operator APPROVED adding `restart` — rationale corrected before filing
 Surfaced by Window 1 during a live canary-registration deploy (`2415cef`), independently
 verified live by Window 2 via `sudo -n -l` same session. **`dashboard` has
 `start`/`stop`/`reset-failed` granted NOPASSWD but NOT `restart`** — the sole service in
@@ -139,12 +139,36 @@ e.g. `suricata`).
   the two commands that a `restart` verb wouldn't have — `watchdog` (SERVICES list includes
   `dashboard`, 120s tick) could in principle observe it stopped and start it first. Did not
   happen this time; the shape is what's flagged, not an incident.
-- **This reads as an omission, not a deliberate scoping decision** — no rationale for
-  excluding `restart` specifically for `dashboard` while granting it everywhere else is
-  recorded anywhere Window 2 has checked. **Needs an explicit operator confirm-or-add, not a
-  silent fix** — either the asymmetry is intentional (and should be recorded as such here) or
-  it's a gap to close by adding the grant, same class of change as any other sudoers edit.
-  Not resolved this session.
+- **Operator approved adding the `restart` grant, but the rationale given at approval time
+  does NOT hold — verified against live code before filing, corrected here rather than
+  carried forward as stated.** The rationale offered was "watchdog's own crash-recovery
+  capability currently can't cleanly restart dashboard the way it can the other 8 services."
+  That's wrong on the mechanism: a `paul` sudoers entry cannot affect what `watchdog` can do,
+  because `watchdog` never runs as `paul` and never goes through sudo at all.
+  - `systemctl show watchdog -p User --value` → `nemesis-watchdog`, not `root`, not `paul`.
+  - `core_module/watchdog/watchdog.py:109` `restart_service()` calls
+    `subprocess.run(["systemctl", "restart", service])` directly — `grep -c sudo` on the
+    file returns `0`. Whatever authorizes `nemesis-watchdog` to restart other services is
+    polkit, not sudoers, and `/etc/polkit-1/rules.d/` remains unreadable at this session's
+    privilege level (8th consecutive session, see below) — so **whether watchdog can
+    restart dashboard is genuinely unknown, not fixed by this grant.**
+  - `dashboard.service` already carries `Restart=always`, `RestartUSec=10s` — systemd itself
+    restarts it on crash independent of watchdog either way.
+  - Watchdog has logged **zero** restart events of any kind in 30 days (113 total journal
+    lines for the unit) — no empirical evidence either way, and specifically not evidence
+    the capability was broken (a service that never tried logs no failures either).
+  - **Checked and NOT confirmed:** the "dashboard and hw-monitor are the only two services
+    with start/stop-but-no-restart" comparison offered in support of "this looks like an
+    omission." `hw-monitor` actually has **neither** start/stop nor restart granted — only
+    `tee`/`chmod` for its unit file, the same deploy-time pair every service gets. So it
+    isn't a second instance of dashboard's pattern; it's a more restricted case. Dashboard
+    remains the only service with start+stop-but-not-restart.
+  - **Correct framing for this grant, going forward:** it's an operator-convenience add (saves
+    the `stop && start` dance, which does carry a narrow race with watchdog's 120s tick) —
+    **not** a watchdog crash-recovery fix, because nothing about watchdog's own capability
+    changes. A future session reading this file should not infer watchdog was broken and is
+    now fixed; the polkit question that would actually answer that remains open and needs
+    root to resolve.
 - **Related `dashboard.service` unit question, same session, worth one combined operator
   decision (Window 1's framing).** The same restart also surfaced that four diagnostics
   checks (`audit_write_liveness`, `schema_drift`, `dependency_preflight`, `config_drift`)
