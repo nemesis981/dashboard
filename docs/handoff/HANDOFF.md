@@ -11,13 +11,14 @@
 
 ## 1. Push status — READ THIS FIRST
 
-**Public repo (`/opt/nemesis`): working tree is CLEAN. 21 commits ahead of `origin/main`, ALL
-REVIEWED by Window 2, NOT pushed — waiting on final operator go-ahead only, nothing left to
-check.**
+**Public repo (`/opt/nemesis`): PUSHED AND SYNCED.** Operator confirmed the full list below at
+closeout; pushed the exact SHA `7c6f3b5` (not the branch name) to `origin/main`. Verified after:
+local `HEAD` == `origin/main` == `7c6f3b5`, 0 commits unpushed. **Nothing pending here — a fresh
+session has no push decision to make.**
 
-- `origin/main`: `892881c`.
-- Local HEAD: `c550323`.
-- Full list, oldest to newest (every one Rule-8-scanned, compiled/tested where applicable):
+- `origin/main`: `7c6f3b5` (was `892881c` before this push).
+- List of what was pushed, oldest to newest (every one Rule-8-scanned, compiled/tested where
+  applicable, kept here for the record rather than because any of it still needs action):
 
   ```
   3269762 docs(entitlements): warn that MAX_REMOTE_CAP_BONUS is half a cross-repo invariant  [Window 3]
@@ -41,14 +42,13 @@ check.**
   35f3ad7 docs(entitlements): trim cross-repo invariant comment per Rule 10                    [Window 2]
   72f475f docs(handoff): sharpen the watchdog-dashboard polkit question                        [Window 2]
   c550323 docs(handoff): watchdog-dashboard restart authority was never missing                [Window 2]
+  7c6f3b5 docs(handoff): closeout refresh for 2026-09-04 (this file's own commit)               [Window 2]
   ```
 
-- **Whoever pushes next**: re-list fresh immediately before pushing (`git log --format='%h %s'
-  origin/main..HEAD`), get explicit operator confirmation on that exact list, push the exact
-  confirmed SHA (not the branch name). Standard push-coordination discipline — see CLAUDE.md.
-  Nothing here should need re-review; every commit above was individually vetted this session
-  (Rule-8 scan, compile/test run, and for the two route-touching commits — `1c1115a`,
-  `2415cef` — a real route-security/sandbox check, not just a plain-shell test run).
+- Every commit above was individually vetted this session before push (Rule-8 scan,
+  compile/test run, and for the two route-touching commits — `1c1115a`, `2415cef` — a real
+  route-security/sandbox check, not just a plain-shell test run). Nothing here needs re-review
+  by a fresh session.
 
 **Private repo (`~/work/nemesis-internal`): NOT pushed, working tree NOT clean (not Window 2's
 files — see below).**
@@ -157,13 +157,16 @@ to resolve, not another re-flag.
 
 ## 8. Precise next steps for a fresh session reading this cold
 
-1. **Get the push confirmed and executed.** Everything in §1 is reviewed and ready; this is
-   the only action item that's actually blocking, and it's a one-message confirmation, not
-   more review.
-2. **Refresh the roadmap-vs-state baseline** (§5) — three sessions overdue.
-3. If picking up build work: read the relevant window's private handoff file in full first
+**The public repo push is DONE — §1 is a closed record, not a pending action.** No push
+decision awaits a fresh session.
+
+1. **Refresh the roadmap-vs-state baseline** (§5) — three sessions overdue, the single most
+   overdue doc-audit item.
+2. If picking up build work: read the relevant window's private handoff file in full first
    (§7) — they're detailed, current, and written for exactly this.
-4. Do NOT re-open: the watchdog/dashboard polkit question (§6, settled — nothing was ever
+3. Do NOT re-open: the watchdog/dashboard polkit question (§6, settled — nothing was ever
    missing), the Rule 10 entitlements decision (§4, operator already decided), or the
    `os.access` claim in `diagnostics/canary.py` (already corrected in-place, kept visible
    deliberately, not a live question).
+4. The private repo (`~/work/nemesis-internal`) still has a real, unaddressed push decision —
+   see §1's private-repo note. That's the one open item this closeout did NOT resolve.
