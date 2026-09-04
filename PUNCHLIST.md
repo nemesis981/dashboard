@@ -3,7 +3,10 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
-### [HIGH] nemesis-drift-check.service has been failing since the Sep-1 Tailscale migration — needs a redeploy (filed 2026-09-04)
+### [CLOSED] nemesis-drift-check.service has been failing since the Sep-1 Tailscale migration — needs a redeploy (filed 2026-09-04, closed same day)
+**Fixed and verified live, 2026-09-04.** Window 1 redeployed; independently re-confirmed here:
+`systemctl status` shows `code=exited, status=0/SUCCESS`, `OK netfilter mode is nodivert (1),
+as configured`. Kept below for the transferable lesson, not because the fix is still open.
 Live security-property drift check (netfilter nodivert mode + anti-spoof DROP rule) has been
 **silently failing for 70 consecutive runs**, verified live: `systemctl status` shows
 `Active: failed`, `code=226/NAMESPACE`, `Failed to set up mount namespacing:
