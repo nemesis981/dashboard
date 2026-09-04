@@ -122,6 +122,30 @@ fleet VMs; this entry is carried forward from the last time it was actually chec
   (e.g. folded into Window 3's VM-fleet closeout sweep instead). Flagging again here
   rather than letting it silently drop a second time.
 
+### `dashboard` NOPASSWD verb asymmetry — flagged 2026-09-04, OPEN (confirm-or-add, not a revoke)
+Surfaced by Window 1 during a live canary-registration deploy (`2415cef`), independently
+verified live by Window 2 via `sudo -n -l` same session. **`dashboard` has
+`start`/`stop`/`reset-failed` granted NOPASSWD but NOT `restart`** — the sole service in
+this asymmetric state. Every other named service with a NOPASSWD systemd grant
+(`alert-watcher`, `device-scanner`, `diagnostics-watcher`, `malware-canary`, `nemesis-fwd`,
+`suricata`, `vpn-dns-guard`, `watchdog`) has `restart` granted (some also have `reload`,
+e.g. `suricata`).
+- **Not itself a security gap in what happened** — Window 1 deployed via a chained
+  `stop && start` (both individually granted), reaching the same end state. Verified live:
+  restart completed, `MainPID` 4029→43549, `ActiveEnterTimestamp` 15:43:07→16:45:21,
+  `active/running`, clean startup journal.
+- **The actual concern, per Window 1's framing:** the missing `restart` grant is what forces
+  the `stop && start` chain in the first place, which opens a real (if narrow) gap between
+  the two commands that a `restart` verb wouldn't have — `watchdog` (SERVICES list includes
+  `dashboard`, 120s tick) could in principle observe it stopped and start it first. Did not
+  happen this time; the shape is what's flagged, not an incident.
+- **This reads as an omission, not a deliberate scoping decision** — no rationale for
+  excluding `restart` specifically for `dashboard` while granting it everywhere else is
+  recorded anywhere Window 2 has checked. **Needs an explicit operator confirm-or-add, not a
+  silent fix** — either the asymmetry is intentional (and should be recorded as such here) or
+  it's a gap to close by adding the grant, same class of change as any other sudoers edit.
+  Not resolved this session.
+
 ### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 4 consecutive sessions
 `ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-09-01, same result
 as prior sessions that attempted this check. Genuinely unable to verify from this
@@ -188,3 +212,8 @@ rule), needs a session with root access to actually `ls` it.
   now a standing gap worth a root-access session to actually resolve, not just re-flag).
   Gateway-VM entry not re-checked (production-box scope, open question unresolved). `tcpdump`
   capability not re-verified again today — now 2 sessions without a fresh `getcap` check.
+- **2026-09-04, later same session** (Window 2): Window 1 flagged a `dashboard` NOPASSWD
+  verb asymmetry (`restart` missing while `start`/`stop`/`reset-failed` present, unlike every
+  other granted service) while deploying `2415cef` via chained `stop && start`. Independently
+  verified live via `sudo -n -l` before recording, per this file's standing discipline —
+  confirmed exact as reported. Recorded above as OPEN, needs operator confirm-or-add.
