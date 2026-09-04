@@ -6514,3 +6514,23 @@ security-relevant network changes.
 Full detail, plus a related genuine (non-urgent) duplication finding in the same sweep — two
 independent `/proc/net/arp` parsers with already-measured drift in MAC normalisation:
 `docs/audits/duplicated-logic-sweep-2026-09-02.md`.
+
+### [LOW] `api_usb_events` has no `ROUTE_MINIMUMS` entry — resolves to admin, fails safe (found 2026-09-04, Window 3, verified independently by Window 2)
+Introduced by `86a3c83` ("feat(usb-control): read-only /api/usb-events operator view",
+2026-09-02) — **already on `origin/main`**, so this is a published gap, not a pending one.
+`alert_manager/test_roles.py`'s registry-completeness check (Part of the standing "every module
+declaring routes needs a registry-completeness test" practice) fails on it: **157 passed, 1
+failed** — `api_usb_events` is live in the `url_map` with no role assignment, so it resolves to
+`admin` (the safe default, not a vulnerability) rather than an intentional minimum.
+
+**Reproduced independently by Window 2, 2026-09-04**: ran `alert_manager/test_roles.py` directly,
+same 157/1 result, same named endpoint. Window 3 also proved it pre-existing rather than assumed
+— identical failure reproduces one commit before their own unrelated licensing work, in a
+detached worktree with that commit absent.
+
+**Not fixed here** — Rule 1 (an audit reports, it doesn't fix) and the intended role for a
+USB-events view is a judgment call for whichever window owns `usb-control`, not something to
+guess. Fix is adding one `ROUTE_MINIMUMS['api_usb_events']` entry once that judgment is made.
+**Worth fixing soon regardless of urgency**: this suite reads red for everyone who runs it in
+the meantime, which is exactly the condition that lets a real regression hide next to a known
+false one.
