@@ -102,7 +102,25 @@
       });
   }
 
+  // The first paint is deliberately NOT wrapped: a page load IS a human arriving.
+  // Only the repeating timer is background.
   if (document.readyState !== 'loading') load();
   else document.addEventListener('DOMContentLoaded', load);
-  setInterval(load, 30000);
+
+  // MUST be marked as a background poll. /api/throttle-status is an ordinary
+  // authenticated endpoint and is NOT in dashboard.py's _IDLE_LOCK_ALLOWED, so an
+  // unmarked poll here stamps `last_activity` every 30s against a 15-minute idle
+  // timeout. This card renders on the main dashboard, so unwrapped it was enough on
+  // its own to stop that page ever idle-locking -- the walk-away lock could never
+  // fire while still appearing fully implemented. Found 2026-09-04; see
+  // static/nemesis-activity.js for why the marking lives at the CALL SITE.
+  // Guarded rather than assuming nemPoll exists, and it WARNS rather than degrading
+  // silently, because a silent fallback is how this went unnoticed.
+  setInterval((window.nemPoll || function (fn) {
+    if (window.console && console.warn) {
+      console.warn('[throttle-status] window.nemPoll missing -- this poll will ' +
+                   'count as user activity and can defeat idle-lock');
+    }
+    return fn;
+  })(load), 30000);
 })();
