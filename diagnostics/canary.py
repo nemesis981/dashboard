@@ -133,9 +133,21 @@ def scratch_dir():
         code was correct; the environment it was verified in was not the one it runs in.
 
     ⛔ IT PROBES, IT DOES NOT INFER. Each candidate is accepted only after actually
-        creating and deleting a file in it. Checking `os.access` or a mode bit would report
-        /tmp as writable here — the read-only MOUNT is invisible to a permission test, so a
-        premise check that reads permissions would confirm exactly the wrong answer.
+        creating and deleting a file in it.
+
+        A mode-bit check would pass here — /tmp is 1777 and looks writable to any inspection
+        of permissions. `os.access(W_OK)` is also the wrong instrument, though for reasons
+        of its own rather than the mount: it tests the REAL uid rather than the effective
+        one and does not account for ACLs.
+
+        ⚠ An earlier version of this comment asserted that `os.access(W_OK)` returns True
+        under a read-only mount. That was reasoned, never measured, and is probably WRONG —
+        access(2) lists EROFS among its own error returns, and every read-only mount tested
+        on this box returned False. It is recorded as unresolved rather than corrected,
+        because the available mounts are all root-owned and mode 755, so they fail on
+        permissions before EROFS is ever consulted, and no unconfounded test is possible
+        here without root. The claim was written into a comment explaining a fix for
+        instruments that confirm what their author expected.
 
     Raises OSError naming every candidate tried, so a total failure is a loud environmental
     finding rather than a silent fallback to somewhere unexpected.

@@ -251,8 +251,9 @@ try:
           isinstance(_sandboxed, str) and os.path.isdir(_sandboxed), repr(_sandboxed))
     check("  ...and it is NOT the unusable ambient one",
           _sandboxed != "/tmp", repr(_sandboxed))
-    # It must be writable in fact, not merely named: os.access and mode bits both
-    # report /tmp writable under a read-only MOUNT, which is the trap this avoids.
+    # It must be writable in fact, not merely named. A mode-bit check passes here
+    # (/tmp is 1777); os.access is unreliable independently of any mount question, as it
+    # tests the real uid and ignores ACLs. Only an actual write settles it.
     _wrote = False
     try:
         _fd, _pr = _tf.mkstemp(prefix=".canary-test-", dir=_sandboxed)
