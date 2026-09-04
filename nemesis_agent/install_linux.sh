@@ -296,10 +296,17 @@ ok "ownership set to ${AGENT_USER}"
 if [ "$DO_ENROLL" -eq 1 ]; then
     step "Enrolling with the Nemesis server..."
     set +e
-    sudo -u "$AGENT_USER" "$VPY" - <<PYEOF
+    # ⛔ QUOTED delimiter + positional args, matching the two sibling heredocs
+    # above (lines ~259, ~279). It was UNQUOTED until 2026-09-04, so bash
+    # command-substituted backticks appearing in PYTHON COMMENTS below --
+    # printing "syntax error near unexpected token '('" on every Linux install
+    # while still exiting 0. Harmless only because those lines are comments; a
+    # real $(...) in code would have been silently eaten. Do not unquote this.
+    sudo -u "$AGENT_USER" "$VPY" - "$INSTALL_DIR" "$SERVER" "$PORT" <<'PYEOF'
 import os, sys
-os.chdir("${INSTALL_DIR}")
-sys.path.insert(0, "${INSTALL_DIR}")
+_INSTALL_DIR, _SERVER, _PORT = sys.argv[1], sys.argv[2], sys.argv[3]
+os.chdir(_INSTALL_DIR)
+sys.path.insert(0, _INSTALL_DIR)
 import config, enrollment
 
 conf = config.load()
@@ -405,7 +412,7 @@ if existing:
 
 device_id, status = enrollment.enroll(conf)
 if not device_id:
-    print("    [FAIL] server did not answer -- check that ${SERVER}:${PORT} is reachable")
+    print("    [FAIL] server did not answer -- check that %s:%s is reachable" % (_SERVER, _PORT))
     sys.exit(1)
 
 # PERSIST. Without this the agent does not know it already enrolled and enrols

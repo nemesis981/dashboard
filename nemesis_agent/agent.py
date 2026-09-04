@@ -1211,9 +1211,19 @@ def _migrate_key_material():
         return
     # Unprotected, but that is a fleet-visible state, not a startup blocker. Note
     # it and continue — the offer to fix it lives in the settings GUI now.
+    # ⚠ PLATFORM-CONDITIONAL. This named a WINDOWS mechanism unconditionally until
+    # 2026-09-04, so the first real Linux enrollment logged "Task-Scheduler startup
+    # never prompts" to a Linux operator -- advice about a mechanism that does not
+    # exist on their platform. `_platform_name` is already resolved at module load
+    # (platform.system()); reused rather than introducing a second source of truth.
+    if _platform_name == "Windows":
+        _how = ("Protect it from the Nemesis settings app "
+                "(Task-Scheduler startup never prompts, by design).")
+    else:
+        _how = ("Protect it from the Nemesis settings app; the service starts "
+                "non-interactively, so it never prompts at startup.")
     log.warning("this device's signing key is stored UNENCRYPTED on disk; "
-                "reporting tier 'none'. Protect it from the Nemesis settings "
-                "app (Task-Scheduler startup never prompts, by design).")
+                "reporting tier 'none'. %s", _how)
 
 
 def offer_key_protection(secret_provider):

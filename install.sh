@@ -147,8 +147,17 @@ preflight_checks() {
             "import ipaddress; print(str(ipaddress.ip_interface('$cidr').network))" 2>/dev/null || true)
     fi
     if [[ -z "$DETECTED_SUBNET" ]]; then
-        # Fallback: assume /24 from the first three octets
-        DETECTED_SUBNET="$(echo "$DETECTED_IP" | grep -oP '^\d+\.\d+\.\d+').0/24"
+        # ⛔ NO /24 FALLBACK. This assumed /24 from the first three octets until
+        # 2026-09-04. On a site whose LAN is a /22 it derived a /24 instead,
+        # and the agent-enrollment ufw allow then silently refused every client that
+        # DHCPed outside that /24 -- on the same LAN, with no error anyone could see.
+        # That is "a failed read became a plausible wrong default", the exact shape
+        # this same file refuses ~1800 lines below for the ufw enumeration case.
+        # A guessed prefix is not safer than stopping: it produces a firewall rule
+        # that is wrong in a direction nobody notices until enrollment fails.
+        die "Could not derive the local subnet from interface $DETECTED_IFACE. \
+Set it explicitly rather than letting the installer guess a prefix -- a wrong \
+prefix silently breaks agent enrollment for part of the LAN."
     fi
     ok "Local subnet: $DETECTED_SUBNET"
 
