@@ -183,7 +183,7 @@ rule), needs a session with root access to actually `ls` it.
   `getcap` re-run) — carried forward from 09-02, flag if this stretches further.
 - **2026-09-04** (Window 2, Morning Status). Production box re-checked live: 70 NOPASSWD
   entries (count matches every prior session this week, no line-by-line diff run). `nemesis-fw`
-  membership unchanged (`paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`). `pihole` group
+  membership unchanged (`<user>,nemesis-alertw,nemesis-dash,nemesis-vpndns`). `pihole` group
   still open, unchanged. Polkit rules still unreadable (**7th consecutive session** — this is
   now a standing gap worth a root-access session to actually resolve, not just re-flag).
   Gateway-VM entry not re-checked (production-box scope, open question unresolved). `tcpdump`
