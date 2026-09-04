@@ -1306,6 +1306,39 @@ is only visible in aggregate — individually each looked like an ordinary slip:
 - **Prefer a neutral cwd** for any path/import test; the repo root silently rescues imports
   that would fail in a service.
 
+**⛔ A SECOND MEASUREMENT THAT AGREES IS NOT CORROBORATION — IT IS OFTEN THE SAME MEASUREMENT
+TWICE (added 2026-09-04, after the same wrong answer was produced twice by different windows).**
+
+**Agreement raises confidence only when the two measurements differ in WHAT is measured or in
+METHOD.** Two people running the same query shape against the same source and getting the same
+number is one measurement with extra steps. It is worse than no second check, because the
+agreement makes a false finding look *stronger* — "independently re-verified" reads as
+corroboration when it is only reproduction.
+
+**The question that catches it is not another count. It is one question asked OF the count:**
+> **Does this quantity answer the question, or merely correlate with it?**
+
+**Confirmed twice, on the same question, five days apart.** The open question was whether
+Suricata flow logging being live unblocks lateral-movement Tier 1:
+- **2026-08-30** — a pass counted flows where BOTH endpoints were RFC1918 and read that as
+  peer-to-peer. The appliance's own LAN address is RFC1918, so every appliance↔device flow
+  satisfied the filter. **The count was accurate; the label on it was not.**
+- **2026-09-04** — Window 1 reported "554 flow events, blocker resolved"; Window 2
+  independently re-verified and got 3,510. Both were counts of flow events BY TYPE. **Neither
+  measured peer-to-peer at all**, and the agreement between them is what made the claim look
+  solid enough to commit. Retracted the same day.
+
+The real answer was topological and unmeasurable by any flow count: ~89–91% of captured flows
+have the appliance as an endpoint, true peer-to-peer is ~0.1–0.7%. Full history and figures:
+`docs/roadmap/lateral-movement-outbreak-detection.md`'s `⛔ REVISION 2026-08-30` section and its
+2026-09-04 follow-up.
+
+**In practice:** when a second window confirms your finding, check whether they measured a
+different thing or merely re-ran your method. If it is the latter, you have one data point.
+And when handing a NEGATIVE to another window ("nothing else references X"), state the
+producing command with it — a truncated or mislabelled check of yours becomes a committed
+assertion of theirs.
+
 **⚠ THIS RULE APPLIES TO YOUR DIAGNOSTICS, NOT ONLY TO PRODUCTION CODE (added 2026-08-26).**
 Every example above is production code. On 2026-08-26 three windows hit this shape in one
 day, and **all three were in the instruments used to INVESTIGATE**, not in the thing being
