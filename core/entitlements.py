@@ -80,17 +80,9 @@ FREE_TIER_REMOTE_CAP = 5
 #: Deliberately generous: 100 five-device packs on one install is far past any real
 #: purchase, so a value above it is evidence of a mistake rather than a big customer.
 #:
-#: ⛔ DO NOT CHANGE THIS ALONE. It is HALF of a cross-repo invariant: the issuing
-#: backend enforces the same ceiling when it signs, and the two MUST stay equal.
-#: Lower it here and the issuer keeps signing bonuses this build now refuses --
-#: every affected customer pays and silently receives nothing, because a rejected
-#: bonus grants 0 rather than erroring. Raise it here and the issuer becomes the
-#: binding limit instead, which is merely wrong rather than harmful.
-#:
-#: Nothing in THIS repo can catch that: the check requires both halves, and the
-#: issuer is not part of this checkout. The backend's own parity suite asserts the
-#: equality where both are importable, so a change here has to be made there too --
-#: this comment is the only warning a reader of this file alone will ever get.
+#: ⛔ DO NOT CHANGE THIS VALUE ALONE -- it must stay coordinated with the issuing
+#: backend, which is not part of this checkout. Contact the maintainer before
+#: modifying.
 MAX_REMOTE_CAP_BONUS = 500
 
 #: Commercial is uncapped, contingent on the gateway being attached. "Gateway
