@@ -3,6 +3,41 @@
 Accumulated small fixes (not project-sized — those go to `docs/roadmap/`). Check items off
 as done; keep newest context inline.
 
+### [HIGH] nemesis-drift-check.service has been failing since the Sep-1 Tailscale migration — needs a redeploy (filed 2026-09-04)
+Live security-property drift check (netfilter nodivert mode + anti-spoof DROP rule) has been
+**silently failing for 70 consecutive runs**, verified live: `systemctl status` shows
+`Active: failed`, `code=226/NAMESPACE`, `Failed to set up mount namespacing:
+/var/snap/tailscale/common/socket: No such file or directory`. Journal confirms: last success
+2026-09-01 11:19:21, first failure 2026-09-01 12:20:56 — one hour later, and every run since.
+
+**Root cause: the DEPLOYED unit is stale, not the code.** The installed
+`/etc/systemd/system/nemesis-drift-check.service` has
+`ReadWritePaths=/var/lib/nemesis-drift /var/snap/tailscale/common/socket` under
+`ProtectSystem=strict` — a snap-era Tailscale socket path baked in at deploy time. Tailscale on
+this box is native since 2026-09-01 (`/run/tailscale/tailscaled.sock`, confirmed live); the
+snap path no longer exists, so systemd fails namespace setup before the checker binary ever
+runs.
+
+**Neither script involved is at fault — both are already packaging-independent, verified
+live:**
+- `scripts/deploy_drift_check.sh:60-64` probes three candidate socket paths in order and uses
+  the first that exists (native `/var/run/`, native `/run/`, snap).
+- `scripts/nemesis-drift-check:47-49`'s `SOCKET_CANDIDATES` does the same, in Python.
+
+**Fix is a re-deploy, not a code change** — re-running `deploy_drift_check.sh` would detect the
+live native socket and regenerate the unit's `ReadWritePaths` correctly. This is a
+state-changing action (systemd unit + service restart) needing the State Snapshots discipline
+(USB snapshot + operator go-ahead) before anyone runs it — not done as part of filing this.
+
+**Transferable lesson, worth keeping independent of this specific fix:** a packaging migration
+can silently invalidate a baked-in unit exception even when every script that GENERATES the
+unit is itself packaging-independent — the staleness lives in what was already deployed, not
+in anything that would show up re-reading the current scripts. Verifying "is the generator
+correct" is not the same check as "is the deployed artifact still correct."
+
+Found by Window 1's launch-readiness audit, independently re-verified (unit file contents,
+journal timeline, both scripts' probe logic, current socket location) before filing.
+
 ### [LOW] `list_listening_ports` READ_OP on `nemesis_fwd` — root-level DNS-process attribution (filed 2026-09-03)
 Window 1's own deferral, routed here per the operator's call. Full reasoning already recorded
 inline at `alert_manager/port_risk.py:70-78` (the `ROLE_DNS_RESOLVER` docstring) — not
