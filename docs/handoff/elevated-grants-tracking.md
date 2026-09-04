@@ -152,6 +152,16 @@ e.g. `suricata`).
     polkit, not sudoers, and `/etc/polkit-1/rules.d/` remains unreadable at this session's
     privilege level (8th consecutive session, see below) — so **whether watchdog can
     restart dashboard is genuinely unknown, not fixed by this grant.**
+  - **Sharpened, same session (`d3a0c55`): the REPO-TRACKED polkit rule source
+    (`alert_manager/10-nemesis-watchdog.rules`) already lists `dashboard.service` in its
+    `allowed` array, and did so before today's commit — this predates 2026-09-04 entirely.**
+    So there's a real, checkable answer available without root, IF the deployed copy under
+    `/etc/polkit-1/rules.d/` matches the repo source (the file's own header says
+    `install.sh` deploys it there). **Still not verified against live state** — the
+    directory itself is `0750 root:polkitd` (confirmed via `stat`), so even a direct
+    `cat` of the known filename is denied, not just `ls`. "Genuinely unknown" above should
+    read as "very likely yes, per the repo source, but unconfirmed against the live
+    deployed file" rather than total ignorance.
   - `dashboard.service` already carries `Restart=always`, `RestartUSec=10s` — systemd itself
     restarts it on crash independent of watchdog either way.
   - Watchdog has logged **zero** restart events of any kind in 30 days (113 total journal
