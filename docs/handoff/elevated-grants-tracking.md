@@ -47,7 +47,7 @@ instruction.
 
 ---
 
-## Current state (last live check: 2026-09-03, Window 2 Morning Status)
+## Current state (last live check: 2026-09-04, Window 2 Morning Status)
 
 ### Production box (`sudo -n -l`, `getent group`, `id <user>`) — CONFIRMED CLEAN
 - No broad `(ALL) NOPASSWD:` grants. (The class revoked 2026-08-19 — `systemctl restart
@@ -181,3 +181,10 @@ rule), needs a session with root access to actually `ls` it.
   consecutive session). Gateway-VM entry not re-checked (production-box scope, open question
   unresolved). `tcpdump` capability not independently re-verified this session (no
   `getcap` re-run) — carried forward from 09-02, flag if this stretches further.
+- **2026-09-04** (Window 2, Morning Status). Production box re-checked live: 70 NOPASSWD
+  entries (count matches every prior session this week, no line-by-line diff run). `nemesis-fw`
+  membership unchanged (`paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`). `pihole` group
+  still open, unchanged. Polkit rules still unreadable (**7th consecutive session** — this is
+  now a standing gap worth a root-access session to actually resolve, not just re-flag).
+  Gateway-VM entry not re-checked (production-box scope, open question unresolved). `tcpdump`
+  capability not re-verified again today — now 2 sessions without a fresh `getcap` check.
