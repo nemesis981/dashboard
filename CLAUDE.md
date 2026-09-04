@@ -1339,6 +1339,42 @@ And when handing a NEGATIVE to another window ("nothing else references X"), sta
 producing command with it — a truncated or mislabelled check of yours becomes a committed
 assertion of theirs.
 
+**⛔ A CHECK THAT SEARCHES TEXT WILL MATCH THE PROSE DESCRIBING WHAT IT SEARCHES FOR (added
+2026-09-04, third instance in one week).**
+
+A grep, a `str.count`, or a regex over source does not distinguish CODE from the COMMENT
+EXPLAINING THAT CODE. Every instance below matched documentation of the very thing being
+looked for, and each produced a confident wrong answer:
+
+- **A premise check counted 9 sites where 5 exist.** `src.count('action="none"')` in
+  `test_fwd_audit_none_guard.py` (`b2b9d56`) also matched the docstring explaining the
+  `action="none"` convention. Only the test's own `EXPECTED_CHECKS` mismatch surfaced it.
+- **A grep "found" an already-fixed defect.** Searching `ip_enrichment.py` for the old
+  `is_private or is_loopback or is_link_local` predicate (`ca473d5`) returned a hit — the
+  COMMENT recording that the predicate was replaced on 2026-09-03. The fix was in place; the
+  search said otherwise.
+- **A test PASSED AGAINST A MUTANT because of its own comment.** A check asserting that
+  Windows-specific wording sits behind a platform guard (`cf3e00a`) searched a window for
+  `platform.system()`. The explanatory comment written as part of that very fix contains that
+  string, so the assertion held even with the guard replaced by `if True:`. Caught only by
+  mutation testing.
+
+**THE PART THAT MAKES THIS WORSE THAN AN ORDINARY SLIP: writing a GOOD comment about a pattern
+is what creates the false match.** The better the defect is documented next to the code, the
+more likely a text search for that defect passes falsely. Diligence in one place defeats the
+check in the other.
+
+**Required, for any check that searches for a string or pattern in source:**
+- **Strip comments and docstrings before matching**, or
+- **Assert on PARSED STRUCTURE** — `ast` for Python, a real parser for shell/config — rather
+  than raw text. Structure cannot be satisfied by prose.
+- **Prefer counting CODE constructs to counting string occurrences.** "Five `return` statements
+  carry this kwarg" is checkable; "the file contains this substring five times" is not the same
+  claim and will drift the moment someone documents it.
+- **A text-search check needs a mutation that proves it can fail.** All three instances above
+  looked correct; two were caught only by a deliberate mutation, and the third by an unrelated
+  count assertion. Reading the check harder would not have caught any of them.
+
 **⚠ THIS RULE APPLIES TO YOUR DIAGNOSTICS, NOT ONLY TO PRODUCTION CODE (added 2026-08-26).**
 Every example above is production code. On 2026-08-26 three windows hit this shape in one
 day, and **all three were in the instruments used to INVESTIGATE**, not in the thing being
