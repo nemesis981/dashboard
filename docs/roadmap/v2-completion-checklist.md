@@ -80,21 +80,42 @@ already existed, neither built).
 
 ## The gate — thirteen items, checked off before v2 is called done
 
-- [ ] **rogue-dhcp-detection.md** — Suricata `dhcp: logger: extended: yes` config flip
-  (install.sh + live box) plus a small consumer watching for a second DHCP server answering.
-  No gateway-mode dependency. Not yet built.
-- [ ] **dns-exfiltration-detection.md** — extends the existing `anomaly_detection` DNS tailer.
-  Requires fixing two data-destruction points in that tailer first (the `_QTYPES = {"A",
-  "AAAA"}` filter and the `_root_domain()` FQDN-collapse, `modules/anomaly_detection/module.py:101`
-  and `:1336`) — both discard exactly the signal DNS-exfiltration detection depends on. Core
-  false-positive suppression is a new per-client-per-domain baseline, extending the existing
-  `anomaly_baseline` table's pattern. Newly-registered-domain checking explicitly deferred to
-  the v2 community backend build, not this item. Not yet built.
+**Last verified against code: 2026-09-04.** This gate is graded on code/git-log, never on a
+file's own `Status:` header — the same discipline CLAUDE.md's roadmap-vs-state audit already
+applies at the file-classification level, one level down: a file can be correctly classified
+while the checkboxes *inside* it rot silently. **2026-09-04 finding: 7 of 13 items were stale,
+all in the same direction — overstating remaining work** (5 fully closeable, 1 blocker
+resolved, 1 partially closed). Found by Window 1's audit, independently re-verified item by
+item before any checkbox changed. A gate whose whole purpose is "nothing gets silently
+dropped" can't do that job if it also can't tell you when things are already done — add this
+line's date forward every time the gate is re-verified, so staleness here is visible rather
+than assumed.
+
+- [x] **rogue-dhcp-detection.md — BUILT AND DEPLOYED, corrected 2026-09-04.** Was marked
+  "not yet built"; false. `scripts/enable-suricata-dhcp-extended.sh` is the config flip
+  (`dhcp: enabled: yes`, confirmed live in `/etc/suricata/suricata.yaml`, dhcp events present
+  in `eve.json` — the flip is applied, not just written). `modules/lan_integrity/rogue_dhcp.py`
+  is the consumer (`module.py` imports it, `parse_event`/`classify`, findings emit
+  `kind='rogue_dhcp'`); `lan_integrity_dhcp_servers` + `lan_integrity_findings` exist in the
+  live DB. `test_rogue_dhcp.py`: 46/46 passing (re-run 2026-09-04). Found by Window 1's audit,
+  independently re-verified before checking this off.
+- [x] **dns-exfiltration-detection.md — BUILT, corrected 2026-09-04.** Was marked "not yet
+  built" with two data-destruction points listed as prerequisites; both were fixed in the same
+  build that shipped this (`cc4aef5`). `modules/anomaly_detection/module.py`: a second tailer
+  consumer (`_accumulate_channel`, `:679`) runs BEFORE the `_QTYPES`/`_root_domain` filtering
+  that the old novelty detector still uses — "sees everything" by construction, not by fixing
+  the filter in place. `_exfil_cycle` (`:705`) drives a selftest that raises on failure
+  (`:717-719`, not a soft warning) and emits `incident_type: "dns_exfiltration"` (`:783`). The
+  doc's own line-number citations were additionally stale (`_QTYPES` moved `:101`→`:107`,
+  `_root_domain` moved `:1336`→`:1552`) — both re-verified against current code. Found by
+  Window 1's audit, independently re-verified (exact line matches) before checking this off.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 1 (core, owned-fleet correlation).** Was
   always a v2 target — see "Checklist correction" above, not a new decision. **Spec written
   2026-08-30** (in the roadmap doc) — grounded in verified existing schema (finding tables,
-  device/IP identity), but gates on one open question: whether Suricata `eve.json` flow-event
-  logging is live on the production box, not verified from the repo. Build not started.
+  device/IP identity). **Blocker RESOLVED 2026-09-04:** the one open question — whether
+  Suricata `eve.json` flow-event logging is live on the production box — is confirmed YES
+  (3,510 `flow` events in a 10MB live sample, re-verified independently). Build itself has not
+  started; unblocked, still open, correctly unchecked.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 2 (venue/epidemic spread).** Reopened
   2026-08-30 — see "Gate reopening" above. **Signal set scoped against current visibility
   2026-08-30** (in the roadmap doc): 2 of 5 signals are Suricata rule-authoring work only, 2
@@ -103,15 +124,26 @@ already existed, neither built).
   decided. Outbound-only IoT beaconing (C2/botnet, no LAN-neighbor attack) recommended
   **excluded** from this scope, as its own future line item. Still needs a real spec/ADR
   (thresholds, baseline windows, false-positive handling) before code — scoping is the input to
-  that, not a substitute for it.
+  that, not a substitute for it. **Nuance added 2026-09-04:** the consumption seam this Tier
+  would plug into already exists — `modules/lan_integrity/signals.py`, whose own docstring
+  calls itself "the STABLE consumption seam" for Tier 2 (one of five signals). Infrastructure
+  the detector would use, not the detector itself; item correctly stays unchecked.
 
-- [ ] **gateway-mode-scoping.md** — scoping only, zero code or ADR exists yet. Full gateway vs.
-  bridged-peer opt-in toggle, segmentation enforcement. Not required to *ship* before v2 closes,
-  but the decision of whether it's in v2's scope at all needs to be made explicitly, not by
-  default omission.
-- [ ] **ADR 0019 Increment 4** (cutover to real enforcement authority) — explicitly "has not
-  started" per the ADR's own status line. Increments 1–3 are built and proven; this is the
-  remaining piece that makes the enforcement point authoritative rather than observe-only.
+- [ ] **gateway-mode-scoping.md — "zero code exists" corrected 2026-09-04, still open
+  otherwise.** `core/gateway_mode.py` is 538 lines (not zero), and `alert_manager` carries
+  dozens of gateway-related references (`NEMESIS_GW_LAN_IFACE`, `gateway_switch`) — real code
+  exists. The item's actual ask is unaffected: no ADR exists for this topic (the only ADR
+  matching `/gateway/` is 0028, email security gateway — a different "gateway," not network
+  gateway mode), and the decision of whether this is in v2's scope at all still needs to be
+  made explicitly, not inferred from code existing.
+- [x] **ADR 0019 Increment 4 — SHIPPED, corrected 2026-09-04.** Was marked "explicitly has
+  not started per the ADR's own status line" — that line is itself stale and the ADR has
+  since corrected it: `0019-*.md` line 13 now reads "...'has not started,' which stopped being
+  true 26 days earlier," and line 135 states "Increment 4 (cutover) landed 2026-08-01." This
+  checklist was quoting a status line the ADR itself had already retracted — a pattern worth
+  watching for elsewhere (a doc can self-correct and a downstream reference can still cite the
+  pre-correction text). Found by Window 1's audit, independently re-verified before checking
+  this off.
 - [ ] **Tier 2 TLS-interception build status — visibility gap, not a build gap.** The mechanism's
   own progress lives entirely in the private mirror (`~/work/nemesis-internal`); nothing in the
   public roadmap tracks it, even though its public-side interface
@@ -121,14 +153,25 @@ already existed, neither built).
 - [ ] **clean-uninstall-build-spec — e2e VM uninstall lifecycle test.** Phases 1–3 are built; the
   actual end-to-end VM uninstall test has never been run. A spec that's "built" but never
   exercised end-to-end is not the same claim as "works."
-- [ ] **malware-detection-pipeline — Layers C/D.** Layer A (ClamAV/YARA/heuristics) and Layer B
-  (canary/behavioral) are live. Layer C (AI verdict via ai_engine) and Layer D (local ML
-  classifier) remain scaffold only.
+- [x] **malware-detection-pipeline — Layers C/D — BUILT, corrected 2026-09-04.** Was marked
+  "scaffold only"; false, and the module's own docstring says so — its comments explicitly
+  read "no classifier — FALSE since 08-21" and "no entry point — FALSE since 08-21."
+  `modules/malware_detection/`: `ml_classifier.py`, `ml_features.py`, `ml_model.py`,
+  `ml_train.py` all present, `test_layer_c.py` (291 lines, re-run 2026-09-04) plus
+  `test_layer_c_render.py`/`test_ml_train.py`. Found by Window 1's audit, independently
+  re-verified (files present, line counts match) before checking this off.
 - [ ] **data-retention-and-archival-policy — broader Tier A retention.** The `dm_operation_log`
   archive-then-coalesce piece shipped; the wider Tier A retention policy the doc scopes has not
-  been built.
-- [ ] **Vestigial-tables removal audit** (`alert_notes`, `anomaly_ai_cache`, `anomaly_ai_usage`) —
-  carried in HANDOFF.md since 2026-08-06, still Window 2's, not yet started.
+  been built. **Confirmed still accurate 2026-09-04** — the doc's own status line reads
+  "PARTIAL, and item 1 is now LIVE," matching this entry exactly.
+- [x] **Vestigial-tables removal audit — CLOSED, nothing to remove, corrected 2026-09-04.**
+  `alert_notes`, `anomaly_ai_cache`, `anomaly_ai_usage` do not exist in the live DB
+  (`sqlite_master` query returns empty, re-verified) and have no `CREATE` anywhere in the repo
+  — either already removed or never created. **Worth one deliberate look, not done here:** why
+  there's no `CREATE` for tables this checklist assumed existed, given CLAUDE.md's "no table
+  without a CREATE in the repo" rule — closing the checkbox doesn't answer that, it just means
+  there's nothing live to clean up. Found by Window 1's audit, independently re-verified
+  before checking this off.
 - [ ] **ADR 0031 write-up** (QUIC/nftables static-policy block, "Piece K") — carried since
   2026-08-06, still unwritten. Confirmed 2026-08-08 it is unrelated to gateway-mode despite
   surfacing in the same day's PUNCHLIST entries — no other doc silently covers it.
@@ -141,14 +184,27 @@ already existed, neither built).
   and is referenced by `LICENSE`/`README.md`); this item takes **0031** instead — the next free
   number, verified against the full `docs/architecture/` range (0001-0030 in use, with
   pre-existing gaps at 0013/0017 not investigated here — flagged, not reused, pending a
-  separate look at why they're empty). No other doc referenced "ADR 0022" for Piece K; this was
-  the only live citation.
+  separate look at why they're empty).
+  **Correction to the correction, same day:** the line above originally claimed this was "the
+  only live citation" — false, caught by a truncated verification (`head -5` on an unfiltered
+  grep cut off the tenth of ten matches). `gateway-mode-scoping.md:13` also stated the stale
+  0022 earmark, and worse, framed it as independently confirmed settled fact — now fixed
+  there too. Both live citations are corrected as of this entry; the append-only historical
+  records (worklogs, supplements, dated audits, briefings) that also mention "ADR 0022" for
+  this item are deliberately left untouched — they're dated accounts of what was true when
+  written, not live references, and editing them would falsify history rather than correct it.
 - [ ] **The long-carried PUNCHLIST tail** — `enrich_ip()` external IP exposure, agent check-in
   jitter, empty-alert-list read-window mismatch, install.sh default-route interface detection,
   host-defence rule naming, Windows DHCP hostname truncation, cache-hit token skew, installer
   token revocation, credential rotation, Concurrency Phase 3, `/api/analyze/<rule_id>`
   GET-that-spends-money. Individually small; carried unchanged across multiple HANDOFFs, which is
-  itself the signal this list exists to catch.
+  itself the signal this list exists to catch. **Partially closed 2026-09-04, item stays open
+  overall:** `enrich_ip()` external IP exposure is CLOSED — `ca473d5` (2026-09-03) gates it
+  through `ip_scope.is_public_ip()`; the old broken predicate survives only as a comment
+  explaining the fix, independently reviewed and test-run by Window 2 at the time. The
+  remaining ~10 sub-items were **not individually re-verified** this pass — flagged as
+  unverified, not confirmed clean, so this stays an open checkbox rather than closing on a
+  partial check.
 
 ## How this gate is meant to be used
 

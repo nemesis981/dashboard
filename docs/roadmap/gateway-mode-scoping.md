@@ -10,13 +10,20 @@ from a blanket product direction into an opt-in mode, selected per install, chan
 reframing is deliberate, not an oversight of the earlier decision — see "Relationship to the
 2026-08-05 decision" below.
 
-**Not yet an ADR. Confirmed 2026-08-08 (Window 2): ADR 0022 is NOT this topic — no collision,
-but no reuse either.** 0022 is earmarked for the QUIC/nftables item (the static-policy nftables
-block, "Piece K," `deploy-quic-block.sh` — carried as owed on every HANDOFF/briefing since
-2026-08-06). That item and the 2026-08-05 gateway-role decision both surfaced in the same
-day's PUNCHLIST entries, which is what made them look related — they aren't the same ADR.
-When this doc is ready to graduate, it takes the next number free at that time (0023 as of this
-writing, but re-check — 0022 stays QUIC/nftables' regardless of write order).
+**Not yet an ADR. This is not the same topic as ADR 0022** (the source-available software
+license, `docs/architecture/0022-source-available-license.md`) — no collision, no reuse. The
+QUIC/nftables item (the static-policy nftables block, "Piece K," `deploy-quic-block.sh` —
+carried as owed on every HANDOFF/briefing since 2026-08-06) and the 2026-08-05 gateway-role
+decision both surfaced in the same day's PUNCHLIST entries, which is what made them look
+related — they aren't the same ADR, and neither is this gateway-mode doc.
+**Corrected 2026-09-04 — the 2026-08-08 earmark below went stale and was stated here as
+settled fact, which is what let it survive uncorrected for weeks; see
+`v2-completion-checklist.md` item 12 for the fuller account.** The QUIC/nftables item no
+longer earmarks 0022 — the number was reused for the license ADR on 2026-08-17, and the QUIC
+item now takes **0031** (next free number as of 2026-09-04's verified range: 0001-0030 in use,
+gaps at 0013/0017 unexplained, not reused). When THIS doc (gateway-mode-scoping) is ready to
+graduate, it takes whatever number is next free at that time — re-check against
+`docs/architecture/` rather than trusting any number written down here, including this one.
 
 ---
 
