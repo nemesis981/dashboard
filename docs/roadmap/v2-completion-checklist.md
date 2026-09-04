@@ -112,14 +112,25 @@ than assumed.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 1 (core, owned-fleet correlation).** Was
   always a v2 target — see "Checklist correction" above, not a new decision. **Spec written
   2026-08-30** (in the roadmap doc) — grounded in verified existing schema (finding tables,
-  device/IP identity). **Blocker RESOLVED 2026-09-04:** the one open question — whether
-  Suricata `eve.json` flow-event logging is live on the production box — is confirmed YES
-  (3,510 `flow` events in a 10MB live sample, re-verified independently). Build itself has not
-  started; unblocked, still open, correctly unchecked.
+  device/IP identity). **STILL BLOCKED — a 2026-09-04 "blocker resolved" claim here was
+  retracted the same day, RECORDED so the mistake doesn't recur a third time.** Two different
+  windows independently measured flow-event *volume* (554 events, then 3,510 events, in live
+  `eve.json` samples) and both read that as answering the open question. It doesn't:
+  `lateral-movement-outbreak-detection.md`'s own `⛔ REVISION 2026-08-30` section already
+  answered this exact question, wrongly, once before — flow logging being ON does not mean the
+  appliance SEES the peer-to-peer traffic Tier 1 needs. Measured there: ~89–91% of captured
+  flows involve the appliance itself as an endpoint; true peer-to-peer is ~0.1–0.7%,
+  single-digit distinct pairs — structural (a non-gateway appliance on a switched LAN only sees
+  traffic to/from itself plus broadcast/multicast), not a config flip, and confirmed
+  2026-09-02 that Gateway Mode does not change it either. **The real blocker stands**: full-form
+  Tier 1 needs VLAN-capable switching or port mirroring — hardware Nemesis doesn't control, not
+  a software gate. Build has not started; correctly unchecked.
 - [ ] **lateral-movement-outbreak-detection.md — Tier 2 (venue/epidemic spread).** Reopened
   2026-08-30 — see "Gate reopening" above. **Signal set scoped against current visibility
   2026-08-30** (in the roadmap doc): 2 of 5 signals are Suricata rule-authoring work only, 2
-  share Tier 1's open flow-logging question, and 1 (ARP anomalies) is architecturally the same
+  share Tier 1's real blocker (**phrasing corrected 2026-09-04** — not "flow-logging," which is
+  live and was never the issue; the shared blocker is the structural peer-to-peer visibility
+  gap item 3 above restates in full), and 1 (ARP anomalies) is architecturally the same
   detector as the already-parked ARP-spoofing item — flagged as an unresolved tension, not
   decided. Outbound-only IoT beaconing (C2/botnet, no LAN-neighbor attack) recommended
   **excluded** from this scope, as its own future line item. Still needs a real spec/ADR

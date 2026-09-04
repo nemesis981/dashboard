@@ -96,6 +96,17 @@ accurate; the label on it was not. Same failure family as the standing "check th
 output, not just whether the value looks plausible" practice — a plausible number sourced from
 somewhere other than where its label claimed.
 
+**⛔ SAME MISTAKE MADE A SECOND TIME, 2026-09-04, by two different windows agreeing with each
+other.** `v2-completion-checklist.md` item 3 was briefly marked "blocker RESOLVED" after two
+independent flow-event *count* checks (554, then 3,510 — both real, both correctly counted)
+were read as answering this section's question. Neither measured peer-to-peer visibility; both
+measured volume, exactly the shape this section already warns about. Caught and retracted same
+day. **The durable lesson, now twice-confirmed:** a plausible flow-event COUNT says nothing
+about whether those flows are peer-to-peer, and this specific question has now fooled two
+different checks into agreeing with each other on the wrong conclusion. Before anyone re-opens
+this question a third time: the answer requires classifying flows by whether the appliance is
+an endpoint, not counting how many flow events exist.
+
 ### What Tier 1 can honestly claim under this constraint
 
 Tier 1's headline framing — *"device A was flagged → is A now reaching for B, C, D?"* — is
