@@ -152,16 +152,40 @@ e.g. `suricata`).
     polkit, not sudoers, and `/etc/polkit-1/rules.d/` remains unreadable at this session's
     privilege level (8th consecutive session, see below) — so **whether watchdog can
     restart dashboard is genuinely unknown, not fixed by this grant.**
-  - **Sharpened, same session (`d3a0c55`): the REPO-TRACKED polkit rule source
-    (`alert_manager/10-nemesis-watchdog.rules`) already lists `dashboard.service` in its
-    `allowed` array, and did so before today's commit — this predates 2026-09-04 entirely.**
-    So there's a real, checkable answer available without root, IF the deployed copy under
-    `/etc/polkit-1/rules.d/` matches the repo source (the file's own header says
-    `install.sh` deploys it there). **Still not verified against live state** — the
-    directory itself is `0750 root:polkitd` (confirmed via `stat`), so even a direct
-    `cat` of the known filename is denied, not just `ls`. "Genuinely unknown" above should
-    read as "very likely yes, per the repo source, but unconfirmed against the live
-    deployed file" rather than total ignorance.
+  - **SETTLED, later same session: the crash-recovery rationale is not merely unproven, it
+    is FALSE — nothing was ever missing.** `alert_manager/10-nemesis-watchdog.rules` has
+    listed `dashboard.service` in its `allowed` array since 2026-07-27, predating this
+    session entirely (confirmed by Window 2 diffing `d3a0c55~1` against `d3a0c55` — the
+    array's `dashboard.service` entry is unchanged context, not part of the diff). Watchdog's
+    polkit authority over dashboard was never absent, so a `paul` sudoers grant could not
+    have restored a capability that was already there. The `restart` grant remains worth
+    adding as **operator convenience only** (saves the `stop && start` dance) — that framing
+    was already correct, only the crash-recovery justification is retracted.
+  - **The polkit-unreadable gap (8 consecutive sessions) is now partially closed, but not
+    fully — two different claims, verified to two different degrees:**
+    - **Verified directly by Window 2:** the repo source is readable and has said
+      `dashboard.service` since 2026-07-27 (see above) — this required no root and no peer
+      claim, just `git show d3a0c55~1:...`.
+    - **Reported by Window 1, NOT independently verified by Window 2:** that the operator
+      ran `sudo diff` between the repo source and the live deployed file today and found
+      them identical. Plausible and consistent with everything else observed, but this
+      session has no root and cannot re-run that diff itself — recorded as operator-attested,
+      not confirmed.
+    - **A genuine open discrepancy Window 2 found while checking this:** `install.sh:1508`
+      deploys the rule via `install -d -m 0755 /etc/polkit-1/rules.d`, but the LIVE directory
+      is `0750 root:polkitd` (confirmed via `stat` this session) — 0755 would make the
+      directory world-traversable, 0750 does not. Either something after install tightened
+      it (a polkit package default, a manual hardening pass, systemd-tmpfiles), or this box's
+      directory predates install.sh ever creating it. **Not chased further this session** —
+      flagging so the “installer says 0755, live is 0750” gap doesn't quietly resolve itself
+      into "unreadable, as expected" without anyone having actually explained why.
+  - **New open item, same surface, least-privilege class:** `d3a0c55`'s own test
+    (`test_watchdog_restart_authority.py`) reports `alert-watcher`, `malware-canary`,
+    `diagnostics-watcher`, and `vpn-dns-guard` as polkit-permitted but NOT supervised by
+    watchdog's `SERVICES` list — over-grant, not a vulnerability (watchdog's own code never
+    calls restart on units outside its list), but a should-eventually-trim item. Deliberately
+    left in place by Window 1 (a future `SERVICES` addition may legitimately need them) and
+    the test prints the list on every run specifically so it can't go unexamined.
   - `dashboard.service` already carries `Restart=always`, `RestartUSec=10s` — systemd itself
     restarts it on crash independent of watchdog either way.
   - Watchdog has logged **zero** restart events of any kind in 30 days (113 total journal
