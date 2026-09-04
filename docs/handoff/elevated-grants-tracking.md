@@ -145,6 +145,18 @@ e.g. `suricata`).
   silent fix** — either the asymmetry is intentional (and should be recorded as such here) or
   it's a gap to close by adding the grant, same class of change as any other sudoers edit.
   Not resolved this session.
+- **Related `dashboard.service` unit question, same session, worth one combined operator
+  decision (Window 1's framing).** The same restart also surfaced that four diagnostics
+  checks (`audit_write_liveness`, `schema_drift`, `dependency_preflight`, `config_drift`)
+  were silently dead in production — `ProtectSystem=strict` + `PrivateTmp=no` on this unit
+  leaves the service with no writable temp directory at all (`tempfile.gettempdir()` itself
+  raises). Worked around in code (`05f7dc8`, `canary.scratch_dir()`, probes rather than
+  infers writability), but the root cause is the unit: `PrivateTmp=yes` would give the
+  service an isolated writable `/tmp` and fix all four without any Python change. That's a
+  production unit edit requiring root, left to the operator — and since there are already
+  NOPASSWD grants for `tee`/`chmod` on this exact unit file, it's the same class of change
+  as the `restart` verb question above. Not resolved this session; flagged for a combined
+  `dashboard.service` decision rather than two separate ones.
 
 ### Polkit rules (`/etc/polkit-1/rules.d/`) — UNCHECKED, 4 consecutive sessions
 `ls /etc/polkit-1/rules.d/` → Permission denied (needs root) on 2026-09-01, same result
