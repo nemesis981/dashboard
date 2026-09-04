@@ -129,9 +129,20 @@ already existed, neither built).
   been built.
 - [ ] **Vestigial-tables removal audit** (`alert_notes`, `anomaly_ai_cache`, `anomaly_ai_usage`) —
   carried in HANDOFF.md since 2026-08-06, still Window 2's, not yet started.
-- [ ] **ADR 0022 write-up** (QUIC/nftables static-policy block, "Piece K") — carried since
+- [ ] **ADR 0031 write-up** (QUIC/nftables static-policy block, "Piece K") — carried since
   2026-08-06, still unwritten. Confirmed 2026-08-08 it is unrelated to gateway-mode despite
   surfacing in the same day's PUNCHLIST entries — no other doc silently covers it.
+  **Corrected 2026-09-04 — number collision found live:** this item carried "ADR 0022" since
+  2026-08-08, when that number was reserved for exactly this write-up
+  (`worklog/2026-08-08-002.md:13`). 2026-08-17's licensing work reused 0022 for
+  `0022-source-available-license.md` (`worklog/2026-08-17-001.md:44`) without anyone catching
+  that it was already spoken for — the QUIC item silently went numberless while this checklist
+  kept citing the now-reassigned number. 0022 **stays** the licensing ADR (it exists, is live,
+  and is referenced by `LICENSE`/`README.md`); this item takes **0031** instead — the next free
+  number, verified against the full `docs/architecture/` range (0001-0030 in use, with
+  pre-existing gaps at 0013/0017 not investigated here — flagged, not reused, pending a
+  separate look at why they're empty). No other doc referenced "ADR 0022" for Piece K; this was
+  the only live citation.
 - [ ] **The long-carried PUNCHLIST tail** — `enrich_ip()` external IP exposure, agent check-in
   jitter, empty-alert-list read-window mismatch, install.sh default-route interface detection,
   host-defence rule naming, Windows DHCP hostname truncation, cache-hit token skew, installer
