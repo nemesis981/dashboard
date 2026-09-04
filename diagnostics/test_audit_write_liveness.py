@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(ROOT, "alert_manager"))
 import audit_write_liveness as A                                   # noqa: E402
 import canary as C                                                 # noqa: E402
 
-EXPECTED_CHECKS = 26
+EXPECTED_CHECKS = 29
 _pass = _fail = 0
 
 
@@ -147,6 +147,52 @@ check("DB_PATH resolves from NEMESIS_DB_PATH when set",
       A.resolve_db_path({"NEMESIS_DB_PATH": "/tmp/x.db"}) == "/tmp/x.db")
 check("  ...and falls back to the canonical /var/lib path, never a __file__-relative guess",
       A.resolve_db_path({}) == "/var/lib/nemesis/alerts.db")
+
+print("\n8. it is REGISTERED -- built-and-tested is not the same as wired")
+# This module was committed complete, with 26 passing checks, and sat unregistered:
+# absent from diagnostics/__init__.py, so nothing ever ran it. Every check above
+# passed the whole time. The sweep below is what closes that class of gap -- it asks
+# the package, not this module, so a FUTURE diagnostic cannot ship unwired either.
+#
+# It imports and inspects real objects rather than grepping source: a text search for
+# "META" would match this very comment, and the prose documenting a pattern is exactly
+# what makes a text-search check pass falsely.
+import importlib
+import pkgutil
+
+# ROOT itself (not just ROOT/diagnostics) must be importable to reach the PACKAGE.
+# Deliberately not relying on cwd: run from /opt/nemesis the import would be rescued
+# silently, and the check would pass for a reason that does not hold under systemd.
+sys.path.insert(0, ROOT)
+import diagnostics as _pkg
+
+_registered = {m.META["id"] for m in _pkg.CHECKS}
+check("this check is registered in CHECKS", "audit_write_liveness" in _registered,
+      "registered: %s" % (sorted(_registered),))   # str: check() concatenates detail
+# NOT an `is A` identity test: this file imports the module top-level while the package
+# imports it as diagnostics.audit_write_liveness, so they are two distinct objects loaded
+# from ONE source file. Identity would compare import paths and fail on working code.
+_mapped = _pkg._CHECK_MAP.get("audit_write_liveness")
+check("  ...and run_check() resolves it to the same source file",
+      _mapped is not None
+      and os.path.realpath(getattr(_mapped, "__file__", "")) ==
+          os.path.realpath(getattr(A, "__file__", "")),
+      "mapped=%r" % (getattr(_mapped, "__file__", None),))
+
+_unwired = []
+for _mi in pkgutil.iter_modules([os.path.join(ROOT, "diagnostics")]):
+    if _mi.name.startswith("test_") or _mi.name in ("canary", "redact"):
+        continue
+    try:
+        _m = importlib.import_module("diagnostics.%s" % _mi.name)
+    except Exception:                                              # noqa: BLE001
+        continue
+    _meta = getattr(_m, "META", None)
+    if isinstance(_meta, dict) and _meta.get("id") and callable(getattr(_m, "run", None)):
+        if _meta["id"] not in _registered:
+            _unwired.append(_meta["id"])
+check("NO diagnostic defines META+run() while absent from CHECKS", not _unwired,
+      "unwired: %s" % sorted(_unwired))
 
 for p in (db, db2, db4, notable):
     try: os.unlink(p)

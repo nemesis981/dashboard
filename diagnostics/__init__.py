@@ -24,6 +24,7 @@ from . import (
     agent_enrollment_integrity,
     dependency_preflight,
     config_drift,
+    audit_write_liveness,
 )
 from .redact import redact, redact_result
 
@@ -45,6 +46,7 @@ CHECKS = [
     agent_enrollment_integrity,
     dependency_preflight,
     config_drift,
+    audit_write_liveness,
 ]
 
 _CHECK_MAP = {m.META["id"]: m for m in CHECKS}
