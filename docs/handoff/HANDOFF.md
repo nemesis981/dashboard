@@ -102,6 +102,25 @@ resolving the multi-day failure Window 3 fixed earlier today (see their handoff 
 `PrivateTmp=yes` unit change) — currently `active/running`, `PrivateTmp=yes` live, verified
 namespace-accurately (not just "it came up").
 
+**⚠ PUSHED ≠ RUNNING — the license downgrade guard (`1c1115a`) is on `origin/main` but is NOT
+the code the live dashboard is executing.** Found and verified by Window 3, independently
+confirmed by Window 2 before recording:
+```
+dashboard ActiveEnterTimestamp : Fri 2026-09-04 17:18:08 CDT
+1c1115a committed               : Fri 2026-09-04 17:38:57 -0500
+```
+The running process predates the fix by ~21 minutes — it was never restarted after this commit
+landed. **On this box right now, activating an older signed licence key still silently
+downgrades capacity**, the exact bug `1c1115a` fixes. Static-file fixes (`aaeb456`, the
+idle-lock defect) don't have this problem — served from disk per request — but `1c1115a`
+touches `dashboard.py` and `core/entitlements.py`, both loaded at process start, so only a
+restart picks it up. **Not restarted deliberately** — dashboard's NOPASSWD grants cover
+`start`/`stop`/`reset-failed` but not `restart` (see §6), making this a `stop && start`, and
+neither Window 1 nor Window 3 considered bouncing the operator's dashboard unannounced at end
+of day theirs to decide. **A fresh session should check `ActiveEnterTimestamp` against
+`1c1115a`'s commit time before assuming this is fixed either way** — don't trust "it's on
+`origin/main`" as proof the running system reflects it.
+
 ## 4. Today's work — full detail in the worklog and supplement
 
 Extremely high commit-velocity day across three windows. This session (post-restart) alone:
