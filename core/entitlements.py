@@ -43,7 +43,8 @@ the database alone was measured to undercount — see that module.
 import os
 
 __all__ = ["is_commercial", "get_tier", "remote_device_budget",
-           "license_status", "FREE_TIER_REMOTE_CAP", "TIER_FREE", "TIER_COMMERCIAL"]
+           "license_status", "FREE_TIER_REMOTE_CAP", "MAX_REMOTE_CAP_BONUS",
+           "TIER_FREE", "TIER_COMMERCIAL"]
 
 TIER_FREE = "free"
 TIER_COMMERCIAL = "commercial"
@@ -69,6 +70,15 @@ TIER_COMMERCIAL = "commercial"
 #: OR from the process environment. Both are inputs the person being metered
 #: controls. TESTS monkeypatch this module attribute.
 FREE_TIER_REMOTE_CAP = 5
+
+#: Ceiling on PURCHASED free-tier capacity (`remote_cap_bonus`, see
+#: `_purchased_bonus`). The signature is trusted, so this does not defend against a
+#: forged key -- it defends against an ISSUER BUG. Without a ceiling, one malformed
+#: value in a variant map or a stray zero in an accumulation could hand a free
+#: install effectively-unlimited capacity, and nothing downstream would question it.
+#: Deliberately generous: 100 five-device packs on one install is far past any real
+#: purchase, so a value above it is evidence of a mistake rather than a big customer.
+MAX_REMOTE_CAP_BONUS = 500
 
 #: Commercial is uncapped, contingent on the gateway being attached. "Gateway
 #: attached" is not yet machine-evaluable (no gateway_mode flag exists anywhere —
@@ -171,25 +181,72 @@ def get_tier() -> str:
     return TIER_COMMERCIAL if is_commercial() else TIER_FREE
 
 
+def _purchased_bonus(db_path=None):
+    """Extra remote-device capacity BOUGHT for a free-tier install. 0 if none.
+
+    Read only from a signature-verified payload. `remote_cap_bonus` is a DELTA, not
+    an absolute: the issuer cannot know this build's FREE_TIER_REMOTE_CAP, so signing
+    an absolute would mean guessing that constant across a version boundary it cannot
+    observe — and a later change to the free base would then silently shrink what
+    existing pack holders had already bought. The issuer signs what was PURCHASED;
+    the client adds its own current base.
+
+    Validation is deliberately STRICTER than the commercial `remote_cap` path below,
+    which accepts anything `int()` swallows. Here a float, a numeric string, or a
+    bool is refused outright rather than coerced: those are signs of a malformed
+    issuance, and silently rounding one into an entitlement is how a wrong number
+    becomes a granted one. Every rejection returns 0 — the NARROWER answer — so a
+    corrupted value can only ever cost capacity, never create it.
+    """
+    state = _license_state(db_path)
+    if not state:
+        return 0
+
+    from core import license_key as lk
+    res = lk.verify(state[0], install_id=None)
+    if not res.valid:
+        # An unverified payload contributes nothing. This is the whole entitlement:
+        # if a bonus could be read from an unsigned or edited key, anyone could mint
+        # themselves capacity by editing the licence row.
+        return 0
+
+    raw = res.payload.get("remote_cap_bonus")
+    if raw is None:
+        return 0
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    if raw <= 0 or raw > MAX_REMOTE_CAP_BONUS:
+        return 0
+    return raw
+
+
 def remote_cap_for_license(db_path=None):
     """The cap this install is entitled to. None means unlimited.
 
     Precedence, and the first rule is the one that matters:
 
-      1. A `remote_cap` in the SIGNED licence payload wins. The issuing tool can
-         set it (`nemesis-license-issue --remote-cap N`), and because it is
-         inside the signature it cannot be edited by the holder. Ignoring it
-         would mean a value the vendor deliberately signed had no effect —
-         issuing a 25-device licence and silently granting unlimited instead.
+      1. A `remote_cap` in the SIGNED licence payload wins for a COMMERCIAL licence.
+         The issuing tool can set it (`nemesis-license-issue --remote-cap N`), and
+         because it is inside the signature it cannot be edited by the holder.
+         Ignoring it would mean a value the vendor deliberately signed had no effect
+         — issuing a 25-device licence and silently granting unlimited instead.
       2. Otherwise a valid commercial licence is unlimited.
-      3. Otherwise the free-tier cap.
+      3. Otherwise the free-tier cap, PLUS any purchased `remote_cap_bonus`.
 
-    Anything unparseable or nonsensical falls through to the free cap rather
-    than to unlimited: a corrupted number must not widen an entitlement.
+    Anything unparseable or nonsensical falls through to the narrower entitlement
+    rather than to unlimited: a corrupted number must not widen an entitlement.
+
+    ⚠ Rule 1 is commercial-only, and used to be written as though it applied to any
+    signed payload. It did not: this function returned the hardcoded free cap before
+    ever reading the payload, so a signed cap on a FREE licence was silently ignored
+    (fixed 2026-09-04, having made the key pack impossible — a bought pack was
+    indistinguishable from not buying one, with no error anywhere). `remote_cap` is
+    still commercial-only by design; free-tier capacity is bought via
+    `remote_cap_bonus`, which is additive and cannot be used to grant unlimited.
     """
     tier, verdict, _detail = license_status(db_path)
     if tier != TIER_COMMERCIAL:
-        return FREE_TIER_REMOTE_CAP
+        return FREE_TIER_REMOTE_CAP + _purchased_bonus(db_path)
 
     state = _license_state(db_path)
     if state:
