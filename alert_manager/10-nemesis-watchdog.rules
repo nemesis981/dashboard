@@ -1,8 +1,20 @@
-// Nemesis: allow the watchdog service user to restart ONLY Nemesis units.
+// Nemesis: allow the watchdog service user to restart ONLY the units it supervises.
 //
 // Grants the de-privileged watchdog service exactly the restart authority it
-// needs, and nothing else. Verified on the test VM: the 7 units below are
-// permitted; every other unit and every other verb falls through to deny.
+// needs, and nothing else. Every other unit and every other verb falls through
+// to deny.
+//
+// THIS LIST MUST COVER core_module/watchdog/watchdog.py's SERVICES LIST.
+// Until 2026-09-04 it did not, and the mismatch failed in the worst direction:
+// watchdog supervised 6 units but was authorised for only 3 of them. For
+// pihole-FTL, clamav-daemon and suricata it would detect the outage, attempt
+// `systemctl restart`, be denied by polkit, and report "down and could not be
+// restarted" -- which reads as a broken service rather than a missing permission.
+// The original list enumerated NEMESIS units; watchdog also supervises three
+// third-party daemons. Including them extends a de-privileged service's authority
+// beyond Nemesis's own units -- narrowly, to exactly the units it already
+// monitors, and to the restart verbs only.
+// alert_manager/test_watchdog_restart_authority.py enforces the coverage.
 //
 // watchdog is the one de-privileged service with a genuine privilege need:
 // systemctl restart <unit> for the services it supervises. This grants exactly
@@ -27,7 +39,11 @@ polkit.addRule(function(action, subject) {
         "device-scanner.service",
         "malware-canary.service",
         "diagnostics-watcher.service",
-        "vpn-dns-guard.service"
+        "vpn-dns-guard.service",
+        // Third-party daemons watchdog supervises (added 2026-09-04).
+        "pihole-FTL.service",
+        "clamav-daemon.service",
+        "suricata.service"
     ];
     if (allowed.indexOf(unit) < 0) {
         return undefined;          // fall through to default (deny)
