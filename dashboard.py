@@ -2959,7 +2959,7 @@ def licensing_page():
     return render_template("licensing.html", **_license_view())
 
 
-def _verify_and_store_license(key):
+def _verify_and_store_license(key, allow_downgrade=False):
     """Verify a licence key against THIS machine and store it. Returns (dict, status).
 
     The single path by which a licence is installed. Both the manual paste
@@ -2996,6 +2996,48 @@ def _verify_and_store_license(key):
         return {"ok": False, "verdict": res.verdict,
                 "detail": res.detail}, 400
 
+    # ── downgrade guard ────────────────────────────────────────────────────
+    # Every pack purchase reissues a superseding key, and each one arrives by its
+    # own email. All of them are genuinely signed and genuinely bound to this
+    # machine, so re-activating an older one -- restoring a machine, or clicking
+    # the first email in the thread -- silently drops capacity that was paid for.
+    # Nothing errors; the number just gets smaller, which is indistinguishable
+    # from the pack never having worked.
+    #
+    # This is NOT an access control. Both keys are valid and possessing one is
+    # already full authorisation to install it; this protects against an accident.
+    # So it fails toward ALLOWING: when either timestamp is unreadable there is no
+    # evidence of a downgrade, and an unverifiable stored key grants 0 capacity
+    # anyway -- refusing then would lock someone out of their own product to
+    # protect capacity they do not have.
+    from core import entitlements as ent
+    prior = ent.installed_payload()
+    prior_at = (prior or {}).get("issued_at")
+    incoming_at = res.payload.get("issued_at")
+    is_downgrade = (isinstance(prior_at, int) and isinstance(incoming_at, int)
+                    and not isinstance(prior_at, bool)
+                    and not isinstance(incoming_at, bool)
+                    and incoming_at < prior_at)
+    if is_downgrade:
+        current_cap = ent.cap_from_payload(prior)
+        incoming_cap = ent.cap_from_payload(res.payload)
+        licence_ref = (res.payload.get("licence_id") or "")[:32]
+        if not allow_downgrade:
+            _audit(action="license_downgrade_refused", rule_id=licence_ref)
+            return {"ok": False, "verdict": "older_key",
+                    "current_cap": current_cap, "incoming_cap": incoming_cap,
+                    "detail": "That licence key is older than the one already "
+                              "installed, and activating it would change this "
+                              "install from %s to %s remote devices. Your licence "
+                              "is unchanged. If you meant to go back to the older "
+                              "key, confirm to continue."
+                              % (_cap_text(current_cap), _cap_text(incoming_cap))}, 409
+        # Audited HERE rather than at the route, so the record means "an older key
+        # really did replace a newer one" and not merely "a request carried the
+        # flag". A confirm sent with a key that is not a downgrade logs nothing,
+        # because nothing was overridden.
+        _audit(action="license_downgrade_overridden", rule_id=licence_ref)
+
     now = datetime.now().isoformat(timespec="seconds")
     try:
         conn = _dm_conn()
@@ -3026,13 +3068,33 @@ def _verify_and_store_license(key):
             "detail": "Licence activated."}, 200
 
 
+def _cap_text(cap):
+    """Render a cap for a user-facing sentence. None means unlimited."""
+    return "unlimited" if cap is None else str(cap)
+
+
 @app.route("/api/license/activate", methods=["POST"])
 @login_required
 def api_license_activate():
-    """Install a purchased licence key. POST-only, auth-gated, audited."""
+    """Install a purchased licence key. POST-only, auth-gated, audited.
+
+    ⚠ THE DOWNGRADE OVERRIDE IS READ FROM JSON ONLY, DELIBERATELY. This route also
+    accepts form-encoded bodies, and a cross-origin form CAN be submitted -- POST
+    alone is not a CSRF defence. Today that is nearly harmless, because forging an
+    activation requires a key already bound to the victim's machine. But an override
+    flag honoured from a form would let that same forged request re-open exactly the
+    silent downgrade the guard exists to close, making the fix into the vector.
+    Requiring a JSON content-type is the defence already used by
+    `api_ram_recovery_clean`: a form cannot produce it, and a cross-origin fetch that
+    sets it is stopped by CORS preflight. `request.is_json` is checked BEFORE the
+    body is read, so a form carrying `confirm_downgrade` is not merely ignored --
+    it never reaches the flag at all.
+    """
+    body_json = request.get_json(silent=True) or {}
     key = (request.form.get("license_key") or
-           (request.get_json(silent=True) or {}).get("license_key") or "").strip()
-    body, status = _verify_and_store_license(key)
+           body_json.get("license_key") or "").strip()
+    allow_downgrade = bool(request.is_json and body_json.get("confirm_downgrade"))
+    body, status = _verify_and_store_license(key, allow_downgrade=allow_downgrade)
     return jsonify(body), status
 
 

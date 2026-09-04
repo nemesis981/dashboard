@@ -44,7 +44,8 @@ import os
 
 __all__ = ["is_commercial", "get_tier", "remote_device_budget",
            "license_status", "FREE_TIER_REMOTE_CAP", "MAX_REMOTE_CAP_BONUS",
-           "TIER_FREE", "TIER_COMMERCIAL"]
+           "TIER_FREE", "TIER_COMMERCIAL",
+           "bonus_from_payload", "cap_from_payload", "installed_payload"]
 
 TIER_FREE = "free"
 TIER_COMMERCIAL = "commercial"
@@ -193,36 +194,34 @@ def get_tier() -> str:
     return TIER_COMMERCIAL if is_commercial() else TIER_FREE
 
 
-def _purchased_bonus(db_path=None):
-    """Extra remote-device capacity BOUGHT for a free-tier install. 0 if none.
+def bonus_from_payload(payload):
+    """Purchased free-tier capacity carried by a VERIFIED payload. 0 if none.
 
-    Read only from a signature-verified payload. `remote_cap_bonus` is a DELTA, not
-    an absolute: the issuer cannot know this build's FREE_TIER_REMOTE_CAP, so signing
-    an absolute would mean guessing that constant across a version boundary it cannot
-    observe — and a later change to the free base would then silently shrink what
-    existing pack holders had already bought. The issuer signs what was PURCHASED;
-    the client adds its own current base.
+    ⚠ The caller is responsible for having verified the signature. This function
+    reads a dict and applies the entitlement rules to it; it cannot tell a genuine
+    payload from an invented one. Every caller here passes the output of
+    `lk.verify(...).payload` after checking `.valid`.
 
-    Validation is deliberately STRICTER than the commercial `remote_cap` path below,
-    which accepts anything `int()` swallows. Here a float, a numeric string, or a
-    bool is refused outright rather than coerced: those are signs of a malformed
-    issuance, and silently rounding one into an entitlement is how a wrong number
-    becomes a granted one. Every rejection returns 0 — the NARROWER answer — so a
-    corrupted value can only ever cost capacity, never create it.
+    `remote_cap_bonus` is a DELTA, not an absolute: the issuer cannot know this
+    build's FREE_TIER_REMOTE_CAP, so signing an absolute would mean guessing that
+    constant across a version boundary it cannot observe — and a later change to the
+    free base would then silently shrink what existing pack holders had already
+    bought. The issuer signs what was PURCHASED; the client adds its own current base.
+
+    Validation is deliberately STRICTER than the commercial `remote_cap` path, which
+    accepts anything `int()` swallows. Here a float, a numeric string, or a bool is
+    refused outright rather than coerced: those are signs of a malformed issuance, and
+    silently rounding one into an entitlement is how a wrong number becomes a granted
+    one. Every rejection returns 0 — the NARROWER answer — so a corrupted value can
+    only ever cost capacity, never create it.
+
+    Extracted so the stored-licence path and the candidate-key preview apply ONE set
+    of rules. Two copies would pass their own tests while drifting apart, which is
+    exactly the divergence the cross-repo ceiling invariant already warns about.
     """
-    state = _license_state(db_path)
-    if not state:
+    if not isinstance(payload, dict):
         return 0
-
-    from core import license_key as lk
-    res = lk.verify(state[0], install_id=None)
-    if not res.valid:
-        # An unverified payload contributes nothing. This is the whole entitlement:
-        # if a bonus could be read from an unsigned or edited key, anyone could mint
-        # themselves capacity by editing the licence row.
-        return 0
-
-    raw = res.payload.get("remote_cap_bonus")
+    raw = payload.get("remote_cap_bonus")
     if raw is None:
         return 0
     if isinstance(raw, bool) or not isinstance(raw, int):
@@ -230,6 +229,67 @@ def _purchased_bonus(db_path=None):
     if raw <= 0 or raw > MAX_REMOTE_CAP_BONUS:
         return 0
     return raw
+
+
+def installed_payload(db_path=None):
+    """The VERIFIED payload of the licence currently installed, or None.
+
+    None means "no usable licence on record" — absent, unparseable, or not signed by
+    the issuer. It is deliberately indistinguishable to callers: if a payload could be
+    read from an unsigned or edited key, anyone could mint themselves an entitlement
+    by editing the licence row.
+
+    The node-lock is NOT checked here (`install_id=None`). Callers ask what the stored
+    licence SAYS, which is still answerable on hardware it no longer matches — and a
+    rebind needs exactly that, since the stored key is bound to the old machine.
+    """
+    state = _license_state(db_path)
+    if not state:
+        return None
+    from core import license_key as lk
+    res = lk.verify(state[0], install_id=None)
+    return res.payload if res.valid else None
+
+
+def cap_from_payload(payload):
+    """The remote-device cap a verified payload WOULD grant if it were installed.
+
+    A preview, for showing someone what activating a key would do before they do it.
+    None means unlimited, matching `remote_cap_for_license`.
+
+    ⚠ NOT a substitute for `remote_cap_for_license`, and deliberately not wired into
+    it. That function takes the tier from `license_status()`, which also accounts for
+    expiry and verdict; this one answers a narrower question — "what does this key
+    say" — from the payload alone. Unifying them would put expiry logic on a path that
+    has no licence installed yet. `test_downgrade_guard.py` asserts the two agree
+    wherever they should, which is the anti-drift mechanism a shared implementation
+    would otherwise have provided.
+    """
+    if not isinstance(payload, dict):
+        return FREE_TIER_REMOTE_CAP
+    if payload.get("tier") != TIER_COMMERCIAL:
+        return FREE_TIER_REMOTE_CAP + bonus_from_payload(payload)
+
+    raw = payload.get("remote_cap")
+    if raw is None:
+        return COMMERCIAL_REMOTE_CAP
+    try:
+        n = int(raw)
+        if n > 0:
+            return n
+    except (TypeError, ValueError):
+        pass
+    # Present but unusable. Fail toward the NARROWER entitlement.
+    return FREE_TIER_REMOTE_CAP
+
+
+def _purchased_bonus(db_path=None):
+    """Extra remote-device capacity BOUGHT for a free-tier install. 0 if none.
+
+    Read only from a signature-verified payload — see `installed_payload`. The rules
+    themselves live in `bonus_from_payload`; this is the stored-licence caller.
+    """
+    return bonus_from_payload(installed_payload(db_path))
 
 
 def remote_cap_for_license(db_path=None):
