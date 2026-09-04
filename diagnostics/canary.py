@@ -140,14 +140,18 @@ def scratch_dir():
         of its own rather than the mount: it tests the REAL uid rather than the effective
         one and does not account for ACLs.
 
-        ⚠ An earlier version of this comment asserted that `os.access(W_OK)` returns True
-        under a read-only mount. That was reasoned, never measured, and is probably WRONG —
-        access(2) lists EROFS among its own error returns, and every read-only mount tested
-        on this box returned False. It is recorded as unresolved rather than corrected,
-        because the available mounts are all root-owned and mode 755, so they fail on
-        permissions before EROFS is ever consulted, and no unconfounded test is possible
-        here without root. The claim was written into a comment explaining a fix for
-        instruments that confirm what their author expected.
+        ⚠ AN EARLIER VERSION OF THIS COMMENT WAS WRONG, AND THE RECORD IS KEPT ON PURPOSE.
+        It asserted that `os.access(W_OK)` returns True under a read-only mount, making the
+        obvious premise check confirm the wrong answer. That was reasoned, never measured,
+        and is REFUTED: measured as root — where mode bits cannot explain a False — a
+        read-only mount gives `os.access(W_OK)=False` and EROFS, while a read-write control
+        at the same mode 500 gives True and a successful write. `access(2)` documents EROFS
+        among its own returns. It does see the mount.
+
+        The claim was written into the comment explaining a fix for instruments that confirm
+        what their author expected, on the day that error was being catalogued, and it was
+        recoverable only because it was passed to another window carrying an "unverified"
+        label instead of being adopted as fact.
 
     Raises OSError naming every candidate tried, so a total failure is a loud environmental
     finding rather than a silent fallback to somewhere unexpected.
