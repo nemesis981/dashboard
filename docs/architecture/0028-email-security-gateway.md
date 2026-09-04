@@ -401,6 +401,23 @@ This sequence gates D5's hold-time budget too (a slow, high-FP heuristic is wors
 fast check at all) and should run before committing to *any* specific inbound-scanning
 technique, not just before shipping a final model.
 
+**⚠ STATUS NOTE, added 2026-09-04 — what D9 means for what's live TODAY, stated plainly
+because it matters commercially, not just architecturally.** As built and deployed right now,
+email security is an **authentication + signals scanner, not a verdict engine**, and that is
+D9 working as designed, not an unfinished corner of it. Verified live: every scanned message
+(144/144) has `verdict = NULL` in `email_message_verdicts` — not a bug, and not silent. Two
+independent places in the code say so on purpose: `writes.py`'s `record_verdict` docstring
+("verdict stays None when the message was scanned but not judged... writing 'clean' to fill
+the gap would manufacture a judgement nothing made") and `supervisor.py`'s call site, which
+passes `verdict=None` with an inline comment naming D9 as the deferred decision explicitly.
+Signal collection itself is working and populated on every message (`signals_json`: 144/144);
+auth results (SPF/DKIM/DMARC) are populated where the mail server provided them (41/144 —
+the rest genuinely lack auth headers to evaluate, not a collection failure). **The practical
+consequence:** today's email security surfaces "what did we observe about this message"
+(authentication posture, structural signals), never "is this message dangerous" — the
+measurement-first sequence above (steps 1-5) is what has to run before that second claim can
+be made honestly, and nothing has skipped ahead of it.
+
 ### D10 — No agent-side code is required for email protection
 
 **Both delivery paths are inherently centralized.** D1 puts Nemesis in the mail path as an
