@@ -1385,6 +1385,9 @@ investigated:
 | `git stash push` + `pop` to measure a test result "before" a change | the push silently did not take, so the "before" run still contained the change — **it was compared against itself and declared innocent** |
 | grepping for symbols, expecting zero, reading hits as damage | the hits were already-committed work; the grep was correct, the **expectation attached to it** was not |
 | counting install-directory entries as setup progress | all of them were OS built-ins |
+| `pgrep -af "intake.wsgi\|signer.py"` to check for stray test servers | returned **two hits, both the grep's own command line** — the search pattern is in the argv of the process doing the searching. Real answer was zero |
+| a branch-coverage harness where a bad `sed` left a dangling `-c` | all three cases "died", **including the one that should have succeeded** — a uniform failure reads as a real result about the code, not as a broken harness |
+| `grep ... alert_manager/watchdog.py 2>/dev/null` | **the file does not exist** — the service moved to `core_module/` weeks earlier (see CLAUDE.md's own stale key-paths line, fixed 2026-09-04). `2>/dev/null` made "no matches" indistinguishable from "no file", nearly producing the conclusion that watchdog does not touch the dashboard |
 
 **The first is the most instructive: it LOOKED like a controlled before/after and had no
 "before".** It then produced a confident, wrong conclusion that was reported to the operator
@@ -1399,6 +1402,29 @@ and sent another window investigating a defect that did not exist.
   not necessarily found a problem; check what the hits ARE before naming them.
 - **Prefer a read-only comparison to a state-moving one.** "Did I cause this?" is usually
   answerable with `git diff --stat -- <file>` — no writes, and it cannot half-fail.
+
+**Three more instances landed 2026-09-04 (same day CLAUDE.md's own key-paths line turned out
+to be the wrong-directory source for one of them), adding shape the original three didn't
+cover:**
+- **A text-search check can match ITSELF, not just nearby prose.** The `pgrep` case's own
+  argv contained the pattern it was searching for — a step past "the check matches the
+  comment documenting it": here the search process is inside its own search space.
+  Bracketing one character in each alternation (`intake[.]wsgi`) removes it.
+- **This family produces FALSE POSITIVES as readily as false negatives, and the false
+  positive is the more expensive one.** Every instance above it is a false negative — a
+  missed finding. `pgrep` invented work instead: it said stray servers were running, and the
+  next step would have been hunting processes that never existed. "My check found MORE than I
+  expected" doesn't feel like this failure mode, so the rule doesn't get reached for it
+  without saying so explicitly.
+- **The tell was still the COUNT** — two hits where the true answer was zero, the same tell
+  that already caught the "two files queried, one line returned" instance above. Evidence
+  the count-check generalizes rather than needing a new per-instance rule each time.
+- **`2>/dev/null` on a diagnostic is the same defect as a default that means something.** It
+  converts "the thing you're searching does not exist" into "the thing you're searching for
+  is not in it" — two different findings with identical output. The standing "a failed read
+  must surface as an explicit failure state, never a default value" rule already covers it in
+  principle; this is the shell idiom that violates it most often, worth naming because it
+  reads as noise-suppression rather than error-suppression.
 
 **Grep for this shape in every retro/review pass**, alongside the checks above and below.
 Four standing checks now, one failure class each: a bug that hides in rendering (#1 recurring
