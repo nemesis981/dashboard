@@ -38,7 +38,7 @@ EXEMPT = {
 }
 
 EXPECTED_SITES = 11
-EXPECTED_CHECKS = 13
+EXPECTED_CHECKS = 15
 _pass = _fail = 0
 
 
@@ -104,11 +104,22 @@ check("  ...handles a nested-paren first argument",
 
 print("\n2. survey every JS source in the tree")
 os.chdir(ROOT)
+
+#: Every source root that can render page JS. `core/*.py` was added 2026-09-05:
+#: the Learning Center landed there and the scan had never looked at it. Nothing
+#: in core/ polls yet, so that gap was latent rather than live -- which is
+#: precisely why it needed closing before it became live, and why section 8
+#: below now detects a blind spot instead of relying on someone remembering to
+#: widen this list.
+SCANNED_PY = (["dashboard.py"]
+              + sorted(glob.glob("modules/*/module.py"))
+              + sorted(glob.glob("core/*.py")))
+SCANNED_JS = sorted(glob.glob("static/*.js"))
 found = []
-for f in sorted(glob.glob("static/*.js")):
+for f in SCANNED_JS:
     for a in sites_in_js(open(f, encoding="utf-8").read()):
         found.append((f, a))
-for f in ["dashboard.py"] + sorted(glob.glob("modules/*/module.py")):
+for f in SCANNED_PY:
     if os.path.exists(f):
         for a in sites_in_py(f):
             found.append((f, a))
@@ -223,6 +234,48 @@ check("a page with the overlay and no nemPoll is detected",
 _mut_ok = "<script " + ACT_TAG + "></script><script " + IDLE_TAG + "></script>"
 check("CONTROL: a correctly-ordered page is NOT flagged",
       ACT_TAG in _mut_ok and _mut_ok.index(ACT_TAG) < _mut_ok.index(IDLE_TAG))
+
+print("\n8. THE SCAN MUST DETECT ITS OWN BLIND SPOTS")
+# ⛔ WHY THIS EXISTS. Sections 2-3 can only police files they look at, so a timer
+# in an unscanned directory is invisible to them AND to their mutation test --
+# the suite stays green and proves nothing about that file. That is the same
+# shape as the bug this whole file was written for ("one file was marked,
+# another was not, and nothing compared them"), lifted to the scan's own scope.
+#
+# FOUND LIVE 2026-09-05: the Learning Center shipped into core/, which this scan
+# had never covered. Nothing there polled, so it was latent -- but the next timer
+# added in core/ would have been unmarked, undetected and green. Widening the
+# list fixes today; this check fixes the class, because it fails the moment a
+# timer appears anywhere the list does not reach, instead of waiting for someone
+# to notice.
+_SKIP_DIRS = ("__pycache__", ".git", "node_modules", "venv", "layerd-model",
+              "nemesis_agent")     # the agent is not a browser surface
+unscanned = []
+for root, dirs, files in os.walk("."):
+    dirs[:] = [d for d in dirs if d not in _SKIP_DIRS and not d.startswith(".")]
+    for fn in files:
+        rel = os.path.relpath(os.path.join(root, fn), ".")
+        if os.path.basename(rel).startswith("test_"):
+            continue
+        if rel in SCANNED_PY or rel in SCANNED_JS:
+            continue
+        try:
+            if fn.endswith(".js"):
+                sites = sites_in_js(open(rel, encoding="utf-8").read())
+            elif fn.endswith(".py"):
+                sites = sites_in_py(rel)
+            else:
+                continue
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        if sites:
+            unscanned.append((rel, sites))
+
+check("no timer call site lives outside the scanned set", not unscanned,
+      "UNSCANNED timer(s): %s -- add the file's directory to SCANNED_PY/SCANNED_JS, "
+      "then mark or exempt the timer" % sorted(unscanned))
+check("  (control: the detector can see a site at all)",
+      bool(sites_in_js("setInterval(ghost, 1000);")), True)
 
 print("\n%d passed, %d failed" % (_pass, _fail))
 if _pass + _fail != EXPECTED_CHECKS:
