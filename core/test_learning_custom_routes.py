@@ -36,7 +36,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 84
+EXPECTED_CHECKS = 104
 _pass = _fail = 0
 
 
@@ -380,6 +380,92 @@ def test_the_mutating_APIS_refuse_GET():
               "got %s" % r.status_code)
 
 
+# ── F. The pending-review badge ──────────────────────────────────────────────
+#
+# ⛔ THE COUNT ITSELF IS THE THING THAT MUST NOT LEAK. `/api/stats` is reachable by any
+# authenticated account. A globally-computed badge would hand every user a running
+# tally of unapproved submissions -- the same material the read path 404s to protect,
+# just aggregated. So these tests check WHO GETS THE NUMBER, not only that it is right.
+
+def _pending_now():
+    return len(C.all_topics(status=C.STATUS_DRAFT))
+
+
+def test_the_badge_is_admin_only_and_silent_at_zero():
+    C.save_draft(slug="custom-badge-1", title="Badge One", summary="s", body="x",
+                 actor="c_user", role="user")
+    n = _pending_now()
+    check("the fixture has something pending", n > 0, "n=%d" % n)
+
+    admin = dashboard._learn_pending_badge_html("admin")
+    check("an admin gets a badge", admin != "")
+    check("...carrying the real count", "%d awaiting review" % n in admin,
+          "badge=%r" % admin[-60:])
+    check("...linking to the queue", "/settings/learning/queue" in admin)
+
+    for role in ("user", "sub_admin", "viewonly"):
+        check("%s gets NOTHING -- the count is not theirs to see" % role,
+              dashboard._learn_pending_badge_html(role) == "")
+
+    check("an unparseable role fails closed",
+          dashboard._learn_pending_badge_html("not-a-role") == "")
+
+
+def test_the_badge_disappears_when_the_queue_empties():
+    """A permanent badge is furniture. One that APPEARS is a signal, which is the only
+    reason this affordance exists."""
+    for t in C.all_topics(status=C.STATUS_DRAFT):
+        C.delete(t["slug"], actor="c_admin", role="admin")
+    check("the queue is genuinely empty", _pending_now() == 0)
+    check("an admin sees no badge at zero",
+          dashboard._learn_pending_badge_html("admin") == "")
+
+    C.save_draft(slug="custom-badge-2", title="Badge Two", summary="s", body="x",
+                 actor="c_user", role="user")
+    check("...and it reappears on the next submission",
+          "1 awaiting review" in dashboard._learn_pending_badge_html("admin"))
+
+
+def test_the_dashboard_HEADER_actually_renders_the_badge():
+    """The header is built by a Python f-string. A misnamed local there is a KeyError at
+    request time on the main page, and `py_compile` cannot see it -- the same class of
+    defect as this codebase's #1 recurring bug."""
+    C.save_draft(slug="custom-hdr", title="Header Badge", summary="s", body="x",
+                 actor="c_user", role="user")
+    r = _get("/", 603)
+    body = r.get_data(as_text=True)
+    check("the dashboard renders for an admin", r.status_code == 200,
+          "got %s" % r.status_code)
+    check("the badge span is in the header", 'id="learn-pending-badge"' in body)
+    check("...and it is populated, not left empty",
+          "awaiting review" in body)
+
+    # The leak assertion on the real page, not just on the helper.
+    plain = _get("/", 601).get_data(as_text=True)
+    check("a plain user renders the same header with NO count",
+          'id="learn-pending-badge"' in plain and "awaiting review" not in plain)
+
+
+def test_api_stats_computes_the_badge_PER_REQUESTER():
+    """The claim the helper's docstring makes, tested through the real payload rather
+    than by reading the helper again."""
+    admin = _get("/api/stats", 603)
+    user = _get("/api/stats", 601)
+    check("/api/stats answers for an admin", admin.status_code == 200,
+          "got %s" % admin.status_code)
+    check("/api/stats answers for a user", user.status_code == 200,
+          "got %s" % user.status_code)
+
+    a = admin.get_json() or {}
+    u = user.get_json() or {}
+    check("the key is present for the admin", "learning_pending_badge" in a)
+    check("the admin payload carries the count",
+          "awaiting review" in (a.get("learning_pending_badge") or ""))
+    check("the USER payload carries no count at all",
+          (u.get("learning_pending_badge") or "") == "",
+          "leaked=%r" % (u.get("learning_pending_badge"),))
+
+
 def test_save_refuses_a_bad_slug_with_400_not_500():
     r = _post("/api/learn/custom/save", 602,
               {"slug": "not-prefixed", "title": "t", "summary": "s", "body": "b"})
@@ -414,6 +500,10 @@ if __name__ == "__main__":
         test_the_review_queue_renders_and_separates_pending_from_published,
         test_the_queue_ESCAPES_author_text_it_shows_as_source,
         test_the_mutating_APIS_refuse_GET,
+        test_the_badge_is_admin_only_and_silent_at_zero,
+        test_the_badge_disappears_when_the_queue_empties,
+        test_the_dashboard_HEADER_actually_renders_the_badge,
+        test_api_stats_computes_the_badge_PER_REQUESTER,
         test_save_refuses_a_bad_slug_with_400_not_500,
     ):
         print("\n%s" % fn.__name__)

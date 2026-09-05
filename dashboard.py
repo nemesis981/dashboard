@@ -2735,6 +2735,40 @@ def _learn_role():
     return _roles.normalise_role(getattr(current_user, "role", None))
 
 
+def _learn_pending_badge_html(role=None):
+    """Pending-submission count for the Learning Center nav entry. "" for everyone else.
+
+    ⛔ COMPUTED PER REQUESTER, NEVER ONCE AND SHARED. `/api/stats` is reachable by any
+    authenticated account, so a globally-computed count would hand every user a running
+    tally of unapproved submissions -- material an admin has deliberately not approved
+    yet, which is exactly what the read path 404s to protect. The role check is here,
+    not at the call site, so a future second caller cannot forget it.
+
+    Renders NOTHING at zero rather than a "0". A permanent badge is furniture; a badge
+    that appears is a signal, and the whole point of this affordance is that an admin
+    learns a submission is waiting without having to go and look.
+    """
+    try:
+        if _roles.normalise_role(role if role is not None else _learn_role()) \
+                != _roles.ROLE_ADMIN:
+            return ""
+        from core import learning_custom as lc
+        n = len(lc.all_topics(status=lc.STATUS_DRAFT))
+    except Exception:
+        # A badge is an ornament on someone else's page. It fails silent rather than
+        # taking the whole dashboard header down with it.
+        return ""
+    if not n:
+        return ""
+    return (
+        '<a href="/settings/learning/queue" target="_blank" rel="noopener" '
+        'title="Submissions waiting for your review" '
+        'style="font-size:0.42em;font-weight:normal;margin-left:10px;'
+        'vertical-align:middle;text-decoration:none;color:#111;background:#d2a24c;'
+        'border-radius:9px;padding:2px 9px">%d awaiting review</a>' % n
+    )
+
+
 @app.route("/learn")
 @login_required
 def learn_page():
@@ -5030,6 +5064,8 @@ def api_stats():
             h for name, h in modules_loader.get_module_cards()
             if name != "community_queue"
         ),
+        # Per-requester, not global -- the helper refuses for non-admins.
+        "learning_pending_badge": _learn_pending_badge_html(),
         "community_queue_badge": (
             (lambda m: m.get_dashboard_card() or "")(
                 modules_loader.get_loaded_modules().get("community_queue")
@@ -18364,6 +18400,10 @@ def dashboard():
         if name != "community_queue"
     )
 
+    # Learning Center pending-review badge. Admin-only; see the helper for why the
+    # role check lives there rather than here.
+    learn_pending_badge_html = _learn_pending_badge_html()
+
     # Community queue header badge (injected into h1, not the grid)
     cq_badge_html = ""
     try:
@@ -18550,7 +18590,7 @@ def dashboard():
                  are now listed on /learn alongside the education topics. Two nav
                  entries for two halves of "learning" made users guess which one held
                  what. -->
-            <a href="/learn" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Security training and reference material">&#128218; Learning Center</a>
+            <a href="/learn" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Security training and reference material">&#128218; Learning Center</a><span id="learn-pending-badge">{learn_pending_badge_html}</span>
         </span>
     </h1>
     <script src="/static/header-status.js"></script>
@@ -20182,6 +20222,10 @@ def dashboard():
                     if (d.community_queue_badge !== undefined) {{
                         var cqEl = document.getElementById("cq-badge-container");
                         if (cqEl) cqEl.innerHTML = d.community_queue_badge || '';
+                    }}
+                    if (d.learning_pending_badge !== undefined) {{
+                        var lpEl = document.getElementById("learn-pending-badge");
+                        if (lpEl) lpEl.innerHTML = d.learning_pending_badge || '';
                     }}
                     if (d.incident_state) {{
                         window._nemesisIncidentState = d.incident_state;
