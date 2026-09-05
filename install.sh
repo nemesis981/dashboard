@@ -1504,7 +1504,21 @@ deploy_services() {
     # verb, and every other service user is denied.
     local _polkit_src="$DASHBOARD_DIR/alert_manager/10-nemesis-watchdog.rules"
     if [[ -f "$_polkit_src" ]]; then
-        install -d -m 0755 /etc/polkit-1/rules.d
+        # ⛔ `install -d` CHMODS a directory that already exists, so it must
+        # never be applied unconditionally to a packaged path. polkitd ships
+        # /etc/polkit-1/rules.d as 0750 root:polkitd; applying a wider mode to
+        # it would make every polkit rule on the system world-readable. Create
+        # it only when genuinely absent, and with the packaged mode rather than
+        # whatever the ambient umask would give.
+        if [[ ! -d /etc/polkit-1/rules.d ]]; then
+            if getent group polkitd >/dev/null 2>&1; then
+                install -d -m 0750 -o root -g polkitd /etc/polkit-1/rules.d
+            else
+                # polkit not installed yet: 0750 root:root is still correct for a
+                # root-run polkitd, and is not a widening of anything.
+                install -d -m 0750 -o root -g root /etc/polkit-1/rules.d
+            fi
+        fi
         install -m 0644 -o root -g root "$_polkit_src" /etc/polkit-1/rules.d/
         systemctl reload polkit 2>/dev/null || systemctl restart polkit 2>/dev/null || true
         ok "Deployed polkit rule for watchdog restart authority"
