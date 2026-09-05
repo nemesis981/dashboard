@@ -596,6 +596,34 @@ ROUTE_MINIMUMS = {
     # the GET that renders the questions.
     "training_page":                  (_U, _U),
     "training_quiz":                  (_U, _U),
+
+    # ── Learning Center (/learn) ─────────────────────────────────────────────
+    # DISTINCT FROM `training_page` ABOVE, which is the capability-unlock quiz
+    # system at /account/training. Same word, different feature; the route prefix
+    # is deliberately /learn so the two are not confused.
+    #
+    # `_U` and not `_V`: viewonly is excluded from "all users" by operator
+    # decision (2026-09-05). These minimums are only the OUTER gate, though --
+    # passing them does not grant sight of any topic. `core/learning.py`
+    # `visible_to()` re-reads each topic's three-state ceiling and the caller's
+    # entitlement on every request, so a `user` who reaches these routes still
+    # sees nothing they were not individually assigned.
+    #
+    # The endpoint names carry NO topic name, deliberately: a topic slug is a
+    # database value and a filename, never an entry in this registry, so no
+    # topic-specific string enters this always-loaded shared file.
+    "learn_page":                     (_U, _U),
+    "learn_topic":                    (_U, _U),
+
+    # Admin surface for the three-state control, per-user grants, and the
+    # defaults preview/apply. Admin for BOTH methods: the GET exposes who has
+    # been granted what across every account, which is as sensitive as the POST
+    # that changes it.
+    "api_learn_admin":                (_A, _A),
+    "api_learn_topic_state":          (_A, _A),
+    "api_learn_user_grant":           (_A, _A),
+    "api_learn_defaults_preview":     (_A, _A),
+    "api_learn_defaults_apply":       (_A, _A),
 }
 
 # Reachable by ANY authenticated principal, whatever their role. These are not

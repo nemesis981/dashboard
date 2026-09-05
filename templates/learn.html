@@ -1,0 +1,57 @@
+{# Learning Center — topic index.
+
+   Every topic reaching this template has ALREADY passed learning.visible_to(); the
+   template does no filtering of its own. Deliberately: a template that re-derives a
+   security decision is a second implementation of it, and the two drift.
+
+   Provenance is shown per topic even though phase 1 has only built-in content, so
+   that business-authored content (phase 2) slots in beside it without the built-in
+   items suddenly gaining a badge they never had. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Learning Center — Nemesis</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; }
+    h1 { color:#00d4ff; font-size:1.6em; margin:0 0 4px; }
+    .sub { color:#999; margin:0 0 24px; }
+    .card { background:#1a1a1a; border:1px solid #333; border-radius:6px;
+            padding:16px; margin-bottom:12px; }
+    .card h2 { margin:0 0 6px; font-size:1.1em; }
+    .card a { color:#00d4ff; text-decoration:none; }
+    .card a:hover { text-decoration:underline; }
+    .summary { color:#aaa; margin:0; }
+    .badge { font-size:0.72em; text-transform:uppercase; letter-spacing:0.06em;
+             color:#888; border:1px solid #444; border-radius:3px;
+             padding:1px 6px; margin-left:8px; vertical-align:middle; }
+    .empty { color:#999; border:1px dashed #444; border-radius:6px; padding:20px; }
+  </style>
+</head>
+<body>
+  <h1>&#128218; Learning Center</h1>
+  <p class="sub">Security training and reference material.</p>
+
+  {% if topics %}
+    {% for t in topics %}
+      <div class="card">
+        <h2><a href="/learn/{{ t.slug }}">{{ t.title }}</a>
+          <span class="badge">Nemesis</span></h2>
+        <p class="summary">{{ t.summary }}</p>
+      </div>
+    {% endfor %}
+  {% else %}
+    {# Says nothing about whether topics EXIST that this account cannot see —
+       "none available to you" would confirm hidden content to someone not
+       permitted to know of it, which is the control's whole purpose. #}
+    <div class="empty">
+      No training topics are available yet. An administrator can add them from
+      Settings.
+    </div>
+  {% endif %}
+
+  <script src="/static/tier.js"></script>
+</body>
+</html>

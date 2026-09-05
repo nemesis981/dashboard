@@ -1,0 +1,52 @@
+{# Learning Center — one topic.
+
+   Reaching this template means learning.visible_to() ALREADY returned True in the
+   route. The template enforces nothing; the route does.
+
+   Tier variants are emitted as data-beginner/-intermediate/-pro and swapped
+   client-side by tier.js, matching the existing convention (115 uses in
+   dashboard.py). The server emits ALL THREE because it cannot read localStorage —
+   so every variant is present in the DOM regardless of the reader's tier. That is
+   fine for prose and is precisely why no capability may ever be gated on tier. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ topic.title }} — Learning Center</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; line-height:1.55; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.5em; margin:12px 0 4px; }
+    .sub { color:#999; margin:0 0 24px; }
+    section { background:#1a1a1a; border:1px solid #333; border-radius:6px;
+              padding:16px 20px; margin-bottom:14px; max-width:70ch; }
+    section h2 { font-size:1.05em; margin:0 0 8px; color:#eee; }
+    .badge { font-size:0.72em; text-transform:uppercase; letter-spacing:0.06em;
+             color:#888; border:1px solid #444; border-radius:3px;
+             padding:1px 6px; margin-left:8px; vertical-align:middle; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/learn">&larr; Learning Center</a>
+  <h1>{{ topic.title }} <span class="badge">Nemesis</span></h1>
+  <p class="sub">{{ topic.summary }}</p>
+
+  {% for sec in topic.sections %}
+    <section>
+      <h2>{{ sec.heading }}</h2>
+      {# All three variants emitted; tier.js selects one. The visible default is the
+         intermediate text so the page is readable before the script runs — and if
+         the script never runs, the reader still gets prose rather than nothing. #}
+      <span class="tier-text"
+            data-beginner="{{ sec.beginner }}"
+            data-intermediate="{{ sec.intermediate }}"
+            data-pro="{{ sec.pro }}">{{ sec.intermediate }}</span>
+    </section>
+  {% endfor %}
+
+  <script src="/static/tier.js"></script>
+</body>
+</html>

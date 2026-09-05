@@ -1154,9 +1154,36 @@ def _create_user(username: str, display_name: str, password: str, role: str = "a
             (username, display_name, _hash_password(password), role, now, now),
         )
         conn.commit()
-        return cur.lastrowid
+        uid = cur.lastrowid
     finally:
         conn.close()
+    _learn_seed_if_eligible(uid, role)
+    return uid
+
+
+def _learn_seed_if_eligible(uid, role):
+    """Seed a user with the Learning Center default topic set. Never raises.
+
+    Called from BOTH account creation and the role-change path. The role change is
+    the one that gets forgotten: an account created as `viewonly` and later promoted
+    is the normal way people are added, and seeding only on creation would silently
+    give that user nothing forever.
+
+    Never raises, deliberately -- a Learning Center seeding failure must not break
+    account creation or a role change. Those are the operations an admin cannot work
+    around; missing entitlements can be fixed later from the admin screen.
+
+    Seeding itself is one-shot per user (see learning.seed_user), so calling this on
+    every role change cannot re-grant a topic an admin deliberately revoked.
+    """
+    try:
+        from core import learning
+        r = _roles.normalise_role(role)
+        if _roles.rank(r) < _roles.rank(_roles.ROLE_USER):
+            return          # viewonly is not part of "all users" -- nothing to seed
+        learning.seed_user(uid, actor=_actor())
+    except Exception:
+        log.exception("learning: seeding failed for user %s (non-fatal)", uid)
 
 
 #: Body fields that carry the admin credential rather than payload data. Any
@@ -2058,6 +2085,12 @@ def api_users_update(uid):
         conn.close()
     auth_log.info("authz: %s updated user %s (%s)",
                   current_user.username, row["username"], ", ".join(sets))
+    # Seed on PROMOTION, not only on creation. An account created as viewonly and
+    # later raised to `user` is the normal way people get added, and seeding only at
+    # creation would leave exactly those users with nothing, permanently, with
+    # nothing anywhere recording why.
+    if new_role is not None:
+        _learn_seed_if_eligible(uid, new_role)
     return jsonify({"ok": True})
 
 
@@ -2623,6 +2656,187 @@ def training_quiz(capability):
                            review=review, recorded=recorded,
                            record_error=record_error, unavailable=None,
                            malformed=False)
+
+
+# ── Learning Center (/learn) ─────────────────────────────────────────────────
+#
+# SECURITY POSTURE, stated once for all routes below:
+#   * All are @login_required and NONE is in _AUTH_EXEMPT.
+#   * Reaching these routes grants sight of NOTHING. `roles.ROUTE_MINIMUMS` is only
+#     the outer gate; every topic is then filtered through `learning.visible_to()`,
+#     which re-reads the topic's three-state ceiling AND the caller's entitlement on
+#     every request.
+#   * THE INDEX AND THE DETAIL ROUTE CALL THE SAME FUNCTION. A list that filters
+#     while the detail route does not enforce is reachable by typing the URL, and
+#     every test of the visible path passes against that bug -- it is the shape that
+#     shipped `install_windows_start`. One decision function, two callers.
+#   * A topic that does not exist and a topic the caller may not see return the SAME
+#     404. Distinguishing them would confirm that a topic exists to someone not
+#     permitted to know it, which for this content is the whole point of the control.
+#   * Admin routes are POST-only where they mutate; the preview is a separate
+#     endpoint from the apply, so a dropped flag cannot turn one into the other.
+
+def _learn_role():
+    return _roles.normalise_role(getattr(current_user, "role", None))
+
+
+@app.route("/learn")
+@login_required
+def learn_page():
+    """Topic index, filtered to what this caller may actually read."""
+    from core import learning, learning_topics
+
+    slugs = learning_topics.all_slugs()
+    visible = learning.visible_topics(current_user.id, _learn_role(), slugs)
+    topics = [dict(learning_topics.get_topic(s), slug=s) for s in visible]
+    return render_template("learn.html", topics=topics,
+                           tiers=learning_topics.TIERS)
+
+
+@app.route("/learn/<slug>")
+@login_required
+def learn_topic(slug):
+    """One topic. Enforces, rather than trusting the index to have filtered."""
+    from core import learning, learning_topics
+
+    topic = learning_topics.get_topic(slug)
+    if topic is None or not learning.visible_to(current_user.id, _learn_role(), slug):
+        # Deliberately identical for "no such topic" and "not permitted" -- see the
+        # posture note above. The distinction is logged, never returned.
+        auth_log.info("learn: refused %s -> %r (exists=%s)",
+                      getattr(current_user, "username", "?"), slug,
+                      topic is not None)
+        abort(404)
+    return render_template("learn_topic.html", topic=topic, slug=slug,
+                           tiers=learning_topics.TIERS)
+
+
+@app.route("/api/learn/admin")
+@login_required
+def api_learn_admin():
+    """Topic states, default membership, and per-user grants. Admin-only.
+
+    Returns the CONFIGURED state of every built-in topic including
+    `not_included` ones -- this is the admin surface, so it must show what is
+    hidden. That is exactly why both methods are admin in ROUTE_MINIMUMS.
+    """
+    from core import learning, learning_topics
+
+    users = []
+    try:
+        conn = _users_conn()
+        for uid, uname, role in conn.execute(
+                "SELECT id, username, role FROM users WHERE is_active=1 "
+                "ORDER BY username"):
+            users.append({"id": uid, "username": uname, "role": role,
+                          "entitlements": learning.user_entitlements(uid),
+                          "seeded": learning.has_been_seeded(uid)})
+        conn.close()
+    except Exception as e:
+        return jsonify({"ok": False, "error": "could not read users: %s" % e}), 500
+
+    topics = []
+    for slug in learning_topics.all_slugs():
+        t = learning_topics.get_topic(slug)
+        topics.append({"slug": slug, "title": t["title"], "summary": t["summary"],
+                       "state": learning.topic_state(slug),
+                       "in_default": slug in set(learning.default_topics()),
+                       "source": "built_in"})
+    return jsonify({"ok": True, "topics": topics, "users": users,
+                    "states": list(learning.STATES)})
+
+
+@app.route("/api/learn/topic/<slug>/state", methods=["POST"])
+@login_required
+def api_learn_topic_state(slug):
+    """Set a topic's three-state ceiling, and optionally its default membership."""
+    from core import learning, learning_topics
+
+    if not learning_topics.exists(slug):
+        return jsonify({"ok": False, "error": "no such topic"}), 404
+    data = request.get_json(silent=True) or request.form or {}
+    state = data.get("state")
+    try:
+        learning.set_topic_state(slug, state, actor=_actor())
+    except learning.LearningError as e:
+        # Refused at the boundary rather than stored and normalised on read.
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    if "in_default" in data:
+        raw = data.get("in_default")
+        learning.set_in_default(slug, raw in (True, 1, "1", "true", "on"),
+                                actor=_actor())
+    _audit(action="learn_topic_state", rule_id=slug)
+    return jsonify({"ok": True, "slug": slug, "state": learning.topic_state(slug)})
+
+
+@app.route("/api/learn/user/<int:uid>/grant", methods=["POST"])
+@login_required
+def api_learn_user_grant(uid):
+    """Grant or revoke one topic for one user -- the per-user fine adjustment."""
+    from core import learning, learning_topics
+
+    data = request.get_json(silent=True) or request.form or {}
+    slug = data.get("topic_slug") or ""
+    if not learning_topics.exists(slug):
+        return jsonify({"ok": False, "error": "no such topic"}), 404
+    if data.get("granted") in (True, 1, "1", "true", "on"):
+        learning.grant(uid, slug, actor=_actor())
+    else:
+        learning.revoke(uid, slug)
+    _audit(action="learn_user_grant", rule_id=slug)
+    return jsonify({"ok": True, "user_id": uid,
+                    "entitlements": learning.user_entitlements(uid)})
+
+
+@app.route("/api/learn/defaults/preview", methods=["POST"])
+@login_required
+def api_learn_defaults_preview():
+    """What applying the defaults WOULD grant. Writes nothing.
+
+    A separate endpoint from the apply below rather than a `dry_run` flag on one:
+    a flag that defaults wrong, or that a caller forgets to send, silently turns a
+    preview into a mutation. Two endpoints cannot be confused by omission.
+    """
+    from core import learning
+
+    plan = learning.preview_apply_defaults(_learn_target_users())
+    return jsonify({"ok": True, "would_grant": {str(k): v for k, v in plan.items()}})
+
+
+@app.route("/api/learn/defaults/apply", methods=["POST"])
+@login_required
+def api_learn_defaults_apply():
+    """Grant every default topic a user is missing. ADDITIVE ONLY -- never revokes."""
+    from core import learning
+
+    granted = learning.apply_defaults(_learn_target_users(), actor=_actor())
+    _audit(action="learn_defaults_apply")
+    return jsonify({"ok": True, "granted": {str(k): v for k, v in granted.items()}})
+
+
+def _learn_target_users():
+    """Active accounts at `user` and above -- who the defaults apply to.
+
+    Excludes viewonly, matching the operator's decision that viewonly is not part of
+    "all users": seeding an account that can never read the result would produce
+    entitlement rows nothing will ever act on.
+    """
+    out = []
+    try:
+        conn = _users_conn()
+        for uid, role in conn.execute(
+                "SELECT id, role FROM users WHERE is_active=1"):
+            try:
+                if _roles.rank(_roles.normalise_role(role)) >= \
+                   _roles.rank(_roles.ROLE_USER):
+                    out.append(uid)
+            except Exception:
+                continue          # an unparseable role is not a target
+        conn.close()
+    except Exception:
+        return []
+    return out
 
 
 # How long a recovery-code sign-in may set a new password without supplying the
