@@ -619,6 +619,7 @@ ROUTE_MINIMUMS = {
     # defaults preview/apply. Admin for BOTH methods: the GET exposes who has
     # been granted what across every account, which is as sensitive as the POST
     # that changes it.
+    "learn_admin_page":               (_A, _A),
     "api_learn_admin":                (_A, _A),
     "api_learn_topic_state":          (_A, _A),
     "api_learn_user_grant":           (_A, _A),

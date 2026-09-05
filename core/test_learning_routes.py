@@ -31,7 +31,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 37
+EXPECTED_CHECKS = 62
 _pass = _fail = 0
 
 
@@ -207,6 +207,95 @@ def test_the_index_lists_only_permitted_topics():
           _get("/learn/%s" % hid, 501).status_code == 404)
 
 
+# ── C. Admin surface ─────────────────────────────────────────────────────────
+
+def test_admin_routes_refuse_a_non_admin_via_the_real_authorizer():
+    """Checked through `roles.may()` rather than an HTTP status, deliberately.
+
+    These route tests bypass `_enforce_role` (see _bypass_gates) so that gate
+    redirects cannot mask the status codes section B asserts -- which means an HTTP
+    request here would NOT prove role enforcement. `may()` IS the function that gate
+    calls, so asking it directly tests the real decision instead of a stand-in.
+    """
+    for ep in ("learn_admin_page", "api_learn_admin", "api_learn_topic_state",
+               "api_learn_user_grant", "api_learn_defaults_preview",
+               "api_learn_defaults_apply"):
+        check("%s refuses ROLE_USER" % ep, R.may(R.ROLE_USER, ep, "GET") is False)
+        check("%s admits ROLE_ADMIN" % ep, R.may(R.ROLE_ADMIN, ep, "GET") is True)
+
+
+def test_the_admin_page_is_registered_and_admin_gated():
+    live = {r.endpoint for r in app.url_map.iter_rules()}
+    check("learn_admin_page is a real route", "learn_admin_page" in live)
+    check("...and is admin/admin",
+          R.ROUTE_MINIMUMS.get("learn_admin_page") == (R.ROLE_ADMIN, R.ROLE_ADMIN))
+
+
+def test_the_all_admin_case_is_stated_rather_than_silent():
+    """On an all-admin install 'all users' and 'admin only' behave identically. A
+    page that says nothing about that is indistinguishable from a broken feature."""
+    from flask import render_template
+    with app.test_request_context("/settings/learning"):
+        warn = render_template("learn_admin.html", eligible_count=2,
+                               non_admin_count=0)
+        norm = render_template("learn_admin.html", eligible_count=2,
+                               non_admin_count=3)
+        err = render_template("learn_admin.html", eligible_count=0,
+                              non_admin_count=-1)
+    check("all-admin install shows the warning",
+          "No non-admin accounts exist yet" in warn)
+    check("a normal install does NOT show it",
+          "No non-admin accounts exist yet" not in norm)
+    check("an unreadable account list says so rather than implying zero",
+          "could not be read" in err)
+    check("...and does not also show the all-admin warning",
+          "No non-admin accounts exist yet" not in err)
+
+
+def test_preview_endpoint_writes_nothing_and_apply_is_additive():
+    """Through the real endpoints, not the library -- the routes are what an admin
+    actually triggers, and a route could call the wrong function."""
+    slug = LT.all_slugs()[0]
+    L.set_topic_state(slug, L.STATE_ALL_USERS)
+    L.set_in_default(slug, True)
+    L.revoke(501, slug)
+    L.grant(501, "phishing_awareness")          # an individual, non-default grant
+
+    before = L.user_entitlements(501)
+    with app.test_client() as c:
+        with c.session_transaction() as s:
+            s["_user_id"] = "502"               # admin
+            s["_fresh"] = True
+        pv = c.post("/api/learn/defaults/preview").get_json()
+        check("preview reports the missing default",
+              slug in (pv.get("would_grant", {}).get("501") or []),
+              "got %r" % pv)
+        check("PREVIEW WROTE NOTHING", L.user_entitlements(501) == before,
+              "before=%r after=%r" % (before, L.user_entitlements(501)))
+
+        ap = c.post("/api/learn/defaults/apply").get_json()
+        check("apply reports what it granted",
+              slug in (ap.get("granted", {}).get("501") or []), "got %r" % ap)
+    check("the default is now held", L.has_entitlement(501, slug))
+    check("THE INDIVIDUAL GRANT SURVIVED APPLY",
+          L.has_entitlement(501, "phishing_awareness"))
+
+
+def test_a_bad_state_is_refused_by_the_route_with_400():
+    slug = LT.all_slugs()[0]
+    with app.test_client() as c:
+        with c.session_transaction() as s:
+            s["_user_id"] = "502"
+            s["_fresh"] = True
+        r = c.post("/api/learn/topic/%s/state" % slug, json={"state": "all_user"})
+        check("a typo'd state is refused at the boundary", r.status_code == 400,
+              "got %s" % r.status_code)
+        r2 = c.post("/api/learn/topic/no_such_topic/state",
+                    json={"state": "all_users"})
+        check("an unknown topic is refused", r2.status_code == 404,
+              "got %s" % r2.status_code)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Learning Center -- routes, registries, direct-URL enforcement")
@@ -227,6 +316,11 @@ if __name__ == "__main__":
         test_not_included_is_404_on_a_DIRECT_URL_even_holding_an_entitlement,
         test_a_nonexistent_topic_is_indistinguishable_from_a_hidden_one,
         test_the_index_lists_only_permitted_topics,
+        test_admin_routes_refuse_a_non_admin_via_the_real_authorizer,
+        test_the_admin_page_is_registered_and_admin_gated,
+        test_the_all_admin_case_is_stated_rather_than_silent,
+        test_preview_endpoint_writes_nothing_and_apply_is_additive,
+        test_a_bad_state_is_refused_by_the_route_with_400,
     ):
         print("\n%s" % fn.__name__)
         fn()

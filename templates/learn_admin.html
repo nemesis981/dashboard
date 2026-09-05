@@ -1,0 +1,284 @@
+{# Learning Center — admin surface.
+
+   A Jinja template, deliberately, not a Python f-string: rendering JS from an
+   f-string is this codebase's single most recurring defect (an apostrophe or a stray
+   newline becomes a silent SyntaxError). Nothing here is interpolated into JS by the
+   server -- the page fetches its data from /api/learn/admin.
+
+   PREVIEW AND APPLY ARE SEPARATE BUTTONS CALLING SEPARATE ENDPOINTS, and Apply stays
+   disabled until a preview has been fetched. A single button with a confirm dialog
+   would put the decision before the information; this puts the information first and
+   makes the mutation a second, deliberate act. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Learning Center — Administration</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.5em; margin:12px 0 4px; }
+    h2 { font-size:1.1em; margin:28px 0 10px; color:#eee; }
+    .sub { color:#999; margin:0 0 20px; }
+    table { border-collapse:collapse; width:100%; max-width:1100px; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #2a2a2a;
+             font-size:0.92em; vertical-align:top; }
+    th { color:#aaa; font-weight:600; font-size:0.82em; text-transform:uppercase;
+         letter-spacing:0.05em; }
+    select, button { background:#1e1e1e; color:#ddd; border:1px solid #444;
+                     border-radius:4px; padding:5px 9px; font-size:0.9em; }
+    button { cursor:pointer; }
+    button:hover:not(:disabled) { border-color:#00d4ff; color:#00d4ff; }
+    button:disabled { opacity:0.4; cursor:not-allowed; }
+    .badge { font-size:0.7em; text-transform:uppercase; letter-spacing:0.06em;
+             color:#888; border:1px solid #444; border-radius:3px; padding:1px 5px; }
+    .note { border:1px solid #444; border-left:3px solid #666; background:#181818;
+            border-radius:4px; padding:12px 14px; margin:14px 0; max-width:1100px; }
+    .note.warn { border-left-color:#d2a24c; }
+    .note.err  { border-left-color:#c0504d; }
+    .muted { color:#999; }
+    .state-not_included { color:#888; }
+    .state-admin_only   { color:#d2a24c; }
+    .state-all_users    { color:#5fb85f; }
+    #plan { white-space:pre-wrap; font-family:ui-monospace,Menlo,Consolas,monospace;
+            font-size:0.85em; color:#bbb; }
+    .grid-scroll { overflow-x:auto; max-width:100%; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/settings">&larr; Settings</a>
+  <h1>&#128218; Learning Center &mdash; Administration</h1>
+  <p class="sub">Control which training topics exist, and who can see them.</p>
+
+  {# The all-admin case. Stated plainly rather than left for someone to discover by
+     setting "all users" and observing nothing happen. #}
+  {% if non_admin_count == 0 %}
+    <div class="note warn">
+      <strong>No non-admin accounts exist yet.</strong>
+      &ldquo;All users&rdquo; and &ldquo;Admin only&rdquo; therefore behave
+      identically on this installation &mdash; there is nobody for the difference to
+      apply to. Add an account under
+      <a href="/settings/users" style="color:#00d4ff">Settings &rarr; Users</a>
+      and the distinction takes effect immediately; nothing here needs changing
+      afterwards.
+    </div>
+  {% elif non_admin_count < 0 %}
+    <div class="note err">
+      The account list could not be read, so this page cannot say whether
+      &ldquo;all users&rdquo; would apply to anyone. Treat the grid below as
+      incomplete rather than empty.
+    </div>
+  {% endif %}
+
+  <h2>Topics</h2>
+  <div class="note">
+    <strong>Not included</strong> means the topic does not exist for anyone, including
+    administrators, and its address returns &ldquo;not found&rdquo; if entered
+    directly. It is the default for every topic, including ones shipped with Nemesis.
+  </div>
+  <table id="topics"><thead>
+    <tr><th>Topic</th><th>Source</th><th>Visibility</th><th>In default set</th></tr>
+  </thead><tbody id="topics-body">
+    <tr><td colspan="4" class="muted">Loading…</td></tr>
+  </tbody></table>
+
+  <h2>Who can see what</h2>
+  <p class="sub muted">
+    A tick assigns a topic to that person. Assignment alone does not grant sight of it
+    &mdash; the topic&rsquo;s own visibility above still applies, so a topic set to
+    &ldquo;not included&rdquo; stays hidden from everyone regardless of what is ticked
+    here.
+  </p>
+  <div class="grid-scroll">
+    <table id="grid"><thead><tr id="grid-head"><th>Account</th></tr></thead>
+    <tbody id="grid-body">
+      <tr><td class="muted">Loading…</td></tr>
+    </tbody></table>
+  </div>
+
+  <h2>Default set for new trainees</h2>
+  <div class="note">
+    Topics marked <em>in default set</em> are assigned automatically the first time an
+    account is given the <code>user</code> role or above. This happens
+    <strong>once per account</strong>: an assignment you remove by hand will not come
+    back the next time that person&rsquo;s role changes.
+    <br><br>
+    Existing accounts are not updated automatically. Use <em>Preview</em> below to see
+    exactly what would change, then <em>Apply</em>. Applying only ever
+    <strong>adds</strong> &mdash; it never removes an assignment you made by hand.
+  </div>
+  <button id="btn-preview">Preview changes</button>
+  <button id="btn-apply" disabled>Apply to existing accounts</button>
+  <div class="note" id="plan-wrap" style="display:none"><div id="plan"></div></div>
+
+<script>
+(function () {
+  'use strict';
+  var DATA = null, PREVIEWED = false;
+
+  function post(url, body) {
+    return fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body || {}),
+      credentials: 'same-origin'
+    }).then(function (r) { return r.json(); });
+  }
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function load() {
+    return fetch('/api/learn/admin', {credentials: 'same-origin'})
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (!d.ok) { throw new Error(d.error || 'could not load'); }
+        DATA = d; renderTopics(); renderGrid();
+      })
+      .catch(function (e) {
+        document.getElementById('topics-body').innerHTML =
+          '<tr><td colspan="4" class="muted">Could not load: ' + esc(e.message) +
+          '</td></tr>';
+      });
+  }
+
+  var LABEL = {not_included: 'Not included',
+               admin_only: 'Admin only',
+               all_users: 'All users'};
+
+  function renderTopics() {
+    var rows = DATA.topics.map(function (t) {
+      var opts = DATA.states.map(function (s) {
+        return '<option value="' + esc(s) + '"' +
+               (s === t.state ? ' selected' : '') + '>' + esc(LABEL[s] || s) +
+               '</option>';
+      }).join('');
+      return '<tr>' +
+        '<td><strong>' + esc(t.title) + '</strong><br>' +
+        '<span class="muted">' + esc(t.summary) + '</span></td>' +
+        '<td><span class="badge">' +
+        (t.source === 'built_in' ? 'Nemesis' : 'Custom') + '</span></td>' +
+        '<td><select class="state state-' + esc(t.state) +
+        '" data-slug="' + esc(t.slug) + '">' + opts + '</select></td>' +
+        '<td style="text-align:center"><input type="checkbox" class="indef" ' +
+        'data-slug="' + esc(t.slug) + '"' + (t.in_default ? ' checked' : '') +
+        '></td></tr>';
+    });
+    document.getElementById('topics-body').innerHTML =
+      rows.join('') || '<tr><td colspan="4" class="muted">No topics.</td></tr>';
+
+    Array.prototype.forEach.call(document.querySelectorAll('select.state'),
+      function (el) {
+        el.addEventListener('change', function () {
+          post('/api/learn/topic/' + encodeURIComponent(el.dataset.slug) + '/state',
+               {state: el.value}).then(function (r) {
+            if (!r.ok) { alertish(r.error); }
+            invalidatePreview(); load();
+          });
+        });
+      });
+    Array.prototype.forEach.call(document.querySelectorAll('input.indef'),
+      function (el) {
+        el.addEventListener('change', function () {
+          var slug = el.dataset.slug;
+          var cur = DATA.topics.filter(function (t) { return t.slug === slug; })[0];
+          post('/api/learn/topic/' + encodeURIComponent(slug) + '/state',
+               {state: cur.state, in_default: el.checked})
+            .then(function () { invalidatePreview(); load(); });
+        });
+      });
+  }
+
+  function renderGrid() {
+    var head = ['<th>Account</th>'].concat(DATA.topics.map(function (t) {
+      return '<th>' + esc(t.title) + '</th>';
+    })).join('');
+    document.getElementById('grid-head').innerHTML = head;
+
+    var body = DATA.users.map(function (u) {
+      var cells = DATA.topics.map(function (t) {
+        var on = u.entitlements.indexOf(t.slug) !== -1;
+        return '<td style="text-align:center">' +
+          '<input type="checkbox" class="ent" data-uid="' + u.id + '" ' +
+          'data-slug="' + esc(t.slug) + '"' + (on ? ' checked' : '') + '></td>';
+      }).join('');
+      return '<tr><td>' + esc(u.username) +
+        '<br><span class="muted">' + esc(u.role) +
+        (u.seeded ? '' : ' &middot; not yet seeded') + '</span></td>' +
+        cells + '</tr>';
+    });
+    document.getElementById('grid-body').innerHTML =
+      body.join('') ||
+      '<tr><td class="muted">No active accounts.</td></tr>';
+
+    Array.prototype.forEach.call(document.querySelectorAll('input.ent'),
+      function (el) {
+        el.addEventListener('change', function () {
+          post('/api/learn/user/' + el.dataset.uid + '/grant',
+               {topic_slug: el.dataset.slug, granted: el.checked})
+            .then(function () { invalidatePreview(); load(); });
+        });
+      });
+  }
+
+  function alertish(msg) {
+    var w = document.getElementById('plan-wrap');
+    w.style.display = 'block';
+    document.getElementById('plan').textContent = 'Refused: ' + msg;
+  }
+
+  /* Any change to topics, defaults or grants makes a fetched preview stale, and a
+     stale preview is worse than none: it describes a state that no longer exists
+     while looking authoritative. So Apply is re-disabled on every mutation. */
+  function invalidatePreview() {
+    PREVIEWED = false;
+    document.getElementById('btn-apply').disabled = true;
+  }
+
+  document.getElementById('btn-preview').addEventListener('click', function () {
+    post('/api/learn/defaults/preview').then(function (r) {
+      var w = document.getElementById('plan-wrap');
+      var el = document.getElementById('plan');
+      w.style.display = 'block';
+      var users = r.would_grant || {};
+      var keys = Object.keys(users);
+      if (!keys.length) {
+        el.textContent = 'Nothing to apply — every eligible account already has ' +
+                         'each topic in the default set.';
+        document.getElementById('btn-apply').disabled = true;
+        return;
+      }
+      var names = {};
+      (DATA ? DATA.users : []).forEach(function (u) { names[String(u.id)] = u.username; });
+      el.textContent = keys.map(function (k) {
+        return (names[k] || ('user ' + k)) + '  +  ' + users[k].join(', ');
+      }).join('\n');
+      PREVIEWED = true;
+      document.getElementById('btn-apply').disabled = false;
+    });
+  });
+
+  document.getElementById('btn-apply').addEventListener('click', function () {
+    if (!PREVIEWED) { return; }          /* belt and braces; the button is disabled */
+    post('/api/learn/defaults/apply').then(function (r) {
+      var el = document.getElementById('plan');
+      var n = Object.keys(r.granted || {}).length;
+      el.textContent = n
+        ? 'Applied to ' + n + ' account(s).'
+        : 'Nothing needed applying.';
+      invalidatePreview();
+      load();
+    });
+  });
+
+  load();
+})();
+</script>
+</body>
+</html>

@@ -2711,6 +2711,40 @@ def learn_topic(slug):
                            tiers=learning_topics.TIERS)
 
 
+@app.route("/settings/learning")
+@login_required
+def learn_admin_page():
+    """Admin surface for the Learning Center. Read-only GET; every change is a POST.
+
+    Renders the shell only -- topic states and per-user grants are fetched from
+    `/api/learn/admin` by the page itself. One source for that data rather than two
+    (a server-rendered copy plus a live one) means the grid cannot drift from what
+    the API reports, which is what an admin acts on.
+
+    `no_eligible_users` is computed HERE and passed in, because a page that silently
+    does nothing is indistinguishable from a broken one: on an all-admin install
+    "admin only" and "all users" are the same thing, and an admin setting the latter
+    would see no effect and have no way to tell why.
+    """
+    eligible = _learn_target_users()
+    non_admin = 0
+    try:
+        conn = _users_conn()
+        for (role,) in conn.execute(
+                "SELECT role FROM users WHERE is_active=1"):
+            try:
+                if _roles.normalise_role(role) != _roles.ROLE_ADMIN:
+                    non_admin += 1
+            except Exception:
+                continue
+        conn.close()
+    except Exception:
+        non_admin = -1          # unknown: say so rather than implying zero
+    return render_template("learn_admin.html",
+                           eligible_count=len(eligible),
+                           non_admin_count=non_admin)
+
+
 @app.route("/api/learn/admin")
 @login_required
 def api_learn_admin():
