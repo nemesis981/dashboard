@@ -2385,6 +2385,34 @@ def init_learning_tables():
                 seeded_at    TEXT NOT NULL
             )
         """)
+        # ── Business-authored content (Phase 2) ──────────────────────────────
+        # ⛔ THIS IS THE ONLY TABLE IN THE LEARNING CENTER THAT CANNOT BE REGENERATED.
+        # Built-in topics ship as code and an upgrade replaces them; these rows are the
+        # business's own material and exist nowhere else. They are covered by the
+        # product's tar.gz backup because that archives the whole of alerts.db --
+        # verified, not assumed, since a per-table backup would have needed adding.
+        #
+        # `body` holds the author's SOURCE, never rendered HTML: rendering on read is
+        # what lets a renderer fix reach content authored before it.
+        #
+        # `published_by` is deliberately separate from `updated_by` -- that pair is the
+        # record of who approved what, and collapsing them would lose the entire point
+        # of a sub_admin drafting and an admin publishing.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS learning_custom_topics (
+                slug         TEXT PRIMARY KEY,
+                title        TEXT NOT NULL,
+                summary      TEXT NOT NULL,
+                body         TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'draft',
+                created_by   TEXT,
+                created_at   TEXT NOT NULL,
+                updated_by   TEXT,
+                updated_at   TEXT NOT NULL,
+                published_by TEXT,
+                published_at TEXT
+            )
+        """)
         conn.commit()
     finally:
         conn.close()
