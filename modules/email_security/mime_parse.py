@@ -244,6 +244,9 @@ def _walk(msg, out: ParsedMessage) -> None:
                     # parser-differential shape worth recording: the client may
                     # act on one, a scanner on the other.
                     "type_extension_mismatch": _type_ext_mismatch(declared, ext),
+                    # Whether the line above was ANSWERABLE. False means "not
+                    # tested", which is not the same as "no mismatch found".
+                    "type_mismatch_tested": _mismatch_testable(declared, ext),
                 }
                 out.attachments.append(entry["attachment"])
 
@@ -299,6 +302,27 @@ _EXECUTABLE_TYPE_MARKERS = (
     "msdownload", "executable", "x-dosexec", "portable-executable",
     "x-msdos-program", "x-msi", "java-archive", "x-sh", "x-bat",
 )
+
+
+def _mismatch_testable(declared: str, ext: str) -> bool:
+    """Could `_type_ext_mismatch` have produced a MEANINGFUL answer for this pair?
+
+    Not the same question as "was there a mismatch". `_type_ext_mismatch` returns
+    False in two very different situations: the pair genuinely agrees, or the pair
+    could not be judged at all (a generic declared type, a missing extension, an
+    extension with no entry in the hints table and not executable-ish). Those are
+    "clean" and "not tested", and a consumer that cannot tell them apart reports a
+    signal that never fired as one with a perfect false-positive rate -- the exact
+    misreading the D9 substrate convention exists to prevent.
+
+    Recorded HERE rather than derived by the consumer because the sets that decide
+    it (`_GENERIC_TYPES`, `_EXT_TYPE_HINTS`, `EXECUTABLE_EXTENSIONS`) live here. A
+    second copy in `fast_check` would drift, and drift in this predicate silently
+    changes what "tested" means without changing any visible value.
+    """
+    if not ext or declared in _GENERIC_TYPES:
+        return False
+    return ext in EXECUTABLE_EXTENSIONS or ext in _EXT_TYPE_HINTS
 
 
 def _type_ext_mismatch(declared: str, ext: str) -> bool:

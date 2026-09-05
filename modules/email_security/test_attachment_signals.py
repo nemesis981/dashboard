@@ -31,7 +31,7 @@ import fast_check                                              # noqa: E402
 import mime_parse                                              # noqa: E402
 from fast_check import signals, SIGNAL_PROVENANCE              # noqa: E402
 
-EXPECTED_CHECKS = 22
+EXPECTED_CHECKS = 30
 _results = []
 
 
@@ -155,6 +155,55 @@ def main():
         b"--B--\r\n")
     check("mime_parse emits type_mismatch_tested on each attachment",
           bool(parsed.attachments) and "type_mismatch_tested" in parsed.attachments[0])
+
+    # ⛔ EXERCISE THE REAL PREDICATE, NOT A HAND-BUILT DICT. The substrate cases
+    # above pass `type_mismatch_tested` in directly, so they prove signals()
+    # CONSUMES the field and prove nothing about mime_parse COMPUTING it. A
+    # mutation making _mismatch_testable() return True unconditionally survived
+    # the whole suite until these two checks existed -- the stub stood in for the
+    # code under test, and the pass was about the stub.
+    real = mime_parse.parse(
+        b"From: a@example.com\r\nTo: b@example.org\r\nSubject: s\r\n"
+        b'Content-Type: multipart/mixed; boundary="B"\r\n\r\n'
+        b"--B\r\nContent-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="real.pdf"\r\n\r\nJVBERi0K\r\n'
+        b"--B\r\nContent-Type: application/octet-stream\r\n"
+        b'Content-Disposition: attachment; filename="real.dat"\r\n\r\nZGF0YQ==\r\n'
+        # An UNKNOWN extension with a SPECIFIC declared type. Reaches the final
+        # return of _mismatch_testable -- the .dat case above returns at the
+        # generic-type guard and never evaluates it, so without this case a
+        # mutation making that return unconditionally True survives the suite.
+        b"--B\r\nContent-Type: application/pdf\r\n"
+        b'Content-Disposition: attachment; filename="real.xyz"\r\n\r\nZGF0YQ==\r\n'
+        # A GENERIC declared type on a KNOWN extension -- octet-stream on a .pdf,
+        # very common in real mail. Reaches the generic guard with an extension
+        # that WOULD otherwise qualify, so it is the only case that detects the
+        # guard being removed.
+        b"--B\r\nContent-Type: application/octet-stream\r\n"
+        b'Content-Disposition: attachment; filename="generic.pdf"\r\n\r\nJVBERi0K\r\n'
+        b"--B--\r\n")
+    # ⛔ Index by (extension, declared_type), NOT by extension alone. Two
+    # attachments here share the .pdf extension with DIFFERENT declared types,
+    # and an extension-keyed dict silently returns whichever came last -- which
+    # is how adding the octet-stream/.pdf case below made an earlier, unrelated
+    # check start measuring a different attachment while still looking correct.
+    by_pair = {(a.get("extension"), a.get("declared_type")): a
+               for a in real.attachments}
+    specific_pdf = by_pair[("pdf", "application/pdf")]
+    generic_pdf = by_pair[("pdf", "application/octet-stream")]
+    by_ext = {a.get("extension"): a for a in real.attachments}
+    check("REAL parse: a specific declared type IS testable",
+          specific_pdf.get("type_mismatch_tested"), True)
+    check("REAL parse: a GENERIC declared type is NOT testable",
+          by_ext.get("dat", {}).get("type_mismatch_tested"), False)
+    check("REAL parse: an UNKNOWN extension is NOT testable (specific type)",
+          by_ext.get("xyz", {}).get("type_mismatch_tested"), False)
+    # ...and end-to-end through signals(), so the two halves are wired together.
+    check("REAL parse: octet-stream on a .pdf is NOT testable (no claim made)",
+          generic_pdf.get("type_mismatch_tested"), False)
+    real_sig = signals(real)
+    check("REAL parse end-to-end: mismatch substrate True (the pdf is testable)",
+          real_sig[MIS]["substrate"], True)
 
     # ── verdict stays None: this change records facts, it does not judge ────
     src = open(os.path.join(_HERE, "supervisor.py")).read()

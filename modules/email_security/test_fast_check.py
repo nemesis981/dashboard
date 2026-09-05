@@ -75,12 +75,27 @@ check_("SHORTENERS has the measured 17 entries", len(SHORTENERS) == 17,
        len(SHORTENERS))
 check_("...including the ones the measurement relied on",
        {"bit.ly", "tinyurl.com", "t.co", "lnkd.in"} <= SHORTENERS)
+# The three D9-CLEARED signals. Attachment facts were added 2026-09-05 and are
+# deliberately NOT in this set: they carry no validated FP rate, and folding them
+# in here would let an unmeasured signal inherit the credibility of a measured one.
+_CLEARED = {"has_form", "urgent_subject", "url_shortener"}
 check_("provenance recorded for every cleared signal",
-       set(SIGNAL_PROVENANCE) == {"has_form", "urgent_subject", "url_shortener"},
-       set(SIGNAL_PROVENANCE))
+       _CLEARED <= set(SIGNAL_PROVENANCE), set(SIGNAL_PROVENANCE))
 check_("...with the corpus size that produced each rate",
-       all(v["n"] == 14785 for v in SIGNAL_PROVENANCE.values()),
+       all(SIGNAL_PROVENANCE[k]["n"] == 14785 for k in _CLEARED),
        "an FP rate without its corpus is not a measurement")
+# The other half of that guarantee: anything NOT cleared must say so, rather than
+# sit in the same table looking measured. Without this the check above passes for
+# the trivial reason that it only ever inspects the three it already knows about.
+check_("...and every non-cleared signal is MARKED, not given a borrowed rate",
+       all(v.get("status") in ("inert", "unmeasured")
+           for k, v in SIGNAL_PROVENANCE.items() if k not in _CLEARED),
+       {k: v.get("status") for k, v in SIGNAL_PROVENANCE.items()
+        if k not in _CLEARED})
+check_("...and an unmeasured signal carries no fabricated fp_rate",
+       all(v.get("fp_rate") is None
+           for k, v in SIGNAL_PROVENANCE.items()
+           if v.get("status") == "unmeasured"))
 
 print("\n-- 3. REJECTED signals are absent entirely, not disabled --")
 src = open(os.path.join(_HERE, "fast_check.py")).read()

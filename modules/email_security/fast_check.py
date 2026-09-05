@@ -114,6 +114,24 @@ SIGNAL_PROVENANCE = {
         "n": 14785, "note": "first era-compatible measurement; Enron predates "
                             "shorteners entirely",
     },
+    # ── NOT D9-CLEARED. Recorded so the claim is traceable, and carrying an
+    # explicit `status` so the ABSENCE of a validated rate is visible rather
+    # than implied by a number sitting in the same column as three measured
+    # ones. These are facts about a message; they are never a verdict.
+    "executable_attachment": {
+        "fp_rate": 0.0001, "corpus": "gmail-2026-08-25 benign inbox",
+        "n": 14785, "status": "inert",
+        "note": "D9 measured `risky_attachment` at 1 occurrence (0.01% benign, "
+                "0.00% phish) and classified it INERT -- never exercised on any "
+                "population, which is NOT the same as disproved. Distinct from "
+                "the signals D9 REJECTED for firing on legitimate mail.",
+    },
+    "attachment_type_mismatch": {
+        "fp_rate": None, "corpus": None, "n": None, "status": "unmeasured",
+        "note": "no corpus measurement exists for declared-type/extension "
+                "contradiction. Left as None rather than borrowing "
+                "`risky_attachment`'s rate, which measured a different thing.",
+    },
 }
 
 
@@ -291,7 +309,13 @@ class FastCheckResult:
 
 
 def signals(parsed) -> dict:
-    """The three D9-cleared signals for one ParsedMessage.
+    """The signals for one ParsedMessage: three D9-cleared, two attachment facts.
+
+    The three cleared signals (`has_form`, `urgent_subject`, `url_shortener`)
+    carry measured false-positive rates. The two attachment entries do NOT --
+    see SIGNAL_PROVENANCE, where they are marked `inert`/`unmeasured` rather
+    than given a borrowed rate. All five share one shape so a consumer cannot
+    tell them apart by accident; provenance is where the difference lives.
 
     Each returns a bool. `substrate` records whether the signal COULD have
     fired -- a signal with no substrate did not "pass", it was not tested, and
@@ -301,6 +325,10 @@ def signals(parsed) -> dict:
     html = getattr(parsed, "body_html", "") or ""
     subject = (getattr(parsed, "headers", {}) or {}).get("subject") or ""
     urls = getattr(parsed, "urls", []) or []
+    # getattr with a default: the import-time selftest builds a message object
+    # that has no `attachments` attribute at all, and a parse that failed early
+    # may not have one either. Absent must degrade to "no substrate", not raise.
+    attachments = getattr(parsed, "attachments", []) or []
 
     forms = 0
     anchors: list = []
@@ -347,6 +375,29 @@ def signals(parsed) -> dict:
         # never looked at -- so the problem is attached here too.
         "url_shortener": {"fired": shortener,
                           "substrate": bool(urls or anchors)},
+        # ── attachment FACTS ────────────────────────────────────────────────
+        # mime_parse computed these correctly and nothing consumed them: before
+        # 2026-09-05 `signals()` never read `parsed.attachments`, so across 169
+        # live recorded verdicts ZERO carried any attachment data.
+        #
+        # substrate is load-bearing here. "No attachment" must read as NOT
+        # TESTED, never as fired=False with substrate=True -- D9 classified
+        # `risky_attachment` INERT precisely because it was never exercised, and
+        # an untested signal reporting a 0.00% FP rate looks like the best
+        # signal in the table. That misreading is what the whole D9 campaign
+        # exists to prevent.
+        "executable_attachment": {
+            "fired": any(a.get("executable_extension") for a in attachments),
+            "substrate": bool(attachments),
+        },
+        # Its substrate is NARROWER than "has attachments": a generic declared
+        # type is the absence of a claim, so there was nothing to contradict and
+        # the signal was not tested. mime_parse decides that (type_mismatch_tested)
+        # because it owns the sets involved.
+        "attachment_type_mismatch": {
+            "fired": any(a.get("type_extension_mismatch") for a in attachments),
+            "substrate": any(a.get("type_mismatch_tested") for a in attachments),
+        },
     }
     if html_failed:
         # Attached INSIDE the affected signals rather than as a new top-level
@@ -420,6 +471,7 @@ def selftest() -> tuple[bool, str]:
         urls: list = []
         problems: list = []
         truncated = False
+        attachments: list = []
 
     neg = signals(_P())
     if any(v["fired"] for v in neg.values()):
@@ -430,8 +482,16 @@ def selftest() -> tuple[bool, str]:
                    "authentication_results": [], "from": ""}
     pos.body_html = '<html><form action="x"><input name="p"></form></html>'
     pos.urls = ["http://bit.ly/abc"]
+    # One attachment that trips BOTH attachment signals: an executable extension
+    # (executable_attachment) declared as a PDF (attachment_type_mismatch), with
+    # the mismatch marked answerable so its substrate is real rather than assumed.
+    pos.attachments = [{"extension": "exe", "declared_type": "application/pdf",
+                        "executable_extension": True,
+                        "type_extension_mismatch": True,
+                        "type_mismatch_tested": True}]
     p = signals(pos)
-    for name in ("has_form", "urgent_subject", "url_shortener"):
+    for name in ("has_form", "urgent_subject", "url_shortener",
+                 "executable_attachment", "attachment_type_mismatch"):
         if not p[name]["fired"]:
             return False, "canary: %s did not fire on a message that should trip it" % name
 
@@ -472,6 +532,19 @@ def selftest() -> tuple[bool, str]:
     if not good.header_trusted or good.spf != "pass" or good.dkim != "fail":
         return False, "canary: a legitimate Authentication-Results was misread"
 
-    return True, ("11 canaries pass (3 must-fire, 3 must-not-fire, "
+    # ...and an ABSENT attachment must read as NOT TESTED, not as clean. Without
+    # this the two new signals could report substrate=True on every message and
+    # nothing here would notice -- the same shape as the has_form parse-failure
+    # bug above, which is why it is checked on import rather than only in a suite.
+    for _n in ("executable_attachment", "attachment_type_mismatch"):
+        if neg[_n]["substrate"]:
+            return False, ("canary: %s reported substrate=True on a message with "
+                           "no attachments -- untested reads as tested" % _n)
+        if not p[_n]["substrate"]:
+            return False, ("canary: %s reported substrate=False on a message that "
+                           "HAS a qualifying attachment -- the check above is "
+                           "vacuous if substrate can never be True" % _n)
+
+    return True, ("15 canaries pass (5 must-fire, 5 must-not-fire, "
                   "parse-failure not mistaken for clean +2 and its control, "
                   "forged-header rejected, genuine header read)")
