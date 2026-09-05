@@ -1,27 +1,35 @@
 # Roadmap — `hw_anomaly_snapshots.top_processes` archival
 
-- **Status:** ⛔ **CODE SHIPPED, POLICY NOT ENFORCED** — corrected 2026-09-05, was an
-  unqualified SHIPPED. The mechanism shipped 2026-08-03 (`97175ba feat(hw-monitor):
-  archive aged top_processes blobs out of hw_anomaly_snapshots (piece 4)`) and is correct.
-  **It has never been scheduled.** `archive_old_top_processes()`
-  (`core_module/hw_monitor/hw_monitor.py:1492`) has ZERO callers — no timer, no unit, no
-  script; the only references in the tree are its own `def` and a comment. It ran ONCE, by
-  hand, on 2026-08-03, and not since.
-  **Measured 2026-09-05:** 31,975 rows / 64.0 MB sit past this item's own declared 14-day
-  window (`TOP_PROC_ARCHIVE_DAYS`), the oldest live blob dating to 2026-07-20 — 47 days,
-  3.4× the window — accruing ~1.7 MB/day. The table is back to 256.0 MB, 42.0% of the
-  database. Full audit, the missing-schedule fix scope, and the generalizable
-  "scheduled or it doesn't exist" rule:
-  [[data-retention-enforcement-and-tier-a-scope-2026-09-05]].
+- **Status:** **SHIPPED AND NOW ENFORCED (this appliance), 2026-09-05** — but see the
+  installer caveat below before reading that as "shipped to users". The mechanism shipped
+  2026-08-03 (`97175ba`) and was always correct; it simply had **no schedule**.
+  `archive_old_top_processes()` (`core_module/hw_monitor/hw_monitor.py:1492`) had ZERO
+  callers — no timer, no unit, no script — and ran exactly once, by hand, then not again
+  for 33 days. Corrected from an unqualified SHIPPED, which described the build rather
+  than the policy.
+  **What the gap cost, measured 2026-09-05 before the fix:** 31,975 rows / 64.0 MB past
+  this item's own 14-day `TOP_PROC_ARCHIVE_DAYS` window, oldest blob 2026-07-20 — 47 days,
+  3.4× the window — accruing ~1.7 MB/day.
+  **Closed by `e54df43`**, which ships the unit + timer AND a window-liveness check
+  (`top_processes_retention_status()` + `test_retention_window.py`, 17 checks) that asserts
+  the window holds independently of how archival works — so a timer later disabled or
+  masked fails loudly instead of silently. First scheduled run 2026-09-05 16:53:21:
+  31,975 rows / 63,950,000 bytes archived, window went 64.0 MB → **0**, and **zero rows
+  were deleted** (62,373 → 62,385 total; refs 18,010 → 49,985, exactly +31,975). Archival
+  is a MOVE, and that held under a real 64 MB run.
+  **⚠ CAVEAT — `install.sh` deploys no timers at all**, so this is enforced HERE and on no
+  other installation. Tracked as the primary open item in
+  [[data-retention-enforcement-and-tier-a-scope-2026-09-05]] §6.1, alongside the same gap
+  affecting `nemesis-oplog-coalesce`, `nemesis-cert-renew` and `nemesis-fw-guard-boot`.
   **On the original numbers:** 18,010 rows archived and the verified round-trip are real
   and still stand. "34.4MB→837KB" is a *column payload* measurement, not a reduction in
-  database file size — the freed space stayed with the table as intra-page slack (38% page
-  utilisation measured 2026-09-05) and only `VACUUM` returns it to the filesystem. See §5
-  of the audit above.
+  database file size — the freed space stays with the table as intra-page slack, measured
+  at 38% page utilisation before the 2026-09-05 run and **14% after** it, with the file
+  itself unchanged at ~610 MB. Only `VACUUM` returns that ~221 MB. See §5 of the audit.
   Header was ALSO stale once before, until corrected 2026-08-04 — see
   [roadmap-state-audit-2026-08-04](../audits/roadmap-state-audit-2026-08-04.md). That
-  correction upgraded a stale PARKED to SHIPPED; this one records that SHIPPED was itself
-  too strong, because it described the build rather than the policy.
+  correction upgraded a stale PARKED to SHIPPED; the 2026-09-05 pass recorded that SHIPPED
+  was itself too strong.
 
 ## What
 
