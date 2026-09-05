@@ -47,12 +47,12 @@
   </div>
 
   {% if used >= cap %}
-    <div class="note warn">
+    <div class="note warn" id="cap-reached">
       You have <strong>{{ used }}</strong> submissions awaiting review, which is the
       limit ({{ cap }}). Withdraw one below, or wait for an administrator to review them.
     </div>
   {% else %}
-    <p class="sub">{{ used }} of {{ cap }} pending submissions used.</p>
+    <p class="sub" id="cap-remaining">{{ used }} of {{ cap }} pending submissions used.</p>
   {% endif %}
 
   <label for="f-slug">Address (lowercase, letters/numbers/hyphens)</label>

@@ -36,7 +36,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 80
+EXPECTED_CHECKS = 84
 _pass = _fail = 0
 
 
@@ -102,7 +102,7 @@ def _seed_users():
         lockout_until TEXT, lockout_tier INTEGER DEFAULT 0,
         password_changed_at TEXT, recovery_grace_until TEXT)""")
     for uid, name, role in ((601, "c_user", "user"), (602, "c_sub", "sub_admin"),
-                            (603, "c_admin", "admin")):
+                            (603, "c_admin", "admin"), (604, "c_cap", "user")):
         conn.execute("INSERT OR REPLACE INTO users(id,username,display_name,"
                      "password_hash,role,is_active,created_at) "
                      "VALUES(?,?,?,'x',?,1,'2026-01-01')", (uid, name, name, role))
@@ -151,7 +151,7 @@ def test_no_custom_endpoint_is_auth_exempt():
         check("%s is NOT public" % ep, ep not in exempt)
 
 
-# ── B. THE SPLIT: sub_admin drafts, admin publishes ─────────────────────────
+# ── B. THE SPLIT: anyone submits, only an admin approves ────────────────────
 
 def test_publish_and_unpublish_are_ADMIN_ONLY():
     """The core of 'not self-publish'. A sub_admin reaching these would make the whole
@@ -306,8 +306,35 @@ def test_the_submission_page_renders_and_shows_only_your_own_work():
     check("the submission page renders", r.status_code == 200, "got %s" % r.status_code)
     check("it lists your own submission", "My Own Draft" in body)
     check("it does NOT list another user's", "Someone Elses Draft" not in body)
-    check("the cap is shown before it is hit",
-          str(C.MAX_UNAPPROVED_PER_USER) in body)
+    # ⚠ NOT `str(MAX_UNAPPROVED_PER_USER) in body`. That was the original check and a
+    # mutation deleting the whole cap line SURVIVED it: the cap is 10, and the page
+    # also carries `margin-top:10px` and `&#10;` newline entities, so the assertion was
+    # true no matter what the template said. Match the sentence, which only that line
+    # can produce.
+    check("the remaining allowance is shown before the cap is hit",
+          'id="cap-remaining"' in body and "%d" % C.MAX_UNAPPROVED_PER_USER in body,
+          "cap line missing from the page")
+
+
+def test_the_submission_page_warns_AT_the_cap_not_only_past_it():
+    """The at-cap branch of `learn_submit.html` had nothing exercising it. A limit a
+    user meets only by being refused reads as the product breaking."""
+    for i in range(C.MAX_UNAPPROVED_PER_USER):
+        C.save_draft(slug="custom-cap-%d" % i, title="Cap %d" % i, summary="s",
+                     body="x", actor="c_cap", role="user")
+    check("the fixture actually reached the cap",
+          C.unapproved_count("c_cap") == C.MAX_UNAPPROVED_PER_USER,
+          "count=%s" % C.unapproved_count("c_cap"))
+
+    body = _get("/learn/submit", 604).get_data(as_text=True)
+    # Matched on the element id, not the sentence. The first version of this check
+    # looked for "which is the limit" and failed against a page that says exactly that
+    # -- the phrase is broken by a line wrap in the template. Prose moves; an id is
+    # the thing the template actually commits to.
+    check("at the cap the page says so", 'id="cap-reached"' in body)
+    check("...and the under-cap allowance line is gone",
+          'id="cap-remaining"' not in body)
+    check("...and it still offers a way out", "Withdraw" in body)
 
 
 def test_the_review_queue_renders_and_separates_pending_from_published():
@@ -383,6 +410,7 @@ if __name__ == "__main__":
         test_the_index_does_not_list_drafts,
         test_the_delete_route_honours_the_ROW_rule_not_just_the_role,
         test_the_submission_page_renders_and_shows_only_your_own_work,
+        test_the_submission_page_warns_AT_the_cap_not_only_past_it,
         test_the_review_queue_renders_and_separates_pending_from_published,
         test_the_queue_ESCAPES_author_text_it_shows_as_source,
         test_the_mutating_APIS_refuse_GET,
