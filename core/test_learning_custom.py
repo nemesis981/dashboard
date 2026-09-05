@@ -35,7 +35,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"), os.path.join(_REPO, "cor
 import learning_custom as C                                        # noqa: E402
 import learning as L                                               # noqa: E402
 
-EXPECTED_CHECKS = 70
+EXPECTED_CHECKS = 101
 _pass = _fail = 0
 
 
@@ -88,10 +88,12 @@ def fresh_db():
 
 
 def mk(db, slug="custom-onboarding", actor="alice", **kw):
+    # role is supplied because `can_edit` fails CLOSED on an unknown role -- a caller
+    # that cannot say who it is does not get to edit an existing row.
     return C.save_draft(slug=slug, title=kw.get("title", "Onboarding"),
                         summary=kw.get("summary", "How we do things"),
                         body=kw.get("body", "# Welcome\n\n**read this**"),
-                        actor=actor, db_path=db)
+                        actor=actor, role=kw.get("role", "user"), db_path=db)
 
 
 # ── A. Slug namespacing ──────────────────────────────────────────────────────
@@ -145,13 +147,18 @@ def test_EDITING_A_PUBLISHED_TOPIC_REVERTS_IT_TO_DRAFT():
     eq("published first", C.get("custom-onboarding", db_path=db)["status"],
        C.STATUS_PUBLISHED)
 
+    # ⚠ Edited by an ADMIN, not by a passing user. An earlier version of this test had
+    # "bob" (neither the creator nor an admin) edit alice's PUBLISHED row -- which is
+    # exactly the privilege escalation `can_edit` now forbids. The test was demonstrating
+    # revert-to-draft using an action that should never have been possible.
     C.save_draft(slug="custom-onboarding", title="Onboarding v2",
-                 summary="changed", body="new text", actor="bob", db_path=db)
+                 summary="changed", body="new text", actor="admin2", role="admin",
+                 db_path=db)
     t = C.get("custom-onboarding", db_path=db)
     eq("editing REVERTED it to draft", t["status"], C.STATUS_DRAFT)
     eq("...and cleared the approval", t["published_by"], None)
     eq("...and its timestamp", t["published_at"], None)
-    eq("the editor is recorded", t["updated_by"], "bob")
+    eq("the editor is recorded", t["updated_by"], "admin2")
     eq("the original author is NOT overwritten", t["created_by"], "alice")
 
 
@@ -279,7 +286,7 @@ def test_reverting_to_draft_immediately_hides_published_content():
     L.grant(7, "custom-x", db_path=db)
     check("visible while published", C.visible_to(7, "user", "custom-x", db_path=db))
     C.save_draft(slug="custom-x", title="t", summary="s", body="b",
-                 actor="alice", db_path=db)
+                 actor="alice", role="admin", db_path=db)
     check("an EDIT hides it again immediately",
           C.visible_to(7, "user", "custom-x", db_path=db) is False)
 
@@ -406,7 +413,7 @@ def test_the_cap_counts_only_UNAPPROVED_submissions():
        C.MAX_UNAPPROVED_PER_USER - 1)
     check("...and a new submission is accepted again",
           C.save_draft(slug="custom-over", title="t", summary="s", body="b",
-                       actor="dave", db_path=db) is not None)
+                       actor="dave", role="user", db_path=db) is not None)
 
 
 def test_the_cap_is_PER_USER_not_global():
@@ -418,7 +425,7 @@ def test_the_cap_is_PER_USER_not_global():
                      actor="dave", db_path=db)
     check("a DIFFERENT user is unaffected",
           C.save_draft(slug="custom-b0", title="t", summary="s", body="b",
-                       actor="erin", db_path=db) is not None)
+                       actor="erin", role="user", db_path=db) is not None)
     eq("and their own count is 1", C.unapproved_count("erin", db_path=db), 1)
 
 
@@ -431,7 +438,7 @@ def test_EDITING_an_existing_submission_does_not_consume_a_new_slot():
                      actor="dave", db_path=db)
     check("editing one already at the cap is allowed",
           C.save_draft(slug="custom-e0", title="fixed", summary="s", body="b2",
-                       actor="dave", db_path=db) is not None)
+                       actor="dave", role="user", db_path=db) is not None)
     eq("count unchanged", C.unapproved_count("dave", db_path=db),
        C.MAX_UNAPPROVED_PER_USER)
 
@@ -445,6 +452,156 @@ def test_an_admin_is_not_capped():
                      actor="admin1", role="admin", db_path=db)
     check("admin exceeded the cap without refusal",
           C.unapproved_count("admin1", db_path=db) > C.MAX_UNAPPROVED_PER_USER)
+
+
+# ── I. ⛔ WRITE-PATH OWNERSHIP (privilege escalation, found by Window 1) ─────
+
+def test_a_user_CANNOT_overwrite_someone_elses_submission():
+    """⛔ REGRESSION TEST FOR A REPRODUCED PRIVILEGE ESCALATION.
+
+    `save_draft` is an UPSERT keyed on slug alone. `can_delete` was given an ownership
+    rule; the write path never had one, because the route minimum used to bound the
+    population to trusted delegates. Opening submission to every account removes that
+    bound, and nothing behind it took over.
+
+    Reproduced at 986d077 before the fix: bob (role=user, not the creator) overwrote
+    alice's ADMIN-APPROVED row. `created_by` stayed 'alice', so the queue still
+    attributed it to her, and the "editing reverts to draft" rule silently revoked the
+    admin's approval as a side effect. Slugs are user-chosen and enumerable from the
+    published list, so it needed no guessing.
+
+    The per-user cap does not help: it counts submissions BY actor, and overwriting
+    someone else's row creates none.
+    """
+    db = fresh_db()
+    C.save_draft(slug="custom-alice", title="Alice Title", summary="hers",
+                 body="alice body", actor="alice", db_path=db)
+    check("bob cannot overwrite alice's DRAFT",
+          raises(C.PermissionDenied,
+                 lambda: C.save_draft(slug="custom-alice", title="BOB", summary="x",
+                                      body="y", actor="bob", role="user", db_path=db)))
+    eq("...and the content is untouched",
+       C.get("custom-alice", db_path=db)["title"], "Alice Title")
+
+
+def test_a_user_CANNOT_overwrite_APPROVED_content_and_revoke_its_approval():
+    """The sharper half: the edit-reverts-to-draft rule turns an unauthorised write into
+    an unpublish. Approval must not be revocable by someone who cannot approve."""
+    db = fresh_db()
+    C.save_draft(slug="custom-alice", title="Alice Title", summary="hers",
+                 body="b", actor="alice", db_path=db)
+    C.publish("custom-alice", actor="admin1", db_path=db)
+
+    check("bob is refused",
+          raises(C.PermissionDenied,
+                 lambda: C.save_draft(slug="custom-alice", title="BOB", summary="x",
+                                      body="y", actor="bob", role="user", db_path=db)))
+    t = C.get("custom-alice", db_path=db)
+    eq("status still published", t["status"], C.STATUS_PUBLISHED)
+    eq("approval intact", t["published_by"], "admin1")
+    eq("title untouched", t["title"], "Alice Title")
+
+
+def test_even_the_CREATOR_cannot_edit_once_an_admin_approved_it():
+    """Consistent with delete: approved content is the admin's to change. Otherwise the
+    author could silently unpublish their own approved material at will."""
+    db = fresh_db()
+    C.save_draft(slug="custom-a", title="T", summary="s", body="b",
+                 actor="alice", db_path=db)
+    C.publish("custom-a", actor="admin1", db_path=db)
+    check("alice cannot edit her own APPROVED submission",
+          raises(C.PermissionDenied,
+                 lambda: C.save_draft(slug="custom-a", title="edit", summary="s",
+                                      body="b2", actor="alice", role="user",
+                                      db_path=db)))
+    eq("still published", C.get("custom-a", db_path=db)["status"], C.STATUS_PUBLISHED)
+
+
+def test_the_creator_CAN_edit_their_own_unapproved_submission():
+    """The positive control. A rule that refused everyone would pass every check above
+    while making the feature unusable."""
+    db = fresh_db()
+    C.save_draft(slug="custom-a", title="T", summary="s", body="b",
+                 actor="alice", db_path=db)
+    C.save_draft(slug="custom-a", title="Fixed", summary="s", body="b2",
+                 actor="alice", role="user", db_path=db)
+    eq("her own edit applied", C.get("custom-a", db_path=db)["title"], "Fixed")
+
+
+def test_an_admin_may_edit_anything():
+    db = fresh_db()
+    C.save_draft(slug="custom-a", title="T", summary="s", body="b",
+                 actor="alice", db_path=db)
+    C.publish("custom-a", actor="admin1", db_path=db)
+    C.save_draft(slug="custom-a", title="Admin Edit", summary="s", body="b2",
+                 actor="admin1", role="admin", db_path=db)
+    t = C.get("custom-a", db_path=db)
+    eq("admin edit applied", t["title"], "Admin Edit")
+    eq("...and it reverted to draft as designed", t["status"], C.STATUS_DRAFT)
+
+
+def test_creating_a_NEW_submission_is_open_to_any_submitter():
+    """Ownership constrains EDITS of an existing row. It must not block creation, or
+    open submission would not work at all."""
+    db = fresh_db()
+    check("a brand-new slug is accepted from anyone",
+          C.save_draft(slug="custom-new", title="T", summary="s", body="b",
+                       actor="zoe", role="user", db_path=db) is not None)
+
+
+def test_can_edit_and_can_delete_agree_on_the_same_row():
+    """Two rules, one intent. If they diverge, one of them is wrong -- and a caller
+    consulting the wrong one gets a confident wrong answer."""
+    db = fresh_db()
+    C.save_draft(slug="custom-a", title="T", summary="s", body="b",
+                 actor="alice", db_path=db)
+    t = C.get("custom-a", db_path=db)
+    for actor, role in (("alice", "user"), ("bob", "user"),
+                        ("alice", "viewonly"), ("admin1", "admin")):
+        check("edit/delete agree for %s/%s" % (actor, role),
+              C.can_edit(t, actor, role) == C.can_delete(t, actor, role),
+              "edit=%s delete=%s" % (C.can_edit(t, actor, role),
+                                     C.can_delete(t, actor, role)))
+
+
+def test_an_UNPARSEABLE_role_is_refused_by_both_rules():
+    """⚠ ADDED AFTER A SURVIVING MUTATION. Flipping `can_edit`'s exception handler from
+    `return False` to `return True` -- i.e. fail-OPEN on a role it cannot parse -- left
+    the suite green. Nothing asserted the direction of that fallback, so the most
+    security-relevant branch in the function was untested.
+
+    A role that cannot be parsed proves nothing about the caller. Both rules must refuse,
+    and they must refuse for the same reason.
+    """
+    db = fresh_db()
+    mk(db, slug="custom-x", actor="alice")
+    t = C.get("custom-x", db_path=db)
+    # ⚠ "ADMIN " and "Admin" are NOT garbage: `normalise_role` deliberately accepts case
+    # and separator variants ("sub-admin" -> "sub_admin"). An earlier version of this
+    # test listed "ADMIN " as unparseable and FAILED against correct behaviour -- my
+    # assumption about what counts as garbage, not a defect in the rule.
+    for bad in ("wizard", "root", "", None, 42, ["admin"]):
+        check("can_edit refuses role %r" % (bad,),
+              C.can_edit(t, "alice", bad) is False)
+        check("can_delete refuses role %r" % (bad,),
+              C.can_delete(t, "alice", bad) is False)
+
+    # The companion positive control: a legitimate VARIANT must still be honoured, or
+    # "refuse what you cannot parse" would have quietly become "refuse anything odd".
+    check("a case/space variant of admin IS honoured",
+          C.can_edit(t, "someone-else", "ADMIN ") is True)
+
+
+def test_save_draft_refuses_an_unparseable_role_on_an_existing_row():
+    """The same fallback, exercised through the enforcing path rather than the advisor."""
+    db = fresh_db()
+    mk(db, slug="custom-x", actor="alice")
+    check("save_draft refuses a garbage role",
+          raises(C.PermissionDenied,
+                 lambda: C.save_draft(slug="custom-x", title="t", summary="s",
+                                      body="b", actor="alice", role="wizard",
+                                      db_path=db)))
+    eq("content untouched", C.get("custom-x", db_path=db)["title"], "Onboarding")
 
 
 if __name__ == "__main__":
@@ -476,6 +633,15 @@ if __name__ == "__main__":
         test_the_cap_is_PER_USER_not_global,
         test_EDITING_an_existing_submission_does_not_consume_a_new_slot,
         test_an_admin_is_not_capped,
+        test_a_user_CANNOT_overwrite_someone_elses_submission,
+        test_a_user_CANNOT_overwrite_APPROVED_content_and_revoke_its_approval,
+        test_even_the_CREATOR_cannot_edit_once_an_admin_approved_it,
+        test_the_creator_CAN_edit_their_own_unapproved_submission,
+        test_an_admin_may_edit_anything,
+        test_creating_a_NEW_submission_is_open_to_any_submitter,
+        test_can_edit_and_can_delete_agree_on_the_same_row,
+        test_an_UNPARSEABLE_role_is_refused_by_both_rules,
+        test_save_draft_refuses_an_unparseable_role_on_an_existing_row,
     ):
         print("\n%s" % fn.__name__)
         fn()

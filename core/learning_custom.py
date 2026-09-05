@@ -15,14 +15,19 @@ git the way shipped content can.
     rest to `learning.visible_to`, so there is one visibility rule, not two.
 
 ⛔ EDITING PUBLISHED CONTENT RETURNS IT TO DRAFT.
-    The non-obvious half of "sub_admin drafts, admin publishes". Without it a sub_admin
+    The non-obvious half of "anyone submits, an admin approves". Without it a submitter
     could alter text an admin already approved, and the approval would then attest to
     content that no longer exists. The friction — a typo fix needs re-approval — is
     accepted deliberately, because the alternative is an approval that means nothing.
+    (An earlier design gated drafting on `sub_admin`; that was rejected because a
+    sub_admin ROUTE_MINIMUMS entry stops the dashboard starting. Submission is open to
+    any authenticated account and approval is admin-only.)
 
 ⛔ DELETE IS THE ONE RULE `ROUTE_MINIMUMS` CANNOT EXPRESS, SO IT LIVES HERE.
     A registry entry gates on the caller's ROLE. This rule also depends on the ROW: an
-    admin may delete anything; a sub_admin may delete only their OWN UNPUBLISHED draft.
+    admin may delete anything; a submitter may delete only their OWN UNAPPROVED work.
+    ⚠ No rule below the registry may branch on `sub_admin` -- the import canary can only
+    see the registry layer, so that is maintained by discipline rather than by check.
     Putting it in the route would leave the function reachable by any second caller with
     the rule attached to only one path — the divergence the route-security practice
     exists to prevent. `delete()` therefore ENFORCES rather than trusting callers to ask.
@@ -227,7 +232,18 @@ def save_draft(slug, title, summary, body, actor=None, role=None, db_path=None):
     #
     # Admins are exempt: this bounds a wide submitting population, and an admin
     # publishing their own material is not that population.
-    is_new = get(slug, db_path) is None
+    existing = get(slug, db_path)
+    # ENFORCED HERE, not in the route. The registry entry is a coarse outer bound that
+    # cannot see the row; the row rule has to exist somewhere, and putting it behind the
+    # function means a second caller cannot bypass it -- the same reasoning `delete()`
+    # already follows by re-checking `can_delete`.
+    if not can_edit(existing, actor, role):
+        raise PermissionDenied(
+            "%r (%s) may not edit %r: it belongs to %r and is %r"
+            % (actor, role, slug,
+               (existing or {}).get("created_by"), (existing or {}).get("status")))
+
+    is_new = existing is None
     if is_new and actor and not _is_admin(role):
         if unapproved_count(actor, db_path) >= MAX_UNAPPROVED_PER_USER:
             raise CustomError(
@@ -295,6 +311,40 @@ def unpublish(slug, actor=None, db_path=None):
 
 
 # ── delete: status- and ownership-aware ─────────────────────────────────────
+
+def can_edit(topic, actor, role):
+    """May `actor` (holding `role`) EDIT this existing row?
+
+    ⛔ THIS EXISTS BECAUSE THE WRITE PATH HAD NO OWNERSHIP RULE AND NEEDED ONE.
+    `save_draft` is an UPSERT keyed on slug alone. While submission was limited to a few
+    trusted delegates, the route minimum bounded who could reach it at all. Opening
+    submission to every account removed that bound and nothing behind it took over --
+    reproduced at 986d077: a plain user overwrote another user's ADMIN-APPROVED row,
+    which stayed attributed to the original author while the edit-reverts-to-draft rule
+    silently revoked the approval.
+
+    Deliberately IDENTICAL in shape to `can_delete`: admin may act on anything; a
+    submitter only on their OWN work and only while UNAPPROVED. Two rules with one
+    intent, and a test asserts they agree on the same row -- if they diverge, a caller
+    consulting either gets a confident wrong answer.
+
+    Returns True for a MISSING topic: creating a new submission is not an edit, and
+    ownership must not block creation or open submission would not work at all.
+    """
+    if not topic:
+        return True                       # a new row -- see docstring
+    try:
+        import roles as _roles
+        r = _roles.normalise_role(role)
+    except Exception:
+        return False                      # an unknown role proves nothing
+    if r == _roles.ROLE_ADMIN:
+        return True
+    if _roles.rank(r) < _roles.rank(_roles.ROLE_USER):
+        return False                      # viewonly writes nothing, ever
+    return (topic.get("status") == STATUS_DRAFT
+            and bool(actor) and topic.get("created_by") == actor)
+
 
 def can_delete(topic, actor, role):
     """May `actor` (holding `role`) delete THIS row?
