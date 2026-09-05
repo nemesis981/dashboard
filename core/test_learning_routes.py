@@ -31,7 +31,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 62
+EXPECTED_CHECKS = 67
 _pass = _fail = 0
 
 
@@ -296,6 +296,63 @@ def test_a_bad_state_is_refused_by_the_route_with_400():
               "got %s" % r2.status_code)
 
 
+def test_the_warning_honours_is_active_not_just_role():
+    """The ONLY configuration where a correct is_active filter and a missing one differ.
+
+    Window 1 found that the obvious live check cannot discriminate: on the appliance the
+    single inactive account is an ADMIN, so the role filter excludes it before is_active
+    is ever consulted, and `role!='admin' AND is_active=1` and `role!='admin'` both
+    return 1. Observing "the warning is absent" there proves the count is non-zero and
+    nothing about whether is_active is honoured -- it passes for the right and the wrong
+    reason indistinguishably.
+
+    An INACTIVE NON-ADMIN is what separates them: a correct implementation still shows
+    the warning (0 ACTIVE non-admins) while a missing filter suppresses it (1 non-admin
+    exists). Creating one on the live box is the operator's call; here it costs nothing.
+    """
+    conn = sqlite3.connect(os.environ["NEMESIS_DB_PATH"])
+    saved = conn.execute("SELECT id, is_active FROM users").fetchall()
+    try:
+        # Every non-admin inactive, and one of them deliberately present-but-inactive.
+        conn.execute("UPDATE users SET is_active=0 WHERE role!='admin'")
+        conn.execute("INSERT OR REPLACE INTO users(id,username,display_name,"
+                     "password_hash,role,is_active,created_at) "
+                     "VALUES(503,'t_inactive','t_inactive','x','user',0,'2026-01-01')")
+        conn.commit()
+
+        both = sqlite3.connect(os.environ["NEMESIS_DB_PATH"])
+        n_active = both.execute("SELECT COUNT(*) FROM users WHERE role!='admin' "
+                                "AND is_active=1").fetchone()[0]
+        n_all = both.execute("SELECT COUNT(*) FROM users "
+                             "WHERE role!='admin'").fetchone()[0]
+        both.close()
+        # Guard the fixture: if these agree, the test below cannot fail and proves
+        # nothing -- the same defect it exists to catch.
+        check("fixture DISCRIMINATES (active=%d vs all=%d)" % (n_active, n_all),
+              n_active != n_all)
+        check("...specifically zero ACTIVE non-admins", n_active == 0)
+
+        r = _get("/settings/learning", 502)          # admin
+        body = r.get_data(as_text=True)
+        check("page renders", r.status_code == 200, "got %s" % r.status_code)
+        check("warning APPEARS despite an inactive non-admin existing",
+              "No non-admin accounts exist yet" in body)
+    finally:
+        conn.execute("DELETE FROM users WHERE id=503")
+        for uid, act in saved:
+            conn.execute("UPDATE users SET is_active=? WHERE id=?", (act, uid))
+        conn.commit()
+        conn.close()
+
+
+def test_the_warning_is_absent_when_an_active_non_admin_exists():
+    """The other side of the pair, so neither direction is assumed."""
+    r = _get("/settings/learning", 502)
+    body = r.get_data(as_text=True)
+    check("an active non-admin exists, so no warning",
+          "No non-admin accounts exist yet" not in body)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Learning Center -- routes, registries, direct-URL enforcement")
@@ -321,6 +378,8 @@ if __name__ == "__main__":
         test_the_all_admin_case_is_stated_rather_than_silent,
         test_preview_endpoint_writes_nothing_and_apply_is_additive,
         test_a_bad_state_is_refused_by_the_route_with_400,
+        test_the_warning_honours_is_active_not_just_role,
+        test_the_warning_is_absent_when_an_active_non_admin_exists,
     ):
         print("\n%s" % fn.__name__)
         fn()
