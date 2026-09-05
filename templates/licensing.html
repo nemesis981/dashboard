@@ -105,6 +105,22 @@
       </div>
     {% endif %}
 
+    {# No pack SIZE is stated here on purpose: how much capacity a pack grants is
+       set in the storefront's variant map, which this install cannot read. A
+       number printed here would be one nothing on this machine can verify, and
+       the checkout page is the authoritative place for it. #}
+    {% if checkout_url %}
+      <div class="note">
+        <strong>Need more remote slots?</strong> Extra remote-device capacity can
+        be bought as a key pack. Your installation ID is attached to the checkout
+        automatically, so the new key is issued for this machine &mdash; there is
+        nothing to copy or paste.<br><br>
+        <a href="{{ checkout_url }}" target="_blank" rel="noopener noreferrer">
+          Buy more remote capacity</a>
+        <span class="muted">&mdash; opens the storefront in a new tab</span>
+      </div>
+    {% endif %}
+
     {# Three categories, deliberately styled differently. Lumping them together
        flagged this server's own node and every pre-licensing device as if they
        were unknown machines on the VPN -- an alarm that is usually wrong, which

@@ -2918,7 +2918,7 @@ def _license_view():
             "budget_known": False, "budget_reason": "", "orphans": [],
             "codes_remaining": 0, "codes_level": "none_issued", "codes_msg": "",
             "known_not_entitled": [],
-            "install_id": "", "install_conf": "", "error": ""}
+            "install_id": "", "install_conf": "", "checkout_url": "", "error": ""}
     try:
         tier, verdict, detail = ent.license_status()
         view.update(tier=tier, verdict=verdict, detail=detail)
@@ -2949,6 +2949,15 @@ def _license_view():
     except Exception as e:
         view["install_id"] = ""
         view["install_conf"] = "unavailable: %s" % str(e)[:80]
+
+    # The pack grants `remote_cap_bonus`, which ONLY a free-tier licence reads --
+    # `remote_cap_for_license` returns before consulting it on the commercial path,
+    # and the backend's variant map refuses the field on a commercial variant
+    # outright. Offering it here to a commercial install would sell a key that
+    # grants that install nothing, so the tier check is a correctness gate rather
+    # than a presentational one.
+    if view["tier"] != "commercial":
+        view["checkout_url"] = _key_pack_checkout_url(view["install_id"])
     return view
 
 
@@ -3142,6 +3151,64 @@ LICENSE_SERVER = (os.environ.get("NEMESIS_LICENSE_SERVER")
 #: and the fallback (manual support) is always available -- so a slow licence
 #: server should degrade to that quickly rather than hang the page.
 _LICENSE_SERVER_TIMEOUT = 10
+
+#: Storefront checkout for the free-tier remote-device key pack. EMPTY by default,
+#: deliberately: the storefront variant does not exist yet, and a placeholder here
+#: would render a Buy button pointing at a dead page. No configuration, no button.
+#:
+#: Not a secret and not environment-specific in the Rule 8 sense -- it is the same
+#: public storefront for every install, like LICENSE_SERVER above. It is read from
+#: the environment only because the variant id is not yet minted.
+KEY_PACK_CHECKOUT_URL = (os.environ.get("NEMESIS_KEY_PACK_CHECKOUT_URL") or "").strip()
+
+#: How Lemon Squeezy carries prefilled custom data on a checkout link. The intake
+#: service reads exactly `meta.custom_data.install_id` (intake/app.py), and an order
+#: arriving without it CANNOT be signed -- it is parked as `needs_attention` for a
+#: human to reconcile by hand. This string is therefore a cross-repo contract, not a
+#: formatting choice.
+_LS_CUSTOM_INSTALL_ID = "checkout[custom][install_id]"
+
+
+def _key_pack_checkout_url(install_id, base=None):
+    """Checkout link for the key pack, with this machine's install id prefilled.
+
+    Returns "" when no usable link can be built -- nothing configured, no install
+    id, or a base URL that is not plainly https. "" means the caller renders no
+    button at all, which is the intended failure rather than a degraded one: a
+    purchase that arrives without an install_id cannot be signed, so a broken link
+    does not merely fail, it takes someone's money into a manual-reconciliation
+    queue. Refusing to render costs nothing by comparison.
+
+    The scheme check is not decoration. This value is interpolated into an href on
+    the one page that displays licence state; a non-https scheme there -- javascript:
+    above all -- is script execution rather than a bad link.
+
+    An install id is placed with urlencode rather than string formatting so that a
+    value containing & or = cannot append or overwrite other checkout parameters.
+    Any install_id already present in the configured base is REPLACED, not appended
+    to: two values for one key is resolved by the storefront, not by us.
+    """
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    base = (KEY_PACK_CHECKOUT_URL if base is None else base).strip()
+    iid = (install_id or "").strip()
+    if not base or not iid:
+        return ""
+
+    try:
+        parts = urlsplit(base)
+    except ValueError:
+        # Unparseable configuration is not a link. Fail closed and silently --
+        # this runs on every render of the licensing page, not at startup.
+        return ""
+    if parts.scheme != "https" or not parts.netloc:
+        return ""
+
+    query = [(k, v) for (k, v) in parse_qsl(parts.query, keep_blank_values=True)
+             if k != _LS_CUSTOM_INSTALL_ID]
+    query.append((_LS_CUSTOM_INSTALL_ID, iid))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query), parts.fragment))
 
 
 def _license_server_post(path, payload):
