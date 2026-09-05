@@ -92,6 +92,36 @@ class PermissionDenied(Exception):
     answer 403 for one and 400 for the other rather than collapsing both."""
 
 
+class SavedSlug(str):
+    """The slug `save_draft` wrote, carrying whether that write CREATED the row.
+
+    ⛔ A str SUBCLASS, not a tuple, deliberately. 43 call sites use this return as the
+    slug and exactly one needs the provenance. A tuple would silently change what every
+    other one formats, renders, or binds to SQL -- trading a notification bug for a
+    quieter and more widespread one. This IS the slug: `==`, `%s`, `json.dumps` and
+    sqlite binding all behave exactly as they did before, with one attribute added for
+    the single caller that must tell a new submission from an edit.
+
+    ⛔ WHY THE FACT TRAVELS BACK AT ALL, rather than the caller checking for itself.
+    `save_draft` ALREADY reads the existing row -- it has to, to enforce ownership and
+    the per-user cap. A route re-reading to ask "was this new?" would be a second source
+    of truth for a question this function has already answered, and the two would drift
+    the first time either changed. Same reasoning that keeps the row rules out of the
+    handlers. See `dashboard.api_learn_custom_save`.
+
+    (No `__slots__`: a non-empty one is not permitted on a subclass of a variable-length
+    built-in like `str`.)
+    """
+
+    def __new__(cls, slug, created):
+        obj = super().__new__(cls, slug)
+        obj.created = bool(created)
+        return obj
+
+    def __repr__(self):
+        return "SavedSlug(%s, created=%r)" % (str.__repr__(self), self.created)
+
+
 def _db(db_path, readonly=False):
     if db_path is None:
         import nemesis_paths
@@ -214,6 +244,10 @@ def save_draft(slug, title, summary, body, actor=None, role=None, db_path=None):
     Editing published content therefore revokes its approval — see the module docstring.
     That is the behaviour, not a side effect, and it is why there is no `save` that
     preserves status.
+
+    Returns a `SavedSlug` — the slug, with `.created` saying whether this call inserted
+    the row rather than updating one. Callers that only want the slug can keep treating
+    it as the plain string it is.
     """
     validate_slug(slug)
     for name, val, cap in (("title", title, MAX_TITLE),
@@ -276,7 +310,12 @@ def save_draft(slug, title, summary, body, actor=None, role=None, db_path=None):
         conn.commit()
     finally:
         conn.close()
-    return slug
+    # `is_new` comes from the same read that enforced the cap and ownership above, not
+    # from a second lookup. Two callers racing to create the SAME slug could both read
+    # no row and both report created=True -- one duplicate notification, never a missed
+    # one, since a row that does not exist yet cannot be read as existing. The race
+    # therefore fails toward telling an admin twice rather than never.
+    return SavedSlug(slug, created=is_new)
 
 
 def set_status(slug, status, actor=None, role=None, db_path=None):

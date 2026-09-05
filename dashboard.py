@@ -3056,9 +3056,22 @@ def api_learn_custom_save():
         return jsonify({"ok": False, "error": str(e)}), 403
     except lc.CustomError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
-    _notify_custom_submission(slug, actor)
+
+    # ⛔ NOTIFY ON CREATION ONLY. `save_draft` is also the EDIT path, and this call used
+    # to be unconditional -- so re-saving one draft mailed an admin once per save.
+    # Measured before the fix: 40 saves -> 1 row -> 40 notifications. The per-user cap
+    # bounds unapproved ROWS and an edit creates none, so it bounded this at all. With
+    # `notify.DEFAULT_NOTIFY_MODE` at `immediate` those were real emails from the
+    # operator's own sender, driven by the lowest-privileged account that can write.
+    #
+    # `.created` comes from the read `save_draft` already performed to enforce the cap
+    # and ownership -- deliberately NOT a second lookup here, which would be a second
+    # source of truth for a question already answered.
+    if slug.created:
+        _notify_custom_submission(slug, actor)
     _audit(action="learn_custom_save", rule_id=slug)
-    return jsonify({"ok": True, "slug": slug, "status": lc.STATUS_DRAFT})
+    return jsonify({"ok": True, "slug": str(slug), "status": lc.STATUS_DRAFT,
+                    "created": slug.created})
 
 
 @app.route("/api/learn/custom/withdraw", methods=["POST"])

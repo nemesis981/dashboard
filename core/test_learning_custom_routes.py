@@ -36,7 +36,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 104
+EXPECTED_CHECKS = 123
 _pass = _fail = 0
 
 
@@ -466,6 +466,128 @@ def test_api_stats_computes_the_badge_PER_REQUESTER():
           "leaked=%r" % (u.get("learning_pending_badge"),))
 
 
+# ── G. One notification per SUBMISSION, not per SAVE ─────────────────────────
+#
+# ⛔ THE DEFECT THIS PINS. `save_draft` is BOTH the create and the edit path, and the
+# save route notified unconditionally. The per-user cap bounds unapproved ROWS, and an
+# edit creates no row, so the cap bounded nothing about notification volume. Measured
+# before the fix: 40 saves -> 1 row -> 40 notifications. With DEFAULT_NOTIFY_MODE at
+# `immediate` those are 40 real emails from the operator's own SMTP sender, driven by
+# the lowest-privileged account that can write anything.
+#
+# The property asserted here is the operator's wording: exactly one notification per
+# genuinely new submission, regardless of how many times it is subsequently edited.
+
+class _NotifySpy:
+    """Records calls to the route's notifier and always restores it.
+
+    Restores in __exit__ rather than at the end of the test body so an assertion that
+    raises cannot leave a stub installed for every later test in the file -- a leaked
+    stub would make the badge suites measure a patched dashboard.
+    """
+
+    def __enter__(self):
+        self.calls = []
+        self._orig = dashboard._notify_custom_submission
+        dashboard._notify_custom_submission = \
+            lambda slug, actor: self.calls.append((slug, actor))
+        return self
+
+    def __exit__(self, *exc):
+        dashboard._notify_custom_submission = self._orig
+        return False
+
+
+def _save(uid, slug, body, title="T", summary="s"):
+    return _post("/api/learn/custom/save", uid,
+                 {"slug": slug, "title": title, "summary": summary, "body": body})
+
+
+def test_ONE_notification_per_submission_however_often_it_is_edited():
+    EDITS = 12
+    with _NotifySpy() as spy:
+        codes = {_save(601, "custom-notify-a", "revision %d" % i).status_code
+                 for i in range(EDITS)}
+        check("every save succeeded", codes == {200}, "codes=%s" % sorted(codes))
+        check("...and they wrote ONE row",
+              len([t for t in C.all_topics() if t["slug"] == "custom-notify-a"]) == 1)
+        check("exactly ONE notification for %d saves" % EDITS,
+              len(spy.calls) == 1, "fired=%d" % len(spy.calls))
+
+        # CONTROL. Without this, "1" could be a stub that never fires rather than a
+        # measurement -- the instrument has to be shown capable of a different answer.
+        _save(601, "custom-notify-b", "another submission")
+        check("a genuinely NEW submission does notify (control)",
+              len(spy.calls) == 2, "fired=%d" % len(spy.calls))
+        check("...and it names the new slug, not the old one",
+              spy.calls[-1][0] == "custom-notify-b", "got %r" % (spy.calls[-1],))
+
+    # The response now reports the same fact. Asserted so the field is EXERCISED rather
+    # than merely present -- an unread response key is an untested branch.
+    fresh = _save(601, "custom-notify-c", "first")
+    edit = _save(601, "custom-notify-c", "second")
+    check("the response says a create was a create",
+          fresh.get_json().get("created") is True, "got %r" % fresh.get_json())
+    check("...and an edit was not", edit.get_json().get("created") is False,
+          "got %r" % edit.get_json())
+
+
+def test_a_REFUSED_save_notifies_nobody():
+    """A notification means "there is something to review". A save that wrote nothing
+    has produced nothing to review, so the branch must not be reached at all."""
+    with _NotifySpy() as spy:
+        bad = _save(601, "not-namespaced", "x")
+        check("a malformed slug is refused", bad.status_code == 400,
+              "got %s" % bad.status_code)
+        check("...and notifies nobody", len(spy.calls) == 0)
+
+        C.save_draft(slug="custom-notify-owned", title="Theirs", summary="s",
+                     body="x", actor="c_sub", role="user")
+        denied = _save(601, "custom-notify-owned", "hijack")
+        check("overwriting someone else's submission is refused",
+              denied.status_code == 403, "got %s" % denied.status_code)
+        check("...and notifies nobody", len(spy.calls) == 0)
+
+
+def test_reverting_a_PUBLISHED_topic_to_draft_does_not_renotify():
+    """An admin edit of approved content reverts it to draft. That is a state change,
+    but it is not a new submission and the admin making it already knows."""
+    C.save_draft(slug="custom-notify-pub", title="Approved", summary="s", body="v1",
+                 actor="c_user", role="user")
+    C.publish("custom-notify-pub", actor="c_admin", role="admin")
+    with _NotifySpy() as spy:
+        r = _save(603, "custom-notify-pub", "v2 by an admin")
+        check("the admin edit succeeded", r.status_code == 200, "got %s" % r.status_code)
+        check("...it did revert the topic to draft",
+              C.get("custom-notify-pub")["status"] == C.STATUS_DRAFT)
+        check("...and nobody was notified about it", len(spy.calls) == 0)
+
+
+def test_the_domain_layer_REPORTS_creation_rather_than_the_route_re_deriving_it():
+    """⛔ The route must not decide this itself. `save_draft` already reads the existing
+    row to enforce the cap and ownership; a second read in the handler would be a second
+    source of truth for the same question, and the two would drift. The fact travels
+    back from the read that actually made the decision."""
+    C.delete("custom-notify-rep", actor="c_admin", role="admin") \
+        if C.get("custom-notify-rep") else None
+
+    first = C.save_draft(slug="custom-notify-rep", title="T", summary="s", body="1",
+                         actor="c_user", role="user")
+    again = C.save_draft(slug="custom-notify-rep", title="T", summary="s", body="2",
+                         actor="c_user", role="user")
+    check("a create reports created=True", first.created is True,
+          "got %r" % (getattr(first, "created", "<absent>"),))
+    check("an edit reports created=False", again.created is False,
+          "got %r" % (getattr(again, "created", "<absent>"),))
+
+    # The return must STILL be the slug string. 42 call sites use it that way, and a
+    # shape change that broke them silently would be a worse defect than the one fixed.
+    check("the return is still the slug", first == "custom-notify-rep")
+    check("...and still a real str", isinstance(first, str))
+    check("...so it still formats as the slug",
+          "%s" % first == "custom-notify-rep")
+
+
 def test_save_refuses_a_bad_slug_with_400_not_500():
     r = _post("/api/learn/custom/save", 602,
               {"slug": "not-prefixed", "title": "t", "summary": "s", "body": "b"})
@@ -504,6 +626,10 @@ if __name__ == "__main__":
         test_the_badge_disappears_when_the_queue_empties,
         test_the_dashboard_HEADER_actually_renders_the_badge,
         test_api_stats_computes_the_badge_PER_REQUESTER,
+        test_ONE_notification_per_submission_however_often_it_is_edited,
+        test_a_REFUSED_save_notifies_nobody,
+        test_reverting_a_PUBLISHED_topic_to_draft_does_not_renotify,
+        test_the_domain_layer_REPORTS_creation_rather_than_the_route_re_deriving_it,
         test_save_refuses_a_bad_slug_with_400_not_500,
     ):
         print("\n%s" % fn.__name__)
