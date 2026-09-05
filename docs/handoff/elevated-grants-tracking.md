@@ -287,3 +287,14 @@ rule), needs a session with root access to actually `ls` it.
   other granted service) while deploying `2415cef` via chained `stop && start`. Independently
   verified live via `sudo -n -l` before recording, per this file's standing discipline —
   confirmed exact as reported. Recorded above as OPEN, needs operator confirm-or-add.
+- **2026-09-05** (Window 2, Morning Status). Production box re-checked live: 70 NOPASSWD
+  entries (`grep -c NOPASSWD` on `sudo -n -l` output), same count as every prior session this
+  week. `dashboard` verb set unchanged — still `tee`/`chmod`/`reset-failed`/`start`/`stop`,
+  still NO `restart` grant, so the 09-04 operator-approved add has **not yet been made** (open,
+  same as recorded). `getent group pihole/nemesis-db/nemesis-fw/nemesis`: `nemesis-fw`
+  unchanged (`paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`), `pihole` membership still
+  open, unchanged. `tcpdump` file capability re-verified via `getcap` this session (last
+  checked 09-02): unchanged, `cap_net_admin,cap_net_raw=eip`, still active Tier 2 use. Polkit
+  rules still unreadable at this session's privilege level (**8th consecutive session** —
+  genuinely needs a root session, not another re-flag). Gateway-VM entry not re-checked
+  (production-box scope, open question unresolved).
