@@ -279,9 +279,28 @@ def save_draft(slug, title, summary, body, actor=None, role=None, db_path=None):
     return slug
 
 
-def set_status(slug, status, actor=None, db_path=None):
-    """Move a topic between draft and published. Raises on an unknown status."""
+def set_status(slug, status, actor=None, role=None, db_path=None):
+    """Move a topic between draft and published. ADMIN ONLY, enforced HERE.
+
+    ⛔ THIS GUARD EXISTS BECAUSE ITS ABSENCE DEFEATED THE STATUS CEILING IN TWO MOVES.
+    `can_edit` and `can_delete` correctly check status BEFORE ownership, so an author
+    cannot touch their own approved content directly. But this function had no check at
+    all and relied on the route being admin-gated -- so calling `unpublish()` reverted
+    approved content to a draft, after which ownership applied again and the author could
+    edit or delete it. Reproduced: alice (role=user) unpublished her own approved row.
+
+    The same class Window 1 caught on the write path: a rule that lives only in the route
+    is not a rule, because the function stays reachable. Approval is the one thing the
+    review queue exists to control, so who may grant and revoke it belongs here.
+
+    Fails CLOSED on an unparseable role -- a caller who cannot say who they are does not
+    get to publish.
+    """
     validate_status(status)
+    if not _is_admin(role):
+        raise PermissionDenied(
+            "%r (%s) may not change publication status of %r: admin only"
+            % (actor, role, slug))
     if get(slug, db_path) is None:
         raise CustomError("no such custom topic: %r" % slug)
 
@@ -302,12 +321,15 @@ def set_status(slug, status, actor=None, db_path=None):
     return status
 
 
-def publish(slug, actor=None, db_path=None):
-    return set_status(slug, STATUS_PUBLISHED, actor=actor, db_path=db_path)
+def publish(slug, actor=None, role=None, db_path=None):
+    """Approve a submission. Admin only -- see set_status."""
+    return set_status(slug, STATUS_PUBLISHED, actor=actor, role=role, db_path=db_path)
 
 
-def unpublish(slug, actor=None, db_path=None):
-    return set_status(slug, STATUS_DRAFT, actor=actor, db_path=db_path)
+def unpublish(slug, actor=None, role=None, db_path=None):
+    """Withdraw approval. Admin only, and NOT a back door to edit rights -- see
+    set_status for the chain this closes."""
+    return set_status(slug, STATUS_DRAFT, actor=actor, role=role, db_path=db_path)
 
 
 # ── delete: status- and ownership-aware ─────────────────────────────────────

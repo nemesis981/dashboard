@@ -35,7 +35,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"), os.path.join(_REPO, "cor
 import learning_custom as C                                        # noqa: E402
 import learning as L                                               # noqa: E402
 
-EXPECTED_CHECKS = 101
+EXPECTED_CHECKS = 114
 _pass = _fail = 0
 
 
@@ -131,7 +131,7 @@ def test_new_content_starts_as_a_draft():
 def test_publish_records_who_approved_and_when():
     db = fresh_db()
     mk(db)
-    C.publish("custom-onboarding", actor="admin1", db_path=db)
+    C.publish("custom-onboarding", actor="admin1", role="admin", db_path=db)
     t = C.get("custom-onboarding", db_path=db)
     eq("status is published", t["status"], C.STATUS_PUBLISHED)
     eq("publisher recorded SEPARATELY from the author", t["published_by"], "admin1")
@@ -143,7 +143,7 @@ def test_EDITING_A_PUBLISHED_TOPIC_REVERTS_IT_TO_DRAFT():
     """The approval must not survive the text it approved."""
     db = fresh_db()
     mk(db)
-    C.publish("custom-onboarding", actor="admin1", db_path=db)
+    C.publish("custom-onboarding", actor="admin1", role="admin", db_path=db)
     eq("published first", C.get("custom-onboarding", db_path=db)["status"],
        C.STATUS_PUBLISHED)
 
@@ -165,8 +165,8 @@ def test_EDITING_A_PUBLISHED_TOPIC_REVERTS_IT_TO_DRAFT():
 def test_unpublish_returns_to_draft():
     db = fresh_db()
     mk(db)
-    C.publish("custom-onboarding", actor="admin1", db_path=db)
-    C.unpublish("custom-onboarding", actor="admin1", db_path=db)
+    C.publish("custom-onboarding", actor="admin1", role="admin", db_path=db)
+    C.unpublish("custom-onboarding", actor="admin1", role="admin", db_path=db)
     t = C.get("custom-onboarding", db_path=db)
     eq("back to draft", t["status"], C.STATUS_DRAFT)
     eq("approval cleared", t["published_by"], None)
@@ -194,7 +194,7 @@ def test_a_sub_admin_may_delete_only_their_OWN_UNPUBLISHED_draft():
     check("SOMEONE ELSE'S draft: refused",
           C.can_delete(C.get("custom-theirs", db_path=db), "alice", "sub_admin") is False)
 
-    C.publish("custom-mine", actor="admin1", db_path=db)
+    C.publish("custom-mine", actor="admin1", role="admin", db_path=db)
     check("their OWN topic once PUBLISHED: refused",
           C.can_delete(C.get("custom-mine", db_path=db), "alice", "sub_admin") is False)
 
@@ -204,7 +204,7 @@ def test_an_admin_may_delete_anything():
     mk(db, slug="custom-x", actor="alice")
     check("admin deletes someone else's draft",
           C.can_delete(C.get("custom-x", db_path=db), "admin1", "admin") is True)
-    C.publish("custom-x", actor="admin1", db_path=db)
+    C.publish("custom-x", actor="admin1", role="admin", db_path=db)
     check("admin deletes published content",
           C.can_delete(C.get("custom-x", db_path=db), "admin1", "admin") is True)
 
@@ -234,7 +234,7 @@ def test_delete_ENFORCES_rather_than_relying_on_the_caller_to_ask():
     function directly must not bypass the rule."""
     db = fresh_db()
     mk(db, slug="custom-x", actor="alice")
-    C.publish("custom-x", actor="admin1", db_path=db)
+    C.publish("custom-x", actor="admin1", role="admin", db_path=db)
     check("delete refuses a sub_admin on published content",
           raises(C.PermissionDenied,
                  lambda: C.delete("custom-x", actor="alice", role="sub_admin",
@@ -264,7 +264,7 @@ def test_publishing_alone_does_not_make_it_visible():
     """Both ceilings, independently. Published + not_included must stay hidden."""
     db = fresh_db()
     mk(db, slug="custom-x", actor="alice")
-    C.publish("custom-x", actor="admin1", db_path=db)
+    C.publish("custom-x", actor="admin1", role="admin", db_path=db)
     L.set_topic_state("custom-x", L.STATE_NOT_INCLUDED, db_path=db)
     L.grant(7, "custom-x", db_path=db)
     check("published but not_included -> invisible",
@@ -281,7 +281,7 @@ def test_publishing_alone_does_not_make_it_visible():
 def test_reverting_to_draft_immediately_hides_published_content():
     db = fresh_db()
     mk(db, slug="custom-x", actor="alice")
-    C.publish("custom-x", actor="admin1", db_path=db)
+    C.publish("custom-x", actor="admin1", role="admin", db_path=db)
     L.set_topic_state("custom-x", L.STATE_ALL_USERS, db_path=db)
     L.grant(7, "custom-x", db_path=db)
     check("visible while published", C.visible_to(7, "user", "custom-x", db_path=db))
@@ -368,7 +368,7 @@ def test_a_plain_USER_may_delete_their_own_unapproved_submission():
     check("someone else's: refused",
           C.can_delete(C.get("custom-theirs", db_path=db), "dave", "user") is False)
 
-    C.publish("custom-mine", actor="admin1", db_path=db)
+    C.publish("custom-mine", actor="admin1", role="admin", db_path=db)
     check("their own, once APPROVED: refused",
           C.can_delete(C.get("custom-mine", db_path=db), "dave", "user") is False,
           "a submitter must not be able to withdraw what an admin approved")
@@ -408,7 +408,7 @@ def test_the_cap_counts_only_UNAPPROVED_submissions():
                  lambda: C.save_draft(slug="custom-over", title="t", summary="s",
                                       body="b", actor="dave", db_path=db)))
 
-    C.publish("custom-d0", actor="admin1", db_path=db)
+    C.publish("custom-d0", actor="admin1", role="admin", db_path=db)
     eq("publishing frees a slot", C.unapproved_count("dave", db_path=db),
        C.MAX_UNAPPROVED_PER_USER - 1)
     check("...and a new submission is accepted again",
@@ -490,7 +490,7 @@ def test_a_user_CANNOT_overwrite_APPROVED_content_and_revoke_its_approval():
     db = fresh_db()
     C.save_draft(slug="custom-alice", title="Alice Title", summary="hers",
                  body="b", actor="alice", db_path=db)
-    C.publish("custom-alice", actor="admin1", db_path=db)
+    C.publish("custom-alice", actor="admin1", role="admin", db_path=db)
 
     check("bob is refused",
           raises(C.PermissionDenied,
@@ -508,7 +508,7 @@ def test_even_the_CREATOR_cannot_edit_once_an_admin_approved_it():
     db = fresh_db()
     C.save_draft(slug="custom-a", title="T", summary="s", body="b",
                  actor="alice", db_path=db)
-    C.publish("custom-a", actor="admin1", db_path=db)
+    C.publish("custom-a", actor="admin1", role="admin", db_path=db)
     check("alice cannot edit her own APPROVED submission",
           raises(C.PermissionDenied,
                  lambda: C.save_draft(slug="custom-a", title="edit", summary="s",
@@ -532,7 +532,7 @@ def test_an_admin_may_edit_anything():
     db = fresh_db()
     C.save_draft(slug="custom-a", title="T", summary="s", body="b",
                  actor="alice", db_path=db)
-    C.publish("custom-a", actor="admin1", db_path=db)
+    C.publish("custom-a", actor="admin1", role="admin", db_path=db)
     C.save_draft(slug="custom-a", title="Admin Edit", summary="s", body="b2",
                  actor="admin1", role="admin", db_path=db)
     t = C.get("custom-a", db_path=db)
@@ -604,6 +604,77 @@ def test_save_draft_refuses_an_unparseable_role_on_an_existing_row():
     eq("content untouched", C.get("custom-x", db_path=db)["title"], "Onboarding")
 
 
+# ── J. ⛔ THE UNPUBLISH CHAIN (adjacent path defeating the status ceiling) ───
+
+def test_the_author_cannot_UNPUBLISH_their_way_back_to_edit_rights():
+    """⛔ REGRESSION TEST FOR AN ATTACK CHAIN, not a single call.
+
+    can_edit and can_delete correctly check status BEFORE ownership, so an author cannot
+    touch their own approved content directly. But `set_status` (and therefore publish /
+    unpublish) had NO domain-layer guard at all -- it relied entirely on the route being
+    admin-gated. Reproduced: alice, role=user, called unpublish() on her own published
+    row and it became a draft. Ownership then applies again and she may edit or delete
+    it.
+
+    So the status ceiling was defeatable in two moves by the person it most needed to
+    constrain. This is the same class Window 1 caught on the write path: a rule that
+    exists only in the route is not a rule, because the function stays reachable.
+    """
+    db = fresh_db()
+    mk(db, slug="custom-a", actor="alice")
+    C.publish("custom-a", actor="admin1", role="admin", db_path=db)
+
+    check("step 1: the author cannot unpublish her own approved content",
+          raises(C.PermissionDenied,
+                 lambda: C.unpublish("custom-a", actor="alice", role="user",
+                                     db_path=db)))
+    eq("...so it is still published", C.get("custom-a", db_path=db)["status"],
+       C.STATUS_PUBLISHED)
+    check("step 2: and therefore still cannot edit it",
+          C.can_edit(C.get("custom-a", db_path=db), "alice", "user") is False)
+    eq("approval intact throughout", C.get("custom-a", db_path=db)["published_by"],
+       "admin1")
+
+
+def test_a_non_admin_cannot_PUBLISH_their_own_submission():
+    """The other half. Without a guard, a submitter could approve their own work --
+    which is the entire thing the review queue exists to prevent."""
+    db = fresh_db()
+    mk(db, slug="custom-a", actor="alice")
+    check("alice cannot publish her own draft",
+          raises(C.PermissionDenied,
+                 lambda: C.publish("custom-a", actor="alice", role="user",
+                                   db_path=db)))
+    eq("still a draft", C.get("custom-a", db_path=db)["status"], C.STATUS_DRAFT)
+    check("nor can a sub_admin",
+          raises(C.PermissionDenied,
+                 lambda: C.publish("custom-a", actor="sam", role="sub_admin",
+                                   db_path=db)))
+
+
+def test_an_admin_CAN_publish_and_unpublish():
+    """Positive control. A guard that refused everyone would satisfy both tests above
+    while making approval impossible."""
+    db = fresh_db()
+    mk(db, slug="custom-a", actor="alice")
+    C.publish("custom-a", actor="admin1", role="admin", db_path=db)
+    eq("admin published it", C.get("custom-a", db_path=db)["status"],
+       C.STATUS_PUBLISHED)
+    C.unpublish("custom-a", actor="admin1", role="admin", db_path=db)
+    eq("admin unpublished it", C.get("custom-a", db_path=db)["status"],
+       C.STATUS_DRAFT)
+
+
+def test_set_status_fails_closed_on_an_unparseable_role():
+    db = fresh_db()
+    mk(db, slug="custom-a", actor="alice")
+    for bad in ("wizard", "", None, 42):
+        check("publish refused for role %r" % (bad,),
+              raises(C.PermissionDenied,
+                     lambda b=bad: C.publish("custom-a", actor="x", role=b,
+                                             db_path=db)))
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("custom content: draft/publish, two ceilings, ownership-aware delete")
@@ -642,6 +713,10 @@ if __name__ == "__main__":
         test_can_edit_and_can_delete_agree_on_the_same_row,
         test_an_UNPARSEABLE_role_is_refused_by_both_rules,
         test_save_draft_refuses_an_unparseable_role_on_an_existing_row,
+        test_the_author_cannot_UNPUBLISH_their_way_back_to_edit_rights,
+        test_a_non_admin_cannot_PUBLISH_their_own_submission,
+        test_an_admin_CAN_publish_and_unpublish,
+        test_set_status_fails_closed_on_an_unparseable_role,
     ):
         print("\n%s" % fn.__name__)
         fn()
