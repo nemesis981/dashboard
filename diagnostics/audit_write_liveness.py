@@ -220,21 +220,53 @@ def _canary():
     return _canary_harness.run_cases(CASES)
 
 
+def _detail_block(r):
+    """The rendered body, identical in shape for the ok and error paths.
+
+    The canary row id is printed EXPLICITLY rather than left inside `detail`.
+    `audit_log` has no free-text column, so per CLAUDE.md Rule 11 that id is the
+    only durable marker for the row this check writes — and on the reused path
+    `detail` does not name it. Putting it in the output is what lets an operator
+    find or delete the row without going to the database.
+    """
+    return ("Audit write round-trip\n"
+            "%s\n"
+            "Canary row id: %s\n"
+            "Database: %s"
+            % (r["detail"],
+               r["row_id"] if r["row_id"] is not None else "(none written)",
+               r["db_path"]))
+
+
 def _produce(detail):
+    """⛔ Returns "output", NOT "sections".
+
+    From 928074a until 2026-09-05 both branches returned a "sections" list. No
+    renderer has ever read that key -- dashboard.py's diagnostics JS reads
+    `d.output` -- so this check rendered as "(no output)" on the page while
+    reporting status=ok, for its whole existence.
+
+    It stayed invisible because `canary.guard()` built a complete result on its
+    FAILURE paths and returned produce_fn's dict unvalidated on the success path.
+    While the canary was failing (no writable temp, fixed in 05f7dc8) the page
+    showed guard's well-formed [PROBE-FAILED] error; the moment the canary
+    started passing, the malformed success path became reachable and the panel
+    went blank. A fix upstream made a latent bug visible -- the check itself was
+    never right. guard() now validates the whole contract, so this cannot recur
+    silently for any check.
+    """
     r = probe()
     if r["ok"]:
         return {
             "status": "ok",
             "summary": "Audit trail is recording (row id=%s%s)." % (
                 r["row_id"], ", reused today's" if r["reused"] else ""),
-            "sections": [{"title": "Audit write round-trip",
-                          "body": "%s\nDatabase: %s" % (r["detail"], r["db_path"])}],
+            "output": _detail_block(r),
         }
     return {
         "status": "error",
         "summary": "Audit trail write could not be verified: %s" % r["detail"],
-        "sections": [{"title": "Audit write round-trip",
-                      "body": "%s\nDatabase: %s" % (r["detail"], r["db_path"])}],
+        "output": _detail_block(r),
     }
 
 

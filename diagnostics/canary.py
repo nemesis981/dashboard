@@ -226,19 +226,58 @@ def guard(meta, canary_fn, produce_fn, subject="this"):
             "output": "[PROBE-FAILED] %s: %s" % (type(e).__name__, e),
         }
 
-    # Final contract enforcement. A status outside the legal set renders as a grey
-    # "Not run", so a check reporting a real problem would look like one nobody
-    # ran — the exact silent-failure shape these tools exist to find.
+    # ── Final contract enforcement ──────────────────────────────────────────
+    # ⛔ THIS USED TO CHECK ONE FIELD OF SIX, WHILE CALLING ITSELF "final
+    # contract enforcement". It validated `status` and then returned produce_fn's
+    # dict untouched. Both FAILURE paths above build a complete result, so a check
+    # whose produce_fn returned the wrong shape rendered correctly while broken and
+    # blankly while healthy -- the failure only became reachable once the canary
+    # started passing.
+    #
+    # That is exactly what happened to audit_write_liveness: it returned a
+    # "sections" key that no renderer has ever read (dashboard.py's diagnostics JS
+    # reads `d.output`), so from 928074a to 2026-09-05 it reported status=ok with an
+    # empty panel. Fixing its canary in 05f7dc8 is what made the bug visible, and
+    # nothing here caught it in between.
+    #
+    # A blank panel is the worst possible diagnostic output: it is indistinguishable
+    # from a check that found nothing wrong, which is the precise silent-failure
+    # shape this whole module exists to prevent. So the contract is enforced in
+    # full, and a violation is reported LOUDLY as an error naming the offending
+    # fields -- never silently repaired, because a repaired result hides the
+    # authoring bug from the only person who can fix it.
+    problems = []
     if result.get("status") not in LEGAL_STATUS:
+        problems.append(
+            "status %r is not one of %s; it would render as a grey 'Not run'"
+            % (result.get("status"), ", ".join(LEGAL_STATUS)))
+    for field in ("summary", "output"):
+        if field not in result:
+            problems.append("%r key is missing entirely" % field)
+        elif not isinstance(result[field], str):
+            problems.append("%r is %s, not a string"
+                            % (field, type(result[field]).__name__))
+    if "summary" in result and isinstance(result.get("summary"), str) \
+            and not result["summary"].strip():
+        problems.append("'summary' is empty, so the card would have no label")
+
+    if problems:
         return {
             "id": meta["id"], "name": meta["name"], "icon": meta["icon"],
             "status": "error",
-            "summary": "Check produced an unrenderable status",
-            "output": "[PROBE-FAILED] status %r is not one of %s; it would render "
-                      "as a grey 'Not run' and the real result would be invisible."
-                      % (result.get("status"), ", ".join(LEGAL_STATUS)),
+            "summary": "Check produced an unrenderable result",
+            "output": "[PROBE-FAILED] %s produced a result the page cannot "
+                      "render:\n  - %s\n\nThis is a bug in the check itself, not a "
+                      "finding about %s. The real result, if any, is NOT shown."
+                      % (meta["id"], "\n  - ".join(problems), subject),
         }
-    return result
+
+    # Identity comes from META, which is authoritative — every failure path above
+    # already stamps it from there, and the success path not doing so is why a
+    # malformed result reached the browser with id/name/icon all null.
+    out = dict(result)
+    out["id"], out["name"], out["icon"] = meta["id"], meta["name"], meta["icon"]
+    return out
 
 
 # ── The harness proves itself, at import, in the production path ─────────────
@@ -295,13 +334,59 @@ def _selftest_harness():
 
     # guard(): a passing canary runs the body and returns it.
     res = guard(meta, lambda: (True, "fine"),
-                lambda d: {"status": "warn", "summary": d}, subject="thing")
+                lambda d: {"status": "warn", "summary": d, "output": "body"},
+                subject="thing")
     if res["status"] != "warn" or res["summary"] != "fine":
         raise AssertionError("harness self-test: a passing canary did not run the body")
 
-    # guard(): an illegal status is refused rather than rendered as grey "Not run".
+    # ...and stamps identity from META, which the success path used not to do.
+    if (res["id"], res["name"], res["icon"]) != ("x", "X", "?"):
+        raise AssertionError(
+            "harness self-test: guard() did not stamp id/name/icon from META -- a "
+            "result would reach the browser with null identity")
+
+    # guard(): a body missing "output" is refused, not rendered as a blank panel.
+    # This is the audit_write_liveness bug (928074a..2026-09-05): status=ok with
+    # nothing to show is indistinguishable from a check that found nothing wrong.
     res = guard(meta, lambda: (True, "fine"),
-                lambda d: {"status": "critical"}, subject="thing")
+                lambda d: {"status": "ok", "summary": "looks fine"}, subject="thing")
+    if res["status"] != "error" or "unrenderable" not in res["summary"]:
+        raise AssertionError(
+            "harness self-test: a result with no 'output' was passed through -- it "
+            "would render as an empty panel and read as a clean result")
+    if "'output' key is missing" not in res["output"]:
+        raise AssertionError(
+            "harness self-test: the refusal did not name the offending field")
+
+    # guard(): a non-string output is refused too (a list of sections was the
+    # actual shape that shipped, and it is not renderable either).
+    res = guard(meta, lambda: (True, "fine"),
+                lambda d: {"status": "ok", "summary": "s",
+                           "output": [{"title": "t", "body": "b"}]},
+                subject="thing")
+    if res["status"] != "error" or "not a string" not in res["output"]:
+        raise AssertionError(
+            "harness self-test: a non-string 'output' was passed through")
+
+    # CONTROL: a fully well-formed body still passes cleanly, so the four
+    # refusals above are caused by the defect and not by guard() rejecting
+    # everything.
+    res = guard(meta, lambda: (True, "fine"),
+                lambda d: {"status": "ok", "summary": "s", "output": "o"},
+                subject="thing")
+    if res["status"] != "ok" or res["output"] != "o":
+        raise AssertionError(
+            "harness self-test: a well-formed result was rejected -- the contract "
+            "check refuses everything and proves nothing")
+
+    # guard(): an illegal status is refused rather than rendered as grey "Not run".
+    # Otherwise WELL-FORMED on purpose: if this fixture also lacked summary/output
+    # the new shape checks would catch it, and the status check could be deleted
+    # without this self-test noticing. A case must fail for the one reason it
+    # is testing.
+    res = guard(meta, lambda: (True, "fine"),
+                lambda d: {"status": "critical", "summary": "s", "output": "o"},
+                subject="thing")
     if res["status"] != "error" or "unrenderable" not in res["summary"]:
         raise AssertionError(
             "harness self-test: an illegal status was passed through -- it would "

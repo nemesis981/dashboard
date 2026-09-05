@@ -106,7 +106,8 @@ check("the suppressed body's own summary is NOT surfaced",
 
 print("\n-- guard(): a passing canary runs the body and returns it --")
 res = cy.guard(META, lambda: (True, "proof"),
-               lambda d: {"status": "warn", "summary": d}, subject="schema")
+               lambda d: {"status": "warn", "summary": d, "output": "body"},
+               subject="schema")
 check("the body ran", res["status"] == "warn")
 check("the canary detail is handed to the body", res["summary"] == "proof")
 
@@ -140,7 +141,8 @@ for bad_status in ("critical", "OK", "pass", "failed", None, "", "Warning"):
 print("  (CONTROL: every legal status passes through)")
 for good_status in cy.LEGAL_STATUS:
     res = cy.guard(META, lambda: (True, "ok"),
-                   lambda d, s=good_status: {"status": s, "summary": "x"},
+                   lambda d, s=good_status: {"status": s, "summary": "x",
+                                             "output": "o"},
                    subject="thing")
     check("status %r passes through" % good_status, res["status"] == good_status)
 
@@ -154,6 +156,59 @@ for res in (cy.guard(META, lambda: (False, "f"), lambda d: {}, subject="t"),
     check("...with a legal status", res["status"] in cy.LEGAL_STATUS, res["status"])
 
 print("\n-- MUTATION: the harness's own self-test must catch each defect --")
+print("\n-- guard(): the FULL result contract is enforced, not just status --")
+# The 2026-09-05 defect: audit_write_liveness returned {"status","summary",
+# "sections"}. No renderer reads "sections" (dashboard.py's diagnostics JS reads
+# d.output), so the check reported status=ok with an empty panel from 928074a
+# until it was found. guard() validated only `status` and returned the rest
+# untouched, and its two FAILURE paths build complete results -- so the check
+# rendered correctly while broken and blankly while healthy.
+res = cy.guard(META, lambda: (True, "ok"),
+               lambda d: {"status": "ok", "summary": "looks fine"}, subject="t")
+check("a result with no 'output' is refused, not rendered blank",
+      res["status"] == "error" and "unrenderable" in res["summary"], res["summary"])
+check("...and the refusal names the offending field",
+      "'output' key is missing" in res["output"], res["output"][:90])
+
+res = cy.guard(META, lambda: (True, "ok"),
+               lambda d: {"status": "ok", "summary": "s",
+                          "output": [{"title": "t", "body": "b"}]}, subject="t")
+check("a non-string 'output' is refused (the exact shape that shipped)",
+      res["status"] == "error" and "not a string" in res["output"], res["output"][:90])
+
+res = cy.guard(META, lambda: (True, "ok"),
+               lambda d: {"status": "ok", "output": "o"}, subject="t")
+check("a result with no 'summary' is refused",
+      res["status"] == "error" and "'summary' key is missing" in res["output"],
+      res["output"][:90])
+
+res = cy.guard(META, lambda: (True, "ok"),
+               lambda d: {"status": "ok", "summary": "   ", "output": "o"},
+               subject="t")
+check("a blank 'summary' is refused (the card would have no label)",
+      res["status"] == "error" and "no label" in res["output"], res["output"][:90])
+
+res = cy.guard(META, lambda: (True, "ok"),
+               lambda d: {"status": "ok", "summary": "s", "output": "o"}, subject="t")
+check("guard() stamps id/name/icon from META on the SUCCESS path",
+      (res["id"], res["name"], res["icon"])
+      == (META["id"], META["name"], META["icon"]),
+      (res.get("id"), res.get("name"), res.get("icon")))
+check("CONTROL: a well-formed result still passes untouched",
+      res["status"] == "ok" and res["output"] == "o" and res["summary"] == "s")
+# Every real check must satisfy the contract guard now enforces -- otherwise the
+# enforcement above would be turning live checks into errors on the page.
+print("  (CONTROL: every guard-using check in the package satisfies it)")
+import importlib
+_pkg = importlib.import_module("diagnostics")
+_GUARDED = ("audit_write_liveness", "config_drift", "dependency_preflight",
+            "schema_drift", "agent_enrollment_integrity",
+            "clock_and_timestamp_sanity")
+for _cid in _GUARDED:
+    _mod = dict((m.META["id"], m) for m in _pkg.CHECKS).get(_cid)
+    check("  %s declares the keys guard() requires" % _cid,
+          _mod is not None and set(_mod.META) >= {"id", "name", "icon"})
+
 SRC = open(_SRC_PATH, encoding="utf-8").read()
 
 MUTATIONS = [
@@ -179,6 +234,15 @@ MUTATIONS = [
      "    if False:\n        return {"),
     ("an illegal status is passed through (renders as grey 'Not run')",
      '    if result.get("status") not in LEGAL_STATUS:',
+     "    if False:"),
+    ("a missing 'output' is passed through (renders as a blank panel)",
+     "        if field not in result:",
+     "        if False:"),
+    ("identity is no longer stamped from META (null id/name/icon reach the UI)",
+     '    out["id"], out["name"], out["icon"] = meta["id"], meta["name"], meta["icon"]',
+     "    pass"),
+    ("the shape problems are collected but never acted on",
+     "    if problems:",
      "    if False:"),
 ]
 
