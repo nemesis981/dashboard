@@ -14,6 +14,12 @@
     another; a nested multipart whose boundary is malformed so one parser stops
     early; an attachment whose declared type and actual magic bytes disagree.
 
+    ⛔ THAT LAST ONE WAS AN ASPIRATION UNTIL 2026-09-05. This docstring listed it
+    among the hazards handled while NO code read a payload byte: `_type_ext_mismatch`
+    compares the declared Content-Type against the filename extension, and both are
+    the sender's to choose. `_content_magic` now does the content half. The claim
+    is kept because it is finally true, not because it always was.
+
     **Nothing here can eliminate that gap** -- Nemesis is not the client, and
     will never parse identically to every mail app. What it CAN do is refuse to
     pretend it parsed cleanly when it did not, which is why `problems` is a
@@ -225,6 +231,12 @@ def _walk(msg, out: ParsedMessage) -> None:
             if filename:
                 ext = os.path.splitext(filename)[1].lower().lstrip(".")
                 declared = ctype
+                # Reads only the first few bytes of an ALREADY-decoded payload --
+                # no second decode, no retention. The bytes are in hand here
+                # solely because sha256/size already need them, and they go out
+                # of scope with this iteration exactly as before.
+                _detected = _content_magic(payload)
+                _content_bad, _content_ok = _content_mismatch(_detected, ext)
                 entry["attachment"] = {
                     # Filename HASHED, extension in the clear -- the extension
                     # is the signal, the name can carry personal information
@@ -247,6 +259,13 @@ def _walk(msg, out: ParsedMessage) -> None:
                     # Whether the line above was ANSWERABLE. False means "not
                     # tested", which is not the same as "no mismatch found".
                     "type_mismatch_tested": _mismatch_testable(declared, ext),
+                    # ── CONTENT, not claims. The two fields above compare a
+                    # declared type against a filename; both are the sender's.
+                    # These read the actual bytes, which is the only way to catch
+                    # an executable whose name AND declared type both say "pdf".
+                    "detected_type": _detected,
+                    "content_type_mismatch": _content_bad,
+                    "content_mismatch_tested": _content_ok,
                 }
                 out.attachments.append(entry["attachment"])
 
@@ -302,6 +321,110 @@ _EXECUTABLE_TYPE_MARKERS = (
     "msdownload", "executable", "x-dosexec", "portable-executable",
     "x-msdos-program", "x-msi", "java-archive", "x-sh", "x-bat",
 )
+
+
+#: Magic-byte signatures, matched at offset 0. The VALUE is a role, not a format
+#: name: PE, ELF and Mach-O all map to "executable" because the security question
+#: is "is this an executable image", not "which linker produced it".
+#:
+#: ⛔ HAND-ROLLED, NOT `python-magic`, DELIBERATELY. libmagic is a large C parser
+#: and every byte reaching it here was chosen by an attacker. Reading eight bytes
+#: ourselves is a far better trade than that attack surface.
+#:
+#: Matched LONGEST-FIRST (see _content_magic) so a 2-byte signature like MZ or BM
+#: can never pre-empt a longer, more specific one.
+_MAGIC_SIGNATURES = (
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole2"),   # legacy Office, .msi
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"7z\xbc\xaf\x27\x1c", "7z"),
+    (b"Rar!\x1a\x07", "rar"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+    (b"%PDF-", "pdf"),
+    (b"{\\rtf", "rtf"),
+    (b"\x7fELF", "executable"),
+    (b"PK\x03\x04", "zip"),
+    (b"PK\x05\x06", "zip"),                            # empty archive
+    (b"PK\x07\x08", "zip"),                            # spanned archive
+    (b"\xfe\xed\xfa\xce", "executable"),               # Mach-O 32 BE
+    (b"\xfe\xed\xfa\xcf", "executable"),               # Mach-O 64 BE
+    (b"\xce\xfa\xed\xfe", "executable"),               # Mach-O 32 LE
+    (b"\xcf\xfa\xed\xfe", "executable"),               # Mach-O 64 LE
+    # CAFEBABE is BOTH a Mach-O universal binary and a Java .class. Both are
+    # executable content, so the role label stays correct either way -- which is
+    # exactly why the table maps to roles rather than to format names.
+    (b"\xca\xfe\xba\xbe", "executable"),
+    (b"\xff\xd8\xff", "jpeg"),
+    (b"\x1f\x8b", "gzip"),
+    (b"MZ", "executable"),                              # PE/DOS
+    (b"BM", "bmp"),
+)
+
+#: Extension -> the content family that extension CLAIMS to be. Absent means the
+#: claim is unverifiable and the check must report "not tested", never "clean".
+#:
+#: ⛔ THE ENTRIES THAT LOOK WRONG ARE THE ONES THAT MATTER. `.msi` is OLE2, not a
+#: PE. `.docx`/`.xlsx`/`.pptx`/`.jar`/`.apk` are ZIP containers. A table that gets
+#: these wrong flags ordinary business mail on every send, and a check that cries
+#: wolf is worse than no check -- the lesson D9 measured repeatedly.
+#:
+#: Scripts (.js, .vbs, .bat, .ps1, .hta) are deliberately ABSENT: they are plain
+#: text with no signature, so nothing about their bytes can confirm or refute the
+#: name. Unverifiable is recorded as unverifiable.
+_EXT_CONTENT_FAMILY = {
+    "exe": "executable", "dll": "executable", "scr": "executable",
+    "sys": "executable", "ocx": "executable", "cpl": "executable",
+    "pdf": "pdf",
+    "zip": "zip", "docx": "zip", "xlsx": "zip", "pptx": "zip",
+    "jar": "zip", "apk": "zip", "odt": "zip", "ods": "zip", "epub": "zip",
+    "doc": "ole2", "xls": "ole2", "ppt": "ole2", "msi": "ole2", "msg": "ole2",
+    "png": "png", "jpg": "jpeg", "jpeg": "jpeg", "gif": "gif", "bmp": "bmp",
+    "rtf": "rtf", "gz": "gzip", "tgz": "gzip", "rar": "rar", "7z": "7z",
+}
+
+#: Longest signature first, computed once. A 2-byte MZ must not shadow an 8-byte
+#: OLE2 header just because it appears earlier in the literal above.
+_MAGIC_BY_LENGTH = tuple(sorted(_MAGIC_SIGNATURES, key=lambda kv: -len(kv[0])))
+
+
+def _content_magic(payload):
+    """The content family the BYTES actually belong to, or None if unrecognised.
+
+    ⛔ THIS IS THE ONLY CHECK HERE THAT LOOKS AT CONTENT. `_type_ext_mismatch`
+    compares the declared Content-Type against the filename extension -- two
+    claims, both chosen by the sender. When they agree it concludes nothing about
+    the bytes, so `invoice.pdf` declared `application/pdf` and containing `MZ`
+    passes it cleanly. That is the exact case this function exists for.
+
+    ⛔ WHAT IT CANNOT DO, stated plainly so it is not oversold:
+      * a POLYGLOT valid as two formats satisfies any single-signature test
+      * content EMBEDDED in a structurally valid host file is invisible here
+      * `PK\x03\x04` cannot separate .docx from .jar from a plain archive
+      * scripts have no signature at all and are unverifiable by this means
+      * it detects a CONTRADICTION, which is not the same as detecting malice
+    It raises the floor against lazy disguise. It is not a malware detector.
+
+    None means "unrecognised", never "fine": callers must treat it as untested.
+    """
+    if not payload:
+        return None
+    for sig, family in _MAGIC_BY_LENGTH:
+        if payload.startswith(sig):
+            return family
+    return None
+
+
+def _content_mismatch(detected, ext):
+    """(mismatch, tested) for a detected family against an extension's claim.
+
+    Both halves are returned together because they are different questions and a
+    caller that conflates them reports an untested attachment as a clean one --
+    the same substrate distinction `_mismatch_testable` exists for.
+    """
+    expected = _EXT_CONTENT_FAMILY.get(ext)
+    if detected is None or expected is None:
+        return False, False
+    return detected != expected, True
 
 
 def _mismatch_testable(declared: str, ext: str) -> bool:

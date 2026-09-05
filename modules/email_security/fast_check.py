@@ -126,6 +126,14 @@ SIGNAL_PROVENANCE = {
                 "population, which is NOT the same as disproved. Distinct from "
                 "the signals D9 REJECTED for firing on legitimate mail.",
     },
+    "attachment_content_mismatch": {
+        "fp_rate": None, "corpus": None, "n": None, "status": "unmeasured",
+        "note": "magic-byte content verification, added 2026-09-05. No corpus "
+                "measurement exists. Known blind spots are structural, not gaps "
+                "to be tuned away: polyglots satisfy any single-signature test, "
+                "embedded content in a valid host file is invisible, and scripts "
+                "have no signature at all. Detects contradiction, not malice.",
+    },
     "attachment_type_mismatch": {
         "fp_rate": None, "corpus": None, "n": None, "status": "unmeasured",
         "note": "no corpus measurement exists for declared-type/extension "
@@ -398,6 +406,15 @@ def signals(parsed) -> dict:
             "fired": any(a.get("type_extension_mismatch") for a in attachments),
             "substrate": any(a.get("type_mismatch_tested") for a in attachments),
         },
+        # CONTENT vs claim -- the only one of the three that reads actual bytes.
+        # Kept ALONGSIDE attachment_type_mismatch rather than replacing it: they
+        # catch different lies. The extension check sees a sender who mislabelled
+        # the type; this sees a sender whose name and type agree with each other
+        # and disagree with the file. A message can trip either, both, or neither.
+        "attachment_content_mismatch": {
+            "fired": any(a.get("content_type_mismatch") for a in attachments),
+            "substrate": any(a.get("content_mismatch_tested") for a in attachments),
+        },
     }
     if html_failed:
         # Attached INSIDE the affected signals rather than as a new top-level
@@ -488,10 +505,14 @@ def selftest() -> tuple[bool, str]:
     pos.attachments = [{"extension": "exe", "declared_type": "application/pdf",
                         "executable_extension": True,
                         "type_extension_mismatch": True,
-                        "type_mismatch_tested": True}]
+                        "type_mismatch_tested": True,
+                        "detected_type": "executable",
+                        "content_type_mismatch": True,
+                        "content_mismatch_tested": True}]
     p = signals(pos)
     for name in ("has_form", "urgent_subject", "url_shortener",
-                 "executable_attachment", "attachment_type_mismatch"):
+                 "executable_attachment", "attachment_type_mismatch",
+                 "attachment_content_mismatch"):
         if not p[name]["fired"]:
             return False, "canary: %s did not fire on a message that should trip it" % name
 
@@ -536,7 +557,8 @@ def selftest() -> tuple[bool, str]:
     # this the two new signals could report substrate=True on every message and
     # nothing here would notice -- the same shape as the has_form parse-failure
     # bug above, which is why it is checked on import rather than only in a suite.
-    for _n in ("executable_attachment", "attachment_type_mismatch"):
+    for _n in ("executable_attachment", "attachment_type_mismatch",
+               "attachment_content_mismatch"):
         if neg[_n]["substrate"]:
             return False, ("canary: %s reported substrate=True on a message with "
                            "no attachments -- untested reads as tested" % _n)
@@ -545,6 +567,6 @@ def selftest() -> tuple[bool, str]:
                            "HAS a qualifying attachment -- the check above is "
                            "vacuous if substrate can never be True" % _n)
 
-    return True, ("15 canaries pass (5 must-fire, 5 must-not-fire, "
+    return True, ("17 canaries pass (6 must-fire, 6 must-not-fire, "
                   "parse-failure not mistaken for clean +2 and its control, "
                   "forged-header rejected, genuine header read)")
