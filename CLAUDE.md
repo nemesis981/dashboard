@@ -1495,6 +1495,50 @@ daily roadmap-vs-state audit) — the existing audit's incremental/full-re-deriv
 does not by itself reach into a file's body claims on every pass, which is exactly why this
 gap stayed open across multiple prior audits.
 
+### A carried-forward OPEN-ITEMS list needs a liveness re-check, not a copy-forward (standing practice, added 2026-09-05)
+
+**An "open items" / "still broken" list in a handoff is a claim about LIVE STATE, and it decays
+the moment someone fixes something without editing the list.** Copying it into the next day's
+handoff republishes every entry as if freshly observed. Nothing in the existing discipline
+catches that: the closeout health check verifies the tree, the push and the leak-scan, and the
+morning roadmap audit diffs roadmap FILES — neither re-reads a handoff's open items against the
+running system.
+
+**The check, at session start and before escalating any inherited item: re-verify it against
+live state, or mark it explicitly as unverified-carried-forward.** An entry that has not been
+re-checked is not evidence; it is a note about what was true once.
+
+**⛔ CONFIRMED THE EXPENSIVE WAY, 2026-09-05.** `nemesis-drift-check.service` was carried as
+"FAILED — a live security check is down, still uninvestigated" and **escalated to the operator
+in those words**. It had been fixed the previous day: last failure 2026-09-04 13:11:21, first
+success 13:18:47 — seven minutes later — and zero failures in the 22 hours since, running hourly
+with both assertions passing. The fix (`bc6ab5c`) and its PUNCHLIST closeout (`892881c`, 13:40)
+both predated the handoff that carried the claim: **that handoff was written at 18:14, four and a
+half hours after the item was closed out, and still listed it as open.** The error was then
+inherited into the next day's file and republished without a single check.
+
+**Two things make this worth its own rule rather than a note.**
+
+**It is the same defect as the roadmap-body rule above, pointed at ourselves.** That rule exists
+because a file can be correctly classified while a claim in its BODY is stale. This is that,
+applied to handoffs — and on the same day it fired, this window caught the identical shape twice
+in OTHER people's documents (a build spec two months stale; five of eleven checklist items
+already closed). Catching it in someone else's file does not mean your own list was checked.
+
+**A oneshot unit is where this misleads in BOTH directions, so check the run result, not the unit
+state.** `inactive`/`dead` is the CORRECT resting state for a healthy oneshot, and `is-failed`
+returns `inactive`, not `failed`. Read `Result`, `ExecMainStatus` and `ExecMainCode` (`1` =
+CLD_EXITED, a normal exit), plus the journal for the actual assertions. Reading `is-active` alone
+would have called a healthy service broken; reading nothing at all, which is what happened, is
+worse.
+
+**And keep the search off the unit's own name.** Grepping that journal for
+`fail|error|...|DRIFT` matched every line, because the unit is called `nemesis-drift-check` —
+zero failures and all failures look identical through it. Key on systemd's own vocabulary
+(`Failed with result`, `status=`, `NAMESPACE`) instead. Same family as the text-search rule
+above.
+
+
 ### Conventions
 - **Local secrets / test creds (OUTSIDE this repo):** Local secrets and test-server
   credentials live at `~/work/nemesis-private/local-config.md` — **outside this repo, never
