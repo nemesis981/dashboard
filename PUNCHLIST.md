@@ -4357,6 +4357,25 @@ constructed) rather than at a string literal that a future refactor will break a
 One variable, own commit.
 
 ### [MEDIUM] `enrollment_tokens` stores installer tokens in PLAINTEXT at rest (found 2026-08-27)
+**⛔ TRACKING NOTE (2026-09-05, operator-resolved): this item — not server key rotation — is what
+the v2 gate carried as "credential rotation".** That name matched nothing in this file, so a
+topic-name grep for it failed repeatedly and the item went effectively untracked between
+2026-08-27 and 2026-09-05. Recorded here, at the item itself, because the v2 checklist is
+overwritten as the gate progresses while this file is edited in place — so a note there would
+not survive, and a future reader looking for "credential rotation" needs to land HERE.
+
+**Do not re-conflate it with key rotation.** Server key rotation is a DIFFERENT, already-shipped
+mechanism (`alert_manager/server_keys.py`, proven by `nemesis_agent/test_key_rotation.py`, 58/58,
+including a proof-of-possession control so a mistyped new key cannot brick the fleet). This item
+is a STORAGE FORMAT finding: the token is stored and compared as cleartext. Rotation is not the
+remedy and would not close it; hashing at rest is.
+
+**Still open, re-confirmed 2026-09-05 against the LIVE schema rather than the source** — `sqlite3`
+on `/var/lib/nemesis/alerts.db` shows `token TEXT NOT NULL UNIQUE`, no hash column. Worth stating
+how that check nearly went wrong: a `token_hash` column DOES exist nearby and looks like the fix,
+but it belongs to `email_enrollment_requests`, a different table. Reading the actually-named
+table is what settled it.
+
 `alert_manager/database.py:1410-1412` declares `token TEXT NOT NULL UNIQUE`, and
 `dashboard.py:4968-4982` (`_valid_installer_token`) looks it up with `WHERE token=?` — so the
 credential is stored and compared as cleartext. Generation is `dashboard.py:5314`,
