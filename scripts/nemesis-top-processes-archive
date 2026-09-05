@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Scheduled entrypoint for hw_anomaly_snapshots.top_processes archival.
+
+Thin wrapper around hw_monitor.archive_old_top_processes(), which does the real,
+verified work (archive -> re-open -> compare row-by-row -> ONLY THEN clear the
+live column; any failure leaves the live data exactly as it was).
+
+⛔ WHY THIS FILE EXISTS AT ALL. The archival function shipped 2026-08-03 and was
+correct from the first commit. It had ZERO CALLERS until 2026-09-05 -- no timer,
+no unit, no script. It ran once by hand and not again, while 64.0 MB of live data
+accumulated past its own declared 14-day window, the oldest by 47 days. Nothing
+caught it, because every test in the tree tested the mechanism and the mechanism
+was never broken. An archival function without a schedule is an unshipped policy.
+See docs/roadmap/data-retention-enforcement-and-tier-a-scope-2026-09-05.md.
+
+⛔ ARCHIVAL IS A MOVE, NEVER A DELETE. The blob relocates to a verified archive
+file and the row keeps a pointer to it in top_processes_ref. The row itself never
+leaves the table. Permanent deletion stays an explicit user action -- nothing on
+this path may ever be made to delete.
+
+⚠ RUNS AS nemesis-hwmon, NOT ROOT. It writes hw_monitor's own table in the shared
+DB (group nemesis-db) and the archive dir (2770 root:nemesis-db, setgid). Group
+access is the whole requirement; root is neither needed nor wanted.
+
+Exit codes: 0 ok (including "nothing eligible") AND the retention window is clean
+· 1 the archival refused (verifier self-test or archive verify failed -- live data
+untouched by design) · 2 could not even start (import/DB-open failure) · 3 the
+archival succeeded but data is STILL past the window afterwards, which means the
+window is not being held and is a real finding. A non-zero exit must stay visible
+in the journal; do not quieten it.
+"""
+import os
+import sys
+
+sys.path.insert(0, "/opt/nemesis/alert_manager")
+sys.path.insert(0, "/opt/nemesis/core_module/hw_monitor")
+
+DB = os.environ.get("NEMESIS_DB_PATH", "/var/lib/nemesis/alerts.db")
+
+
+def _fmt(status):
+    return ("%d rows / %.1f MB past the %d-day window (oldest %s)"
+            % (status["violating_rows"], status["violating_bytes"] / 1e6,
+               status["cutoff_days"], status["oldest_violation"]))
+
+
+def main():
+    try:
+        import hw_monitor
+    except Exception as exc:                                     # noqa: BLE001
+        print("top-processes-archive: cannot import hw_monitor: %r" % exc,
+              file=sys.stderr)
+        return 2
+
+    # BEFORE: measured independently of the archiver, so the journal records what
+    # the window actually looked like rather than what the archiver claims it did.
+    try:
+        before = hw_monitor.top_processes_retention_status()
+    except Exception as exc:                                     # noqa: BLE001
+        print("top-processes-archive: cannot read retention status: %r" % exc,
+              file=sys.stderr)
+        return 2
+    print("top-processes-archive: before: %s" % _fmt(before))
+
+    try:
+        result = hw_monitor.archive_old_top_processes()
+    except Exception as exc:                                     # noqa: BLE001
+        print("top-processes-archive: run failed: %r" % exc, file=sys.stderr)
+        return 2
+    print("top-processes-archive: %s" % result)
+
+    if result.get("status") != "ok":
+        # The archive/verify path refused and left the live data untouched.
+        print("top-processes-archive: ARCHIVAL REFUSED -- live data untouched",
+              file=sys.stderr)
+        return 1
+
+    # AFTER: the window-liveness check. This is the assertion that would have
+    # caught the 2026-08-03..09-05 gap, and it is deliberately NOT derived from
+    # the archiver's own return value -- it re-reads the table and asks whether
+    # anything is still past its cutoff. A schedule that silently stops working
+    # fails here rather than reporting success forever.
+    try:
+        after = hw_monitor.top_processes_retention_status()
+    except Exception as exc:                                     # noqa: BLE001
+        print("top-processes-archive: cannot re-read retention status: %r" % exc,
+              file=sys.stderr)
+        return 2
+    print("top-processes-archive: after: %s" % _fmt(after))
+
+    if not after["ok"]:
+        print("top-processes-archive: WINDOW STILL VIOLATED after a successful "
+              "archival run -- the retention window is not being held",
+              file=sys.stderr)
+        return 3
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

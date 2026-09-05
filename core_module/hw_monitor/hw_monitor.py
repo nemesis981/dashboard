@@ -1558,6 +1558,64 @@ def archive_old_top_processes(cutoff_days=TOP_PROC_ARCHIVE_DAYS, dry_run=False):
         conn.close()
 
 
+def top_processes_retention_status(cutoff_days=TOP_PROC_ARCHIVE_DAYS, conn=None):
+    """Is any LIVE `top_processes` blob older than its declared retention window?
+
+    ⛔ THIS CHECKS THE WINDOW, NOT THE ARCHIVER — deliberately, and the
+    distinction is the entire reason it exists.
+
+    From 2026-08-03 to 2026-09-05 `archive_old_top_processes()` above was
+    correct, round-trip verified, and NEVER CALLED: zero callers, no timer, no
+    unit. It ran once by hand and not again. 64.0 MB of live data sat past this
+    module's own 14-day window, the oldest by 47 days, and nothing noticed —
+    because every test in the tree tested the MECHANISM, and the mechanism was
+    never the broken part. A correct function that nothing invokes passes every
+    code-level test there is.
+
+    So this function knows nothing about how archival works. It asks one question
+    of the data. That independence is what makes it survive the failure it exists
+    to catch: it fails if the archiver breaks, if the timer is removed or masked,
+    or if someone ships a working function and forgets to schedule it.
+
+    ⛔ IT MUST NOT INHERIT `archive_old_top_processes`'s OWN PREDICATE. That
+    query also filters on `top_processes_ref IS NULL`. Copying that here would
+    make a row holding BOTH a blob and an archive ref — which should never exist,
+    and would mean archival half-completed — invisible to the very check meant to
+    catch archival going wrong. The check is deliberately broader than the thing
+    it checks.
+
+    Raises rather than returning a clean-looking default if the table cannot be
+    read: a failed read must never be indistinguishable from "nothing is wrong".
+
+    Full context: docs/roadmap/data-retention-enforcement-and-tier-a-scope-2026-09-05.md
+    """
+    own = conn is None
+    if own:
+        conn = _db_connect()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(top_processes)), 0), "
+            "       MIN(captured_at) "
+            "FROM hw_anomaly_snapshots "
+            "WHERE captured_at < datetime('now', 'localtime', ?) "
+            "  AND top_processes IS NOT NULL AND top_processes != ''",
+            ("-%d days" % int(cutoff_days),),
+        ).fetchone()
+    finally:
+        if own:
+            conn.close()
+    n_rows, n_bytes, oldest = int(row[0]), int(row[1]), row[2]
+    return {
+        "table": "hw_anomaly_snapshots",
+        "column": "top_processes",
+        "cutoff_days": int(cutoff_days),
+        "ok": n_rows == 0,
+        "violating_rows": n_rows,
+        "violating_bytes": n_bytes,
+        "oldest_violation": oldest,
+    }
+
+
 def get_hw_notifications(include_dismissed=False):
     """Return active hardware baseline-drift notifications."""
     conn = _db_connect()

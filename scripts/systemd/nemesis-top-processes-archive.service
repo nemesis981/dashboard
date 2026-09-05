@@ -1,0 +1,41 @@
+# /etc/systemd/system/nemesis-top-processes-archive.service
+[Unit]
+Description=Nemesis hw_anomaly_snapshots.top_processes archival (enforces the 14-day retention window)
+After=network.target
+
+[Service]
+Type=oneshot
+# nemesis-hwmon, NOT root and NOT the dashboard user: this archives hw_monitor's
+# OWN table, so it runs as the identity that owns that module. It writes the
+# shared alerts.db (group nemesis-db) and the archive dir (2770 root:nemesis-db,
+# setgid). Group ownership is the entire access requirement; root is neither
+# needed nor wanted.
+User=nemesis-hwmon
+Group=nemesis-db
+ExecStart=/opt/nemesis/scripts/nemesis-top-processes-archive
+Environment=NEMESIS_DB_PATH=/var/lib/nemesis/alerts.db
+# hw_monitor imports data_manager/database/nemesis_paths from alert_manager.
+Environment=PYTHONPATH=/opt/nemesis/alert_manager:/opt/nemesis/core_module/hw_monitor
+# ⛔ REQUIRED, not hygiene: importing hw_monitor opens a RotatingFileHandler at
+# import time, at $LOGS_DIRECTORY/hw_monitor.log. ProtectSystem=strict makes
+# /opt/nemesis read-only, so without a LogsDirectory the import itself fails and
+# this unit can never run. Deliberately its OWN directory rather than sharing
+# hw-monitor.service's: two processes rotating one file can lose records, and the
+# daemon holds that file open continuously.
+LogsDirectory=nemesis/hw-top-proc-archive
+LogsDirectoryMode=0750
+# The job touches ONLY the DB dir (db + wal/shm siblings + the archives/ subdir)
+# and its own log dir. Everything else is read-only.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/nemesis
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+# No capability is needed: DB and archive access is by group ownership, not
+# privilege.
+CapabilityBoundingSet=
+# Exit codes are meaningful and MUST stay visible: 1 = archival refused (live data
+# untouched by design), 2 = could not start, 3 = the retention window is still
+# violated after a successful run. Do NOT add SuccessExitStatus to quieten any of
+# them -- 3 in particular is the check that exists because this job silently not
+# running is the exact failure that went unnoticed from 2026-08-03 to 2026-09-05.

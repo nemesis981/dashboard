@@ -1,0 +1,19 @@
+# /etc/systemd/system/nemesis-top-processes-archive.timer
+[Unit]
+Description=Periodic Nemesis top_processes archival
+
+[Timer]
+# Daily against a 14-day cutoff: a day's delay changes nothing about what is
+# eligible, and the work is the same either way. OnBootSec catches a box that was
+# off at the scheduled time; Persistent=true runs a missed occurrence at next
+# boot -- which is what keeps the window held on an appliance that is not on 24/7.
+# Offset from nemesis-oplog-coalesce.timer's 15min so the two DB-writing
+# maintenance jobs do not contend at boot.
+OnBootSec=20min
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30min
+Unit=nemesis-top-processes-archive.service
+
+[Install]
+WantedBy=timers.target
