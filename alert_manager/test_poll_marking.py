@@ -37,7 +37,13 @@ EXEMPT = {
         "pure client-side countdown; issues no fetch at all",
 }
 
-EXPECTED_SITES = 11
+#: 11 -> 12 on 2026-09-05: static/nemesis-version.js's staleness poll. Reviewed
+#: rather than merely re-counted — it is nemPoll-wrapped, and its endpoint
+#: /api/build is in _IDLE_LOCK_ALLOWED, so it cannot stamp last_activity even on
+#: a page where window.nemPoll is undefined. That second property is the
+#: load-bearing one: this script is injected into EVERY authenticated page,
+#: including ones that do not load nemesis-activity.js.
+EXPECTED_SITES = 12
 EXPECTED_CHECKS = 15
 _pass = _fail = 0
 

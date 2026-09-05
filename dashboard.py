@@ -1447,6 +1447,61 @@ def _no_store(resp):
     return resp
 
 
+#: Identity of the RUNNING PROCESS, captured once at import.
+#:
+#: WHY PROCESS START AND NOT THE GIT SHA. The question this answers is "is the
+#: page in your browser older than the code now serving it", and the event that
+#: changes served code is a RESTART. A sha would miss a deploy from an
+#: uncommitted tree, and would be IDENTICAL across a restart that changed
+#: nothing — so a stale tab could sit unwarned. This errs the other way: a
+#: no-op restart does prompt a reload. That is the conservative direction, since
+#: a spurious prompt costs a click while a missed one leaves a page running
+#: superseded code, which is precisely what happened on 2026-09-05 (a tab open
+#: ~5 hours kept pre-fix idle-lock behaviour alive after the fix was deployed,
+#: and nothing anywhere said so).
+_BUILD_ID = "%d" % int(time.time())
+
+
+@app.after_request
+def _inject_build_probe(resp):
+    """Put the staleness probe on every authenticated HTML page, automatically.
+
+    ⛔ A HOOK, NOT A PER-PAGE SCRIPT TAG, AND THE REASON IS THIS FILE'S OWN
+    HISTORY. Adding the tag to each page by hand is how nemesis-activity.js came
+    to be on three of six overlay pages (be72fdb) — "one page was fixed, a
+    newly-added page was not, and nothing compared them". A page added tomorrow
+    would silently miss the probe in exactly the same way. The RBAC gate above
+    rejects decorators for the identical reason and says so: coverage becomes a
+    property of the MECHANISM rather than of remembering. Same choice here.
+
+    Scope follows from the guard rather than from a list: authenticated HTML
+    only, so the unlock screen IS covered (it has a valid session and is exactly
+    where a stale tab lingers) while the pre-login page is not (no session to
+    check against, and the page where staleness matters least).
+
+    Deliberately narrow and fail-safe: non-HTML, non-200, streamed, or
+    already-injected responses are returned untouched, and any failure leaves the
+    response exactly as it was. A bug in a convenience banner must never be able
+    to damage a page.
+    """
+    try:
+        if (resp.status_code != 200
+                or resp.direct_passthrough
+                or not (resp.content_type or "").startswith("text/html")
+                or not current_user.is_authenticated):
+            return resp
+        body = resp.get_data(as_text=True)
+        if "</body>" not in body or "nemesis-version.js" in body:
+            return resp
+        tag = ('<script src="/static/nemesis-version.js" data-build="%s"></script>'
+               % _BUILD_ID)
+        resp.set_data(body.replace("</body>", tag + "</body>", 1))
+    except Exception:
+        # Never let this cost a page. Logged, not raised.
+        log.exception("build-probe injection failed")
+    return resp
+
+
 @app.after_request
 def _nosniff(resp):
     """Stop the browser from MIME-sniffing a response into a different content
@@ -2941,12 +2996,42 @@ _SESSION_MAX_SECONDS  = _env_int("SESSION_MAX_HOURS", 8) * 3600
 #: — someone who walks up to an unattended session must not be able to set a new
 #: password from it. `login`/`setup` are absent too: they bounce an already
 #: authenticated session onward, which is pointless here.
-_IDLE_LOCK_ALLOWED = {"account_unlock", "logout", "static", "api_health"}
+#: ⛔ `api_build` IS IDLE-LOCK-EXEMPT ON PURPOSE, AND THAT IS A SAFETY PROPERTY,
+#: NOT A CONVENIENCE. The staleness probe polls it on a timer. Any poll to an
+#: ordinary authenticated endpoint stamps `last_activity` (see
+#: _enforce_setup_and_auth), so an unexempted probe would keep every session
+#: alive forever — defeating the walk-away lock, which is the very failure this
+#: feature exists to make visible. The feature would have become its own cause.
+#: That is the third instance of this exact shape (throttle-status.js aaeb456,
+#: the missing nemesis-activity.js be72fdb, this), which is why it is stated
+#: here rather than left to the route's own docstring.
+#:
+#: It is exempt from the IDLE LOCK only — NOT from authentication. It is
+#: deliberately absent from _AUTH_EXEMPT: the running build is exactly the sort
+#: of thing that helps someone match a host to a known vulnerability, so it is
+#: not published to unauthenticated callers. A locked session may read it, which
+#: is harmless: it is a timestamp, and the locked session already knows it is
+#: talking to this box.
+_IDLE_LOCK_ALLOWED = {"account_unlock", "logout", "static", "api_health",
+                      "api_build"}
 
 _SESSION_LOGIN_AT   = "login_at"
 _SESSION_LAST_SEEN  = "last_activity"
 #: Set once per lock so the audit row is written once, not on every blocked request.
 _SESSION_LOCK_LOGGED = "idle_lock_logged"
+
+
+@app.route("/api/build")
+@login_required
+def api_build():
+    """The running process's build identity, for the staleness probe.
+
+    Authenticated (see _IDLE_LOCK_ALLOWED above for why it is nonetheless
+    idle-lock-exempt, and why it is NOT auth-exempt). Returns a bare timestamp
+    and nothing else — no version string, no path, no host — so it cannot become
+    a fingerprinting surface if it is ever reached in a way not anticipated here.
+    """
+    return jsonify({"build": _BUILD_ID})
 
 
 def _stamp_session_start():
