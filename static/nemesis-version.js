@@ -31,8 +31,23 @@
         var d = document.createElement('div');
         d.id = 'nemVersionBanner';
         d.setAttribute('role', 'status');
+        /* ⛔ z-index 99997 IS DELIBERATE AND MUST STAY BELOW THE IDLE LOCK.
+           The layer stack is: idle-lock overlay 99999 (full-viewport, 92% opaque)
+           > idle-lock's own warning banner 99998 > this 99997 > everything else.
+
+           This started at 2147483000, which put it ABOVE the lock screen: a page
+           that was both stale and locked showed a Reload button floating over the
+           credential prompt, and pressing it reloaded straight back into the lock
+           screen. The lock owns the screen while it is up; a staleness nudge must
+           lose to it.
+
+           Losing the z-index race is the whole mechanism, so no coupling to the
+           other script is needed: while the overlay is up it simply covers this,
+           and when the operator unlocks, the overlay hides and this becomes
+           visible again on its own -- which is correct, because the page is still
+           stale. */
         d.style.cssText =
-            'position:fixed;left:0;right:0;bottom:0;z-index:2147483000;' +
+            'position:fixed;left:0;right:0;bottom:0;z-index:99997;' +
             'background:#12122a;border-top:1px solid #00d4ff;color:#eee;' +
             'font:14px system-ui,sans-serif;padding:10px 14px;display:flex;' +
             'gap:12px;align-items:center;justify-content:center';

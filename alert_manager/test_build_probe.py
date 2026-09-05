@@ -33,7 +33,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASH = os.path.join(REPO, "dashboard.py")
 JS = os.path.join(REPO, "static", "nemesis-version.js")
 
-EXPECTED_CHECKS = 17
+EXPECTED_CHECKS = 20
 _results = []
 
 
@@ -120,6 +120,24 @@ def main():
     check("  ...and it is inside a click handler, not a timer",
           bool(reloads) and "addEventListener('click'" in js[max(0, reloads[0] - 120):reloads[0]],
           True)
+
+    print("\n5. the banner must LOSE the z-index race to the idle lock")
+    # A page can be stale AND locked at once -- a long-idle tab is the common
+    # case for both. At 2147483000 the banner drew OVER the credential prompt and
+    # its Reload button reloaded straight back into the lock screen. The lock owns
+    # the screen while it is up.
+    import re as _re
+    def _z(path, pat):
+        t = open(os.path.join(REPO, path), encoding="utf-8").read()
+        m = _re.search(pat, strip_js_comments(t))
+        return int(m.group(1)) if m else None
+    ver = _z("static/nemesis-version.js", r"z-index:(\d+)")
+    lock = _z("static/nemesis-idle-lock.js", r"inset:0;z-index:(\d+)")
+    check("both z-indexes were found (control)", ver is not None and lock is not None, True)
+    check("version banner sits BELOW the idle-lock overlay", ver < lock, True)
+    # Guard the other direction too: it must still beat ordinary page chrome, or
+    # the banner would be invisible in the normal (unlocked) case it exists for.
+    check("  ...but still above ordinary page chrome (>9999)", ver > 9999, True)
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)
