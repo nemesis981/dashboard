@@ -14,6 +14,7 @@ import agent_errors
 import signal
 import socket
 import sys
+import random
 import time
 import threading
 import traceback
@@ -348,6 +349,52 @@ def _effective_interval(beat_index, poll_interval, hint):
     if hint is None:
         return base
     return max(POLL_INTERVAL_FLOOR, min(base, hint))
+
+
+#: Fraction of the computed interval used as desynchronisation splay.
+#: Small on purpose -- this exists to break lockstep, not to reshape the cadence.
+POLL_JITTER_FRACTION = 0.05
+
+
+def _jittered_interval(interval, _rand=random.random):
+    """`interval` reduced by a small random splay, so a fleet desynchronises.
+
+    WHY THIS EXISTS, measured not theorised (gauge VM, 2026-08-05, Phase 4, 100
+    simulated devices on the DB write path): 100 devices writing SIMULTANEOUSLY
+    gave p95 3140ms / max 3541ms. The same 100 writing a THOUSAND times more
+    often but staggered gave p95 105ms. Thirty times better latency at a
+    thousand times the load, because SQLite serialises writes -- simultaneous
+    arrivals queue behind one another while spread-out arrivals find the lock
+    free. THE WORST CASE FOR THIS SYSTEM IS SYNCHRONISED LOAD, NOT SUSTAINED
+    LOAD.
+
+    The trigger is ordinary, not exotic: a power cut, a switch reboot or a mass
+    agent restart starts every agent's clock at the same instant. The interval
+    chain (`_ramp_interval` -> `_clamp_poll_hint` -> `_effective_interval`) is
+    fully deterministic, so without this the herd stays locked together
+    indefinitely rather than drifting apart.
+
+    ⛔ SUBTRACTS ONLY, NEVER ADDS, and that is a deliberate security choice
+    rather than an arbitrary sign. `_effective_interval` refuses to let a server
+    hint LENGTHEN an interval, because the heartbeat response is unsigned and an
+    impersonator could otherwise silence an agent while it still looked healthy.
+    Positive jitter would be the first thing in this chain able to make an agent
+    quieter than its configured cadence -- small and self-imposed, but it would
+    weaken an invariant that is currently absolute. Subtracting keeps "nothing
+    can make me beat later than I was told" true without qualification, and
+    desynchronises exactly as well.
+
+    The cost is stated rather than hidden: average interval falls by half the
+    splay (~2.5% more check-ins at the 5% default). That is the price of the
+    property above, and it is far cheaper than the contention it prevents.
+
+    Clamped to POLL_INTERVAL_FLOOR, so the splay can never drive an agent below
+    the floor the rest of the chain enforces.
+
+    `_rand` is injected for testing only; production always uses random.random.
+    """
+    splay = interval * POLL_JITTER_FRACTION
+    return max(POLL_INTERVAL_FLOOR, interval - splay * _rand())
 
 
 # ── Roaming traffic steering (tunnel-back §5) — DEFAULT OFF ───────────────────
@@ -2172,6 +2219,10 @@ def _poll_loop():
         # Recorded for the status surface only -- an ESTIMATE, and named as one in
         # the payload. An event-triggered check-in or a shutdown can beat sooner,
         # so nothing may treat this as a schedule.
+        # Splay applied HERE, after the hint comparison above, so that log line
+        # still compares like with like. What is recorded and slept is the
+        # jittered value, because that is what actually happens.
+        interval = _jittered_interval(interval)
         global _next_beat_due_at
         _next_beat_due_at = time.time() + interval
         _interruptible_sleep(interval)
