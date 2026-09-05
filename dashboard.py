@@ -18304,13 +18304,13 @@ def dashboard():
             &nbsp;|&nbsp;
             <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
             &nbsp;|&nbsp;
-            <a href="/account/training" data-min-role="user" style="color:#bbb;text-decoration:none" title="Capability training">🎓 Training</a>
+            <a href="/account/training" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Capability training">🎓 Training</a>
             &nbsp;|&nbsp;
             <!-- Deliberately "Learning Center", not "Training": the entry immediately
                  left of this one is /account/training, the capability-UNLOCK quiz
                  system. Two entries both called Training would read as duplicate
                  navigation and send people to the wrong one. -->
-            <a href="/learn" data-min-role="user" style="color:#bbb;text-decoration:none" title="Security training and reference material">&#128218; Learning Center</a>
+            <a href="/learn" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Security training and reference material">&#128218; Learning Center</a>
         </span>
     </h1>
     <script src="/static/header-status.js"></script>
