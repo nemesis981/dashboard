@@ -1035,7 +1035,14 @@ def _additivity_sample_size():
 
 
 def _additivity_holds():
-    """True if inserting sub_admin changed NO answer for any pre-existing role.
+    """(ok, compared) -- did inserting sub_admin change any pre-existing answer?
+
+    Returns the COMPARISON COUNT, not just a verdict, because the control that guards
+    this check was asserting on pairs GENERATED while the loop skips some: measured
+    2026-09-05, 3564 generated vs 3204 actually compared -- 360 (10.1%) invisible to it,
+    from the UNAUTHENTICATED/SELF_SERVICE skip that predates any of this. A control
+    counting the wrong number cannot notice coverage shrinking, which is precisely what
+    it exists to notice.
 
     Recomputes each answer under the ORIGINAL 3-role ranking and compares it to
     what `may()` says now. This is the check that makes "additive" a measured
@@ -1043,15 +1050,39 @@ def _additivity_holds():
     registry entries was needed or done.
     """
     old = {name: i for i, name in enumerate(_PRE_SUBADMIN_ORDER)}
+    compared = 0
     for role, ep, method in _additivity_pairs():
         if ep in UNAUTHENTICATED or ep in SELF_SERVICE:
             continue                                    # unconditionally allowed
         entry = ROUTE_MINIMUMS.get(ep)
         need = ROLE_ADMIN if entry is None else (
             entry[0] if str(method).upper() in SAFE_METHODS else entry[1])
+        if need not in old:
+            # A minimum naming a rank that POSTDATES the baseline (today: sub_admin).
+            # Such a route could not have been expressed before that rank existed, so
+            # there is no pre-existing answer for it to have changed -- the baseline
+            # model has no term for it, and the lookup below would raise KeyError
+            # rather than measure anything.
+            #
+            # ⛔ BUT `need not in old` IS ALSO TRUE FOR A TYPO. "supervisor", "Admin",
+            # "sub-admin" or any garbage in a tuple satisfies it. Before this guard
+            # existed those raised KeyError and failed the canary LOUDLY at import; a
+            # bare `continue` would convert a loud typo into invisible non-coverage --
+            # every triple for that endpoint dropping silently out of the check. That
+            # is the exact "a typo protects nothing while looking like coverage"
+            # failure the registry-completeness discipline exists to prevent.
+            #
+            # So only a rank in the LIVE ordering may be skipped. `_RANK` is that
+            # allow-list, derived from ROLES rather than hand-maintained, so it cannot
+            # drift out of step the way a literal list would -- and the next rank
+            # inserted is covered without another patch.
+            if need not in _RANK:
+                return False, compared
+            continue
+        compared += 1
         if (old[role] >= old[need]) != may(role, ep, method):
-            return False
-    return True
+            return False, compared
+    return True, compared
 
 
 def _sub_admin_equals_user_without_unlocks():
@@ -1094,9 +1125,18 @@ _CASES = [
     # ordering rather than trusted -- a future reorder that silently altered one
     # answer would otherwise pass every other check in this file.
     _H.bad("inserting sub_admin changed NO answer for viewonly/user/admin",
-           lambda: (_additivity_holds() or None)),
+           lambda: (_additivity_holds()[0] or None)),
+    # ⛔ THE CONTROL ASSERTS ON COMPARISONS ACTUALLY MADE, not on pairs generated.
+    # It used to read `_additivity_sample_size()`, which counts what the generator
+    # YIELDS -- and the loop skips some of them. Measured 2026-09-05: 3564 generated,
+    # 3204 compared, 360 (10.1%) invisible to this control, from a skip that predates
+    # sub_admin entirely. A control counting the wrong number cannot notice coverage
+    # shrinking, which is the one thing it exists to notice; and the skip class added
+    # for sub_admin minimums GROWS as such routes accumulate, so counting the right
+    # number matters more now than it did.
     _H.good("CONTROL: that comparison is not vacuous (it really compares)",
-            lambda: (None if _additivity_sample_size() > 100 else "too few cases"),),
+            lambda: (None if _additivity_holds()[1] > 100
+                     else "too few comparisons actually made"),),
 
     # ── capability layer (ADR 0026 D2) ──────────────────────────────────────
     _H.bad("an unknown capability RAISES rather than reading as locked",
