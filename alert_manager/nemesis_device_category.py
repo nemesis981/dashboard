@@ -99,6 +99,34 @@ _GATEWAY_VENDORS = ("eero", "ubiquiti", "netgear", "asus", "linksys", "mikrotik"
 #: iOS hostnames, when a hostname is available at all. Coverage is poor in
 #: practice (measured 1/41 devices resolvable on the dev network, 2026-08-06), so
 #: this is a bonus signal, never a primary one.
+#:
+#: ⛔ WINDOWS HOSTNAMES ARRIVE TRUNCATED AT 15 CHARACTERS. Every entry here must
+#: therefore stay short enough to survive that cut, and hostname must be matched
+#: by SUBSTRING, never by equality.
+#:
+#: Measured on the gateway test zone 2026-08-06, with a control: a Windows client
+#: sent `Nemesis-SW-CLEA` -- exactly 15 characters, the NetBIOS limit, visibly cut
+#: mid-word -- while a Linux client on the SAME segment, DHCP server and lease
+#: file sent a 20-character name intact. So the truncation is Windows sending a
+#: short name in DHCP option 12, not the server, the lease file or the wire format.
+#:
+#: THE FULL NAME IS NOT RECOVERABLE. The bytes never reach the wire; the
+#: truncation happens before the packet is sent. Do not add reconstruction logic.
+#: If an exact identity is ever needed, use the MAC.
+#:
+#: Nothing is broken today -- these hints are 4-6 characters and matched as
+#: substrings, so they survive. The hazard is entirely in what gets added next: a
+#: hint longer than 15 characters, an equality comparison, or a join to another
+#: source on hostname would silently fail FOR WINDOWS DEVICES ONLY, while every
+#: Linux/macOS/iOS device matched fine. That reads as "this feature is flaky"
+#: rather than "Windows names are cut at 15", and the platform correlation is not
+#: visible from a single failing case. test_hostname_truncation_safety.py turns
+#: that invisible future failure into a loud one.
+#:
+#: NOT YET VERIFIED, so build nothing that depends on the exact semantics: whether
+#: this is a fixed 15-character cap or that one host's NetBIOS name simply being
+#: short. Only one Windows client has ever been observed. Confirm against a box
+#: whose full name is known to exceed 15 characters first.
 _IOS_HOSTNAME_HINTS = ("iphone", "ipad", "ipod")
 
 
