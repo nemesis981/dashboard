@@ -223,39 +223,57 @@ a partial one, and the code matching that declaration already exists.
   records (worklogs, supplements, dated audits, briefings) that also mention "ADR 0022" for
   this item are deliberately left untouched — they're dated accounts of what was true when
   written, not live references, and editing them would falsify history rather than correct it.
-- [ ] **The long-carried PUNCHLIST tail — exact citations added 2026-09-05, one more item
+- [ ] **The long-carried PUNCHLIST tail — exact citations added 2026-09-05, five of eleven now
   closed.** Individually small; carried unchanged across multiple HANDOFFs, which is itself the
   signal this list exists to catch. This entry's own naming had drifted far enough from
   `PUNCHLIST.md`'s current text that a fresh grep by topic name mostly failed — exact line
-  citations below so this doesn't happen again.
+  citations below so this doesn't happen again. **Verified across two independent passes
+  (Window 2, then Window 1's follow-up sweep, then Window 2 re-verifying Window 1's sweep) —
+  every closure below was checked against live code, not against another window's report.**
   - `enrich_ip()` external IP exposure — **CLOSED** (confirmed 2026-09-04): `ca473d5`
     (2026-09-03) gates it through `ip_scope.is_public_ip()`.
-  - **Installer token revocation — CLOSED, found stale 2026-09-05.** This item was carried as
-    open; `PUNCHLIST.md:5059` records `[FIXED — 2026-08-29, pending commit]` —
-    `POST /api/agent/installer/revoke` shipped, admin-gated, mutation-tested. Was already
-    closed a week before this checklist's own 09-04 pass and nobody caught it.
-  - Agent check-in jitter — open, `PUNCHLIST.md:3294`.
-  - Empty-alert-list read-window mismatch — open, `PUNCHLIST.md:~3325` (`get_active_alerts()`
-    vs. `get_alert_counts()` reading the log through two different windows).
-  - `install.sh` default-route interface detection — open, `PUNCHLIST.md:3429`.
-  - Host-defence rule naming — open, `PUNCHLIST.md:3453` (related finding at `:3401`).
-  - Windows DHCP hostname truncation — open, `PUNCHLIST.md:3736`.
-  - Cache-hit token skew — open, `PUNCHLIST.md:3160`.
-  - `/api/analyze/<rule_id>` GET-that-spends-money — open, `PUNCHLIST.md:3110` (distinct from
-    the already-`[x]`-resolved PII-redaction finding on the same route at `:3128` — don't
-    conflate the two).
-  - **Credential rotation — NOT confidently located.** Closest candidate is
-    `PUNCHLIST.md:4358` ("`enrollment_tokens` stores installer tokens in PLAINTEXT at rest,"
-    found 2026-08-27), but that's a storage-format finding, not literally rotation — flagged
-    as uncertain rather than asserted.
-  - **"Concurrency Phase 3" — NOT confidently located under that name.** Best candidate is the
-    residual race documented at `PUNCHLIST.md:~432` ("`anomaly_incidents` merge is still
-    read-JSON→merge-Python→write," labeled "RACE 4 residual" in-file, not "Phase 3") — same
-    section as the other three concurrency races this checklist's items above already
-    reference as fixed. Flagged as uncertain, not asserted.
-  - **Net: 8 of 10 sub-items have exact current citations, 2 fixed/closed, 2 uncertain.** This
-    checkbox stays open overall — 8 confirmed-open sub-items remain regardless of the 2
-    uncertain ones' resolution.
+  - **Installer token revocation — CLOSED, found stale 2026-09-05.** `PUNCHLIST.md:5059`
+    records `[FIXED — 2026-08-29, pending commit]` — `POST /api/agent/installer/revoke`
+    shipped, admin-gated, mutation-tested. Closed a week before this checklist's own 09-04
+    pass caught it.
+  - **`/api/analyze/<rule_id>` GET-that-spends-money — CLOSED, found by Window 1, verified
+    2026-09-05.** `dashboard.py:8787` now reads `methods=["POST"]`. Closed by `468c8d8`
+    ("six GET routes that acted are now POST + JSON-only").
+  - **Empty-alert-list read-window mismatch — CLOSED, found by Window 1, verified 2026-09-05.**
+    Both `get_suricata_alerts()` and `get_alert_counts()` now run `tail -n 200000`;
+    `dashboard.py:3713` carries an explicit `DEPTH MUST MATCH get_alert_counts()` comment
+    against regression.
+  - **Host-defence rule naming — CLOSED, found by Window 2 while independently re-checking
+    Window 1's sweep, 2026-09-05.** Window 1's own grep for "against Nemesis host" hit only
+    the historical comment explaining the PAST fix (`config/suricata/local.rules:104-137`,
+    explicitly marked "kept in the PAST TENSE... must not be read as a live claim that the
+    names are still wrong") — the exact comment-vs-code trap this codebase has hit three
+    times before. The live `msg:` fields (sid 1000001/1000002, `rev:2 -> rev:3`,
+    2026-08-30) all read "against any LAN device." Worth noting: this was caught by
+    re-verifying a peer's verification, not by re-reading the list.
+  - Agent check-in jitter — **open**, `nemesis_agent/agent.py` has zero randomisation
+    (word-bounded grep for `random|jitter|uniform|randint|splay`; an earlier unbounded grep
+    by Window 1 false-matched 8 hits, all the word "display"). `PUNCHLIST.md:3294`.
+  - `install.sh` default-route interface detection — **open**, still
+    `ip route get 8.8.8.8 | grep -oP 'dev \K\S+'` at `install.sh:129`, no VPN-route
+    awareness. `PUNCHLIST.md:3429`.
+  - Windows DHCP hostname truncation — **open**, `reconcile_dhcp_hostnames()`
+    (`alert_manager/database.py:875`) has no 15-char/NetBIOS handling, confirmed by reading
+    the full function body. `PUNCHLIST.md:3736`.
+  - Cache-hit token skew — **open**, confirmed by reading `modules/ai_engine/module.py`'s
+    cache-hit path directly: it returns `row["response_text"]` verbatim
+    (`module.py:~3608-3615`) with no re-resolution call, consistent with the finding's exact
+    mechanism (tokens resolved fresh against current DB state on every read, so a changed
+    `src_ip`/`dst_ip` since caching skews a cache hit). `PUNCHLIST.md:3160`.
+  - **Credential rotation — NOT confidently located**, Window 1 investigating. Closest
+    candidate so far: `PUNCHLIST.md:4358` ("`enrollment_tokens` stores installer tokens in
+    PLAINTEXT at rest," found 2026-08-27) — a storage-format finding, not literally rotation.
+  - **"Concurrency Phase 3" — NOT confidently located under that name**, Window 1
+    investigating. Closest candidate: the residual race at `PUNCHLIST.md:~432`
+    ("`anomaly_incidents` merge is still read-JSON→merge-Python→write," labeled "RACE 4
+    residual" in-file, not "Phase 3").
+  - **Net: 5 of 11 CLOSED, 4 confirmed open, 2 still unresolved-by-name.** Checkbox stays
+    open — 4 confirmed-open sub-items remain regardless of the 2 unresolved names' outcome.
 
 ## How this gate is meant to be used
 
