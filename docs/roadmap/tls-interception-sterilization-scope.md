@@ -56,6 +56,47 @@ shipped property.
 > below, there's an unresolved architectural tension (how much traffic actually needs decrypting)
 > that should be answered before committing to a session count.
 
+## Public-side status pointer (added 2026-09-05)
+
+**Why this section exists.** Tier 2's implementation progress is tracked entirely in the
+private mirror, so a reader of only the public repo could not tell that part of Tier 2 already
+ships here — or which part. That is a visibility gap, not a build gap, and closing it needs no
+mechanism detail.
+
+**⛔ Rule 10, stated explicitly because this rule is easy to misread: this is a
+source-visibility decision, never a feature-gating one. The capability ships at every tier.**
+Nothing here is withheld from a customer; what is withheld from the *public repo* is the
+implementation of a novel mechanism, which is a head-start decision the operator makes per
+module.
+
+**What is PUBLIC and in this repository today:**
+
+- `alert_manager/tier2_gate_state.py` — the gate's state-publication interface, shipped
+  2026-08-08 (`db19c20`). It is the single coupling point between the gate and the rest of the
+  product: the gate calls `publish()`, the dashboard calls `read_state()` to render a
+  persistent banner while traffic is uninspected, and the audit trail records every
+  transition. Same fact published two ways, so one mechanism rather than two.
+- That file's own docstring draws the boundary this section is describing, and is worth
+  reading as the worked example: *"It carries no Tier 2 mechanism — no selection criteria, no
+  steering detail, nothing about how inspection works. That is deliberate and is what makes
+  this file safe to live in the public repo while the gate itself does not."*
+- Pieces J and K of this document, including the QUIC block, which is
+  [ADR 0031](../architecture/0031-quic-static-policy-block.md) and fully public.
+
+**What is PRIVATE, and what that means for a public reader:**
+
+- The gate itself and the implementation detail of the remaining pieces. Their build progress,
+  measurements and open questions live in the private mirror.
+- **A public reader should therefore treat the absence of Tier 2 progress notes here as
+  expected, not as evidence that nothing is happening.** That inference is the specific
+  confusion this pointer exists to prevent — and it is the same failure shape this codebase
+  keeps recording elsewhere: an absence being read as a finding rather than as the absence of
+  a reading.
+
+**Deliberately not restated here:** interception mechanism, selection criteria, steering
+behaviour, tuning parameters, or evasion-resistance detail. Those are the categories Rule 10
+holds back, and repeating them in a status pointer would defeat the point of having one.
+
 ## The decision
 **Full TLS interception (decrypt → inspect → re-encrypt)** is the mechanism chosen for genuine
 payload-level coverage of HTTPS traffic. This is a real architectural commitment, not a minor
