@@ -14,7 +14,7 @@ import gateway_mode as G
 
 _fail = []
 _count = 0
-EXPECTED_CHECKS = 102
+EXPECTED_CHECKS = 127   # 102 -> 127: VLAN-capable third mode (2026-09-05)
 
 
 def check(label, got, want):
@@ -328,6 +328,108 @@ def test_render_escapes_and_carries_no_js():
           "LAN side" in G.render_capability_table(iface="eth1", cidr="10.0.0.0/24"), True)
 
 
+
+def test_vlan_mode_capability_shape():
+    """The VLAN-capable third mode carries the SAME key set as the other two.
+
+    A mode added with a missing field renders as a blank capability row -- the
+    honesty table's whole job is to state losses, so a silently absent
+    `degraded` or `cost` reads as "no downsides" rather than as a bug.
+    """
+    caps = G.GATEWAY_CAPABILITIES
+    check("VLAN mode exists", G.MODE_GATEWAY_VLAN in caps, True)
+    base = set(caps[G.MODE_GATEWAY])
+    check("VLAN mode carries every key the gateway mode does",
+          base - set(caps[G.MODE_GATEWAY_VLAN]), set())
+    for k in ("label", "segmentation", "gains", "degraded", "cost", "notes"):
+        check("  VLAN mode has a non-empty %s" % k,
+              bool(caps[G.MODE_GATEWAY_VLAN].get(k)) or k in ("gains", "degraded", "cost"),
+              True)
+
+
+def test_only_vlan_mode_claims_unhedged_segmentation():
+    """VLAN mode enforces segmentation; the other two must NOT claim to.
+
+    Asserted in BOTH directions on purpose. The dangerous edit is not adding a
+    wrong claim to the new mode -- it is quietly promoting the EXISTING gateway
+    mode's carefully hedged wording ("only with ... VLAN-capable switch/AP
+    hardware") to a flat "enforced" while adding the new one. That would make
+    the product claim isolation it cannot deliver on a flat network, which is
+    the exact finding this whole ADR exists to record.
+    """
+    caps = G.GATEWAY_CAPABILITIES
+    check("VLAN mode segmentation is enforced, unhedged",
+          caps[G.MODE_GATEWAY_VLAN]["segmentation"], "enforced")
+    check("gateway mode STILL hedges on hardware",
+          "VLAN-capable" in caps[G.MODE_GATEWAY]["segmentation"], True)
+    check("bridged mode still says UNAVAILABLE",
+          "UNAVAILABLE" in caps[G.MODE_BRIDGED]["segmentation"], True)
+
+
+def test_vlan_mode_declares_it_needs_switch_configuration():
+    """`requires_switch_config` is DATA, not prose, and only VLAN mode sets it.
+
+    Nemesis cannot trunk a switch port from an end-host position -- no vendor
+    credentials, no management protocol it may assume. So the mode is
+    unreachable until the user configures the switch, and the wizard has to be
+    able to READ that rather than a human remembering it.
+    """
+    caps = G.GATEWAY_CAPABILITIES
+    check("VLAN mode requires switch config",
+          caps[G.MODE_GATEWAY_VLAN].get("requires_switch_config"), True)
+    check("gateway mode does not", caps[G.MODE_GATEWAY].get("requires_switch_config"), None)
+    check("bridged mode does not", caps[G.MODE_BRIDGED].get("requires_switch_config"), None)
+    check("VLAN mode lists prerequisites for the user",
+          len(caps[G.MODE_GATEWAY_VLAN].get("prerequisites", [])) >= 2, True)
+
+
+def test_vlan_available_gates_on_declared_capability():
+    """`vlan_available()` offers VLAN mode ONLY when capability is declared.
+
+    The control matters as much as the assertion: without it, a function that
+    always returned "no" would pass the headline check while making the feature
+    permanently unreachable.
+    """
+    yes = G.vlan_available(True)
+    no = G.vlan_available(False)
+    check("declared-capable offers VLAN mode", G.MODE_GATEWAY_VLAN in yes, True)
+    check("not-capable does NOT offer VLAN mode", G.MODE_GATEWAY_VLAN in no, False)
+    check("CONTROL: not-capable still offers the other two",
+          G.MODE_GATEWAY in no and G.MODE_BRIDGED in no, True)
+    check("CONTROL: capable still offers the other two",
+          G.MODE_GATEWAY in yes and G.MODE_BRIDGED in yes, True)
+    check("unknown/None is treated as NOT capable (fail closed)",
+          G.MODE_GATEWAY_VLAN in G.vlan_available(None), False)
+
+
+def test_vlan_mode_is_not_offerable_until_enforcement_exists():
+    """⛔ THE GUARD THAT STOPS THIS SHIPPING HALF-BUILT.
+
+    The capability table DESCRIBES the mode; nothing enforces it yet -- no
+    802.1Q sub-interfaces, no per-VLAN DHCP, no inter-VLAN firewalling. A
+    control that offered the mode would let an operator select something the
+    product cannot deliver, which is the "looks implemented" failure this
+    codebase keeps finding. Delete this test only in the same change that makes
+    enforcement real.
+    """
+    for mode in (G.MODE_BRIDGED, G.MODE_GATEWAY):
+        html = G.render_switch_control(current_mode=mode, iface="eth0", cidr="10.0.0.0/24")
+        check("switch control does not offer VLAN mode (from %s)" % mode,
+              G.MODE_GATEWAY_VLAN in html, False)
+    # And it is not rendered in the user-facing table either. The DATA describes
+    # it -- that is what the setup flow reads -- but the chooser shows only modes
+    # a person can actually select. The pre-existing "<section> count == 2" check
+    # above is the other half of this invariant, and it caught this: the render
+    # loop iterated every mode, so adding a third silently advertised it.
+    table = G.render_capability_table(current_mode=G.MODE_BRIDGED)
+    check("VLAN mode is NOT rendered as a choice yet",
+          G.GATEWAY_CAPABILITIES[G.MODE_GATEWAY_VLAN]["label"] in table, False)
+    check("...but the DATA describes it, for the setup flow to read",
+          bool(G.GATEWAY_CAPABILITIES[G.MODE_GATEWAY_VLAN]["prerequisites"]), True)
+    check("RENDERABLE_MODES names the two selectable modes only",
+          set(G.RENDERABLE_MODES), {G.MODE_GATEWAY, G.MODE_BRIDGED})
+
+
 def test_selftest():
     print("\n[the instrument proves it produces every answer it claims]")
     ok, detail = G.selftest()
@@ -354,6 +456,11 @@ if __name__ == "__main__":
     test_security_is_never_the_upsell()
     test_current_mode_is_marked()
     test_render_escapes_and_carries_no_js()
+    test_vlan_mode_capability_shape()
+    test_only_vlan_mode_claims_unhedged_segmentation()
+    test_vlan_mode_declares_it_needs_switch_configuration()
+    test_vlan_available_gates_on_declared_capability()
+    test_vlan_mode_is_not_offerable_until_enforcement_exists()
     test_selftest()
     print()
     if _count != EXPECTED_CHECKS:

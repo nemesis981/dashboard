@@ -167,6 +167,19 @@ def verify_forwarding(dropin_content, live_output, want_enabled):
 
 MODE_GATEWAY = "gateway"
 MODE_BRIDGED = "bridged"
+#: Gateway Mode on hardware that can actually separate devices at layer 2.
+#: DESCRIBED HERE, NOT YET OFFERABLE -- see `vlan_available()` and the guard in
+#: core/test_gateway_mode.py. Nothing enforces this mode yet.
+MODE_GATEWAY_VLAN = "gateway_vlan"
+
+#: Modes the UI may show as choices. VLAN mode is DESCRIBED in the capability
+#: data below (so the setup flow can explain it honestly) but is NOT rendered as
+#: an option, because nothing enforces it yet -- no 802.1Q sub-interfaces, no
+#: per-VLAN DHCP, no inter-VLAN firewalling. Rendering a mode nobody can deliver
+#: is the "looks implemented" failure this codebase keeps finding.
+#: ⛔ ADD MODE_GATEWAY_VLAN HERE IN THE SAME CHANGE THAT MAKES ENFORCEMENT REAL,
+#: not before. core/test_gateway_mode.py fails if it appears early.
+RENDERABLE_MODES = (MODE_GATEWAY, MODE_BRIDGED)
 
 GATEWAY_CAPABILITIES = {
     MODE_GATEWAY: {
@@ -220,7 +233,83 @@ GATEWAY_CAPABILITIES = {
         "notes": "The default, and the right answer for most networks -- especially "
                  "where the router cannot be taken out of routing duty.",
     },
+    MODE_GATEWAY_VLAN: {
+        "label": "Nemesis is your gateway, on VLAN-capable hardware",
+        "inline_l3_gate": True,
+        # UNHEDGED, and that is the entire difference from MODE_GATEWAY. That
+        # mode's wording has to say "only with VLAN-capable switch/AP hardware"
+        # because it cannot know whether the hardware is there. This mode is
+        # only reachable once that condition is established, so the hedge is
+        # answered rather than repeated.
+        "segmentation": "enforced",
+        # ⛔ DATA, NOT PROSE, DELIBERATELY. Nemesis cannot trunk a switch port
+        # from an end-host position: no vendor credentials, no management
+        # protocol it may assume. So this mode is unreachable until the user
+        # configures the switch, and the setup flow has to be able to READ that
+        # fact rather than a human remembering to mention it.
+        "requires_switch_config": True,
+        "prerequisites": [
+            "A managed switch (or AP) that supports 802.1Q VLAN tagging.",
+            "VLANs already created on that switch, with the port Nemesis is "
+            "plugged into configured as a trunk carrying them.",
+            "Nemesis serving DHCP, so it can assign devices to the segments it "
+            "is about to enforce.",
+        ],
+        "gains": [
+            "Devices are genuinely isolated from one another, not merely grouped. "
+            "A compromised device cannot reach its neighbours.",
+            "Traffic between your own devices becomes visible. On a flat network "
+            "most of it never reaches Nemesis at all, so it cannot be inspected -- "
+            "this is the difference between watching the edge and watching inside.",
+            "Device tiering assigns to a boundary that is enforced in hardware.",
+        ],
+        "degraded": [],
+        "cost": [
+            "Requires configuration ON THE SWITCH, which Nemesis cannot perform "
+            "for you -- it has no credentials for your hardware and will not ask "
+            "for them.",
+            "A trunk misconfigured on the switch side can isolate devices from "
+            "the network entirely, including this one.",
+            "Inherits every cost of Gateway Mode: your router gives up routing "
+            "and NAT duty, and a mistake takes the network offline.",
+        ],
+        "notes": "NOT YET SELECTABLE. The capability is described here so the "
+                 "setup flow can explain it honestly, but enforcement (802.1Q "
+                 "sub-interfaces, per-VLAN DHCP, inter-VLAN firewalling) is "
+                 "separately scoped and not built. Offering it before then would "
+                 "let an operator choose a mode the product cannot deliver.",
+    },
 }
+
+
+def vlan_available(declared_capable):
+    """Which modes may be OFFERED, given the user's declared hardware capability.
+
+    Pure: takes a declaration, returns a tuple. No probing, no I/O, no guessing.
+
+    ⛔ DECLARATION, NOT DETECTION, AND THAT IS A DESIGN CONCLUSION RATHER THAN A
+    SHORTCUT. Investigated 2026-09-05: an end host cannot reliably determine
+    whether its switch is VLAN-capable. LLDP with the 802.1 Port-VLAN TLV gives a
+    trustworthy POSITIVE, but silence is uninformative -- unmanaged switches say
+    nothing, and managed ones commonly ship with LLDP disabled. An instrument
+    whose negative answer means "I could not tell" must never be wired as a gate,
+    which is exactly the one-directional-instrument shape this repo keeps
+    recording. SNMP needs the switch address and credentials, which is a
+    declaration wearing a protocol's clothes.
+
+    And the point that settles it: even with capable hardware, the switch must
+    already be trunked to Nemesis, which the user must do themselves. Since the
+    user has to act either way, asking is honest and probing would only add a
+    confident wrong answer.
+
+    FAILS CLOSED. Anything other than an explicit True -- False, None, an
+    unanswered wizard -- withholds the VLAN mode. "I do not know" and "no" lead
+    to the same place, which is the safe one.
+    """
+    base = (MODE_BRIDGED, MODE_GATEWAY)
+    if declared_capable is True:
+        return base + (MODE_GATEWAY_VLAN,)
+    return base
 
 
 def _li(items):
@@ -246,6 +335,8 @@ def render_capability_table(current_mode=MODE_BRIDGED, iface=None, cidr=None):
         out.append("<p class='muted'>LAN side: %s on %s</p>"
                    % (_html.escape(str(cidr)), _html.escape(str(iface))))
     for mode, cap in GATEWAY_CAPABILITIES.items():
+        if mode not in RENDERABLE_MODES:
+            continue
         active = " (current)" if mode == current_mode else ""
         out.append("<section><h4>%s%s</h4>" % (_html.escape(cap["label"]), active))
         out.append("<p><b>Segmentation:</b> %s</p>" % _html.escape(cap["segmentation"]))
