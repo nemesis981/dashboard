@@ -2744,7 +2744,41 @@ def learn_page():
     slugs = learning_topics.all_slugs()
     visible = learning.visible_topics(current_user.id, _learn_role(), slugs)
     topics = [dict(learning_topics.get_topic(s), slug=s) for s in visible]
-    return render_template("learn.html", topics=topics,
+
+    # ── Capability quizzes, presented alongside but NOT merged ───────────────
+    # `/account/training` is an AUTHORIZATION mechanism, not content: passing a quiz
+    # writes an unlock row that `roles.may_with_unlocks()` consumes. It therefore keeps
+    # its own backend and its own access rule, and is deliberately NOT put behind the
+    # three-state visibility model -- setting a quiz to `not_included` would not hide a
+    # page, it would remove the only path by which a sub_admin can earn a capability,
+    # silently freezing their privileges while looking like a display setting.
+    #
+    # ALL quizzes are listed, passed or not (operator decision 2026-09-05): seeing one
+    # is what prompts a user to ask for access, which tells the admin there is demand.
+    # Hiding unpassed quizzes would make the whole mechanism undiscoverable.
+    #
+    # Reuses `_training_rows`, the same helper /account/training renders from, so the
+    # two pages cannot disagree about what a user holds.
+    quizzes = []
+    try:
+        for row in _training_rows(current_user.id):
+            quizzes.append({
+                "name": row["name"],
+                "title": row["title"] or row["label"],
+                "intro": row["intro"],
+                "questions": row["questions"],
+                "passed": bool(row["unlock"]),
+                "ready": row["training"] == _TRAINING_READY,
+                "broken": row["training"] == _TRAINING_BROKEN,
+                "built": row["built"],
+            })
+    except Exception as e:
+        # A fault in the quiz subsystem must not take the education listing with it --
+        # they are separate systems and this page is the only route to both.
+        log.exception("learn: could not list capability training (non-fatal)")
+        quizzes = []
+
+    return render_template("learn.html", topics=topics, quizzes=quizzes,
                            tiers=learning_topics.TIERS)
 
 
@@ -18304,12 +18338,11 @@ def dashboard():
             &nbsp;|&nbsp;
             <a href="/diagnostics" target="_blank" rel="noopener" style="color:#bbb;text-decoration:none" title="Diagnostics &amp; Support">🔍 Diagnostics</a>
             &nbsp;|&nbsp;
-            <a href="/account/training" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Capability training">🎓 Training</a>
-            &nbsp;|&nbsp;
-            <!-- Deliberately "Learning Center", not "Training": the entry immediately
-                 left of this one is /account/training, the capability-UNLOCK quiz
-                 system. Two entries both called Training would read as duplicate
-                 navigation and send people to the wrong one. -->
+            <!-- ONE entry, deliberately. /account/training is still routable and
+                 bookmarkable -- it is simply no longer in the nav, because its quizzes
+                 are now listed on /learn alongside the education topics. Two nav
+                 entries for two halves of "learning" made users guess which one held
+                 what. -->
             <a href="/learn" target="_blank" rel="noopener" data-min-role="user" style="color:#bbb;text-decoration:none" title="Security training and reference material">&#128218; Learning Center</a>
         </span>
     </h1>

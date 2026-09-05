@@ -22,7 +22,11 @@
     .sub { color:#999; margin:0 0 24px; }
     .card { background:#1a1a1a; border:1px solid #333; border-radius:6px;
             padding:16px; margin-bottom:12px; }
-    .card h2 { margin:0 0 6px; font-size:1.1em; }
+    h2.section { color:#eee; font-size:1.0em; text-transform:uppercase;
+                 letter-spacing:0.07em; margin:26px 0 10px; font-weight:600; }
+    .card h3 { margin:0 0 6px; font-size:1.1em; font-weight:600; }
+    .badge.pass { color:#5fb85f; border-color:#3d6b3d; }
+    .summary.warn { color:#d2a24c; }
     .card a { color:#00d4ff; text-decoration:none; }
     .card a:hover { text-decoration:underline; }
     .summary { color:#aaa; margin:0; }
@@ -40,11 +44,12 @@
   <h1>&#128218; Learning Center</h1>
   <p class="sub">Security training and reference material.</p>
 
+  <h2 class="section">Security training</h2>
   {% if topics %}
     {% for t in topics %}
       <div class="card">
-        <h2><a href="/learn/{{ t.slug }}">{{ t.title }}</a>
-          <span class="badge">Nemesis</span></h2>
+        <h3><a href="/learn/{{ t.slug }}">{{ t.title }}</a>
+          <span class="badge">Nemesis</span></h3>
         <p class="summary">{{ t.summary }}</p>
       </div>
     {% endfor %}
@@ -56,6 +61,49 @@
       No training topics are available yet. An administrator can add them from
       Settings.
     </div>
+  {% endif %}
+
+  {# ── Capability quizzes ────────────────────────────────────────────────────
+     A SEPARATE SECTION, labelled for what it does. These are not articles: passing
+     one grants a capability, and presenting them identically to reading material
+     would hide the single property that makes them different. Every quiz is listed
+     whether or not the user has passed it — seeing one is what prompts someone to
+     ask an admin for access, and that request is the admin's signal of demand. #}
+  {% if quizzes %}
+    <h2 class="section">Operating Nemesis
+      <span class="muted" style="font-weight:normal;font-size:0.72em">
+        &mdash; these grant permissions, not just knowledge</span></h2>
+    {% for q in quizzes %}
+      <div class="card">
+        <h3>
+          {% if q.ready %}
+            <a href="/account/training/{{ q.name }}">{{ q.title }}</a>
+          {% else %}
+            {{ q.title }}
+          {% endif %}
+          {% if q.passed %}
+            <span class="badge pass">&#10003; Passed</span>
+          {% elif q.ready %}
+            <span class="badge">{{ q.questions }} question{{ '' if q.questions == 1 else 's' }}</span>
+          {% endif %}
+          {% if not q.built %}
+            {# ADR 0026 D2 rule 4: a DECLARED capability grants no endpoints yet, and
+               that must be visible rather than merely true — otherwise someone earns
+               an unlock for something that does nothing and cannot tell why. #}
+            <span class="badge">not yet in use</span>
+          {% endif %}
+        </h3>
+        {% if q.broken %}
+          <p class="summary warn">This quiz cannot be loaded and needs attention from
+            an administrator. It is listed rather than hidden, because a quiz that is
+            broken and one that was never written are different problems.</p>
+        {% elif not q.ready %}
+          <p class="summary muted">No quiz has been written for this capability yet.</p>
+        {% elif q.intro %}
+          <p class="summary">{{ q.intro }}</p>
+        {% endif %}
+      </div>
+    {% endfor %}
   {% endif %}
 
   <script src="/static/tier.js"></script>

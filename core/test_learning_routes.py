@@ -31,7 +31,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 70
+EXPECTED_CHECKS = 84
 _pass = _fail = 0
 
 
@@ -353,6 +353,94 @@ def test_the_warning_is_absent_when_an_active_non_admin_exists():
           "No non-admin accounts exist yet" not in body)
 
 
+# ── D. Unified landing page ──────────────────────────────────────────────────
+
+def test_the_training_route_survives_removal_from_the_nav():
+    """THE "no functionality lost" guarantee, asserted rather than assumed.
+
+    /account/training left the header nav when the Learning Center consolidated to one
+    entry. The ROUTE must remain registered and reachable -- bookmarks, deep links, and
+    the quiz links on /learn all depend on it. Removing a link and removing a route look
+    identical in a nav diff and are completely different for a user with a bookmark.
+    """
+    live = {r.endpoint for r in app.url_map.iter_rules()}
+    check("training_page is still a registered route", "training_page" in live)
+    check("training_quiz is still a registered route", "training_quiz" in live)
+    check("...and still has its role minimum",
+          R.ROUTE_MINIMUMS.get("training_page") == (R.ROLE_USER, R.ROLE_USER))
+    check("it is NO LONGER in the header nav",
+          _nav_has("/account/training") is False)
+    check("/learn IS in the header nav", _nav_has("/learn") is True)
+
+
+def _nav_has(href):
+    src = open(os.path.join(_REPO, "dashboard.py"), encoding="utf-8").read()
+    i = src.find('title="Log out">Logout</a>')
+    j = src.find("</h1>", i) if i >= 0 else -1
+    nav = src[i:j] if (i >= 0 and j > i) else ""
+    return ('href="%s"' % href) in nav
+
+
+def test_the_landing_page_lists_BOTH_kinds_and_labels_them_apart():
+    """Quizzes are not articles: passing one grants a capability. Presenting them
+    identically to reading material would hide the property that makes them different."""
+    slug = LT.all_slugs()[0]
+    L.set_topic_state(slug, L.STATE_ALL_USERS)
+    L.grant(501, slug)
+    body = _get("/learn", 501).get_data(as_text=True)
+    check("education section present", "Security training" in body)
+    check("quiz section present and labelled by EFFECT",
+          "Operating Nemesis" in body and "grant permissions" in body)
+    check("an education topic is listed", ("/learn/%s" % slug) in body)
+
+
+def test_every_quiz_is_listed_passed_or_not():
+    """Operator decision 2026-09-05: visibility is what prompts a user to ask an admin
+    for access, which is also how the admin learns there is demand. Hiding unpassed
+    quizzes would make the entire mechanism undiscoverable."""
+    body = _get("/learn", 501).get_data(as_text=True)
+    import roles as _r
+    declared = sorted(_r.CAPABILITY_ROUTES)
+    check("there are capabilities to list", len(declared) > 0)
+
+    # ⚠ Matched on the RENDERED form, not the raw capability id. A capability with no
+    # quiz authored yet has title=None and falls back to `label` -- the id with
+    # underscores replaced by spaces. The first version of this check searched for the
+    # underscore form and reported "2 of 4 missing" against a page that listed all four
+    # correctly: a false failure caused by testing a string the page never emits.
+    def rendered(cap):
+        return cap in body or cap.replace("_", " ") in body
+
+    listed = [c for c in declared if rendered(c)]
+    check("EVERY declared capability appears, regardless of pass state",
+          len(listed) == len(declared),
+          "listed %d of %d: missing=%r" % (len(listed), len(declared),
+                                           sorted(set(declared) - set(listed))))
+    check("...including ones with no quiz authored yet",
+          rendered("firewall_change"),
+          "an unauthored capability must still be discoverable")
+
+
+def test_a_quiz_subsystem_failure_does_not_break_the_education_listing():
+    """They are separate systems and /learn is now the only route to both. A fault in
+    one must not take the other down -- otherwise consolidating the nav would have made
+    the page strictly more fragile than the two it replaced."""
+    slug = LT.all_slugs()[0]
+    L.set_topic_state(slug, L.STATE_ALL_USERS)
+    L.grant(501, slug)
+    real = dashboard._training_rows
+    try:
+        dashboard._training_rows = lambda uid: (_ for _ in ()).throw(
+            RuntimeError("quiz backend exploded"))
+        r = _get("/learn", 501)
+        check("page still renders", r.status_code == 200, "got %s" % r.status_code)
+        body = r.get_data(as_text=True)
+        check("education topics still listed", ("/learn/%s" % slug) in body)
+        check("quiz section is simply absent", "Operating Nemesis" not in body)
+    finally:
+        dashboard._training_rows = real
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Learning Center -- routes, registries, direct-URL enforcement")
@@ -380,6 +468,10 @@ if __name__ == "__main__":
         test_a_bad_state_is_refused_by_the_route_with_400,
         test_the_warning_honours_is_active_not_just_role,
         test_the_warning_is_absent_when_an_active_non_admin_exists,
+        test_the_training_route_survives_removal_from_the_nav,
+        test_the_landing_page_lists_BOTH_kinds_and_labels_them_apart,
+        test_every_quiz_is_listed_passed_or_not,
+        test_a_quiz_subsystem_failure_does_not_break_the_education_listing,
     ):
         print("\n%s" % fn.__name__)
         fn()

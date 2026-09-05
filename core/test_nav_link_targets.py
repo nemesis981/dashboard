@@ -33,7 +33,7 @@ import sys
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARD = os.path.join(_REPO, "dashboard.py")
 
-EXPECTED_CHECKS = 12
+EXPECTED_CHECKS = 10
 _pass = _fail = 0
 
 
@@ -49,7 +49,13 @@ def check(label, cond, detail=""):
 
 #: Full-page destinations reachable from the header nav. Anchor links (#section-...)
 #: are deliberately excluded -- they scroll the current page and must NOT open a tab.
-NAV_PAGE_LINKS = ("/settings", "/diagnostics", "/account/training", "/learn")
+#:
+#: `/account/training` was REMOVED from this list on 2026-09-05 when the nav consolidated
+#: to a single Learning Center entry. The route still exists and is still bookmarkable --
+#: its quizzes are now listed on /learn -- it is simply no longer in the nav. This test
+#: failed when the nav changed and before this list was updated, which is the behaviour
+#: wanted: a nav edit that silently passed its own consistency test would be worse.
+NAV_PAGE_LINKS = ("/settings", "/diagnostics", "/learn")
 
 SRC = open(DASHBOARD, encoding="utf-8").read()
 
