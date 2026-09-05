@@ -11570,6 +11570,13 @@ def settings_page():
 <html>
 <head>
     <title>Nemesis — Settings</title>
+    <!-- First script on the page, deliberately: it wraps window.fetch, so any
+         script loaded ahead of it could capture the unwrapped original. Its
+         absence here is what let the idle lock be defeated (fixed 2026-09-05):
+         without it window.nemPoll is undefined, every wrapped poll timer
+         silently falls back to unmarked, and the walk-away lock can never fire
+         while still rendering its overlay. -->
+    <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
@@ -13701,6 +13708,13 @@ def diagnostics_page():
 <html>
 <head>
     <title>Nemesis — Diagnostics</title>
+    <!-- First script on the page, deliberately: it wraps window.fetch, so any
+         script loaded ahead of it could capture the unwrapped original. Its
+         absence here is what let the idle lock be defeated (fixed 2026-09-05):
+         without it window.nemPoll is undefined, every wrapped poll timer
+         silently falls back to unmarked, and the walk-away lock can never fire
+         while still rendering its overlay. -->
+    <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>
@@ -14234,6 +14248,13 @@ def firewall_db():
 <html>
 <head>
     <title>Nemesis - Alert Database</title>
+    <!-- First script on the page, deliberately: it wraps window.fetch, so any
+         script loaded ahead of it could capture the unwrapped original. Its
+         absence here is what let the idle lock be defeated (fixed 2026-09-05):
+         without it window.nemPoll is undefined, every wrapped poll timer
+         silently falls back to unmarked, and the walk-away lock can never fire
+         while still rendering its overlay. -->
+    <script src="/static/nemesis-activity.js"></script>
     <script src="/static/tier.js"></script>
     <script src="/static/role.js"></script>
     <script src="/static/fw-credential.js"></script>

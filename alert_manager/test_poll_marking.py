@@ -38,7 +38,7 @@ EXEMPT = {
 }
 
 EXPECTED_SITES = 11
-EXPECTED_CHECKS = 8
+EXPECTED_CHECKS = 13
 _pass = _fail = 0
 
 
@@ -134,6 +134,95 @@ _mutated = found + [("static/fake.js", "load")]
 _mut_unmarked = [(f, a) for (f, a) in _mutated
                  if "nemPoll" not in a and (f, a.strip()) not in EXEMPT]
 check("a newly-added unwrapped timer is detected", bool(_mut_unmarked), _mut_unmarked)
+
+print("\n6. nemPoll must EXIST on every page that relies on it")
+# ⛔ THE OTHER HALF OF THIS FILE'S INVARIANT, and the half that was missing.
+# Sections 1-5 prove every timer is WRAPPED. They cannot see whether
+# window.nemPoll exists on the page hosting it. Each wrapped timer is written
+# `(window.nemPoll || fallback)(fn)`, so on a page that never loads
+# static/nemesis-activity.js the wrapper silently degrades to the unwrapped
+# fallback -- and a correctly-marked timer is then indistinguishable from an
+# unmarked one, while this test still reported PASS.
+#
+# FOUND LIVE 2026-09-05. static/nemesis-activity.js was missing from
+# settings_page, diagnostics_page and firewall_db -- three of the six pages that
+# render the idle-lock overlay. nemesis-activity.js also installs the
+# window.fetch patch that adds X-Nemesis-Poll, so on those pages EVERY request
+# read as human activity and the walk-away idle lock could never fire
+# server-side. The operator saw the lock overlay (client-side, and its own header
+# says "Nothing here may be relied on for security"), refreshed, and was let
+# straight back in against a session the server had never locked. Zero
+# session_idle_locked audit rows were written on the day it was observed.
+#
+# MATCHES THE SCRIPT TAG, NOT THE FILENAME. dashboard.py mentions both files in
+# comments and docstrings -- api_session_touch's docstring names
+# nemesis-idle-lock.js and would otherwise register as an overlay-bearing page.
+# A tag is code; a mention is prose. Same discipline as this file's .py scanning.
+IDLE_TAG = 'src="/static/nemesis-idle-lock.js"'
+ACT_TAG = 'src="/static/nemesis-activity.js"'
+
+EXPECTED_OVERLAY_PAGES = 6
+
+
+def _page_markup(fn_node, src_lines):
+    """Concatenated STRING LITERALS of a function, minus its docstring.
+
+    Docstrings are excluded explicitly: they are string literals too, so
+    including them would let prose satisfy a check about markup.
+    """
+    body = list(fn_node.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)):
+        body = body[1:]                       # drop the docstring
+    parts = []
+    for stmt in body:
+        for n in ast.walk(stmt):
+            if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                parts.append(n.value)
+    return "\n".join(parts)
+
+
+_dash = os.path.join(ROOT, "dashboard.py")
+_tree = ast.parse(open(_dash, encoding="utf-8").read())
+_lines = open(_dash, encoding="utf-8").read().split("\n")
+
+overlay_pages, missing_act, wrong_order = [], [], []
+for _node in ast.walk(_tree):
+    if not isinstance(_node, ast.FunctionDef):
+        continue
+    markup = _page_markup(_node, _lines)
+    if IDLE_TAG not in markup:
+        continue
+    overlay_pages.append(_node.name)
+    if ACT_TAG not in markup:
+        missing_act.append(_node.name)
+    elif markup.index(ACT_TAG) > markup.index(IDLE_TAG):
+        # It wraps window.fetch, so anything loaded ahead of it can capture the
+        # unwrapped original -- the working pages carry a comment saying exactly
+        # this, and order is therefore part of the contract, not a preference.
+        wrong_order.append(_node.name)
+
+print("     overlay-bearing pages: %s" % ", ".join(sorted(overlay_pages)))
+check("found the expected number of overlay pages",
+      len(overlay_pages) == EXPECTED_OVERLAY_PAGES,
+      "found %d (%s), expected %d -- a page was added or removed; this count is "
+      "what stops the scan passing vacuously"
+      % (len(overlay_pages), sorted(overlay_pages), EXPECTED_OVERLAY_PAGES))
+check("every overlay page loads nemesis-activity.js", not missing_act,
+      "MISSING on: %s -- window.nemPoll is undefined there, so every wrapped "
+      "timer silently falls back to unmarked and the idle lock cannot fire"
+      % sorted(missing_act))
+check("...and loads it BEFORE nemesis-idle-lock.js", not wrong_order,
+      "out of order on: %s" % sorted(wrong_order))
+
+print("\n7. mutation: a page that drops nemesis-activity.js must be caught")
+_mut = "<script " + IDLE_TAG + "></script>"          # overlay, no activity.js
+check("a page with the overlay and no nemPoll is detected",
+      ACT_TAG not in _mut and IDLE_TAG in _mut, _mut)
+_mut_ok = "<script " + ACT_TAG + "></script><script " + IDLE_TAG + "></script>"
+check("CONTROL: a correctly-ordered page is NOT flagged",
+      ACT_TAG in _mut_ok and _mut_ok.index(ACT_TAG) < _mut_ok.index(IDLE_TAG))
 
 print("\n%d passed, %d failed" % (_pass, _fail))
 if _pass + _fail != EXPECTED_CHECKS:
