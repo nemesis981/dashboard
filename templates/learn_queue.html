@@ -1,0 +1,121 @@
+{# Admin review queue.
+
+   Pending first, deliberately: the page's whole reason to exist is what is WAITING.
+   Published material is listed below it so an admin can withdraw something without
+   hunting for it, not because it needs attention.
+
+   Every field here is author-supplied and printed normally, so Jinja escapes it. The
+   body preview is NOT rendered as markup on this page -- an admin reviews the SOURCE,
+   which is what they are actually approving. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Review queue — Learning Center</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.5em; margin:12px 0 4px; }
+    h2 { font-size:1.05em; margin:28px 0 6px; color:#eee; }
+    .sub { color:#999; margin:0 0 20px; }
+    .item { background:#1a1a1a; border:1px solid #333; border-radius:6px;
+            padding:14px 18px; margin:10px 0; max-width:80ch; }
+    .item.pending { border-left:3px solid #d2a24c; }
+    .item h3 { margin:0 0 3px; font-size:1.05em; color:#eee; }
+    .meta { color:#777; font-size:0.83em; margin:0 0 8px; }
+    .summary { color:#bbb; margin:0 0 10px; }
+    details summary { cursor:pointer; color:#888; font-size:0.85em; }
+    pre { background:#141414; border:1px solid #2a2a2a; border-radius:4px;
+          padding:10px 12px; overflow-x:auto; white-space:pre-wrap;
+          font-family:ui-monospace,Menlo,Consolas,monospace; font-size:0.85em;
+          color:#c8c8c8; margin:8px 0 0; }
+    button { background:#1e1e1e; color:#ddd; border:1px solid #444; border-radius:4px;
+             padding:5px 12px; cursor:pointer; margin-right:8px; font-size:0.88em; }
+    button:hover { border-color:#00d4ff; color:#00d4ff; }
+    button.danger:hover { border-color:#c05050; color:#c05050; }
+    .empty { color:#777; font-style:italic; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/settings/learning">&larr; Learning settings</a>
+  <h1>Review queue</h1>
+  <p class="sub">Submissions from users in your organisation. Nothing here is visible to
+    anyone else until you approve it — and approving it only lifts the first of two
+    gates: each topic's own visibility setting still decides who sees it.</p>
+
+  <h2>Awaiting review ({{ pending | length }})</h2>
+  {% if pending %}
+    {% for t in pending %}
+      <div class="item pending">
+        <h3>{{ t.title }}</h3>
+        <p class="meta">{{ t.slug }} · submitted by {{ t.created_by or 'unknown' }}
+          {%- if t.updated_at %} · last edited {{ t.updated_at }}{% endif %}</p>
+        <p class="summary">{{ t.summary }}</p>
+        <details><summary>Read the submitted source</summary><pre>{{ t.body }}</pre></details>
+        <p style="margin:12px 0 0">
+          <button class="pub" data-slug="{{ t.slug }}">Approve &amp; publish</button>
+          <button class="danger del" data-slug="{{ t.slug }}">Delete</button>
+        </p>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="empty">Nothing is waiting for review.</p>
+  {% endif %}
+
+  <h2>Published ({{ published | length }})</h2>
+  {% if published %}
+    {% for t in published %}
+      <div class="item">
+        <h3>{{ t.title }}</h3>
+        <p class="meta">{{ t.slug }} · by {{ t.created_by or 'unknown' }}
+          {%- if t.published_by %} · approved by {{ t.published_by }}{% endif %}</p>
+        <p class="summary">{{ t.summary }}</p>
+        <p style="margin:12px 0 0">
+          <a class="back" href="/learn/{{ t.slug }}" target="_blank"
+             rel="noopener">View &nearr;</a>
+          <button class="unpub" data-slug="{{ t.slug }}"
+                  style="margin-left:14px">Return to draft</button>
+          <button class="danger del" data-slug="{{ t.slug }}">Delete</button>
+        </p>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="empty">Nothing published yet.</p>
+  {% endif %}
+
+<script>
+(function () {
+  'use strict';
+  /* Every action is a POST. A GET that mutates state is CSRF-triggerable by a plain
+     <img> tag under SameSite=Lax, and this codebase has shipped that bug before. */
+  function act(url, slug) {
+    return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                       body: JSON.stringify({slug: slug}), credentials:'same-origin'})
+      .then(function (r) { return r.json().then(function (j) {
+        if (r.status !== 200) { throw new Error(j.error || 'Request failed'); }
+        location.reload();
+      }); })
+      .catch(function (e) { alert(e.message); });
+  }
+  function wire(cls, url, confirmText) {
+    Array.prototype.forEach.call(document.querySelectorAll('button.' + cls),
+      function (b) {
+        b.addEventListener('click', function () {
+          /* Deletion is irreversible and the queue holds other people's work, so it
+             asks. Publishing and unpublishing are both undoable from this page. */
+          if (confirmText && !window.confirm(confirmText)) { return; }
+          act(url, b.dataset.slug);
+        });
+      });
+  }
+  wire('pub',   '/api/learn/custom/publish',   null);
+  wire('unpub', '/api/learn/custom/unpublish', null);
+  wire('del',   '/api/learn/custom/delete',
+       'Delete this submission permanently? This cannot be undone.');
+})();
+</script>
+</body>
+</html>

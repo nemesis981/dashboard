@@ -1,0 +1,130 @@
+{# Submission form. Open to any authenticated user; nothing here goes live.
+
+   The cap is shown BEFORE it is hit. A limit discovered only by being refused reads as
+   the product breaking; shown up front it reads as a rule. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Submit training content — Nemesis</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.5em; margin:12px 0 4px; }
+    .sub { color:#999; margin:0 0 20px; }
+    label { display:block; margin:14px 0 4px; font-size:0.9em; color:#bbb; }
+    input, textarea { width:100%; max-width:70ch; background:#1a1a1a; color:#ddd;
+                      border:1px solid #444; border-radius:4px; padding:8px;
+                      font-family:inherit; font-size:0.95em; box-sizing:border-box; }
+    textarea { min-height:260px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+    button { background:#1e1e1e; color:#ddd; border:1px solid #444; border-radius:4px;
+             padding:7px 14px; cursor:pointer; margin-top:14px; }
+    button:hover { border-color:#00d4ff; color:#00d4ff; }
+    .note { border:1px solid #444; border-left:3px solid #666; background:#181818;
+            border-radius:4px; padding:12px 14px; margin:14px 0; max-width:70ch; }
+    .note.warn { border-left-color:#d2a24c; }
+    table { border-collapse:collapse; margin-top:10px; max-width:70ch; width:100%; }
+    th, td { text-align:left; padding:6px 8px; border-bottom:1px solid #2a2a2a;
+             font-size:0.9em; }
+    th { color:#aaa; font-size:0.78em; text-transform:uppercase; }
+    .st-draft { color:#d2a24c; } .st-published { color:#5fb85f; }
+    #result { margin-top:12px; font-size:0.9em; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/learn">&larr; Learning Center</a>
+  <h1>Submit training content</h1>
+  <p class="sub">Anyone can write something useful. An administrator reviews it before
+    it appears for others.</p>
+
+  <div class="note">
+    <strong>Nothing you submit goes live on its own.</strong> It is held for review, and
+    an administrator decides whether it is published. You can edit or withdraw it freely
+    while it is waiting; once it has been approved, only an administrator can change it.
+  </div>
+
+  {% if used >= cap %}
+    <div class="note warn">
+      You have <strong>{{ used }}</strong> submissions awaiting review, which is the
+      limit ({{ cap }}). Withdraw one below, or wait for an administrator to review them.
+    </div>
+  {% else %}
+    <p class="sub">{{ used }} of {{ cap }} pending submissions used.</p>
+  {% endif %}
+
+  <label for="f-slug">Address (lowercase, letters/numbers/hyphens)</label>
+  <input id="f-slug" placeholder="custom-onboarding-notes">
+  <label for="f-title">Title</label>
+  <input id="f-title" placeholder="Onboarding notes">
+  <label for="f-summary">One-line summary</label>
+  <input id="f-summary" placeholder="What a new starter needs in week one">
+  <label for="f-body">Content</label>
+  <textarea id="f-body" placeholder="# A heading&#10;&#10;**bold**, *italic*, `code`&#10;&#10;- a list item&#10;&#10;[a link](https://example.com)"></textarea>
+  <p class="sub" style="font-size:0.85em">
+    Headings, <strong>bold</strong>, <em>italic</em>, lists, quotes, links and code.
+    HTML is not accepted and is shown as plain text.
+  </p>
+  <button id="btn-submit">Submit for review</button>
+  <div id="result"></div>
+
+  <h2 style="font-size:1.05em;margin-top:30px">Your submissions</h2>
+  {% if mine %}
+    <table><thead><tr><th>Title</th><th>Address</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+      {% for t in mine %}
+        <tr>
+          <td>{{ t.title }}</td>
+          <td>{{ t.slug }}</td>
+          <td class="st-{{ t.status }}">
+            {{ 'Awaiting review' if t.status == 'draft' else 'Published' }}</td>
+          <td>{% if t.status == 'draft' %}
+            <button class="wd" data-slug="{{ t.slug }}"
+                    style="margin:0;padding:3px 9px;font-size:0.85em">Withdraw</button>
+          {% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody></table>
+  {% else %}
+    <p class="sub">You have not submitted anything yet.</p>
+  {% endif %}
+
+<script>
+(function () {
+  'use strict';
+  function post(url, body) {
+    return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                       body: JSON.stringify(body||{}), credentials:'same-origin'})
+           .then(function (r) { return r.json().then(function (j) {
+             return {status: r.status, body: j}; }); });
+  }
+  var out = document.getElementById('result');
+  document.getElementById('btn-submit').addEventListener('click', function () {
+    post('/api/learn/custom/save', {
+      slug: document.getElementById('f-slug').value.trim(),
+      title: document.getElementById('f-title').value,
+      summary: document.getElementById('f-summary').value,
+      body: document.getElementById('f-body').value
+    }).then(function (r) {
+      /* The server's message is shown verbatim: it explains WHY a slug or the cap was
+         refused, and replacing it with a generic "failed" would hide the only useful
+         part. It is inserted as textContent, never HTML. */
+      out.textContent = r.status === 200
+        ? 'Submitted. An administrator will review it.'
+        : (r.body.error || 'Could not submit.');
+      out.style.color = r.status === 200 ? '#5fb85f' : '#d2a24c';
+      if (r.status === 200) { setTimeout(function () { location.reload(); }, 900); }
+    });
+  });
+  Array.prototype.forEach.call(document.querySelectorAll('button.wd'), function (b) {
+    b.addEventListener('click', function () {
+      post('/api/learn/custom/withdraw', {slug: b.dataset.slug})
+        .then(function () { location.reload(); });
+    });
+  });
+})();
+</script>
+</body>
+</html>

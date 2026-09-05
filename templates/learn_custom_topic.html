@@ -1,0 +1,55 @@
+{# A business-authored topic.
+
+   ⛔ `body_html` IS ALREADY-RENDERED, ALREADY-SAFE HTML from core/learning_render.py,
+   which escapes every byte of the author's source BEFORE interpreting any markup, so
+   only tags that module emits can reach here. It is therefore printed with `| safe` --
+   the ONE place in this feature that bypasses Jinja autoescaping, and it is safe only
+   because the renderer is proven (63 checks, 8/8 mutations, no HTML passthrough by
+   construction).
+
+   ⚠ NEVER put author-supplied text through `| safe` anywhere else on this page. `title`
+   and `summary` are printed normally so Jinja escapes them: they are raw author input
+   that has been nowhere near the renderer.
+
+   Provenance is shown, always: a reader must be able to tell business-authored material
+   from content that shipped with Nemesis. #}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ topic.title }} — Learning Center</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
+           margin:0; padding:24px; line-height:1.55; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.5em; margin:12px 0 4px; }
+    .sub { color:#999; margin:0 0 6px; }
+    .byline { color:#777; font-size:0.85em; margin:0 0 22px; }
+    .badge { font-size:0.72em; text-transform:uppercase; letter-spacing:0.06em;
+             color:#d2a24c; border:1px solid #6b5426; border-radius:3px;
+             padding:1px 6px; margin-left:8px; vertical-align:middle; }
+    article { background:#1a1a1a; border:1px solid #333; border-radius:6px;
+              padding:18px 22px; max-width:70ch; }
+    article h2 { font-size:1.15em; margin:18px 0 8px; color:#eee; }
+    article h3 { font-size:1.02em; margin:16px 0 6px; color:#eee; }
+    article code { background:#222; padding:1px 5px; border-radius:3px;
+                   font-family:ui-monospace,Menlo,Consolas,monospace; font-size:0.9em; }
+    article blockquote { border-left:3px solid #444; margin:12px 0; padding:2px 14px;
+                         color:#bbb; }
+    article a { color:#00d4ff; }
+  </style>
+</head>
+<body>
+  <a class="back" href="/learn">&larr; Learning Center</a>
+  <h1>{{ topic.title }} <span class="badge">Your organisation</span></h1>
+  <p class="sub">{{ topic.summary }}</p>
+  <p class="byline">
+    Written by {{ topic.created_by or 'an unnamed author' }}{% if topic.published_by %},
+    approved by {{ topic.published_by }}{% endif %}.
+  </p>
+
+  <article>{{ body_html | safe }}</article>
+</body>
+</html>

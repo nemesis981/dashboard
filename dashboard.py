@@ -2786,7 +2786,28 @@ def learn_page():
 @login_required
 def learn_topic(slug):
     """One topic. Enforces, rather than trusting the index to have filtered."""
-    from core import learning, learning_topics
+    from core import learning, learning_topics, learning_custom
+
+    # ── Custom content dispatches on the slug PREFIX ─────────────────────────
+    # One route, not two, deliberately: a second read route would be a second place to
+    # get the visibility decision right, and the two would drift. `learning_custom
+    # .visible_to` checks the status ceiling and then delegates the rest to the SAME
+    # `learning.visible_to` the built-in path uses, so there is one rule underneath.
+    #
+    # A DRAFT, a topic the caller may not see, and a topic that does not exist all
+    # return the identical 404 -- distinguishing them would confirm that unapproved
+    # content exists to someone not permitted to know it.
+    if slug.startswith(learning_custom.SLUG_PREFIX):
+        row = learning_custom.get(slug)
+        if row is None or not learning_custom.visible_to(
+                current_user.id, _learn_role(), slug):
+            auth_log.info("learn: refused %s -> %r (custom, exists=%s, status=%s)",
+                          getattr(current_user, "username", "?"), slug,
+                          row is not None, (row or {}).get("status"))
+            abort(404)
+        return render_template(
+            "learn_custom_topic.html", topic=row, slug=slug,
+            body_html=learning_custom.render_body(slug))
 
     topic = learning_topics.get_topic(slug)
     if topic is None or not learning.visible_to(current_user.id, _learn_role(), slug):
@@ -2936,6 +2957,192 @@ def api_learn_defaults_apply():
     granted = learning.apply_defaults(_learn_target_users(), actor=_actor())
     _audit(action="learn_defaults_apply")
     return jsonify({"ok": True, "granted": {str(k): v for k, v in granted.items()}})
+
+
+# ── Custom (business-authored) content ───────────────────────────────────────
+#
+# SECURITY POSTURE, stated once for all seven routes below:
+#   * ANY authenticated user may SUBMIT; only an ADMIN may APPROVE. `user` is the only
+#     safe non-admin minimum, and that is categorical -- see the comment on these
+#     entries in roles.py for why a `sub_admin` minimum stops the dashboard starting.
+#   * ⛔ THE ROUTE MINIMUM IS A COARSE OUTER BOUND, NOT THE RULE. `_U` on save/delete
+#     would by itself let any user overwrite or remove anyone else's submission,
+#     including admin-approved content -- reproduced before these routes existed. The
+#     row rules (ownership + status) live in `core/learning_custom.py` and are ENFORCED
+#     there. These handlers translate its exceptions into status codes; they do not
+#     re-implement the checks, because a second copy is a copy that drifts.
+#   * `PermissionDenied` -> 403, `CustomError` -> 400. Distinguished deliberately: one
+#     means "not yours", the other "malformed", and collapsing them makes a validation
+#     bug look like an authorization failure to whoever debugs it next.
+#   * A DRAFT is invisible on the read path, identically to a nonexistent topic.
+
+def _custom_actor():
+    """(actor, role) for the current request, as the domain layer expects them."""
+    return _actor(), _learn_role()
+
+
+@app.route("/learn/submit")
+@login_required
+def learn_custom_submit_page():
+    """Submission form, plus this user's own submissions and their status."""
+    from core import learning_custom as lc
+    actor, _role = _custom_actor()
+    mine = [t for t in lc.all_topics() if t.get("created_by") == actor]
+    return render_template("learn_submit.html", mine=mine,
+                           cap=lc.MAX_UNAPPROVED_PER_USER,
+                           used=lc.unapproved_count(actor))
+
+
+@app.route("/settings/learning/queue")
+@login_required
+def learn_custom_queue_page():
+    """Admin review queue. Pending first -- the whole point is what is waiting."""
+    from core import learning_custom as lc
+    return render_template("learn_queue.html",
+                           pending=lc.all_topics(status=lc.STATUS_DRAFT),
+                           published=lc.all_topics(status=lc.STATUS_PUBLISHED))
+
+
+@app.route("/api/learn/custom/save", methods=["POST"])
+@login_required
+def api_learn_custom_save():
+    """Create or edit a submission. Always lands in DRAFT -- editing approved content
+    revokes its approval, which is why only its owner or an admin may do it."""
+    from core import learning_custom as lc
+    actor, role = _custom_actor()
+    d = request.get_json(silent=True) or request.form or {}
+    try:
+        slug = lc.save_draft(slug=(d.get("slug") or "").strip(),
+                             title=d.get("title") or "",
+                             summary=d.get("summary") or "",
+                             body=d.get("body") or "",
+                             actor=actor, role=role)
+    except lc.PermissionDenied as e:
+        _audit(action="learn_custom_save_denied")
+        return jsonify({"ok": False, "error": str(e)}), 403
+    except lc.CustomError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    _notify_custom_submission(slug, actor)
+    _audit(action="learn_custom_save", rule_id=slug)
+    return jsonify({"ok": True, "slug": slug, "status": lc.STATUS_DRAFT})
+
+
+@app.route("/api/learn/custom/withdraw", methods=["POST"])
+@login_required
+def api_learn_custom_withdraw():
+    """Withdraw one's own unapproved submission. Same rule as delete, deliberately:
+    withdrawing IS deleting, and giving it a gentler name must not give it a gentler
+    permission."""
+    return _custom_delete_impl()
+
+
+@app.route("/api/learn/custom/delete", methods=["POST"])
+@login_required
+def api_learn_custom_delete():
+    return _custom_delete_impl()
+
+
+def _custom_delete_impl():
+    from core import learning_custom as lc
+    actor, role = _custom_actor()
+    d = request.get_json(silent=True) or request.form or {}
+    slug = (d.get("slug") or "").strip()
+    try:
+        lc.delete(slug, actor=actor, role=role)
+    except lc.PermissionDenied as e:
+        _audit(action="learn_custom_delete_denied", rule_id=slug)
+        return jsonify({"ok": False, "error": str(e)}), 403
+    except lc.CustomError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    _audit(action="learn_custom_delete", rule_id=slug)
+    return jsonify({"ok": True, "slug": slug})
+
+
+@app.route("/api/learn/custom/publish", methods=["POST"])
+@login_required
+def api_learn_custom_publish():
+    return _custom_status_impl(publish=True)
+
+
+@app.route("/api/learn/custom/unpublish", methods=["POST"])
+@login_required
+def api_learn_custom_unpublish():
+    return _custom_status_impl(publish=False)
+
+
+def _custom_status_impl(publish):
+    """Approve or withdraw approval. Admin-only at BOTH layers.
+
+    The registry entry is `_A`, and `learning_custom.set_status` independently requires
+    admin. That is not redundancy for its own sake: without the domain check, a caller
+    reaching the function another way could unpublish approved content and then edit it
+    as its owner -- a chain that was reproduced before the guard existed.
+    """
+    from core import learning_custom as lc
+    actor, role = _custom_actor()
+    d = request.get_json(silent=True) or request.form or {}
+    slug = (d.get("slug") or "").strip()
+    try:
+        fn = lc.publish if publish else lc.unpublish
+        fn(slug, actor=actor, role=role)
+    except lc.PermissionDenied as e:
+        _audit(action="learn_custom_status_denied", rule_id=slug)
+        return jsonify({"ok": False, "error": str(e)}), 403
+    except lc.CustomError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    _audit(action="learn_custom_publish" if publish else "learn_custom_unpublish",
+           rule_id=slug)
+    return jsonify({"ok": True, "slug": slug, "status": lc.get(slug)["status"]})
+
+
+def _notify_custom_submission(slug, actor):
+    """Tell admins something is waiting, through the EXISTING notifier.
+
+    Severity LOW, deliberately: nothing is broken and nothing is at risk, so under the
+    default digest mode this BUNDLES rather than sending its own mail. Inflating it to
+    force a faster email would be dishonest signalling that trains admins to filter the
+    channel. The nav badge is what makes it timely; this makes it durable.
+
+    Never raises: a notification failure must not fail the submission the user just made.
+    """
+    try:
+        from alert_manager import notify as _n                   # noqa: PLC0415
+
+        # ⚠ route() FIRST, then enqueue only a BUNDLE verdict. enqueue's own docstring
+        # refuses to route internally, deliberately: a helper that both decided and
+        # stored would make "held on purpose, or did the caller forget to send?"
+        # unanswerable afterwards. Pattern copied from
+        # modules/email_security/notify_copy.py rather than invented.
+        # ⚠ THE DEFAULT MODE IS `immediate`, NOT `digest` -- measured, and the opposite
+        # of what the design note assumed. So on a stock install this sends rather than
+        # bundles. That is the operator's own global setting applied consistently, which
+        # is the point of routing through notify rather than inventing a second policy.
+        mode = _n._default_get_setting(_n.KEY_NOTIFY_MODE, _n.DEFAULT_NOTIFY_MODE)
+        decision = _n.route("LOW", mode)
+        if decision == _n.SEND_NOW:
+            from alert_manager.email_utils import send_email   # noqa: PLC0415
+            send_email("Learning Center: submission awaiting review",
+                       "%s submitted %s for review.\n\nReview it at "
+                       "/settings/learning/queue" % (actor, slug))
+            return "immediate"
+        conn = _users_conn()
+        try:
+            _n.enqueue(conn, "LOW",
+                       "Learning Center: submission awaiting review",
+                       body="%s submitted %s for review." % (actor, slug),
+                       surface="learning_center",
+                       # family_key collapses repeats into one digest line. Wanted here:
+                       # five pending submissions are one errand ("go review the queue"),
+                       # not five, and the queue itself lists which.
+                       family_key="learning_submission",
+                       actor=actor)
+        finally:
+            conn.close()
+        return "bundled"
+    except Exception:
+        log.debug("learning: submission notify failed (non-fatal)", exc_info=True)
+        return "failed"
+
 
 
 def _learn_target_users():
