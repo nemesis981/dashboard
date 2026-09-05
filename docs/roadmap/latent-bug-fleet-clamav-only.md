@@ -5,12 +5,11 @@ resolved by the scan/task orchestration ADR, [0004](../architecture/0004-scan-ta
 
 ## What
 Every **automated, scheduled, condition-triggered, or fleet** scan runs **ClamAV only**
-— NOT the full Layer-A stack (ClamAV + YARA + entropy/PE heuristics). The full stack
-(`scan_file`/`scan_directory` → `malware_findings`) is reachable **only** via the manual
-`POST /api/malware/scan` button on the local host. The dashboard's local scan
-(`_run_local_clamscan`), hw_monitor's queued-scan executor (`_local_clamscan_thread`),
-and the agent's remote scanner (`scanner._run_scan`) are all clamav-only and write
-`scan_jobs`/`scan_threats`, never `malware_findings`.
+— NOT the full Layer-A stack (ClamAV + YARA + entropy/PE heuristics). The full stack is
+reachable **only** via the manual scan trigger on the local host. **Exact code paths and
+executor names are kept in the private mirror per Rule 10** — this is a live, unfixed
+coverage gap, and precision about exactly which entry points route through which engine
+is attacker-relevant detail, not architectural direction.
 
 ## Why it matters
 **Users believe they are full-scanning and are not.** A scheduled or fleet "scan" looks
@@ -20,8 +19,10 @@ not just a missing feature: the UI implies depth the execution doesn't deliver, 
 the local host and the fleet.
 
 ## Reasoning / shape
-- This is the concrete user-facing symptom of audit facts #2/#3
-  (`docs/audits/scan-task-architecture-audit.md`).
+- This is the concrete user-facing symptom of the scan/task architecture audit's
+  findings — the general facts are already public in
+  [ADR 0004](../architecture/0004-scan-task-orchestration.md)'s evidence base;
+  executor-level implementation detail is kept private per Rule 10.
 - The fix is architectural, not a patch: it depends on unifying the scan path so
   automation routes through the full-stack engine. That is ADR 0004's job (scheduler →
   full-stack execution module → reporting).
