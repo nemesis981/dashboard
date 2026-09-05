@@ -292,6 +292,103 @@ _TOPICS = {
             },
         ],
     },
+    "network_vlan_basics": {
+        "title": "Separate Networks (VLANs), and Whether Your Hardware Can Do Them",
+        "summary": "Why devices on one network can talk to each other unseen, what "
+                   "would change that, and how to tell whether your own equipment "
+                   "supports it.",
+        "sections": [
+            {
+                "heading": "Why your devices can talk to each other unseen",
+                "beginner": (
+                    "When two devices on your network talk to each other &mdash; a "
+                    "laptop to a printer, a phone to a smart TV &mdash; that traffic "
+                    "usually goes straight through the box they are both plugged into "
+                    "and never passes Nemesis at all. Nemesis can only inspect what "
+                    "reaches it. That is not a setting anyone forgot to switch on; it "
+                    "is how an ordinary network is built."),
+                "intermediate": (
+                    "On a flat layer-2 network, device-to-device traffic is switched "
+                    "locally and never crosses the gateway. Nemesis sees the edge, not "
+                    "the interior. Making that traffic visible means changing the "
+                    "topology so it has to pass through Nemesis, which is what "
+                    "separate networks do."),
+                "pro": (
+                    "East-west traffic on a shared broadcast domain is forwarded by the "
+                    "switch and never transits the L3 gateway, so it is outside the "
+                    "enforcement and inspection path by construction. Measured on this "
+                    "product&#39;s own reference network: roughly 89&ndash;91% of "
+                    "captured flows have the appliance as an endpoint, and true "
+                    "peer-to-peer is around 0.1&ndash;0.7%."),
+            },
+            {
+                "heading": "What a VLAN actually is",
+                "beginner": (
+                    "A VLAN lets one physical switch behave like several separate "
+                    "ones. Devices in different groups cannot reach each other "
+                    "directly, even though they are plugged into the same box. Traffic "
+                    "between the groups has to go through something that can check it "
+                    "&mdash; which is where Nemesis fits."),
+                "intermediate": (
+                    "A VLAN partitions a switch into independent broadcast domains, "
+                    "tagged with an ID (802.1Q). Devices in different VLANs must be "
+                    "routed between rather than switched, so that traffic passes "
+                    "through the router &mdash; and can therefore be filtered and "
+                    "logged."),
+                "pro": (
+                    "802.1Q tagging carves separate broadcast domains from one physical "
+                    "switch. Inter-VLAN traffic requires L3 forwarding, placing it in "
+                    "the gateway&#39;s path; the port facing the router carries all "
+                    "VLANs as a trunk. Isolation is enforced by the switch, not by a "
+                    "host, which is why software alone cannot substitute for it."),
+            },
+            {
+                "heading": "How to tell whether your equipment can do it",
+                "beginner": (
+                    "Look for a separate box between your router and your devices "
+                    "&mdash; often a small metal one with several network ports. If "
+                    "everything plugs directly into the router your provider gave you, "
+                    "the answer is almost certainly no. If there is a separate box and "
+                    "it has a settings page you can log into, it may well support "
+                    "this. If it has no settings at all, it does not."),
+                "intermediate": (
+                    "You need a MANAGED switch. Unmanaged switches have no "
+                    "configuration interface and cannot tag VLANs. The practical test "
+                    "is whether the device has a web interface or an IP address of its "
+                    "own. Model number plus &quot;VLAN&quot; in a search usually settles "
+                    "it quickly."),
+                "pro": (
+                    "Managed or smart-managed switch with 802.1Q support. Note that "
+                    "Nemesis cannot determine this for you: LLDP&#39;s Port-VLAN TLV "
+                    "would be a trustworthy positive signal, but its absence proves "
+                    "nothing &mdash; unmanaged switches emit nothing, and managed ones "
+                    "commonly ship with LLDP disabled. That is why the setup flow asks "
+                    "rather than probes."),
+            },
+            {
+                "heading": "What you would have to set up &mdash; and what Nemesis cannot do for you",
+                "beginner": (
+                    "Even with the right hardware, someone has to configure the switch "
+                    "itself: create the separate networks, and tell the port Nemesis "
+                    "uses to carry all of them. Nemesis cannot do that part for you. It "
+                    "has no password for your switch and will not ask for one. Until "
+                    "that is done, the feature stays switched off rather than pretending "
+                    "to work."),
+                "intermediate": (
+                    "Create the VLANs on the switch, assign device ports to them, and "
+                    "configure the port facing Nemesis as a trunk carrying every VLAN. "
+                    "Nemesis then serves DHCP per segment and routes between them. The "
+                    "switch-side work is yours; the routing and filtering is ours."),
+                "pro": (
+                    "Access ports assigned per VLAN, trunk to the Nemesis interface, "
+                    "802.1Q sub-interfaces and per-VLAN DHCP scopes on the Nemesis side. "
+                    "Nemesis holds no switch credentials and implements no vendor "
+                    "management protocol, so switch configuration is out of scope by "
+                    "design rather than by omission &mdash; a deliberate boundary, not a "
+                    "missing integration."),
+            },
+        ],
+    },
     "phishing_awareness": {
         "title": "Recognising Phishing",
         "summary": "Why phishing works on careful people, and what actually helps.",

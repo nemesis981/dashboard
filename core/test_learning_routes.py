@@ -31,7 +31,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 84
+EXPECTED_CHECKS = 85   # 84 -> 85: network_vlan_basics topic (2026-09-05)
 _pass = _fail = 0
 
 
