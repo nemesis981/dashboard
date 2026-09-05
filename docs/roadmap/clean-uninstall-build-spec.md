@@ -1,8 +1,13 @@
 # Roadmap — Clean install/uninstall overhaul (build spec)
 
-- **Status:** PARTIAL — phases 1–3 BUILT; de-enroll endpoint (`:5001`) DEPLOYED live; end-to-end
-  VM uninstall lifecycle test still PENDING. (`9321cfe` Phase 1 / `5b03260` Phase 2 / `14ce142`
-  Phase 3.) Design of record, authored by the docs window from the trip-1.0.8 uninstall audit.
+- **Status:** PARTIAL — phases 1–3 BUILT; de-enroll endpoint (`:5001`) DEPLOYED live; R1/R2
+  (below) FIXED 2026-09-02 (`cc332c7`); end-to-end VM uninstall lifecycle test (§7) still
+  PENDING — on-device Windows verification remains unproven, not blocked by a code gap.
+  (`9321cfe` Phase 1 / `5b03260` Phase 2 / `14ce142` Phase 3.) Design of record, authored by
+  the docs window from the trip-1.0.8 uninstall audit. **Corrected 2026-09-05** — this line
+  read "phases 1-3 BUILT... test still PENDING" with no mention of R1/R2 for two months after
+  they were fixed; found live by Window 1 while scoping the e2e-test pickup, independently
+  re-verified here (both new test suites re-run, 16/16 and 14/14 passing) before correcting.
 - **Date:** 2026-07-01
 - **Evidence / baseline:** `docs/audits/trip-1.0.8-vm-lifecycle-test-2026-07-01.md` (§4 uninstall
   baseline + §4b third-party inventory).
@@ -265,35 +270,40 @@ Settings → Apps:
 
 ## Post-trip remnants (from the VM `.83` uninstall audit)
 
-Two findings from running the real uninstall on VM `.83`. **Post-trip, complete-uninstall work** —
-capture only, no build now.
+Two findings from running the real uninstall on VM `.83`. **Both FIXED 2026-09-02 (`cc332c7`) —
+corrected 2026-09-05, this section previously read "fix owed" for both, two months stale.**
 
-### R1 — SELF-DELETE GAP: `NemesisUninstall.exe` + `%APPDATA%\Nemesis\` left behind (fix owed)
-**Finding:** after uninstall, `NemesisUninstall.exe` remains on disk, which keeps
-`%APPDATA%\Nemesis\` alive — a running exe can't delete its own file (or its own directory).
-**Why:** the intended fix is already named in §3 (lines 152–153) — **self-relaunch from `%TEMP%`**:
-copy the uninstaller to `%TEMP%` and relaunch that copy so it can delete the original dir cleanly.
-The VM `.83` audit shows that trick is **either not wired or not working** — the original exe/dir
-survive. So the uninstall is not yet "no residue" (violates the Definition-of-done "no
-`%APPDATA%\Nemesis`" line and Test-plan step 4 "Local: no `%APPDATA%\Nemesis`").
-**To do (complete-uninstall build):** wire/repair the `%TEMP%` self-relaunch so the last stage
-runs from outside `%APPDATA%\Nemesis\`, deletes the dir + the original `NemesisUninstall.exe`, and
-leaves no residue; re-verify on a fresh clone (Test-plan step 4).
-**Severity:** the visible "complete uninstall" promise fails without it — real remnant, owed before
-this spec is DONE.
+### R1 — SELF-DELETE GAP: `NemesisUninstall.exe` + `%APPDATA%\Nemesis\` left behind — FIXED 2026-09-02
+**Finding:** after uninstall, `NemesisUninstall.exe` remained on disk, which kept
+`%APPDATA%\Nemesis\` alive — a running exe can't delete its own file (or its own directory). The
+original mechanism was `cmd /c timeout /t 3 /nobreak >nul & rmdir /s /q "%APPDATA%\Nemesis"`,
+scheduled while the process continued on to a completion screen that waits for the user to click
+Close — a fixed 3-second timer racing an indefinite human, which fails whenever the user reads
+the screen for more than three seconds (essentially always).
+**Fix actually shipped (`cc332c7`, NOT this section's originally-named `%TEMP%` self-relaunch
+remedy):** a detached command keyed to the uninstaller's own `os.getpid()` exit
+(`Wait-Process -Id`, passed as argv rather than a shell string), plus a `_wait_then_delete()`
+that REFUSES on timeout rather than deleting anyway — an intact directory beats a half-deleted
+one. `nemesis_agent/test_uninstall_self_delete.py`: 16/16 passing (re-run 2026-09-05),
+mutation-proved (4/4 mutations detected).
+**Still genuinely open:** the fix proves the SEQUENCING CONTRACT only — it cannot execute real
+Windows file deletion from this environment. Whether `%APPDATA%\Nemesis` actually vanishes on a
+real machine is Test-plan §7 step 4's job, and remains unproven on-device. That's the e2e test's
+purpose, not a blocker to running it.
 
-### R2 — MANIFEST-COVERAGE PRINCIPLE (design guardrail, confirmed by a non-bug)
-**Finding:** the `NemesisOvernightLog` scheduled task **survived** uninstall because it was created
-**out-of-band** (not via the agent manifest), so the manifest-driven uninstaller never saw it.
-**Not a bug in this instance** — `NemesisOvernightLog` is a dev/diagnostic artifact, not a shipped
-product component, so nothing should have removed it. But it **confirms the guardrail** this spec
-is built on (§1: "Manifest is the single source of truth the uninstaller reads"):
-> **ANYTHING the product installs — scheduled task, registry key, service, file, driver, Defender
-> exclusion, firewall rule — MUST be recorded in `install-manifest.json`, or uninstall will not
-> remove it.** Out-of-band creation = guaranteed residue. Manifest coverage is the invariant; any
-> new install-side action must add its manifest entry in the same change (definition of done for
-> that action).
-**To do:** no fix for the task itself (correctly ignored). Keep this as a standing design rule for
-every future install-side feature; consider a build-time/CI check that flags install actions with
-no matching manifest field.
-**Severity:** guardrail, not a defect — cheap to honor now, expensive residue later if ignored.
+### R2 — MANIFEST-COVERAGE PRINCIPLE — guardrail turned executable, found a real gap, FIXED 2026-09-02
+**Original finding:** the `NemesisOvernightLog` scheduled task survived uninstall because it was
+created out-of-band (not via the agent manifest) — correctly NOT a bug (dev/diagnostic artifact,
+nothing should have removed it), but it confirmed the guardrail this spec is built on (§1:
+"Manifest is the single source of truth the uninstaller reads").
+**This section's own "to do" — "consider a build-time/CI check that flags install actions with no
+matching manifest field" — was built (`cc332c7`, `test_manifest_coverage.py`) and immediately
+found a REAL gap, not a hypothetical one:** the installer creates a Start Menu folder with two
+shortcuts and recorded nothing in the manifest, while the uninstaller removed it via a separately
+hardcoded constant — identical literals today, silently divergent the moment either is edited,
+orphaning the folder with no error. Fixed: one definition (`START_MENU_DIR`), recorded as a
+`start_menu` manifest component, read back by the uninstaller, with the old constant kept only as
+a fallback for installs predating this fix. `nemesis_agent/test_manifest_coverage.py`: 14/14
+passing (re-run 2026-09-05), mutation-proved (4/4 mutations detected).
+**Severity, resolved:** was "guardrail, not a defect" — now a shipped, executable guardrail that
+already caught one real coverage gap, which is the whole reason to have it.
