@@ -35,7 +35,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"), os.path.join(_REPO, "cor
 import learning_custom as C                                        # noqa: E402
 import learning as L                                               # noqa: E402
 
-EXPECTED_CHECKS = 114
+EXPECTED_CHECKS = 119
 _pass = _fail = 0
 
 
@@ -675,6 +675,53 @@ def test_set_status_fails_closed_on_an_unparseable_role():
                                              db_path=db)))
 
 
+# ── K. Two DDL copies must never drift (ADR 0001) ──────────────────────────
+
+def test_the_two_DDL_copies_are_identical():
+    """⚠ The table's CREATE lives in TWO places: `learning_custom.SCHEMA_SQL` (used by
+    tests to build a temp DB) and `database.init_learning_tables()` (what a real install
+    runs). ADR 0001 says a table's DDL lives in exactly ONE canonical init, and this is a
+    real deviation from it.
+
+    Identical today, verified. Kept as two copies rather than collapsed because the test
+    fixture genuinely needs a standalone schema and importing `database` into every unit
+    test would drag the whole alert_manager import graph in. So the duplication buys
+    something -- but it must not be allowed to drift SILENTLY, which is the actual risk:
+    whichever init runs first wins, and a column added to one copy would leave a fresh
+    install with a different table shape than an upgraded one, discovered only when a
+    query fails on one of them.
+
+    This test is the cheap half of that trade. It fails the day someone edits one copy,
+    which is the only moment the divergence is easy to fix.
+
+    Compared on NORMALISED column text rather than raw source, so indentation and the
+    surrounding Python (a bare string here, an `execute()` call there) do not produce a
+    false mismatch that trains people to ignore it.
+    """
+    import re
+    def columns(path):
+        src = io.open(path, encoding="utf-8").read()
+        m = re.search(
+            r"CREATE TABLE IF NOT EXISTS learning_custom_topics\s*\((.*?)\)\s*;?",
+            src, re.S | re.I)
+        if not m:
+            return None
+        return re.sub(r"\s+", " ", m.group(1)).strip().rstrip(",")
+
+    a = columns(os.path.join(_REPO, "core", "learning_custom.py"))
+    b = columns(os.path.join(_REPO, "alert_manager", "database.py"))
+    check("found the DDL in learning_custom.py", a is not None)
+    check("found the DDL in database.py", b is not None)
+    check("the two copies are IDENTICAL", a == b,
+          "they have drifted:\n  learning_custom: %s\n  database:        %s" % (a, b))
+
+    # Control: the comparison is not vacuously true because both are empty/None.
+    check("control: the extracted DDL is substantial",
+          a is not None and len(a) > 100, "len=%r" % (len(a) if a else None))
+    check("control: it actually names the status column",
+          a is not None and "status" in a)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("custom content: draft/publish, two ceilings, ownership-aware delete")
@@ -717,6 +764,7 @@ if __name__ == "__main__":
         test_a_non_admin_cannot_PUBLISH_their_own_submission,
         test_an_admin_CAN_publish_and_unpublish,
         test_set_status_fails_closed_on_an_unparseable_role,
+        test_the_two_DDL_copies_are_identical,
     ):
         print("\n%s" % fn.__name__)
         fn()

@@ -625,6 +625,34 @@ ROUTE_MINIMUMS = {
     "api_learn_user_grant":           (_A, _A),
     "api_learn_defaults_preview":     (_A, _A),
     "api_learn_defaults_apply":       (_A, _A),
+
+    # ── Custom (business-authored) content — Phase 2 ─────────────────────────
+    # ANY authenticated user may SUBMIT; only an admin may APPROVE. That split is the
+    # whole design, so submit/withdraw/save sit at `_U` and publish/unpublish at `_A`.
+    #
+    # ⛔ `user` IS THE ONLY SAFE NON-ADMIN MINIMUM, and this is categorical rather than
+    # convenient. `may_with_unlocks` reaches its capability branch only after `may()`
+    # returns False, so: a minimum at or below `user` is reachable by rank for BOTH a
+    # user and a no-unlock sub_admin (equal, invariant holds); an `admin` minimum denies
+    # both by rank and lets the capability branch lift a sub_admin only WITH an unlock
+    # (equal at zero unlocks, invariant holds); a `sub_admin` minimum is reachable by
+    # rank for a sub_admin and NOT for a user (UNEQUAL — invariant broken, and since
+    # `_sub_admin_equals_user_without_unlocks` backs a known-bad canary case, roles.py
+    # then fails to import and the dashboard does not start). The invariant-safe set is
+    # therefore exactly {viewonly, user, admin} = `_PRE_SUBADMIN_ORDER`.
+    #
+    # ⚠ THESE MINIMUMS ARE A COARSE OUTER BOUND, NOT THE RULE. `_U` on save/delete would
+    # by itself let any user overwrite or remove any other user's submission, including
+    # admin-approved content — reproduced before these entries were written. The row
+    # rules (ownership + status) live in `core/learning_custom.py` and are ENFORCED
+    # there, not merely consulted, because a registry entry cannot see the row.
+    "learn_custom_submit_page":       (_U, _U),
+    "learn_custom_queue_page":        (_A, _A),
+    "api_learn_custom_save":          (_U, _U),
+    "api_learn_custom_withdraw":      (_U, _U),
+    "api_learn_custom_delete":        (_U, _U),
+    "api_learn_custom_publish":       (_A, _A),
+    "api_learn_custom_unpublish":     (_A, _A),
 }
 
 # Reachable by ANY authenticated principal, whatever their role. These are not
