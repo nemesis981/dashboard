@@ -198,9 +198,13 @@ a partial one, and the code matching that declaration already exists.
   without a CREATE in the repo" rule — closing the checkbox doesn't answer that, it just means
   there's nothing live to clean up. Found by Window 1's audit, independently re-verified
   before checking this off.
-- [ ] **ADR 0031 write-up** (QUIC/nftables static-policy block, "Piece K") — carried since
-  2026-08-06, still unwritten. Confirmed 2026-08-08 it is unrelated to gateway-mode despite
-  surfacing in the same day's PUNCHLIST entries — no other doc silently covers it.
+- [x] **ADR 0031 write-up — SHIPPED 2026-09-05** (QUIC/nftables static-policy block, "Piece
+  K"), by Window 1 (`51481f6`). Was carried since 2026-08-06, unwritten. Confirmed 2026-08-08
+  it is unrelated to gateway-mode despite surfacing in the same day's PUNCHLIST entries — no
+  other doc silently covers it. `docs/architecture/0031-quic-static-policy-block.md` exists,
+  status "Accepted and shipped 2026-08-06," measured against real adversarial traffic (24
+  packets, zero false positives) — verified directly before checking this off, not taken on
+  the commit message alone.
   **Corrected 2026-09-04 — number collision found live:** this item carried "ADR 0022" since
   2026-08-08, when that number was reserved for exactly this write-up
   (`worklog/2026-08-08-002.md:13`). 2026-08-17's licensing work reused 0022 for
@@ -219,18 +223,39 @@ a partial one, and the code matching that declaration already exists.
   records (worklogs, supplements, dated audits, briefings) that also mention "ADR 0022" for
   this item are deliberately left untouched — they're dated accounts of what was true when
   written, not live references, and editing them would falsify history rather than correct it.
-- [ ] **The long-carried PUNCHLIST tail** — `enrich_ip()` external IP exposure, agent check-in
-  jitter, empty-alert-list read-window mismatch, install.sh default-route interface detection,
-  host-defence rule naming, Windows DHCP hostname truncation, cache-hit token skew, installer
-  token revocation, credential rotation, Concurrency Phase 3, `/api/analyze/<rule_id>`
-  GET-that-spends-money. Individually small; carried unchanged across multiple HANDOFFs, which is
-  itself the signal this list exists to catch. **Partially closed 2026-09-04, item stays open
-  overall:** `enrich_ip()` external IP exposure is CLOSED — `ca473d5` (2026-09-03) gates it
-  through `ip_scope.is_public_ip()`; the old broken predicate survives only as a comment
-  explaining the fix, independently reviewed and test-run by Window 2 at the time. The
-  remaining ~10 sub-items were **not individually re-verified** this pass — flagged as
-  unverified, not confirmed clean, so this stays an open checkbox rather than closing on a
-  partial check.
+- [ ] **The long-carried PUNCHLIST tail — exact citations added 2026-09-05, one more item
+  closed.** Individually small; carried unchanged across multiple HANDOFFs, which is itself the
+  signal this list exists to catch. This entry's own naming had drifted far enough from
+  `PUNCHLIST.md`'s current text that a fresh grep by topic name mostly failed — exact line
+  citations below so this doesn't happen again.
+  - `enrich_ip()` external IP exposure — **CLOSED** (confirmed 2026-09-04): `ca473d5`
+    (2026-09-03) gates it through `ip_scope.is_public_ip()`.
+  - **Installer token revocation — CLOSED, found stale 2026-09-05.** This item was carried as
+    open; `PUNCHLIST.md:5059` records `[FIXED — 2026-08-29, pending commit]` —
+    `POST /api/agent/installer/revoke` shipped, admin-gated, mutation-tested. Was already
+    closed a week before this checklist's own 09-04 pass and nobody caught it.
+  - Agent check-in jitter — open, `PUNCHLIST.md:3294`.
+  - Empty-alert-list read-window mismatch — open, `PUNCHLIST.md:~3325` (`get_active_alerts()`
+    vs. `get_alert_counts()` reading the log through two different windows).
+  - `install.sh` default-route interface detection — open, `PUNCHLIST.md:3429`.
+  - Host-defence rule naming — open, `PUNCHLIST.md:3453` (related finding at `:3401`).
+  - Windows DHCP hostname truncation — open, `PUNCHLIST.md:3736`.
+  - Cache-hit token skew — open, `PUNCHLIST.md:3160`.
+  - `/api/analyze/<rule_id>` GET-that-spends-money — open, `PUNCHLIST.md:3110` (distinct from
+    the already-`[x]`-resolved PII-redaction finding on the same route at `:3128` — don't
+    conflate the two).
+  - **Credential rotation — NOT confidently located.** Closest candidate is
+    `PUNCHLIST.md:4358` ("`enrollment_tokens` stores installer tokens in PLAINTEXT at rest,"
+    found 2026-08-27), but that's a storage-format finding, not literally rotation — flagged
+    as uncertain rather than asserted.
+  - **"Concurrency Phase 3" — NOT confidently located under that name.** Best candidate is the
+    residual race documented at `PUNCHLIST.md:~432` ("`anomaly_incidents` merge is still
+    read-JSON→merge-Python→write," labeled "RACE 4 residual" in-file, not "Phase 3") — same
+    section as the other three concurrency races this checklist's items above already
+    reference as fixed. Flagged as uncertain, not asserted.
+  - **Net: 8 of 10 sub-items have exact current citations, 2 fixed/closed, 2 uncertain.** This
+    checkbox stays open overall — 8 confirmed-open sub-items remain regardless of the 2
+    uncertain ones' resolution.
 
 ## How this gate is meant to be used
 
