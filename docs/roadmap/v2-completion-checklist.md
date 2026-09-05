@@ -80,7 +80,7 @@ already existed, neither built).
 
 ## The gate — thirteen items, checked off before v2 is called done
 
-**Last verified against code: 2026-09-04.** This gate is graded on code/git-log, never on a
+**Last verified against code: 2026-09-05.** This gate is graded on code/git-log, never on a
 file's own `Status:` header — the same discipline CLAUDE.md's roadmap-vs-state audit already
 applies at the file-classification level, one level down: a file can be correctly classified
 while the checkboxes *inside* it rot silently. **2026-09-04 finding: 7 of 13 items were stale,
@@ -90,6 +90,27 @@ item before any checkbox changed. A gate whose whole purpose is "nothing gets si
 dropped" can't do that job if it also can't tell you when things are already done — add this
 line's date forward every time the gate is re-verified, so staleness here is visible rather
 than assumed.
+
+**2026-09-05 correction — lateral-movement Tier 1 AND Tier 2 were both stale, same direction
+as 09-04's finding.** `lateral-movement-outbreak-detection.md`'s own `⛔ RESOLVED 2026-09-02`
+sections (written the same day these shipped, three days before this gate caught up) declare
+the reduced-scope detection form "the PERMANENT shape for non-VLAN installs, not a temporary
+compromise. Both tiers are unblocked to build in that form now." Both were then built exactly
+to that spec, same day: `modules/anomaly_detection/post_detection.py:41`
+(`POST_DETECTION_TYPE = "post_detection_egress"`, full four-stage build in `module.py`,
+integration-tested) for Tier 1, and `modules/lan_behavior_monitor/` (`behavior.py:64`
+`PROBE_SCAN = "lan_probe_scan"`; `manifest.json` `display_name: "LAN Probe & Scan Detection"`
+verbatim-matches the doc's own UI-label spec, `enabled_by_default: true`,
+`test_lan_behavior_registry.py` registry-completeness test present) for Tier 2's
+currently-buildable signals. This checklist's items 3/4 below were still reading "STILL
+BLOCKED... build has not started" — quoting the *pre*-RESOLVED state of a doc that had already
+resolved itself. Same failure shape as 09-04's ADR 0019 finding (a doc self-corrects, a
+downstream reference keeps citing the pre-correction text) — now confirmed twice on this one
+checklist. **The full originally-imagined form (true unicast peer-to-peer correlation) remains
+genuinely and permanently blocked on VLAN-capable switching/port-mirroring hardware the
+operator doesn't control — that has not changed and is not what's being checked off here.**
+What changed is that the doc itself declared the reduced form the complete v2 deliverable, not
+a partial one, and the code matching that declaration already exists.
 
 - [x] **rogue-dhcp-detection.md — BUILT AND DEPLOYED, corrected 2026-09-04.** Was marked
   "not yet built"; false. `scripts/enable-suricata-dhcp-extended.sh` is the config flip
@@ -109,36 +130,30 @@ than assumed.
   doc's own line-number citations were additionally stale (`_QTYPES` moved `:101`→`:107`,
   `_root_domain` moved `:1336`→`:1552`) — both re-verified against current code. Found by
   Window 1's audit, independently re-verified (exact line matches) before checking this off.
-- [ ] **lateral-movement-outbreak-detection.md — Tier 1 (core, owned-fleet correlation).** Was
-  always a v2 target — see "Checklist correction" above, not a new decision. **Spec written
-  2026-08-30** (in the roadmap doc) — grounded in verified existing schema (finding tables,
-  device/IP identity). **STILL BLOCKED — a 2026-09-04 "blocker resolved" claim here was
-  retracted the same day, RECORDED so the mistake doesn't recur a third time.** Two different
-  windows independently measured flow-event *volume* (554 events, then 3,510 events, in live
-  `eve.json` samples) and both read that as answering the open question. It doesn't:
-  `lateral-movement-outbreak-detection.md`'s own `⛔ REVISION 2026-08-30` section already
-  answered this exact question, wrongly, once before — flow logging being ON does not mean the
-  appliance SEES the peer-to-peer traffic Tier 1 needs. Measured there: ~89–91% of captured
-  flows involve the appliance itself as an endpoint; true peer-to-peer is ~0.1–0.7%,
-  single-digit distinct pairs — structural (a non-gateway appliance on a switched LAN only sees
-  traffic to/from itself plus broadcast/multicast), not a config flip, and confirmed
-  2026-09-02 that Gateway Mode does not change it either. **The real blocker stands**: full-form
-  Tier 1 needs VLAN-capable switching or port mirroring — hardware Nemesis doesn't control, not
-  a software gate. Build has not started; correctly unchecked.
-- [ ] **lateral-movement-outbreak-detection.md — Tier 2 (venue/epidemic spread).** Reopened
-  2026-08-30 — see "Gate reopening" above. **Signal set scoped against current visibility
-  2026-08-30** (in the roadmap doc): 2 of 5 signals are Suricata rule-authoring work only, 2
-  share Tier 1's real blocker (**phrasing corrected 2026-09-04** — not "flow-logging," which is
-  live and was never the issue; the shared blocker is the structural peer-to-peer visibility
-  gap item 3 above restates in full), and 1 (ARP anomalies) is architecturally the same
-  detector as the already-parked ARP-spoofing item — flagged as an unresolved tension, not
-  decided. Outbound-only IoT beaconing (C2/botnet, no LAN-neighbor attack) recommended
-  **excluded** from this scope, as its own future line item. Still needs a real spec/ADR
-  (thresholds, baseline windows, false-positive handling) before code — scoping is the input to
-  that, not a substitute for it. **Nuance added 2026-09-04:** the consumption seam this Tier
-  would plug into already exists — `modules/lan_integrity/signals.py`, whose own docstring
-  calls itself "the STABLE consumption seam" for Tier 2 (one of five signals). Infrastructure
-  the detector would use, not the detector itself; item correctly stays unchecked.
+- [x] **lateral-movement-outbreak-detection.md — Tier 1 (core, owned-fleet correlation) —
+  SHIPPED in its permanent reduced-scope form, corrected 2026-09-05.** Was marked "STILL
+  BLOCKED... build has not started" — stale, quoting the doc's own pre-RESOLVED state (see the
+  2026-09-05 correction note above). `modules/anomaly_detection/post_detection.py:41`
+  (`POST_DETECTION_TYPE = "post_detection_egress"`) plus the four-stage build in `module.py`
+  (trigger-table watcher, correlation, dedup, incident creation via the existing
+  `_create_or_update_incident` pattern), integration-tested
+  (`test_post_detection_integration.py`, `test_post_detection.py`). **The full originally-
+  imagined form (true unicast peer-to-peer correlation) remains permanently blocked on
+  VLAN-capable switching/port mirroring the operator doesn't control** — that's real and
+  unchanged, but the doc itself declares the reduced form the complete v2 deliverable, not a
+  partial one, so this checks off.
+- [x] **lateral-movement-outbreak-detection.md — Tier 2 (venue/epidemic spread), buildable
+  signals — SHIPPED, corrected 2026-09-05.** Was marked unchecked pending a spec/ADR — stale,
+  same reason as Tier 1 above: the doc's own `⛔ RESOLVED 2026-09-02` section scoped exactly
+  which signals are buildable now and named the build. `modules/lan_behavior_monitor/behavior.py:64`
+  (`PROBE_SCAN = "lan_probe_scan"`); `manifest.json`'s `display_name: "LAN Probe & Scan
+  Detection"` verbatim-matches the doc's own UI-label spec, `enabled_by_default: true`;
+  `test_lan_behavior_registry.py` provides the registry-completeness test this codebase's
+  standing practice requires for any module declaring routes. **The ARP-anomaly signal /
+  ARP-spoofing tension flagged below is still unresolved** — not all five originally-listed
+  Tier 2 signals shipped, only the currently-buildable subset the RESOLVED section scoped; the
+  excluded outbound-only-IoT-beaconing line item and the ARP tension are real open threads, not
+  closed by this checkbox.
 
 - [ ] **gateway-mode-scoping.md — "zero code exists" corrected 2026-09-04, still open
   otherwise.** `core/gateway_mode.py` is 538 lines (not zero), and `alert_manager` carries
