@@ -2328,5 +2328,67 @@ def init_email_security_tables():
         conn.close()
 
 
+def init_learning_tables():
+    """Canonical DDL for the Learning Center (three-state visibility + entitlements).
+
+    CORE-OWNED AND UNPREFIXED, deliberately, and this is the half that inverted late
+    in design: education content ships WITH core rather than as an optional module,
+    so per ADR 0001 these are core's tables and belong here -- not in a module
+    `_init_db()`, which is where an earlier draft of the design put them.
+
+    ── THE DEFAULT IS THE SAFE STATE, AND THAT IS LOAD-BEARING ──────────────────
+    `state` defaults to 'not_included', and a topic with NO ROW AT ALL is treated as
+    not_included by the read path. A topic that nobody has configured is therefore
+    invisible rather than visible. This carries the whole original sensitivity
+    requirement: content ships with core unconditionally, so "not included" being the
+    default is the only thing standing between a fresh install and a dark-web topic
+    appearing on it.
+
+    ── WHY A SEPARATE SEED LOG ─────────────────────────────────────────────────
+    `learning_seed_log` records that a user has EVER been seeded, which is what makes
+    seeding one-shot. Without it, a second role assignment re-grants topics an admin
+    deliberately revoked for that person -- re-granting revoked access is worse than
+    never seeding at all, and it would look like the product overriding a decision
+    someone made on purpose. The log is one row per user and is never cleared.
+
+    ── WHY ENTITLEMENTS ARE NOT A CEILING ──────────────────────────────────────
+    A row here means "this person was assigned this topic". It does NOT mean they may
+    read it: `core/learning.py:visible_to()` re-reads the topic's state on every
+    request and treats it as a ceiling above this table. Storing the effective answer
+    instead would mean flipping a topic to not_included left every previously-granted
+    user still reading it -- the global control silently failing for exactly the
+    population it exists to control.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=5.0)
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS learning_topic_visibility (
+                topic_slug   TEXT PRIMARY KEY,
+                state        TEXT NOT NULL DEFAULT 'not_included',
+                in_default   INTEGER NOT NULL DEFAULT 0,
+                updated_at   TEXT NOT NULL,
+                actor        TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS learning_entitlements (
+                user_id      INTEGER NOT NULL,
+                topic_slug   TEXT    NOT NULL,
+                granted_at   TEXT    NOT NULL,
+                actor        TEXT,
+                PRIMARY KEY (user_id, topic_slug)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS learning_seed_log (
+                user_id      INTEGER PRIMARY KEY,
+                seeded_at    TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     init_db()

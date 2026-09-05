@@ -106,7 +106,8 @@ from database import (init_db as init_alerts_db, init_quarantines_table,
                       init_recovery_codes_table,
                       init_licensing_tables, init_capability_tables,
                       init_settings_table, init_error_tables,
-                      init_conn_events_tables, init_tier2_gate_tables)
+                      init_conn_events_tables, init_tier2_gate_tables,
+                      init_learning_tables)
 # Imported HERE and not in database.py -- see the call site below for the measured
 # PYTHONPATH constraint that makes this the only safe place for it.
 from core.admin_approval_store import init_admin_approval_tables
@@ -159,6 +160,10 @@ init_licensing_tables()
 # alert_manager/database.py). Dashboard-only writer: unlocks are created by the
 # quiz grader and removed on revoke, both of which live here.
 init_capability_tables()
+# Learning Center visibility + entitlements (core/learning.py reads these; DDL is
+# canonical in alert_manager/database.py). Core-owned because education content ships
+# WITH core rather than as an optional module -- only the sandbox TOOL is a module.
+init_learning_tables()
 # Admin-approval request state machine (core/admin_approval_store.py, which owns
 # its own DDL). Called from HERE and not from database.py, and that is a measured
 # constraint rather than a preference:
