@@ -24,9 +24,249 @@ The two topics below are PLACEHOLDERS that exercise the machinery end to end. Re
 curriculum content is dropped in as additional entries with no code change.
 """
 
+#: ⚠ THE DARK-WEB TOPICS BELOW ARE DRAFT TEXT, NOT THE OPERATOR'S COURSE.
+#: They exist so the Learning Center has real content to view and review. The operator's
+#: 8-module "Darknet Field Course" replaces them when supplied. Marked in the summary
+#: line of each so a reviewer can never mistake draft prose for the finished course --
+#: an unmarked placeholder that reads plausibly is how draft text ships by accident.
+#:
+#: Written as EDUCATION, deliberately: what the technology is, what it does and does not
+#: protect, what the law says. There are no access instructions, no directory pointers
+#: and no operational how-to, because none of that is needed to understand the risks --
+#: which is what a defender, a parent, or a curious user actually needs.
+
 #: slug -> topic. `slug` must match `^[a-z0-9_-]+$` (checked by `is_valid_slug`) so it
 #: can be a URL path segment and a stable database key without escaping.
 _TOPICS = {
+    "darkweb_safety_basics": {
+        "title": "Dark Web: What It Is, and Staying Safe",
+        "summary": "DRAFT — vocabulary, threat modelling and the safety rules that matter.",
+        "sections": [
+            {
+                "heading": "Three different things people call 'the dark web'",
+                "beginner": (
+                    "People use one phrase for three separate things. The <em>surface "
+                    "web</em> is everything a search engine can find. The <em>deep "
+                    "web</em> is anything behind a login &mdash; your email, your bank, "
+                    "your medical records. That is most of the internet, and it is "
+                    "completely ordinary. The <em>dark web</em> is a small set of sites "
+                    "reachable only through special software that hides who is "
+                    "connecting to what. Confusing the second and third is the single "
+                    "most common mistake, and it is why headlines about &lsquo;billions "
+                    "of pages on the dark web&rsquo; are usually wrong."),
+                "intermediate": (
+                    "Surface web: indexed. Deep web: reachable but not indexed, mostly "
+                    "authentication-gated &mdash; the overwhelming majority of the web. "
+                    "Dark web: services on overlay networks (predominantly Tor onion "
+                    "services) that are not routable from the ordinary internet and "
+                    "resolve only inside the overlay. The three are frequently "
+                    "conflated, which inflates dark-web size estimates by orders of "
+                    "magnitude."),
+                "pro": (
+                    "Indexed / non-indexed-but-routable / overlay-only. Onion services "
+                    "terminate inside the Tor network and have no exit to the clearnet; "
+                    "`.onion` is not in the public DNS hierarchy. Conflating deep and "
+                    "dark inflates size estimates by orders of magnitude and is the "
+                    "usual defect in press figures."),
+            },
+            {
+                "heading": "Who actually uses it, and why that matters to you",
+                "beginner": (
+                    "It is not only criminals. Journalists and their sources, people "
+                    "living under censorship, and researchers all use these tools for "
+                    "good reasons &mdash; and so do criminals. This matters because the "
+                    "&lsquo;only criminals use it&rsquo; framing leads people to assume "
+                    "anyone using Tor must be up to something, which is both wrong and "
+                    "unhelpful when you are trying to understand what you are seeing on "
+                    "your own network."),
+                "intermediate": (
+                    "Mixed population: censorship circumvention, source protection, "
+                    "research, and criminal markets share the same infrastructure. For a "
+                    "defender this matters concretely &mdash; Tor usage on your network "
+                    "is a signal worth understanding, not automatically an incident, and "
+                    "treating it as automatically malicious produces false positives and "
+                    "damages trust."),
+                "pro": (
+                    "Anonymity sets are shared by design; that is what makes them work. "
+                    "Tor traffic on a monitored network is a fact to contextualise, not "
+                    "a verdict. Base-rate reasoning applies."),
+            },
+            {
+                "heading": "The safety rules that actually matter",
+                "beginner": (
+                    "<strong>Never click a link you cannot identify.</strong> On the "
+                    "dark web there is no reputation system, no verified badge and no "
+                    "search engine doing quality control for you. "
+                    "<strong>Verify before you trust anything</strong> &mdash; addresses "
+                    "are long random strings precisely so they cannot be guessed, and "
+                    "that also means a single altered character sends you somewhere "
+                    "else entirely. <strong>Never download and open files.</strong> "
+                    "<strong>Never reuse a username, email or password</strong> you have "
+                    "used anywhere else &mdash; that single mistake links an anonymous "
+                    "session to your real identity, and it is the most common way people "
+                    "are identified."),
+                "intermediate": (
+                    "No reputation layer, no trusted index, no certificate authority in "
+                    "the familiar sense. Onion addresses are self-authenticating hashes "
+                    "of a public key, so a mistyped address is a different service, not "
+                    "an error. Treat every file as hostile. Above all, avoid identity "
+                    "reuse: the network layer can be sound while the human layer leaks "
+                    "everything, and correlation across accounts is the dominant "
+                    "de-anonymisation route in practice."),
+                "pro": (
+                    "v3 onion addresses are base32(pubkey ‖ checksum ‖ version) &mdash; "
+                    "self-authenticating, so no CA is involved and a near-miss address is "
+                    "simply a different key. Operational failures dominate cryptographic "
+                    "ones: identifier reuse, writing style, timing, and metadata in "
+                    "downloaded files."),
+            },
+        ],
+    },
+    "darkweb_legal_boundaries": {
+        "title": "Dark Web: Legal Boundaries",
+        "summary": "DRAFT — the lines that are not technical, and are not negotiable.",
+        "sections": [
+            {
+                "heading": "Using the technology is not the same as what you do with it",
+                "beginner": (
+                    "In most countries, using Tor is legal. Running a private network "
+                    "connection is legal. What you <em>do</em> over it is judged exactly "
+                    "as it would be anywhere else &mdash; buying illegal goods is illegal "
+                    "whether the shop is on a high street or an onion address. The tool "
+                    "is not the offence; the conduct is. Note that this is general "
+                    "information and not legal advice, and that a few countries do "
+                    "restrict anonymity tools themselves."),
+                "intermediate": (
+                    "Tool legality and conduct legality are separate questions. Tor use "
+                    "is lawful in most jurisdictions; some restrict or block it. Conduct "
+                    "over the transport is assessed on its own terms. This is general "
+                    "information, not legal advice &mdash; if it matters to your "
+                    "situation, ask someone qualified in your jurisdiction."),
+                "pro": (
+                    "Transport legality ≠ conduct legality; jurisdiction-dependent, with "
+                    "a minority restricting anonymity tooling directly. Not legal advice."),
+            },
+            {
+                "heading": "⛔ Child sexual abuse material — the absolute line",
+                "beginner": (
+                    "<strong>Child sexual abuse material is a serious criminal offence "
+                    "everywhere, and nothing about how you reached it changes that.</strong> "
+                    "Not curiosity, not research, not &lsquo;I only looked&rsquo;, not "
+                    "using Tor, not a VM. In most jurisdictions the offence includes "
+                    "<em>accessing</em> and <em>possessing</em>, and material can be "
+                    "cached to disk simply by a page loading &mdash; so &lsquo;I did not "
+                    "download anything&rsquo; is not the protection people assume it is. "
+                    "<br><br>If you encounter it: <strong>close it, do not investigate, "
+                    "do not screenshot it, do not share it even to report it</strong>, "
+                    "and report it to the appropriate authority or hotline in your "
+                    "country. Sharing the material itself &mdash; including to prove what "
+                    "you found &mdash; is itself an offence."),
+                "intermediate": (
+                    "CSAM is criminal in essentially every jurisdiction, and the offence "
+                    "typically covers access and possession rather than distribution "
+                    "alone. Browser caching means passive viewing can constitute "
+                    "possession. Intent framed as research or curiosity is not a defence. "
+                    "Correct response: terminate the session, preserve nothing, capture "
+                    "nothing, and report the URL only &mdash; never the material &mdash; "
+                    "to the relevant national hotline or law enforcement."),
+                "pro": (
+                    "Access/possession offences, strict in practice; cache artefacts "
+                    "constitute possession in most jurisdictions. Do not collect, do not "
+                    "hash, do not screenshot, do not forward. Report the locator to the "
+                    "national hotline or LE and stop. Research exemptions, where they "
+                    "exist at all, require prior authorisation and institutional cover."),
+            },
+            {
+                "heading": "Why this section exists in a security product",
+                "beginner": (
+                    "You are far more likely to meet this material by accident than to go "
+                    "looking for it &mdash; a mislabelled link, a hijacked index, someone "
+                    "else using a machine you own. Knowing in advance what to do means "
+                    "you act correctly in the ten seconds that matter, rather than "
+                    "improvising badly. That is the entire purpose of putting it here."),
+                "intermediate": (
+                    "Accidental exposure is the realistic scenario, particularly on "
+                    "shared or household machines. A rehearsed response &mdash; stop, "
+                    "preserve nothing, report the locator &mdash; prevents the common "
+                    "secondary mistakes of collecting &lsquo;evidence&rsquo; or "
+                    "forwarding it to show someone."),
+                "pro": (
+                    "Prepared response prevents evidentiary self-harm. The failure mode "
+                    "is well-intentioned collection or forwarding."),
+            },
+        ],
+    },
+    "darkweb_how_tor_works": {
+        "title": "How Tor Actually Works",
+        "summary": "DRAFT — onion routing, guards, and exactly what each party can see.",
+        "sections": [
+            {
+                "heading": "Three hops, and why three",
+                "beginner": (
+                    "Your traffic is wrapped in three layers of encryption and passed "
+                    "through three volunteer-run computers. The first knows who you are "
+                    "but not where you are going. The last knows where you are going but "
+                    "not who you are. The middle one knows neither &mdash; it exists "
+                    "specifically so the first and last never meet. Anonymity comes from "
+                    "no single point holding both halves."),
+                "intermediate": (
+                    "Three-hop circuit: guard, middle, exit. Layered encryption is peeled "
+                    "one hop at a time, so each relay learns only its immediate "
+                    "predecessor and successor. The middle relay prevents guard and exit "
+                    "from being the same observer or colluding trivially. The property "
+                    "is separation of knowledge, not secrecy of content."),
+                "pro": (
+                    "Telescoping circuit build, per-hop ephemeral keys, layered onion "
+                    "encryption. Guard/middle/exit; the middle exists to break "
+                    "guard-exit linkability. Threat model is a non-global adversary &mdash; "
+                    "Tor explicitly does not defend against an observer who can watch both "
+                    "ends."),
+            },
+            {
+                "heading": "Guards: why your first hop stays the same",
+                "beginner": (
+                    "Your first hop is deliberately kept the same for weeks at a time. It "
+                    "sounds wrong &mdash; surely changing it more often is safer? It is "
+                    "not. If you picked a fresh first hop every time, then over enough "
+                    "connections you would eventually pick a hostile one, and an attacker "
+                    "only needs to be lucky once. Keeping one means you are either "
+                    "unlucky from the start or you are fine."),
+                "intermediate": (
+                    "Entry guards are pinned for months, deliberately. Random first-hop "
+                    "selection makes eventual selection of an adversarial guard "
+                    "near-certain over time; pinning converts a repeated trial into a "
+                    "single one. This is a considered trade of per-connection variety for "
+                    "a bounded lifetime risk."),
+                "pro": (
+                    "Guard pinning bounds the probability of ever selecting a hostile "
+                    "entry, versus asymptotic certainty under per-circuit reselection. "
+                    "Predecessor-attack mitigation."),
+            },
+            {
+                "heading": "What each party actually sees",
+                "beginner": (
+                    "<strong>Your internet provider</strong> sees that you are using Tor, "
+                    "and nothing about what you do. <strong>The first hop</strong> sees "
+                    "your address but not your destination. <strong>The last hop</strong> "
+                    "sees the destination &mdash; and if the site is not using HTTPS, it "
+                    "can read the content too. <strong>The website</strong> sees a "
+                    "connection from the last hop, not from you. The important gap: your "
+                    "provider knowing you use Tor is not the same as knowing what you do, "
+                    "but it is not nothing either."),
+                "intermediate": (
+                    "ISP: Tor usage, timing, volume. Guard: client IP, no destination. "
+                    "Exit: destination and, absent TLS, plaintext. Destination: exit IP. "
+                    "Onion services have no exit hop at all, so the exit-visibility "
+                    "problem does not arise for them &mdash; a frequently missed "
+                    "distinction."),
+                "pro": (
+                    "Exit is the plaintext boundary for clearnet destinations; end-to-end "
+                    "TLS is what closes it. Onion services are end-to-end within the "
+                    "overlay and have no exit stage. Traffic-confirmation by a global "
+                    "passive adversary remains out of scope for Tor's threat model."),
+            },
+        ],
+    },
     "network_basics": {
         "title": "Network Security Basics",
         "summary": "What a firewall does, what it cannot do, and why both matter.",

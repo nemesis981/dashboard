@@ -16,7 +16,9 @@
   <style>
     body { background:#111; color:#ddd; font-family:system-ui,sans-serif;
            margin:0; padding:24px; }
-    h1 { color:#00d4ff; font-size:1.6em; margin:0 0 4px; }
+    a.back { color:#888; text-decoration:none; font-size:0.9em; }
+    a.back:hover { color:#00d4ff; }
+    h1 { color:#00d4ff; font-size:1.6em; margin:12px 0 4px; }
     .sub { color:#999; margin:0 0 24px; }
     .card { background:#1a1a1a; border:1px solid #333; border-radius:6px;
             padding:16px; margin-bottom:12px; }
@@ -31,6 +33,10 @@
   </style>
 </head>
 <body>
+  {# A way BACK. Without this the page is a one-way trip: the index had no link to
+     anywhere else, so the only exit was the browser's back button. Topic pages already
+     link here; this is the missing half. #}
+  <a class="back" href="/">&larr; Dashboard</a>
   <h1>&#128218; Learning Center</h1>
   <p class="sub">Security training and reference material.</p>
 
