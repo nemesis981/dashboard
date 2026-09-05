@@ -48,6 +48,19 @@ _SLUG_RE = re.compile(r"^%s[a-z0-9][a-z0-9-]{0,55}$" % re.escape(SLUG_PREFIX))
 MAX_TITLE = 200
 MAX_SUMMARY = 500
 
+#: Per-user ceiling on UNAPPROVED submissions. Volume control, not authorization.
+#:
+#: Needed because the redesign widened submission from a handful of delegates to EVERY
+#: authenticated account, and nothing else bounds row creation. Deliberately per-user: a
+#: global cap would let one noisy account block everyone else, which is a denial of
+#: service wearing a quota's clothes.
+#:
+#: Counts only UNAPPROVED work. An approved submission must not count against its author
+#: forever -- that would punish a contributor for being published, which is backwards --
+#: and editing an existing submission consumes no new slot, or the cap would block
+#: CORRECTION rather than volume.
+MAX_UNAPPROVED_PER_USER = 10
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS learning_custom_topics (
     slug         TEXT PRIMARY KEY,
@@ -87,6 +100,17 @@ def _now():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
 
 
+def _is_admin(role):
+    """True only for a genuine admin. An unreadable role is NOT an admin."""
+    if not role:
+        return False
+    try:
+        import roles as _roles
+        return _roles.normalise_role(role) == _roles.ROLE_ADMIN
+    except Exception:
+        return False
+
+
 def validate_slug(slug):
     """A custom slug. Namespaced so it can never collide with or impersonate a built-in.
 
@@ -114,6 +138,20 @@ def validate_status(status):
 
 
 # ── reads ────────────────────────────────────────────────────────────────────
+
+def unapproved_count(actor, db_path=None):
+    """How many UNAPPROVED submissions this author currently holds."""
+    if not actor:
+        return 0
+    conn = _db(db_path, readonly=True)
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM learning_custom_topics "
+            "WHERE created_by=? AND status=?", (actor, STATUS_DRAFT)).fetchone()
+        return row[0] if row else 0
+    finally:
+        conn.close()
+
 
 def get(slug, db_path=None):
     """One topic as a dict, or None. Never raises for a missing row."""
@@ -165,7 +203,7 @@ def render_body(slug, db_path=None):
 
 # ── the state machine ────────────────────────────────────────────────────────
 
-def save_draft(slug, title, summary, body, actor=None, db_path=None):
+def save_draft(slug, title, summary, body, actor=None, role=None, db_path=None):
     """Create or edit. ALWAYS leaves the topic in DRAFT.
 
     Editing published content therefore revokes its approval — see the module docstring.
@@ -181,6 +219,21 @@ def save_draft(slug, title, summary, body, actor=None, db_path=None):
             raise CustomError("%s exceeds %d characters" % (name, cap))
     if not isinstance(body, str):
         raise CustomError("body must be text")
+
+    # ── Per-user cap, applied to NEW submissions only ────────────────────────
+    # Checked against the EXISTING row rather than blindly: editing something already
+    # submitted consumes no new slot, so a user at the cap can still fix a typo. A cap
+    # that blocked correction would be punishing the wrong thing.
+    #
+    # Admins are exempt: this bounds a wide submitting population, and an admin
+    # publishing their own material is not that population.
+    is_new = get(slug, db_path) is None
+    if is_new and actor and not _is_admin(role):
+        if unapproved_count(actor, db_path) >= MAX_UNAPPROVED_PER_USER:
+            raise CustomError(
+                "%r already has %d unapproved submissions (the limit). Withdraw one, "
+                "or wait for an administrator to review them."
+                % (actor, MAX_UNAPPROVED_PER_USER))
 
     now = _now()
     conn = _db(db_path)
@@ -259,9 +312,12 @@ def can_delete(topic, actor, role):
 
     if r == _roles.ROLE_ADMIN:
         return True
-    if _roles.rank(r) < _roles.rank(_roles.ROLE_SUB_ADMIN):
-        return False           # user and viewonly may delete nothing
-    # sub_admin: their OWN work, and only while it is still unapproved.
+    if _roles.rank(r) < _roles.rank(_roles.ROLE_USER):
+        return False           # viewonly writes nothing, ever
+    # Any SUBMITTER (user and above): their OWN work, and only while UNAPPROVED.
+    # The floor moved from sub_admin to user when submission opened to every account;
+    # the ownership and status conditions are deliberately unchanged, because they are
+    # what stop a submitter withdrawing something an admin already approved.
     return (topic.get("status") == STATUS_DRAFT
             and bool(actor) and topic.get("created_by") == actor)
 

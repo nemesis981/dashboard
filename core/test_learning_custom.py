@@ -35,7 +35,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"), os.path.join(_REPO, "cor
 import learning_custom as C                                        # noqa: E402
 import learning as L                                               # noqa: E402
 
-EXPECTED_CHECKS = 54
+EXPECTED_CHECKS = 70
 _pass = _fail = 0
 
 
@@ -202,12 +202,24 @@ def test_an_admin_may_delete_anything():
           C.can_delete(C.get("custom-x", db_path=db), "admin1", "admin") is True)
 
 
-def test_a_plain_user_may_delete_nothing():
+def test_only_viewonly_may_delete_nothing():
+    """⚠ SUPERSEDES an earlier version asserting that a plain `user` could delete
+    nothing. That was correct under the sub_admin-drafting design and is WRONG under the
+    redesign: submission is open to every account, so a submitter must be able to
+    withdraw their own unapproved work. The floor moved; the rule did not.
+
+    viewonly is unchanged and is the part that still matters here -- it writes nothing,
+    ever, which is the same reasoning that excludes it from submitting at all.
+    """
     db = fresh_db()
     mk(db, slug="custom-x", actor="dave")
-    for role in ("user", "viewonly"):
-        check("%s cannot delete even their own draft" % role,
-              C.can_delete(C.get("custom-x", db_path=db), "dave", role) is False)
+    t = C.get("custom-x", db_path=db)
+    check("viewonly cannot delete, even their own draft",
+          C.can_delete(t, "dave", "viewonly") is False)
+    check("a plain user CAN delete their own unapproved draft (redesign)",
+          C.can_delete(t, "dave", "user") is True)
+    check("...but still not someone else's",
+          C.can_delete(t, "not-dave", "user") is False)
 
 
 def test_delete_ENFORCES_rather_than_relying_on_the_caller_to_ask():
@@ -334,6 +346,107 @@ def test_no_diagnostic_reads_the_custom_content_table():
           len(known) > 0, "the scan found nothing at all, so its clean result is suspect")
 
 
+# ── G. Open submission: any user submits, admin approves ────────────────────
+
+def test_a_plain_USER_may_delete_their_own_unapproved_submission():
+    """The redesign generalises WHO submits. A submitter must be able to withdraw their
+    own work while it is still unapproved -- the same rule that applied to a sub_admin,
+    with the role floor lowered rather than the rule rewritten."""
+    db = fresh_db()
+    mk(db, slug="custom-mine", actor="dave")
+    mk(db, slug="custom-theirs", actor="erin")
+
+    check("own unapproved submission: allowed",
+          C.can_delete(C.get("custom-mine", db_path=db), "dave", "user") is True)
+    check("someone else's: refused",
+          C.can_delete(C.get("custom-theirs", db_path=db), "dave", "user") is False)
+
+    C.publish("custom-mine", actor="admin1", db_path=db)
+    check("their own, once APPROVED: refused",
+          C.can_delete(C.get("custom-mine", db_path=db), "dave", "user") is False,
+          "a submitter must not be able to withdraw what an admin approved")
+
+
+def test_viewonly_still_cannot_delete_anything():
+    """The floor moved to `user`, not to everybody. viewonly writes nothing."""
+    db = fresh_db()
+    mk(db, slug="custom-x", actor="vic")
+    check("viewonly refused even on their own draft",
+          C.can_delete(C.get("custom-x", db_path=db), "vic", "viewonly") is False)
+
+
+def test_sub_admin_and_admin_are_unaffected_by_the_lowered_floor():
+    """Lowering a floor must not change what the roles above it could already do."""
+    db = fresh_db()
+    mk(db, slug="custom-s", actor="sam")
+    check("sub_admin still deletes their own draft",
+          C.can_delete(C.get("custom-s", db_path=db), "sam", "sub_admin") is True)
+    check("admin still deletes anything",
+          C.can_delete(C.get("custom-s", db_path=db), "other", "admin") is True)
+
+
+# ── H. Per-user cap on UNAPPROVED submissions ───────────────────────────────
+
+def test_the_cap_counts_only_UNAPPROVED_submissions():
+    """An approved submission must not count against the author forever -- otherwise a
+    productive contributor is punished for being published, which is backwards."""
+    db = fresh_db()
+    for i in range(C.MAX_UNAPPROVED_PER_USER):
+        C.save_draft(slug="custom-d%d" % i, title="t", summary="s", body="b",
+                     actor="dave", db_path=db)
+    eq("at the cap", C.unapproved_count("dave", db_path=db),
+       C.MAX_UNAPPROVED_PER_USER)
+    check("one more is refused",
+          raises(C.CustomError,
+                 lambda: C.save_draft(slug="custom-over", title="t", summary="s",
+                                      body="b", actor="dave", db_path=db)))
+
+    C.publish("custom-d0", actor="admin1", db_path=db)
+    eq("publishing frees a slot", C.unapproved_count("dave", db_path=db),
+       C.MAX_UNAPPROVED_PER_USER - 1)
+    check("...and a new submission is accepted again",
+          C.save_draft(slug="custom-over", title="t", summary="s", body="b",
+                       actor="dave", db_path=db) is not None)
+
+
+def test_the_cap_is_PER_USER_not_global():
+    """A global cap would let one noisy account block everyone else -- a denial of
+    service dressed as a quota."""
+    db = fresh_db()
+    for i in range(C.MAX_UNAPPROVED_PER_USER):
+        C.save_draft(slug="custom-a%d" % i, title="t", summary="s", body="b",
+                     actor="dave", db_path=db)
+    check("a DIFFERENT user is unaffected",
+          C.save_draft(slug="custom-b0", title="t", summary="s", body="b",
+                       actor="erin", db_path=db) is not None)
+    eq("and their own count is 1", C.unapproved_count("erin", db_path=db), 1)
+
+
+def test_EDITING_an_existing_submission_does_not_consume_a_new_slot():
+    """Otherwise a user at the cap could not fix a typo in work they already submitted --
+    the cap would block correction rather than volume."""
+    db = fresh_db()
+    for i in range(C.MAX_UNAPPROVED_PER_USER):
+        C.save_draft(slug="custom-e%d" % i, title="t", summary="s", body="b",
+                     actor="dave", db_path=db)
+    check("editing one already at the cap is allowed",
+          C.save_draft(slug="custom-e0", title="fixed", summary="s", body="b2",
+                       actor="dave", db_path=db) is not None)
+    eq("count unchanged", C.unapproved_count("dave", db_path=db),
+       C.MAX_UNAPPROVED_PER_USER)
+
+
+def test_an_admin_is_not_capped():
+    """The cap is volume control against a wide submitting population; an admin
+    publishing their own material is not that population."""
+    db = fresh_db()
+    for i in range(C.MAX_UNAPPROVED_PER_USER + 2):
+        C.save_draft(slug="custom-adm%d" % i, title="t", summary="s", body="b",
+                     actor="admin1", role="admin", db_path=db)
+    check("admin exceeded the cap without refusal",
+          C.unapproved_count("admin1", db_path=db) > C.MAX_UNAPPROVED_PER_USER)
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("custom content: draft/publish, two ceilings, ownership-aware delete")
@@ -348,7 +461,7 @@ if __name__ == "__main__":
         test_an_unknown_status_can_never_be_stored,
         test_a_sub_admin_may_delete_only_their_OWN_UNPUBLISHED_draft,
         test_an_admin_may_delete_anything,
-        test_a_plain_user_may_delete_nothing,
+        test_only_viewonly_may_delete_nothing,
         test_delete_ENFORCES_rather_than_relying_on_the_caller_to_ask,
         test_a_DRAFT_is_invisible_even_at_all_users_with_an_entitlement,
         test_publishing_alone_does_not_make_it_visible,
@@ -356,6 +469,13 @@ if __name__ == "__main__":
         test_the_body_column_holds_SOURCE_never_rendered_html,
         test_render_body_of_a_missing_topic_is_empty_not_an_error,
         test_no_diagnostic_reads_the_custom_content_table,
+        test_a_plain_USER_may_delete_their_own_unapproved_submission,
+        test_viewonly_still_cannot_delete_anything,
+        test_sub_admin_and_admin_are_unaffected_by_the_lowered_floor,
+        test_the_cap_counts_only_UNAPPROVED_submissions,
+        test_the_cap_is_PER_USER_not_global,
+        test_EDITING_an_existing_submission_does_not_consume_a_new_slot,
+        test_an_admin_is_not_capped,
     ):
         print("\n%s" % fn.__name__)
         fn()
