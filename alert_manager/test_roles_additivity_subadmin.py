@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import roles as R                                                  # noqa: E402
 
-EXPECTED_CHECKS = 27
+EXPECTED_CHECKS = 29
 _pass = _fail = 0
 
 
@@ -136,18 +136,45 @@ def test_the_skip_is_NARROW_and_measurable():
         _restore(saved)
 
 
-def test_sub_admin_still_equals_user_without_unlocks():
-    """ADR 0026 D1's invariant, re-asserted here because a sub_admin-minimum ENTRY is
-    the one thing that could break it: such a route is reachable by rank alone, with no
-    unlock behind it. If this fails, the entry is wrong -- not the canary."""
+def test_a_sub_admin_MINIMUM_would_stop_the_dashboard_from_STARTING():
+    """⛔ A GUARD AGAINST A DESIGN, NOT A SANCTIONED BREAKAGE. Read this before adding
+    any ROUTE_MINIMUMS entry with a sub_admin minimum.
+
+    An earlier version of this test asserted the breakage as "expected", which a later
+    reader would reasonably take as licence to add such an entry. It is not. The
+    consequence is not a failing test:
+
+        _sub_admin_equals_user_without_unlocks() backs a _H.bad case
+          -> canary() returns False
+          -> _assert_canary_at_import() raises RuntimeError
+          -> roles.py does not import
+          -> THE DASHBOARD DOES NOT START.
+
+    Measured, not reasoned: with a sub_admin-minimum entry present, canary() reports
+    "known-bad case failed -- a sub_admin with no unlocks is exactly a standard user".
+
+    WHY the model forbids it: `may_with_unlocks()` states that a sub-admin with no
+    unlocks is EXACTLY a standard user. A sub_admin minimum makes rank alone sufficient,
+    so a no-unlock sub_admin reaches something a user cannot -- the invariant negated.
+
+    WHAT TO USE INSTEAD: give the endpoint ('admin', 'admin') and add it to a
+    CAPABILITY_ROUTES capability. `approve_enrollment` is the shipped reference and
+    yields exactly the intended split -- user denied, no-unlock sub_admin denied,
+    unlocked sub_admin allowed, admin allowed -- with the invariant intact.
+    """
     saved = dict(R.ROUTE_MINIMUMS)
     try:
         check("holds as shipped", R._sub_admin_equals_user_without_unlocks() is True)
         R.ROUTE_MINIMUMS["zz_subadmin_probe"] = (R.ROLE_SUB_ADMIN, R.ROLE_SUB_ADMIN)
         broke = R._sub_admin_equals_user_without_unlocks()
-        check("a sub_admin-minimum entry DOES break it, and that is expected",
+        check("a sub_admin-minimum entry violates the capability model",
               broke is False,
               "if this passes, the invariant no longer means what its name says")
+        ok, detail = R.canary()
+        check("...and therefore FAILS THE IMPORT CANARY (dashboard would not start)",
+              ok is False, "canary passed -- the startup consequence is gone")
+        check("...naming the invariant it broke",
+              "no unlocks" in (detail or ""), "detail=%r" % detail)
     finally:
         _restore(saved)
     check("restored", R._sub_admin_equals_user_without_unlocks() is True)
@@ -252,7 +279,7 @@ if __name__ == "__main__":
         test_a_sub_admin_minimum_entry_does_not_raise,
         test_the_sub_admin_entry_still_gates_correctly,
         test_the_skip_is_NARROW_and_measurable,
-        test_sub_admin_still_equals_user_without_unlocks,
+        test_a_sub_admin_MINIMUM_would_stop_the_dashboard_from_STARTING,
         test_a_TYPOD_role_still_fails_LOUDLY_rather_than_being_skipped,
         test_coverage_of_OTHER_routes_survives_the_skip,
         test_the_control_counts_COMPARISONS_not_pairs_generated,
