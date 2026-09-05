@@ -77,6 +77,75 @@ CONF_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nemesis-install.conf"
 # STEP 1/9 — PREFLIGHT CHECKS
 ###############################################################################
 
+# ── LAN interface selection ──────────────────────────────────────────────────
+# Reads `ip -4 -o addr show scope global` on STDIN and prints the interface that
+# faces the LAN, or nothing if it cannot tell. Split out from preflight_checks()
+# and fed on stdin specifically so it is testable against recorded `ip` output
+# rather than only against whatever host happens to run it.
+#
+# ⛔ DO NOT GO BACK TO THE DEFAULT ROUTE. This used to be
+# `ip route get 8.8.8.8 | grep -oP 'dev \K\S+'`. On any box whose default route
+# leaves via a VPN or tailnet -- which is the normal state for this product's own
+# operator, and common for its users -- that returns the TUNNEL interface, and
+# install_suricata() then writes it into suricata.yaml's af-packet section.
+# Suricata is then bound to an interface that carries none of the LAN traffic the
+# host-defence rules exist to detect.
+#
+# The failure is silent, which is what makes it serious: the install succeeds,
+# the service runs, the dashboard looks healthy, and the box is blind to exactly
+# the scans the rules were added for. Nothing reports an error. Measured on the
+# dev box 2026-08-06 -- internet routes leave via the tailnet interface, so the
+# old derivation returned the tailnet interface and address while Suricata was
+# in fact watching the LAN, because someone had corrected it by hand. A fresh
+# install would not get that correction.
+#
+# Same shape as scripts/deploy-suricata-rules.sh's derivation, which already
+# rejected the routing table for this reason: enumerate what the host actually
+# holds rather than asking where traffic happens to leave.
+_VIRTUAL_IFACE_RE='^(lo|tun|tap|wg|ppp|tailscale|zt|docker|br-|veth|virbr|vmnet|vboxnet)'
+
+pick_lan_iface() {
+    local line iface cidr addr best=""
+    while read -r line; do
+        [[ -n "$line" ]] || continue
+        iface=$(awk '{print $2}' <<<"$line")
+        cidr=$(awk '{print $4}' <<<"$line")
+        addr=${cidr%%/*}
+        [[ -n "$iface" && -n "$addr" ]] || continue
+        # Tunnels and virtual bridges are never the LAN-facing NIC.
+        [[ "$iface" =~ $_VIRTUAL_IFACE_RE ]] && continue
+        # RFC1918 is what HOME_NET means here. Take nothing else.
+        #
+        # This is also what excludes the tailnet: CGNAT 100.64.0.0/10 is not
+        # RFC1918, so a tailnet address is rejected here BY CONSEQUENCE rather
+        # than by a rule of its own. An explicit CGNAT test was written first and
+        # then removed -- mutation testing showed it could never fire, because
+        # anything it would have excluded fails this check one line later. A
+        # guard that cannot fire is worse than none: it tells the next reader
+        # that CGNAT is handled THERE, when it is actually handled here, so
+        # loosening this line would silently remove tailnet protection too.
+        if [[ "$addr" =~ ^10\. ]] \
+           || [[ "$addr" =~ ^192\.168\. ]] \
+           || [[ "$addr" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]]; then
+            # First match wins, but keep scanning so a second one can be seen.
+            if [[ -z "$best" ]]; then
+                best="$iface"
+            elif [[ "$best" != "$iface" ]]; then
+                # AMBIGUOUS. Two LAN-facing NICs is a real topology (a gateway
+                # with separate WAN/LAN legs), and guessing which one Suricata
+                # should watch would be exactly the plausible-looking wrong
+                # answer this rewrite exists to stop producing. Say nothing and
+                # let the caller ask.
+                echo ""
+                return 1
+            fi
+        fi
+    done
+    [[ -n "$best" ]] || return 1
+    echo "$best"
+}
+
+
 preflight_checks() {
     step_header "1/9" "Preflight Checks"
 
@@ -125,17 +194,34 @@ preflight_checks() {
     fi
     ok "Internet connectivity confirmed"
 
-    # Auto-detect outbound network interface
-    DETECTED_IFACE=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' | head -1 || true)
+    # Auto-detect the LAN-FACING interface (see pick_lan_iface above for why
+    # this must not come from the default route).
+    DETECTED_IFACE=$(ip -4 -o addr show scope global 2>/dev/null | pick_lan_iface || true)
     if [[ -z "$DETECTED_IFACE" ]]; then
-        die "Could not auto-detect network interface. Check your network connection."
+        die "Could not identify a LAN-facing network interface. Nemesis needs the \
+interface carrying this machine's private (RFC1918) address, not whichever one \
+the default route uses. If this host has two LAN-facing NICs, or only a public \
+address, set it by hand in /etc/nemesis.env after install."
     fi
     ok "Network interface: $DETECTED_IFACE"
 
-    # Auto-detect this machine's IP
-    DETECTED_IP=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'src \K\S+' | head -1 || true)
+    # Say so when the default route disagrees. Not fatal -- it is the EXPECTED
+    # state on a VPN/tailnet box, and is precisely the case the old derivation
+    # got wrong. Surfaced so the operator can see the choice was deliberate.
+    local _route_iface
+    _route_iface=$(ip route get 8.8.8.8 2>/dev/null | grep -oP 'dev \K\S+' | head -1 || true)
+    if [[ -n "$_route_iface" && "$_route_iface" != "$DETECTED_IFACE" ]]; then
+        info "Default route leaves via $_route_iface (VPN/tunnel); monitoring \
+$DETECTED_IFACE instead, which is the LAN-facing interface."
+    fi
+
+    # This machine's IP, taken from the interface chosen above rather than from
+    # the route's `src` -- otherwise it reports the tunnel address on exactly the
+    # boxes this fix is for.
+    DETECTED_IP=$(ip -4 -o addr show dev "$DETECTED_IFACE" scope global 2>/dev/null \
+                  | awk '{print $4}' | cut -d/ -f1 | head -1 || true)
     if [[ -z "$DETECTED_IP" ]]; then
-        die "Could not auto-detect IP address."
+        die "Could not auto-detect IP address on $DETECTED_IFACE."
     fi
     ok "IP address: $DETECTED_IP"
 
