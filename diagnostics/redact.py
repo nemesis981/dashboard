@@ -11,6 +11,14 @@ scrubber for text that may leave the box (e.g. Submit-to-Support) — see
 diagnostics-and-access-master-plan.md §2.1 for why the narrower secrets-only
 version of this module was a privacy gap, not just an incompleteness.
 
+TWO SCOPES, and the distinction is the whole point of this module's existence
+(see `redact()`). `SCOPE_EXPORT` runs every pass and is for text that LEAVES the
+box. `SCOPE_DISPLAY` runs the secret passes ONLY and is for text rendered back
+to the appliance's own owner in their own browser, where there is no third
+party to protect against and stripping their own addressing destroys the
+information they are looking at. Default is EXPORT, so a caller that does not
+think about it gets the safest behaviour.
+
 NOT `alert_manager/nemesis_pseudonymize.py`. That module maps addresses/names
 to STABLE, REVERSIBLE tokens because the AI call it protects needs relational
 reasoning to survive ("host-A is scanning host-B"). This module DESTROYS
@@ -95,6 +103,14 @@ _WITHHELD = ("[OUTPUT WITHHELD — redaction unavailable: one of the redaction "
              "reading process can read /etc/nemesis.env (mode 640 "
              "root:nemesis) and the devices database; see the "
              "nemesis.diagnostics.redact log for the exact cause.]")
+
+# ── redaction scopes ─────────────────────────────────────────────────────────
+# EXPORT is the default everywhere on purpose: an unscoped call is a call that
+# did not think about it, and the safe answer to "I don't know where this text
+# is going" is to assume it leaves the box.
+SCOPE_EXPORT = "export"      # every pass — text may leave the box
+SCOPE_DISPLAY = "display"    # secret passes only — the owner's own screen
+_SCOPES = (SCOPE_EXPORT, SCOPE_DISPLAY)
 
 # Keys that are definitely secrets even if short
 _SECRET_KEYS = {
@@ -287,22 +303,49 @@ def _load_pseudonymize_helpers():
             "cannot load address-matching pattern module: %s" % exc) from exc
 
 
-def redact(text: str) -> str:
-    """Replace all known secrets, device/host names, IP/MAC addresses,
-    LAN/mDNS/Tailscale FQDNs, and email addresses in `text` with [REDACTED].
+def redact(text: str, scope: str = SCOPE_EXPORT) -> str:
+    """Replace secrets — and, at EXPORT scope, identifying network data — with
+    [REDACTED].
 
-    WITHHOLDS the text entirely if any redaction source could not be
-    determined. Under-redacted output is strictly worse than no output: the
-    caller believes scrubbing happened either way, and only one of those
-    beliefs is survivable.
+    `scope=SCOPE_EXPORT` (the default) runs every pass: known secrets, device/
+    host names, IP/MAC addresses, LAN/mDNS/Tailscale FQDNs, emails, and
+    key-shaped strings. Use it for anything that leaves the box.
+
+    `scope=SCOPE_DISPLAY` runs the SECRET passes only (1 and 6). Use it for text
+    rendered back to the appliance's own owner. Stripping a household's own
+    addresses and device names from the screen of the person who owns them
+    protects nobody and destroys the answer they are looking at — see
+    `diagnostics/__init__.py:run_check` for the incident that established this.
+    Credentials are still removed, because a screen gets photographed and pasted
+    into support requests.
+
+    WITHHOLDS the text entirely if a redaction source THIS SCOPE NEEDS could not
+    be determined. Under-redacted output is strictly worse than no output: the
+    caller believes scrubbing happened either way, and only one of those beliefs
+    is survivable. DISPLAY scope needs only the secret list, so an unreadable
+    devices DB no longer withholds the owner's own diagnostics — it never
+    contributed to display output in the first place.
+
+    An unrecognised scope is treated as EXPORT and logged. Fail closed on
+    ambiguity: "I cannot tell where this is going" must not resolve to the
+    permissive answer.
     """
     if not text:
         return text
 
+    if scope not in _SCOPES:
+        log.error("unknown redaction scope %r — treating as %r (fail closed)",
+                  scope, SCOPE_EXPORT)
+        scope = SCOPE_EXPORT
+
+    full = (scope == SCOPE_EXPORT)
+
     try:
         secrets = _load_secrets()
-        raw_names = _load_known_names()
-        addr_re, is_real_address, scrubbable_names = _load_pseudonymize_helpers()
+        if full:
+            raw_names = _load_known_names()
+            addr_re, is_real_address, scrubbable_names = \
+                _load_pseudonymize_helpers()
     except RedactionUnavailable as exc:
         # Loud, not silent — this is a security-relevant degradation and the
         # operator needs to be able to find it. The returned marker says the
@@ -318,32 +361,37 @@ def redact(text: str) -> str:
         if secret in text:
             text = text.replace(secret, "[REDACTED]")
 
-    # 2. Known device/host names — longest first, case-insensitive,
-    #    boundary-anchored. Mirrors nemesis_pseudonymize.pseudonymize()'s own
-    #    name pass, and for the same reason: replacing a SHORTER name first
-    #    can strand a distinguishing suffix ("Reception-Laptop" ->
-    #    "[REDACTED]-Laptop", a partial leak wearing a redacted label).
-    #    Runs before addresses/FQDNs for the same reason nemesis_pseudonymize
-    #    does names first: a name can itself contain digits and dots.
-    for name in scrubbable_names(raw_names):
-        pattern = re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])",
-                              re.IGNORECASE)
-        text = pattern.sub("[REDACTED]", text)
+    # ── passes 2-5 are the IDENTIFIER passes: EXPORT scope only. ────────────
+    # At DISPLAY scope the reader is the owner of the very network being
+    # described, so these strip information from the only person entitled to
+    # all of it.
+    if full:
+        # 2. Known device/host names — longest first, case-insensitive,
+        #    boundary-anchored. Mirrors nemesis_pseudonymize.pseudonymize()'s own
+        #    name pass, and for the same reason: replacing a SHORTER name first
+        #    can strand a distinguishing suffix ("Reception-Laptop" ->
+        #    "[REDACTED]-Laptop", a partial leak wearing a redacted label).
+        #    Runs before addresses/FQDNs for the same reason nemesis_pseudonymize
+        #    does names first: a name can itself contain digits and dots.
+        for name in scrubbable_names(raw_names):
+            pattern = re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])",
+                                  re.IGNORECASE)
+            text = pattern.sub("[REDACTED]", text)
 
-    # 3. IP / MAC — pattern match, then validated. The validation is what
-    #    rejects a version-number-shaped near-miss ("build 1.2.3.4") that the
-    #    regex alone would over-redact — same two-stage approach
-    #    nemesis_pseudonymize.pseudonymize() uses for the identical reason.
-    def _addr_sub(match):
-        raw = match.group(0)
-        return "[REDACTED]" if is_real_address(raw) else raw
-    text = addr_re.sub(_addr_sub, text)
+        # 3. IP / MAC — pattern match, then validated. The validation is what
+        #    rejects a version-number-shaped near-miss ("build 1.2.3.4") that the
+        #    regex alone would over-redact — same two-stage approach
+        #    nemesis_pseudonymize.pseudonymize() uses for the identical reason.
+        def _addr_sub(match):
+            raw = match.group(0)
+            return "[REDACTED]" if is_real_address(raw) else raw
+        text = addr_re.sub(_addr_sub, text)
 
-    # 4. LAN/mDNS/Tailscale FQDNs.
-    text = _HOSTNAME_SUFFIX_PATTERN.sub("[REDACTED]", text)
+        # 4. LAN/mDNS/Tailscale FQDNs.
+        text = _HOSTNAME_SUFFIX_PATTERN.sub("[REDACTED]", text)
 
-    # 5. Email addresses.
-    text = _EMAIL_PATTERN.sub("[REDACTED]", text)
+        # 5. Email addresses.
+        text = _EMAIL_PATTERN.sub("[REDACTED]", text)
 
     # 6. Key-shaped strings not already caught above (an unknown API key, or
     #    one whose value changed since the env file was last read). Runs last,
@@ -360,9 +408,13 @@ def redact(text: str) -> str:
     return text
 
 
-def redact_result(result: dict) -> dict:
-    """Apply redaction to the 'output' and 'summary' fields of a check result dict."""
+def redact_result(result: dict, scope: str = SCOPE_EXPORT) -> dict:
+    """Apply redaction to the 'output' and 'summary' fields of a check result dict.
+
+    Defaults to EXPORT for the same reason `redact()` does: an unscoped call is
+    one that did not consider where the text is going.
+    """
     out = dict(result)
-    out["output"] = redact(out.get("output", ""))
-    out["summary"] = redact(out.get("summary", ""))
+    out["output"] = redact(out.get("output", ""), scope=scope)
+    out["summary"] = redact(out.get("summary", ""), scope=scope)
     return out
