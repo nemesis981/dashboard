@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, redirect, url_for, render_template, session, abort, Response
 import requests
+import hashlib
 import subprocess
 import sqlite3
 import json
@@ -8784,6 +8785,40 @@ make another. All three describe the same conclusion; only the reader changes.
 }"""
 
 
+def _alert_cache_key(rule_id, addr_map):
+    """Cache key for an alert explanation, BOUND TO THE ADDRESS MAPPING.
+
+    ⛔ The mapping is part of the key, and that is the whole point.
+
+    On this path the reply is cached TOKENIZED: `ai_engine.analyze()` resolves
+    before caching, but its own pass finds no addresses here because the body
+    arrived already pseudonymized, so its `resolve()` is a no-op and what lands
+    in `ai_cache` still says "host-A". The real resolution happens back in this
+    request, against `_addr_map` rebuilt from TODAY's body.
+
+    Keying on `rule_id` alone therefore let the same rule firing later from a
+    DIFFERENT source address hit the old entry: `host-A` resolved to the new
+    address while the cached text described the old one. An explanation about
+    host A, silently attributed to host B, for up to `cache_hours` (24). Wrong
+    rather than broken -- nothing errors, the reader just gets confident,
+    incorrect attribution in a security explanation.
+
+    Including a fingerprint of the mapping makes a hit possible only when every
+    address is identical, which is exactly the condition under which reusing the
+    reply is correct. A repeat alert between the same hosts still hits; one whose
+    addresses changed simply misses and pays for a fresh call, which is the
+    outcome that was always intended.
+
+    Sorted before hashing so the key is stable regardless of dict order. An empty
+    map (a body with no addresses) yields a stable fingerprint of its own rather
+    than a special case.
+    """
+    fp = hashlib.sha256(
+        "\x00".join("%s=%s" % (t, addr_map[t]) for t in sorted(addr_map))
+        .encode("utf-8")).hexdigest()[:16]
+    return "alert_%s_%s" % (rule_id, fp)
+
+
 @app.route("/api/analyze/<rule_id>", methods=["POST"])
 def analyze_alert(rule_id):
     """POST + JSON content-type only -- this route SPENDS MONEY on an AI call.
@@ -8995,7 +9030,7 @@ def analyze_alert(rule_id):
             # only ever looks at one tier -- the known cost of one-call-three-
             # variants over one-call-per-tier-on-demand.
             max_tokens=1200,
-            cache_key=f"alert_{rule_id}",
+            cache_key=_alert_cache_key(rule_id, _addr_map),
             cache_hours=24,
             # job_id engages ai_engine's in-flight dedup. The mechanism already
             # existed but this caller never passed one, so two concurrent
