@@ -44,7 +44,7 @@ sys.path.insert(0, os.path.dirname(_HERE))       # repo root, for the package
 _pkg = importlib.import_module("diagnostics")    # noqa: E402
 R = importlib.import_module("diagnostics.redact")  # noqa: E402
 
-EXPECTED_CHECKS = 39
+EXPECTED_CHECKS = 73
 
 _results = []
 
@@ -235,6 +235,142 @@ def main():
     # was caused by the patch and not by something permanent.
     check("CONTROL: sources restored -> display redaction resumes",
           R.redact("plain text", scope=R.SCOPE_DISPLAY) == "plain text", True)
+
+    # ── key-NAME classifier: what makes a value a secret at display scope ───
+    # Every name below is already present in tracked files (verified before
+    # pinning them here), so this is not a Rule-8 disclosure.
+    print("\ndisplay-scope secret classifier keys on the key NAME, not length")
+    SECRET_NAMES = ("ABUSEIPDB_KEY", "IPINFO_TOKEN", "ANTHROPIC_API_KEY",
+                    "WATCHDOG_PASSWORD", "PIHOLE_PASSWORD",
+                    "TAILSCALE_OAUTH_CLIENT_SECRET", "NEMESIS_DOOR_SECRET",
+                    "EMAIL_SENDER_SALT")
+    CONFIG_NAMES = ("SMTP_HOST", "PIHOLE_IP", "LAN_SUBNET", "NEMESIS_GH_REPO",
+                    "NEMESIS_AGENT_EXE", "NEMESIS_PUBLIC_URL",
+                    "TAILSCALE_OAUTH_CLIENT_ID")
+    for k in SECRET_NAMES:
+        check("  %s reads as a credential" % k,
+              bool(R._SECRET_NAME_PATTERN.search(k)), True)
+    for k in CONFIG_NAMES:
+        check("  %s does NOT read as a credential" % k,
+              bool(R._SECRET_NAME_PATTERN.search(k)), False)
+    # the paired-key asymmetry is the whole reason CLIENT_ID is on that list
+    check("  OAuth pair splits: _SECRET matches, _ID does not",
+          bool(R._SECRET_NAME_PATTERN.search("TAILSCALE_OAUTH_CLIENT_SECRET"))
+          and not bool(R._SECRET_NAME_PATTERN.search(
+              "TAILSCALE_OAUTH_CLIENT_ID")), True)
+    # anchoring: a keyword embedded in a word is not a match
+    check("  MONKEY_BUSINESS is not a credential (anchored, not substring)",
+          bool(R._SECRET_NAME_PATTERN.search("MONKEY_BUSINESS")), False)
+    check("  API_KEY_V2 IS a credential (interior match still anchored)",
+          bool(R._SECRET_NAME_PATTERN.search("API_KEY_V2")), True)
+
+    # ── the REAL _nonsecret_env_values(), against a real file ───────────────
+    # Every other display test patches this function, so without this block its
+    # classification loop is never executed and a mutation that made it return
+    # every value -- leaking credentials to the screen -- survived the suite.
+    # Found by mutation M9 while writing this file; the fix is to exercise the
+    # branch, not to trust that the patched stub implies the real one works.
+    print("\nreal _nonsecret_env_values() classifies a real env file")
+    import tempfile
+    fd, envpath = tempfile.mkstemp(prefix="nemesis-test-env-")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("# comment line\n"
+                     "\n"
+                     "LAN_SUBNET=198.51.100.0/22\n"
+                     "SMTP_HOST=mail.example.com\n"
+                     "TAILSCALE_OAUTH_CLIENT_ID=public-id-value\n"
+                     "WATCHDOG_PASSWORD=hunter2-not-a-real-password\n"
+                     "NEMESIS_DOOR_SECRET=door-secret-value\n"
+                     # in _SECRET_KEYS but its NAME does not match the
+                     # keyword pattern -- the only key of that shape, and
+                     # therefore the only one that proves the _SECRET_KEYS
+                     # clause carries its own weight (mutation M13).
+                     "WATCHDOG_EMAIL=alerts@example.com\n"
+                     "EMPTY_VALUE=\n")
+        rp = _patch(R, "_ENV_FILE", envpath)
+        try:
+            got = R._nonsecret_env_values()
+        finally:
+            rp()
+        check("real classifier keeps LAN_SUBNET as non-secret",
+              "198.51.100.0/22" in got, True)
+        check("real classifier keeps SMTP_HOST as non-secret",
+              "mail.example.com" in got, True)
+        check("real classifier keeps OAuth CLIENT_ID as non-secret",
+              "public-id-value" in got, True)
+        check("real classifier EXCLUDES a _PASSWORD value",
+              "hunter2-not-a-real-password" in got, False)
+        check("real classifier EXCLUDES a _SECRET value",
+              "door-secret-value" in got, False)
+        check("real classifier EXCLUDES WATCHDOG_EMAIL via _SECRET_KEYS",
+              "alerts@example.com" in got, False)
+        check("...and it is _SECRET_KEYS doing that, not the name pattern",
+              bool(R._SECRET_NAME_PATTERN.search("WATCHDOG_EMAIL")), False)
+        check("real classifier returns exactly the three non-secrets",
+              len(got), 3)
+    finally:
+        os.unlink(envpath)
+
+    # ── the ufw_rules defect, end to end ────────────────────────────────────
+    print("\nnon-secret config is visible on display, still stripped on export")
+    CONFIG_VAL = "198.51.100.0/22"          # stands in for LAN_SUBNET
+    CRED_VAL = "hunter2-not-a-real-password"
+    UFW_LINE = "22/tcp   LIMIT IN   %s   # rate-limit ssh" % CONFIG_VAL
+    CFG_LINE = UFW_LINE + "  token=" + CRED_VAL
+
+    r5 = _patch(R, "_load_secrets", lambda: {CONFIG_VAL, CRED_VAL})
+    r6 = _patch(R, "_nonsecret_env_values", lambda: {CONFIG_VAL})
+    try:
+        dis = R.redact(CFG_LINE, scope=R.SCOPE_DISPLAY)
+        check("display: LAN CIDR visible (the ufw_rules defect)",
+              CONFIG_VAL in dis, True)
+        check("display: credential still stripped", CRED_VAL not in dis, True)
+
+        # EXPORT MUST BE UNAFFECTED -- this is the property the whole option
+        # was chosen for, so it is asserted directly rather than assumed.
+        exp = R.redact(CFG_LINE)
+        check("export: CIDR still stripped (export unchanged)",
+              CONFIG_VAL not in exp, True)
+        check("export: credential still stripped", CRED_VAL not in exp, True)
+
+        # ...and prove export never even consults the classifier: make it claim
+        # EVERY value is non-secret and confirm export output does not budge.
+        r7 = _patch(R, "_nonsecret_env_values",
+                    lambda: {CONFIG_VAL, CRED_VAL})
+        try:
+            check("export ignores the display classifier entirely",
+                  R.redact(CFG_LINE) == exp, True)
+        finally:
+            r7()
+    finally:
+        r6(); r5()
+
+    # ── classifier read failure degrades to over-redaction, never a leak ────
+    print("\nan unreadable env file makes display hide MORE, never less")
+    r9 = _patch(R, "_load_secrets", lambda: {CONFIG_VAL, CRED_VAL})
+    try:
+        # _nonsecret_env_values swallows its own read error and returns empty,
+        # so nothing is subtracted and display reverts to redacting everything.
+        r10 = _patch(R, "_ENV_FILE", "/nonexistent/dir/nemesis.env")
+        try:
+            out = R.redact(CFG_LINE, scope=R.SCOPE_DISPLAY)
+            check("degraded display still strips the credential",
+                  CRED_VAL not in out, True)
+            check("degraded display over-redacts config rather than leaking",
+                  CONFIG_VAL not in out, True)
+        finally:
+            r10()
+        # CONTROL: with the classifier working again, config comes back --
+        # proves the two checks above were caused by the patch, not permanent.
+        r11 = _patch(R, "_nonsecret_env_values", lambda: {CONFIG_VAL})
+        try:
+            check("CONTROL: classifier restored -> config visible again",
+                  CONFIG_VAL in R.redact(CFG_LINE, scope=R.SCOPE_DISPLAY), True)
+        finally:
+            r11()
+    finally:
+        r9()
 
     passed = sum(1 for _, ok in _results if ok)
     ran = len(_results)

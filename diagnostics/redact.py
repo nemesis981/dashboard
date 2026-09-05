@@ -118,6 +118,33 @@ _SECRET_KEYS = {
     "WATCHDOG_EMAIL", "WATCHDOG_PASSWORD", "PIHOLE_PASSWORD",
 }
 
+# Key NAMES that denote a credential regardless of value length. This is the
+# DISPLAY-scope classifier: at display scope a value is redacted because of what
+# its key is CALLED, not because it happens to be 8 characters long.
+#
+# WHY THE LENGTH HEURISTIC IS WRONG FOR DISPLAY. `_MIN_SECRET_LEN` treats every
+# env value >= 8 chars as a secret, which is a sound catch-all for text LEAVING
+# the box (an unanticipated credential is caught even if nobody listed its key).
+# On the owner's own screen it is simply wrong: measured 2026-09-05, it swept in
+# SMTP_HOST, PIHOLE_IP, LAN_SUBNET, NEMESIS_GH_REPO, NEMESIS_AGENT_EXE,
+# NEMESIS_PUBLIC_URL and TAILSCALE_OAUTH_CLIENT_ID -- none of them secrets. The
+# visible consequence was the ufw_rules check rendering the CIDR its own ALLOW
+# rules apply to as [REDACTED], i.e. hiding the single most important fact in a
+# firewall rule from the person reviewing it.
+#
+# TAILSCALE_OAUTH_CLIENT_ID is deliberately NOT matched (operator-confirmed
+# 2026-09-05): an OAuth client id is public by design -- it travels in the
+# authorization URL -- while the paired ..._CLIENT_SECRET matches and stays
+# hidden. That asymmetry is the point of the pair.
+#
+# Anchored on _ or string boundary so it matches API_KEY and KEY_V2 but not
+# MONKEY. Export scope does not consult this at all.
+_SECRET_NAME_PATTERN = re.compile(
+    r'(?:^|_)(?:KEY|KEYS|SECRET|SECRETS|TOKEN|TOKENS|PASSWORD|PASSWD|'
+    r'PASSPHRASE|SALT|CREDENTIAL|CREDENTIALS|APIKEY|PRIVKEY)(?:_|$)',
+    re.IGNORECASE,
+)
+
 # Pattern for things that look like API keys even if not in env file
 _KEY_PATTERN = re.compile(
     r'(sk-ant-[A-Za-z0-9\-_]{20,}|[A-Za-z0-9+/]{32,}={0,2})'
@@ -224,6 +251,49 @@ def _load_secrets() -> set:
         if v and len(v) >= _MIN_SECRET_LEN:
             secrets.add(v)
     return secrets
+
+
+def _nonsecret_env_values() -> set:
+    """Env values whose KEY does not denote a credential — DISPLAY scope only.
+
+    `redact()` subtracts this from `_load_secrets()` at display scope, so what
+    remains is `_SECRET_KEYS` plus every key matching `_SECRET_NAME_PATTERN`.
+    Export never calls this and is unaffected.
+
+    DEGRADES TOWARDS MORE REDACTION, NEVER LESS. An unreadable env file returns
+    the empty set, so nothing is subtracted and display falls back to the old
+    over-redacting behaviour. That is a deliberate exception to this module's
+    usual fail-closed-by-raising rule, and it is safe in the one direction that
+    matters: the failure can only ever hide more, never leak more. Withholding
+    the page instead would punish the owner for a permissions problem that
+    cannot expose anything. Logged loudly, because silently reverting to the
+    behaviour this scope exists to fix is exactly the kind of quiet regression
+    that goes unnoticed for weeks.
+    """
+    keep = set()
+    try:
+        with open(_ENV_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key, val = key.strip(), val.strip()
+                if not val:
+                    continue
+                if key in _SECRET_KEYS or _SECRET_NAME_PATTERN.search(key):
+                    continue
+                keep.add(val)
+    except FileNotFoundError:
+        # Legitimately empty: no file means no file-derived values at all, so
+        # there is nothing to subtract. Same distinction _load_secrets() draws.
+        return set()
+    except Exception as exc:                      # noqa: BLE001
+        log.error("cannot read %s to classify non-secret config values; "
+                  "display output falls back to redacting every env value "
+                  "(over-redaction, not a leak): %s", _ENV_FILE, exc)
+        return set()
+    return keep
 
 
 def _load_known_names() -> set:
@@ -346,6 +416,10 @@ def redact(text: str, scope: str = SCOPE_EXPORT) -> str:
             raw_names = _load_known_names()
             addr_re, is_real_address, scrubbable_names = \
                 _load_pseudonymize_helpers()
+        else:
+            # DISPLAY: keep only values whose KEY denotes a credential. The
+            # >=8-char catch-all stays in force for export, untouched.
+            secrets = secrets - _nonsecret_env_values()
     except RedactionUnavailable as exc:
         # Loud, not silent — this is a security-relevant degradation and the
         # operator needs to be able to find it. The returned marker says the
