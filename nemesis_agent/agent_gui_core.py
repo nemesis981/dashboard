@@ -465,6 +465,19 @@ def checkin_age(status):
 def engine_problems(status):
     """Engines the agent itself reports as not fully working, worst first.
 
+    ⛔ THE SHAPE IS A DICT KEYED BY NAME, NOT A LIST. engine_inventory.inventory()
+    documents it in its own docstring:
+        {"engines": {name: {capability, version, ruleset_version, detail}, ...}}
+    The values carry NO "engine"/"name" key -- the dict key IS the name.
+
+    This function's first version checked isinstance(engines, (list, tuple)) and
+    iterated expecting per-item name keys, so it returned [] for every real
+    payload, on a box where yara and behavioral were both genuinely absent. It
+    passed 125 checks and four mutations because the TEST FIXTURE was invented
+    rather than taken from the contract. A fixture that diverges from production
+    proves the function correct in a world that does not exist. See
+    test_agent_gui_core.py, which now drives one case from inventory() itself.
+
     Reads the CACHED inventory the last heartbeat computed (agent.py populates it
     in `_engine_inventory()`), never a fresh probe: the GUI polls this every few
     seconds and the probes shell out with real timeouts.
@@ -476,23 +489,34 @@ def engine_problems(status):
     if not isinstance(status, dict):
         return []
     inv = status.get("engine_inventory")
-    if not isinstance(inv, dict):
+    if inv is None:
         return []
+    if not isinstance(inv, dict) or "engines" not in inv:
+        # Present but unreadable. NOT the same as "no problems" -- surface it,
+        # because "we cannot determine engine health" reading as "healthy" is the
+        # exact failure this whole change exists to remove.
+        return [{"name": "engine inventory", "capability": "unreadable",
+                 "detail": "the agent reported engine health in a shape this "
+                           "version does not understand"}]
     engines = inv.get("engines")
-    if not isinstance(engines, (list, tuple)):
-        return []
+    if not isinstance(engines, dict):
+        return [{"name": "engine inventory", "capability": "unreadable",
+                 "detail": "engine list was %s, expected a mapping"
+                           % type(engines).__name__}]
     out = []
-    for e in engines:
+    for name, e in engines.items():
         if not isinstance(e, dict):
+            out.append({"name": str(name), "capability": "unreadable",
+                        "detail": "malformed entry"})
             continue
         cap = str(e.get("capability", "")).lower()
         if cap in ("available", "ok"):
             continue
-        out.append({"name": e.get("engine") or e.get("name") or "?",
-                    "capability": cap or "unknown",
+        out.append({"name": str(name), "capability": cap or "unknown",
                     "detail": e.get("detail") or ""})
     # absent before degraded: a missing layer is worse than a crippled one.
-    out.sort(key=lambda x: (x["capability"] != "absent", x["name"]))
+    _rank = {"absent": 0, "unreadable": 1}
+    out.sort(key=lambda x: (_rank.get(x["capability"], 2), x["name"]))
     return out
 
 

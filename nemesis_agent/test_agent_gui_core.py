@@ -271,44 +271,88 @@ def main():
     check("shutting down -> bad", core.overall_state(
         {"running": False, "conf": {}})[0], "bad")
 
+    def _first_cap(problems):
+        """First problem's capability, or a sentinel. NEVER indexes blind: a
+        mutation that empties the list must FAIL cleanly, not raise IndexError --
+        a crash aborts the remaining checks, changes the count, and reads as
+        silence to any harness that greps for FAIL."""
+        return problems[0]["capability"] if problems else "<none returned>"
+
     print("\nengine health — a config flag is not a working engine")
-    # Until 2026-09-06 the local GUI could show "Intrusion detection: ON" from a
-    # CONFIG flag while the engine behind it was dead, with no local signal at all.
-    # engine_inventory was computed every heartbeat and attached ONLY to the
-    # server-bound payload. During a server outage the GUI is the only place a user
-    # can look, so that was precisely when it said least.
+    # ⛔ THE FIXTURES BELOW USE THE REAL SHAPE, AND THE FIRST VERSION DID NOT.
+    # engine_inventory.inventory() returns {"engines": {name: {...}}} -- a DICT
+    # keyed by name, values carrying NO "engine" key. The original tests built a
+    # LIST of dicts with an "engine" field, invented rather than read from the
+    # contract, so engine_problems() returned [] for every real payload while
+    # passing 125 checks and four mutations. A fixture that diverges from
+    # production proves the function correct in a world that does not exist.
     _ok_base = {"conf": {"enrollment_status": "approved"},
                 "last_checkin_ok_at": 940.0, "last_checkin_error": None, "now": 1000.0}
+
+    # ── the contract itself, driven by the real producer ─────────────────────
+    # This is the check that would have caught the original bug. It calls
+    # inventory() rather than trusting a hand-built shape, so a future change to
+    # its return type breaks HERE instead of silently emptying the GUI.
+    import engine_inventory as _ei
+    _real = _ei.inventory()
+    check("inventory() returns a dict for 'engines' (the contract)",
+          isinstance(_real.get("engines"), dict), True)
+    check("...and its values carry no 'engine' key -- the dict key IS the name",
+          any("engine" in v for v in _real["engines"].values()), False)
+    check("engine_problems handles the REAL producer output without crashing",
+          isinstance(core.engine_problems({"engine_inventory": _real}), list), True)
+    # Every non-available engine in the real inventory must be reported.
+    _expected = {n for n, v in _real["engines"].items()
+                 if str(v.get("capability", "")).lower() not in ("available", "ok")}
+    check("every non-available engine in the REAL inventory is surfaced",
+          {p["name"] for p in core.engine_problems({"engine_inventory": _real})},
+          _expected)
+
+    # ── hand-built cases, in the real shape ──────────────────────────────────
     check("no inventory at all -> unchanged, still ok",
           core.overall_state(dict(_ok_base))[0], "ok")
     check("all engines available -> still ok", core.overall_state(dict(
-        _ok_base, engine_inventory={"engines": [
-            {"engine": "clamav", "capability": "available"},
-            {"engine": "yara", "capability": "available"}]}))[0], "ok")
+        _ok_base, engine_inventory={"engines": {
+            "clamav": {"capability": "available"},
+            "yara": {"capability": "available"}}}))[0], "ok")
     check("a DEGRADED engine -> bad, not ok", core.overall_state(dict(
-        _ok_base, engine_inventory={"engines": [
-            {"engine": "clamav", "capability": "degraded",
-             "detail": "no signature database reported"}]}))[0], "bad")
+        _ok_base, engine_inventory={"engines": {
+            "clamav": {"capability": "degraded",
+                       "detail": "no signature database reported"}}}))[0], "bad")
     check("...and the reason is surfaced, not just a colour", "signature database" in
-          core.overall_state(dict(_ok_base, engine_inventory={"engines": [
-              {"engine": "clamav", "capability": "degraded",
-               "detail": "no signature database reported"}]}))[1], True)
+          core.overall_state(dict(_ok_base, engine_inventory={"engines": {
+              "clamav": {"capability": "degraded",
+                         "detail": "no signature database reported"}}}))[1], True)
     check("an ABSENT engine -> bad", core.overall_state(dict(
-        _ok_base, engine_inventory={"engines": [
-            {"engine": "yara", "capability": "absent", "detail": "yara not on PATH"}]}))[0], "bad")
+        _ok_base, engine_inventory={"engines": {
+            "yara": {"capability": "absent", "detail": "yara not on PATH"}}}))[0], "bad")
     check("absent is reported before degraded (worse first)",
-          core.engine_problems({"engine_inventory": {"engines": [
-              {"engine": "clamav", "capability": "degraded"},
-              {"engine": "yara", "capability": "absent"}]}})[0]["name"], "yara")
+          ([p["name"] for p in core.engine_problems({"engine_inventory": {"engines": {
+              "clamav": {"capability": "degraded"},
+              "yara": {"capability": "absent"}}}})] or ["<none>"])[0], "yara")
     check("engine health OUTRANKS a failed check-in", core.overall_state(dict(
-        _ok_base, last_checkin_error="HTTP 401", engine_inventory={"engines": [
-            {"engine": "clamav", "capability": "absent", "detail": "not on PATH"}]}))[0], "bad")
+        _ok_base, last_checkin_error="HTTP 401", engine_inventory={"engines": {
+            "clamav": {"capability": "absent", "detail": "not on PATH"}}}))[0], "bad")
     # CONTROL: without the engine problem that same status is only a warn, so the
     # assertion above is measuring the engine branch and not something else.
     check("CONTROL: the same status without an engine problem is only warn",
           core.overall_state(dict(_ok_base, last_checkin_error="HTTP 401"))[0], "warn")
-    check("a malformed inventory is ignored, never crashes",
-          core.engine_problems({"engine_inventory": "not-a-dict"}), [])
+
+    # ── an UNREADABLE inventory must not read as healthy ─────────────────────
+    # The original bug's real damage: a shape it did not understand became [],
+    # which is indistinguishable from "everything is fine".
+    check("a LIST (the old wrong shape) is reported unreadable, NOT empty",
+          _first_cap(core.engine_problems({"engine_inventory": {"engines": [
+              {"engine": "clamav", "capability": "absent"}]}})),
+          "unreadable")
+    check("...and that makes the overall state bad, not ok", core.overall_state(dict(
+        _ok_base, engine_inventory={"engines": [{"engine": "x", "capability": "absent"}]}))[0],
+        "bad")
+    check("a non-dict inventory is reported unreadable",
+          _first_cap(core.engine_problems({"engine_inventory": "not-a-dict"})),
+          "unreadable")
+    check("absent inventory (never reported) stays empty, not unreadable",
+          core.engine_problems({"engine_inventory": None}), [])
 
     print("\ncheck-in staleness — a 5-minute blip and a 5-day outage are not the same")
     _stale = dict(_ok_base)
