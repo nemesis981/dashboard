@@ -38,7 +38,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
 # changes, and a check that cries wolf gets deleted. The formula still catches what
 # the convention exists for: a check skipped by a short-circuit alters the RAN count
 # without altering the topic count.
-#   104 fixed checks + one per topic  (was 82 before the state/default
+#   107 fixed checks + one per topic  (was 82 before the state/default
 #   endpoint split; was the literal 88 at 6 topics before that)
 EXPECTED_CHECKS = None   # set immediately after the learning_topics import
 _pass = _fail = 0
@@ -69,7 +69,7 @@ except BaseException:          # dashboard sys.exit()s on config failure
 import learning as L                                              # noqa: E402
 import learning_topics as LT                                      # noqa: E402
 
-EXPECTED_CHECKS = 104 + len(LT.all_slugs())
+EXPECTED_CHECKS = 107 + len(LT.all_slugs())
 import roles as R                                                 # noqa: E402
 
 app = dashboard.app
@@ -350,17 +350,24 @@ def test_the_default_toggle_cannot_clobber_the_ceiling():
     written was always a legal state.
     """
     slug = LT.all_slugs()[0]
-    L.set_topic_state(slug, L.STATE_ADMIN_ONLY)
-    L.set_in_default(slug, False)
     c = _admin_client()
 
-    r = c.post("/api/learn/topic/%s/default" % slug, json={"in_default": True})
-    check("the default toggle is accepted", r.status_code == 200,
-          "got %s" % r.status_code)
-    check("it set default membership", slug in L.default_topics())
-    check("THE CEILING IS UNTOUCHED BY A DEFAULT TOGGLE",
-          L.topic_state(slug) == L.STATE_ADMIN_ONLY,
-          "got %r" % L.topic_state(slug))
+    # ⛔ TWO DIFFERENT CEILINGS, DELIBERATELY -- one is not enough.
+    # A first version of this test asserted only against admin_only, and a mutation
+    # that made this route ALSO write set_topic_state(slug, "admin_only") -- the very
+    # bug being fixed -- SURVIVED it: the clobbered value happened to equal the
+    # precondition the test itself had set. Asserting across two ceilings means no
+    # single hardcoded state a mutant could write satisfies both iterations.
+    for ceiling in (L.STATE_ADMIN_ONLY, L.STATE_ALL_USERS):
+        L.set_topic_state(slug, ceiling)
+        L.set_in_default(slug, False)
+        r = c.post("/api/learn/topic/%s/default" % slug, json={"in_default": True})
+        check("the default toggle is accepted (ceiling=%s)" % ceiling,
+              r.status_code == 200, "got %s" % r.status_code)
+        check("it set default membership (ceiling=%s)" % ceiling,
+              slug in L.default_topics())
+        check("THE CEILING %s IS UNTOUCHED BY A DEFAULT TOGGLE" % ceiling,
+              L.topic_state(slug) == ceiling, "got %r" % L.topic_state(slug))
 
     # The mirror image: changing the ceiling must not disturb the default set.
     r2 = c.post("/api/learn/topic/%s/state" % slug, json={"state": "all_users"})
