@@ -1075,6 +1075,23 @@ def _drain_behavioral():
         return []
 
 
+#: Last engine inventory computed by a heartbeat, for the LOCAL GUI to read.
+#:
+#: ⛔ CACHED, NOT RE-PROBED ON DEMAND. The loopback status listener is polled by
+#: the GUI every few seconds (agent_gui REFRESH_MS) and the probes shell out with
+#: real timeouts -- re-running them per poll would spend seconds of subprocess
+#: time to answer a question the last beat already answered.
+#:
+#: It stays FRESH DURING A SERVER OUTAGE, which is the reason this exists:
+#: `_collect_payload()` runs before `_post_payload()` in the same try, so the
+#: engines are probed every beat whether or not the POST lands. When the appliance
+#: is unreachable the local GUI is the only place a user can look, and until now
+#: it could only show CONFIG flags ("Intrusion detection: ON") -- never whether the
+#: engines behind them were actually working.
+_last_engine_inventory = None
+_last_engine_inventory_at = None
+
+
 def _engine_inventory():
     """Endpoint engine inventory for the heartbeat. Best-effort; never raises.
 
@@ -1092,8 +1109,12 @@ def _engine_inventory():
             reader = behavioral_agent.status_reader
         except Exception:                                    # noqa: BLE001
             reader = None      # behavioral module not present yet -> ABSENT
-        return engine_inventory.inventory(yara_rules_dir=rules_dir,
+        inv = engine_inventory.inventory(yara_rules_dir=rules_dir,
                                           behavioral_status_reader=reader)
+        global _last_engine_inventory, _last_engine_inventory_at
+        _last_engine_inventory = inv
+        _last_engine_inventory_at = time.time()
+        return inv
     except Exception as exc:                                 # noqa: BLE001
         log.warning("engine inventory failed: %s", exc)
         return {"engines": {}, "summary": {}, "error": str(exc)[:120]}
@@ -2407,6 +2428,11 @@ def _status_snapshot():
         "last_checkin_failed_at": _last_post_fail_at,
         "last_checkin_error": _last_post_error,
         "next_checkin_due_at_estimate": _next_beat_due_at,
+        # Live engine health for the LOCAL view. See _last_engine_inventory above:
+        # this is what lets the GUI distinguish "Intrusion detection: ON" (a config
+        # flag) from "and the engine behind it is actually working right now".
+        "engine_inventory": _last_engine_inventory,
+        "engine_inventory_at": _last_engine_inventory_at,
         "scan_on_reconnect_done": _scan_on_reconnect_done,
         # Steering lease status (None when steering is not armed, which is the
         # default). Read-only observability; the GUI/dashboard can show whether a

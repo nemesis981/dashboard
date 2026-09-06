@@ -416,6 +416,86 @@ DMZ_ENABLE_CONFIRM = ("Turn on DMZ mode?\n\nThis turns OFF UDP/QUIC filtering an
                       "It takes effect when the agent restarts.")
 
 
+#: Seconds without a successful check-in before the wording escalates from "a
+#: check-in failed" to "you are running on cached rules".
+#:
+#: DERIVED, NOT PICKED. config.POLL_INTERVAL_CEILING is 86400 with the comment
+#: "an interval past this is a typo, not a choice" -- so 24h is already this
+#: codebase's outer bound for a LEGITIMATE gap between beats. A device silent for
+#: longer than the longest legitimate poll interval is unambiguously stale rather
+#: than merely between beats. Two supporting reasons, neither sufficient alone:
+#: it sits above ordinary overnight laptop sleep (8-16h) so it does not fire on
+#: normal use, and agent.py's `_older_than_24h` already uses the same figure for
+#: scan_on_reconnect -- one staleness notion in this codebase rather than two.
+STALE_CHECKIN_SECONDS = 86400
+
+
+def effective_stale_seconds(status):
+    """The staleness threshold, floored at three poll intervals.
+
+    A fixed 24h would be WRONG for a device configured near the ceiling: at
+    poll_interval=86400 a single missed beat would trip it, reporting "running on
+    cached rules" for what is one ordinary skipped check-in. Three intervals means
+    the escalation always represents several genuinely missed beats, whatever the
+    cadence."""
+    try:
+        pi = float((status or {}).get("conf", {}).get("poll_interval") or 0)
+    except (TypeError, ValueError):
+        pi = 0.0
+    return max(STALE_CHECKIN_SECONDS, 3.0 * pi)
+
+
+def checkin_age(status):
+    """Seconds since the last SUCCESSFUL check-in, or None if unknowable.
+
+    None rather than a number when either timestamp is missing: an age computed
+    from a guess is worse than no age, because the caller cannot tell them apart."""
+    if not isinstance(status, dict):
+        return None
+    ok_at, now = status.get("last_checkin_ok_at"), status.get("now")
+    try:
+        if ok_at is None or now is None:
+            return None
+        age = float(now) - float(ok_at)
+    except (TypeError, ValueError):
+        return None
+    return age if age >= 0 else None
+
+
+def engine_problems(status):
+    """Engines the agent itself reports as not fully working, worst first.
+
+    Reads the CACHED inventory the last heartbeat computed (agent.py populates it
+    in `_engine_inventory()`), never a fresh probe: the GUI polls this every few
+    seconds and the probes shell out with real timeouts.
+
+    ⛔ THE CACHE IS FRESH EVEN DURING A SERVER OUTAGE, which is the whole point.
+    `_collect_payload()` runs BEFORE `_post_payload()` in the same try, so the
+    engines are probed every beat whether or not the POST succeeds. During an
+    outage this is the ONLY honest protection signal the user can see."""
+    if not isinstance(status, dict):
+        return []
+    inv = status.get("engine_inventory")
+    if not isinstance(inv, dict):
+        return []
+    engines = inv.get("engines")
+    if not isinstance(engines, (list, tuple)):
+        return []
+    out = []
+    for e in engines:
+        if not isinstance(e, dict):
+            continue
+        cap = str(e.get("capability", "")).lower()
+        if cap in ("available", "ok"):
+            continue
+        out.append({"name": e.get("engine") or e.get("name") or "?",
+                    "capability": cap or "unknown",
+                    "detail": e.get("detail") or ""})
+    # absent before degraded: a missing layer is worse than a crippled one.
+    out.sort(key=lambda x: (x["capability"] != "absent", x["name"]))
+    return out
+
+
 def overall_state(status):
     """One line summarising health, as (state, sentence).
 
@@ -438,6 +518,31 @@ def overall_state(status):
         if error:
             return "bad", "Hasn't checked in yet — %s" % error
         return "warn", "Starting up — no check-in yet."
+    # ⛔ ENGINE HEALTH OUTRANKS CONNECTIVITY, DELIBERATELY. A degraded engine is a
+    # PROTECTION fact; a failed check-in is a REACHABILITY fact. A user can act on
+    # "ClamAV has no signature database" and cannot act on "the appliance is
+    # unreachable", and the engine problem persists whether or not the link comes
+    # back. Reporting the outage over it would bury the more serious of the two --
+    # the same reasoning the DMZ branch below already applies in the other
+    # direction.
+    problems = engine_problems(status)
+    if problems:
+        first = problems[0]
+        extra = (" and %d other" % (len(problems) - 1)) if len(problems) > 2 else (
+                " and 1 other" if len(problems) == 2 else "")
+        return "bad", "%s is %s%s — %s" % (
+            first["name"], first["capability"], extra,
+            first["detail"] or "no detail reported")
+
+    # A long silence is a DIFFERENT state from a failed attempt, and saying "last
+    # check-in failed" for a five-day outage understates it: the device has been
+    # running on whatever rules it had cached since then.
+    age = checkin_age(status)
+    if age is not None and age > effective_stale_seconds(status):
+        return "bad", ("No contact with the appliance for %s — running on cached "
+                       "rules only." % humanize_ago(status.get("last_checkin_ok_at"),
+                                                    status.get("now")))
+
     if status.get("last_checkin_error"):
         return "warn", "Last check-in failed — %s" % status["last_checkin_error"]
     # DMZ is checked AFTER the check-in health above -- a device that cannot reach

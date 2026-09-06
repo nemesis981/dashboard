@@ -271,6 +271,70 @@ def main():
     check("shutting down -> bad", core.overall_state(
         {"running": False, "conf": {}})[0], "bad")
 
+    print("\nengine health — a config flag is not a working engine")
+    # Until 2026-09-06 the local GUI could show "Intrusion detection: ON" from a
+    # CONFIG flag while the engine behind it was dead, with no local signal at all.
+    # engine_inventory was computed every heartbeat and attached ONLY to the
+    # server-bound payload. During a server outage the GUI is the only place a user
+    # can look, so that was precisely when it said least.
+    _ok_base = {"conf": {"enrollment_status": "approved"},
+                "last_checkin_ok_at": 940.0, "last_checkin_error": None, "now": 1000.0}
+    check("no inventory at all -> unchanged, still ok",
+          core.overall_state(dict(_ok_base))[0], "ok")
+    check("all engines available -> still ok", core.overall_state(dict(
+        _ok_base, engine_inventory={"engines": [
+            {"engine": "clamav", "capability": "available"},
+            {"engine": "yara", "capability": "available"}]}))[0], "ok")
+    check("a DEGRADED engine -> bad, not ok", core.overall_state(dict(
+        _ok_base, engine_inventory={"engines": [
+            {"engine": "clamav", "capability": "degraded",
+             "detail": "no signature database reported"}]}))[0], "bad")
+    check("...and the reason is surfaced, not just a colour", "signature database" in
+          core.overall_state(dict(_ok_base, engine_inventory={"engines": [
+              {"engine": "clamav", "capability": "degraded",
+               "detail": "no signature database reported"}]}))[1], True)
+    check("an ABSENT engine -> bad", core.overall_state(dict(
+        _ok_base, engine_inventory={"engines": [
+            {"engine": "yara", "capability": "absent", "detail": "yara not on PATH"}]}))[0], "bad")
+    check("absent is reported before degraded (worse first)",
+          core.engine_problems({"engine_inventory": {"engines": [
+              {"engine": "clamav", "capability": "degraded"},
+              {"engine": "yara", "capability": "absent"}]}})[0]["name"], "yara")
+    check("engine health OUTRANKS a failed check-in", core.overall_state(dict(
+        _ok_base, last_checkin_error="HTTP 401", engine_inventory={"engines": [
+            {"engine": "clamav", "capability": "absent", "detail": "not on PATH"}]}))[0], "bad")
+    # CONTROL: without the engine problem that same status is only a warn, so the
+    # assertion above is measuring the engine branch and not something else.
+    check("CONTROL: the same status without an engine problem is only warn",
+          core.overall_state(dict(_ok_base, last_checkin_error="HTTP 401"))[0], "warn")
+    check("a malformed inventory is ignored, never crashes",
+          core.engine_problems({"engine_inventory": "not-a-dict"}), [])
+
+    print("\ncheck-in staleness — a 5-minute blip and a 5-day outage are not the same")
+    _stale = dict(_ok_base)
+    check("fresh check-in -> ok", core.overall_state(_stale)[0], "ok")
+    check("just under the threshold -> not escalated", core.overall_state(dict(
+        _ok_base, last_checkin_ok_at=0.0, now=core.STALE_CHECKIN_SECONDS - 60))[0], "ok")
+    check("just over the threshold -> bad", core.overall_state(dict(
+        _ok_base, last_checkin_ok_at=0.0, now=core.STALE_CHECKIN_SECONDS + 60))[0], "bad")
+    check("...and says 'cached rules', not merely 'failed'", "cached rules" in
+          core.overall_state(dict(_ok_base, last_checkin_ok_at=0.0,
+                                  now=core.STALE_CHECKIN_SECONDS + 60))[1], True)
+    check("a stale check-in outranks a transient error's wording", core.overall_state(dict(
+        _ok_base, last_checkin_ok_at=0.0, now=core.STALE_CHECKIN_SECONDS + 60,
+        last_checkin_error="timeout"))[0], "bad")
+    # A device configured near POLL_INTERVAL_CEILING must not trip on ONE missed beat.
+    check("threshold floors at three poll intervals", core.effective_stale_seconds(
+        {"conf": {"poll_interval": "86400"}}), 3.0 * 86400)
+    check("a normal poll interval leaves the threshold at 24h",
+          core.effective_stale_seconds({"conf": {"poll_interval": "300"}}),
+          core.STALE_CHECKIN_SECONDS)
+    check("an unparseable poll_interval falls back, never crashes",
+          core.effective_stale_seconds({"conf": {"poll_interval": "banana"}}),
+          core.STALE_CHECKIN_SECONDS)
+    check("checkin_age returns None rather than guessing when now is absent",
+          core.checkin_age({"last_checkin_ok_at": 5.0}), None)
+
     print("\nconnection type — a failed read is UNKNOWN, never a confident location")
     # The sentinel split (2026-08-20). Before it, all three collapsed to
     # "vpn_remote", which was safe while the field was descriptive and stops being
