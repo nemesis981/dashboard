@@ -40,6 +40,10 @@ def send_email(subject, body, to=None, cc=None):
                 smtp.starttls()
                 smtp.login(sender, password)
                 smtp.send_message(msg)
+        # FINDING 6 (route-security-audit-learning-custom-2026-09-05.md): only the
+        # failure path logged, so "sent" and "never attempted" were indistinguishable
+        # from the journal -- a caller could only prove a failure, never a success.
+        log.info("send_email sent (%s) to %s", subject, msg["To"])
         return True
     except Exception as exc:
         log.error("send_email failed (%s): %s", subject, exc)
