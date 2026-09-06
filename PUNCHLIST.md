@@ -6565,3 +6565,14 @@ because it's urgent.
    during an unrelated review pass — the same "make correct behavior the only reachable
    outcome, not a thing to remember" reasoning this file's own §"Why this file exists" already
    applies to a different recurring-loss problem.
+
+### [LOW] `server_outage_protection`'s visibility/entitlement rows were set via a direct DB path, not the audit-logged admin route (found 2026-09-06, Window 1, verified by Window 2)
+`learning_topic_visibility`/`learning_entitlements` for the new Learning Center topic were set
+by calling `core/learning.py` directly (`actor='window1-cli'`) rather than through the HTTP
+admin routes (`/api/learn/topic/<slug>/state`, `/api/learn/user/<uid>/grant`), which are what
+normally write the `learn_topic_state`/`learn_user_grant` rows to `audit_log`. Confirmed live:
+`SELECT * FROM audit_log WHERE action IN ('learn_topic_state','learn_user_grant')` returns no
+row for this topic. Not a security gap — the change is correctly attributed in-band on the rows
+themselves, and it's a one-time doc-visibility change, not a repeatable pattern — but it's the
+same "bypassed the normal audit path" shape flagged elsewhere today, worth a plain record rather
+than letting it pass silently. No fix owed; recorded for the trail.
