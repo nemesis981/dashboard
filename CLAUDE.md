@@ -1571,6 +1571,63 @@ both constants to their current values is not the same check and will not catch 
 moves both sides of the ratio together, which is the property that makes it a ratio-class defect
 rather than an ordinary regression.
 
+### Before trusting any check's result, confirm it can produce BOTH possible answers (standing practice, added 2026-09-06)
+
+**A check that has only ever been observed to pass has not been shown to work — it may simply be
+structurally incapable of failing.** This is the same principle the 2026-08-01 "verification code
+must prove its own premise" rule already states, restated here as its own section because
+2026-09-06 alone produced at least six independent instances of it across two windows — density
+that means this is not a rare edge case worth a passing mention inside a broader rule, but the
+single most common way a check misleads its own author on an ordinary day.
+
+**The habit, stated as one question:** before recording a check's result as evidence, ask what
+that check would have printed if the thing it's checking were actually broken. If the answer is
+"the same thing it just printed," the result is not evidence yet — it needs a known-bad case, a
+positive control, or a deliberate mutation run through it first.
+
+**Today's instances, because the shape is only convincing in aggregate:**
+- `engine_problems()` (see "mutate the WIRING" above) checked `isinstance(engines, (list, tuple))`
+  against data that is always a dict — the check could return `[]` for a healthy fleet and for a
+  fully-broken one alike, and did, for the whole time it was "125/125, mutation-proven."
+- A checkin-staleness test asserted "tune the slice below the floor and the latency claim
+  silently breaks" and had never been run against a tuning that actually did so — the assertion
+  had only ever been watched passing, not proven capable of failing, until a dedicated mutation
+  (M6) drove it red on purpose.
+- A cross-session SHA-ancestry check reported "not on origin/main" for three commits under
+  investigation **and for its own positive control** in the same run — a uniform negative that
+  discriminated nothing, caught only because a known-pushed commit was checked alongside them and
+  came back with the same wrong answer.
+- The same author, checking a different claim, ran a script from outside the directory it needed
+  to run from; it exited 1 on `FileNotFoundError` — exactly the exit code a working gate produces
+  on a real catch. The "control" had passed by accident, not by measuring anything, and was only
+  caught by re-running from the correct location and checking the printed reason, not just the
+  code.
+- A reviewer proposed a general rule from a review pass and reported four supporting instances in
+  the same breath as citing two verified ones — the unverified pair did not survive a second
+  reviewer's check, and "four, past coincidence" was doing rhetorical work the evidence did not
+  support. Pattern-matching presented with the same confidence as a measurement is indistinguishable
+  from a measurement until someone checks.
+- A test asserting a negative (a mutation "does not reach" a bad state) passed against a mutant
+  that fell through to a *different* not-quite-bad state — "asserting NOT X" is weaker than
+  "asserting IS Y," and the fix was pinning the exact expected outcome rather than merely
+  excluding the one outcome originally imagined.
+
+**What to do about it, concretely:**
+- **A check with only one observed outcome is not yet a check.** Before relying on it, run it
+  against a case you already know is bad (a known-failing input, a deliberately broken copy of
+  the thing under test, a control with the opposite expected answer) and confirm it disagrees.
+- **A uniform result across a whole batch — everything passes, everything fails, everything says
+  "not found" — is the single loudest tell.** It reads as a strong result and is usually a broken
+  instrument; add a positive control specifically because a uniform negative and a real one look
+  identical without it.
+- **An exit code alone is not a result.** The same exit code can mean "caught a real defect" and
+  "never ran at all" (see the FileNotFoundError case above) — read what the check actually printed,
+  not just whether it returned nonzero.
+- **This is the practical, run-it-yourself form of "audit-first, then act" and "verify with real
+  output" (Rules 1 and 3) applied specifically to the checks and tests that back a claim** — not a
+  new discipline, a sharper form of two already standing ones, worth naming on its own because it
+  keeps recurring in exactly this shape.
+
 ### A roadmap item picked up for build needs its dependency claims verified against code, not just its build status (standing practice, added 2026-09-02)
 
 **The existing roadmap-audit discipline — classify against code and git log, never against a
