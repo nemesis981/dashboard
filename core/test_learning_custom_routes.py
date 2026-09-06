@@ -25,6 +25,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import types
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _TMP = tempfile.mkdtemp(prefix="lcr-")
@@ -36,7 +37,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 126
+EXPECTED_CHECKS = 132
 _pass = _fail = 0
 
 
@@ -162,6 +163,92 @@ def test_publish_and_unpublish_are_ADMIN_ONLY():
         check("%s admits admin" % ep, R.may(R.ROLE_ADMIN, ep, "POST") is True)
     check("the queue page is admin-only too",
           R.may(R.ROLE_USER, "learn_custom_queue_page", "GET") is False)
+
+
+class _ConcurrentDeleteOnStatusEcho:
+    """Makes the ROUTE's own post-write status-echo read (dashboard.py's final
+    `lc.get(slug)`) observe a row a SECOND admin deleted in the window between the
+    write committing and that read -- FINDING 2, route-security-audit-learning-custom-
+    2026-09-05.md.
+
+    dashboard.py's `from core import learning_custom as lc` is a DEFERRED import
+    inside the function body, re-resolved from `sys.modules['core.learning_custom']`
+    on every call. Swapping that entry for the duration of one request lets `.get`
+    misbehave for exactly this call while every other attribute (`.publish`,
+    `.unpublish`, the exception classes) proxies straight to the real module -- so the
+    write itself is genuine, unaffected, and already committed by the time `.get` is
+    reached. `learning_custom.py`'s OWN internal calls (e.g. `set_status`'s `get(slug,
+    db_path)` check before the write) resolve via that module's own globals, not via
+    this swapped sys.modules entry, so they are untouched -- only a caller doing a
+    FRESH `from core import learning_custom` after the swap sees the proxy, which is
+    exactly what dashboard.py does and exactly what internal same-module calls don't.
+    """
+
+    def __init__(self, target_slug, deleter_actor="c_admin", deleter_role="admin"):
+        self.target_slug = target_slug
+        self.deleter_actor = deleter_actor
+        self.deleter_role = deleter_role
+        self.get_calls = 0
+
+    def __enter__(self):
+        import core
+        import core.learning_custom as _real
+        self._real = _real
+        self._core_pkg = core
+        self._orig_modules = sys.modules.get("core.learning_custom")
+        self._orig_attr = getattr(core, "learning_custom", None)
+        proxy = types.SimpleNamespace(
+            **{name: getattr(_real, name) for name in dir(_real)
+               if not name.startswith("__")})
+        proxy.get = self._get
+        # `from core import learning_custom` resolves via `getattr(core,
+        # 'learning_custom')` FIRST (the attribute Python's import system sets on the
+        # parent package after the first successful import) and only falls back to
+        # sys.modules if that attribute is absent. Since this process already imported
+        # it once, the attribute is set -- patching sys.modules alone is a no-op; both
+        # must be swapped for dashboard.py's deferred import to see the proxy.
+        sys.modules["core.learning_custom"] = proxy
+        core.learning_custom = proxy
+        return self
+
+    def _get(self, slug, db_path=None):
+        self.get_calls += 1
+        if slug == self.target_slug:
+            # The row already exists and the caller's own write already committed --
+            # this simulates a SECOND admin deleting it in the gap before the route's
+            # echo read, not the caller's own action failing.
+            self._real.delete(slug, actor=self.deleter_actor, role=self.deleter_role)
+        return self._real.get(slug, db_path)
+
+    def __exit__(self, *exc):
+        sys.modules["core.learning_custom"] = self._orig_modules
+        if self._orig_attr is not None:
+            self._core_pkg.learning_custom = self._orig_attr
+        return False
+
+
+def test_publish_survives_a_concurrent_delete_of_the_same_row_400_not_500():
+    C.save_draft(slug="custom-race-2", title="Race", summary="s", body="x",
+                 actor="c_user", role="user")
+    with _ConcurrentDeleteOnStatusEcho("custom-race-2") as race:
+        r = _post("/api/learn/custom/publish", 603, {"slug": "custom-race-2"})
+        check("the echo read was actually reached (control -- the race can fire)",
+              race.get_calls >= 1, "get_calls=%d" % race.get_calls)
+        check("a concurrent delete after a successful publish is 409, not 500",
+              r.status_code == 409, "got %s" % r.status_code)
+        check("...and the write is not silently reported as failed",
+              (r.get_json() or {}).get("ok") is True, "got %r" % r.get_json())
+        check("...and the row is in fact gone", C.get("custom-race-2") is None)
+
+    # CONTROL. Without this, the fix could be returning 409 unconditionally and the
+    # test above would not have proven the guard is actually conditional on the race.
+    C.save_draft(slug="custom-race-3", title="Race", summary="s", body="x",
+                 actor="c_user", role="user")
+    r = _post("/api/learn/custom/publish", 603, {"slug": "custom-race-3"})
+    check("...whereas an UNRACED publish still returns 200", r.status_code == 200,
+          "got %s" % r.status_code)
+    check("...with the real status echoed",
+          (r.get_json() or {}).get("status") == C.STATUS_PUBLISHED)
 
 
 def test_submission_is_open_to_any_user_but_not_viewonly():
@@ -629,6 +716,7 @@ if __name__ == "__main__":
         test_every_endpoint_is_registered_and_gated,
         test_no_custom_endpoint_is_auth_exempt,
         test_publish_and_unpublish_are_ADMIN_ONLY,
+        test_publish_survives_a_concurrent_delete_of_the_same_row_400_not_500,
         test_submission_is_open_to_any_user_but_not_viewonly,
         test_the_declared_minimums_match_the_registry,
         test_a_draft_404s_on_a_direct_url_exactly_like_a_missing_topic,

@@ -3146,7 +3146,15 @@ def _custom_status_impl(publish):
         return jsonify({"ok": False, "error": str(e)}), 400
     _audit(action="learn_custom_publish" if publish else "learn_custom_unpublish",
            rule_id=slug)
-    return jsonify({"ok": True, "slug": slug, "status": lc.get(slug)["status"]})
+    # FINDING 2 (route-security-audit-learning-custom-2026-09-05.md): the status change
+    # above has already committed -- this guards only the echo read below, against a
+    # SECOND admin deleting the same row in the window between that commit and this
+    # read. `lc.get` documents returning None for a missing row rather than raising, so
+    # the unguarded subscript turned that race into a 500 instead of a clean response.
+    row = lc.get(slug)
+    if row is None:
+        return jsonify({"ok": True, "slug": slug, "status": None}), 409
+    return jsonify({"ok": True, "slug": slug, "status": row["status"]})
 
 
 def _notify_custom_submission(slug, actor):
