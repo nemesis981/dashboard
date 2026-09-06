@@ -1,0 +1,121 @@
+# Roadmap — Agent-update scheduling: state-awareness, fairness, and why not Wake-on-LAN
+
+- **Status:** **DECISION CAPTURED, 2026-09-06 — build order operator-approved, nothing built
+  yet.** Build state-awareness + a retry queue + fairness ordering. **Do NOT build
+  Wake-on-LAN.** If proactive wake is ever wanted later, use agent-armed RTC wake timers, not
+  magic packets. Investigation and reasoning: Window 1, 2026-09-06. Written up: Window 2.
+  Full measurement provenance (including a corrected earlier analysis, retracted rather than
+  annotated): `~/work/nemesis-internal/handoff/2026-09-06-window1-handoff.md` (private mirror,
+  commit `082badb`).
+
+## 1. The reframe this decision rests on
+
+The danger of a fleet reconverging online after a rollout pause is not **exposure duration**
+— it is **starvation**. A strictly sequential, one-device-at-a-time rollout may never *reach*
+a device whose online windows are short and fragmented. Measured on the one device with real
+history (§3): at roughly 90 minutes online per day, spread in fragments, against a queue that
+needs 100–200 contiguous minutes to work through a 20-device fleet, that device can be skipped
+day after day while the queue itself looks healthy — nothing about the queue's own state would
+say so.
+
+**Fairness ordering fixes this. Waking a device does not** — a device that gets woken still
+has to wait its turn in a queue with no fairness. The two are not substitutes for each other,
+and the measurement work below exists to establish this before either gets built.
+
+## 2. Why wake is not *necessary* — only faster
+
+A genuinely suspended device is not exposed: nothing of the product is running or listening on
+it. The exposure window starts the moment it comes online on its own, and a priority queue can
+act on it in the first seconds of that window rather than waiting for its turn. The residual
+gap — a device wakes, gets used, and sleeps again before a critical update finishes landing —
+is narrowed by priority-on-checkin ordering, not eliminated by pre-waking either. Waking a
+device earlier buys speed, not correctness; the correctness problem is starvation, and fairness
+is what closes it.
+
+## 3. Confirmed build order
+
+1. **State model (online / suspended / offline / unreachable) + a retry queue that re-attempts
+   at the device's next check-in, rather than blocking the whole rollout on one unreachable
+   device.** Stand-alone; confirmed to build first.
+2. **Fairness + resumability**: oldest-failure-first ordering, update-on-checkin priority (a
+   device that just came online gets its overdue update before anything else queued for it),
+   and chunked/resumable transfer so a short online window still makes forward progress instead
+   of restarting from zero next time.
+3. **Pattern-aware staggering** (predicting *when* a device is likely to be online and timing
+   rollout waves around it) — **deferred until multi-device history exists to actually test the
+   premise.** See §4; the one device measurable today argues against the premise it would rest
+   on, not for it.
+4. **Agent-armed RTC wake timers** — deferred until a real operational need is demonstrated,
+   and gated on the agent first reporting its power source (see §6). Not Wake-on-LAN; see §5
+   for why.
+
+## 4. Why pattern-aware staggering is deferred — measured, not assumed
+
+Three facts, each verified independently against live `alerts.db` before this doc was written,
+not merely relayed from Window 1's own report:
+
+- **A presence-history substrate already exists with no new schema.** `hw_metrics` writes one
+  row per heartbeat, carrying `device_id` and `timestamp`. No dedicated presence table is
+  needed to start measuring this.
+- **The fleet is `n=1` for learning purposes today.** Grouping `hw_metrics` by `device_id`:
+  `local` (the appliance itself, not an agent) carries 21,918 rows across 78 days; the one real
+  agent with meaningful history (`ece4736c...`, "trip-laptop"/`<lan-friendly-name>`) carries **731 rows
+  across 40 distinct days**; the only other enrolled agent has carried exactly **1 row**. A
+  pattern-aware scheduler has essentially nothing to train against yet.
+- **The one device that CAN be measured is not schedule-shaped.** Its busiest 2-hour window
+  holds only **~26% of its check-ins** (188 of 731, independently re-derived from live data),
+  spread across roughly 20–21 of 24 hours. That is a household laptop used irregularly, not a
+  fleet booting at a fixed hour. The premise a pattern-aware scheduler would need — a
+  recognizable, exploitable online schedule — is directly testable on the only device available
+  to test it against, and it does not hold there. Building staggering logic now would be tuning
+  a model to a sample of one, and the one sample argues against the shape of model being
+  proposed.
+
+## 5. Why Wake-on-LAN specifically was rejected, not merely deferred
+
+This was investigated in detail because an earlier read of the situation (an agent that had
+gone silent, believed to be on a different site) suggested WoL might be the fix — that read was
+**wrong and has been corrected, not merely appended to**: the device in question
+("trip-laptop"/tailnet name `<tailnet-hostname>`) is LAN-local, not remote, and its MAC
+was already sitting in the `devices` table under its LAN friendly name the whole time — a correlation ADR 0023
+exists specifically to make automatic and currently does not, on this exact device, because it
+runs a pre-2026-08-19 agent that never reports `lan_macs`. Even with the "no broadcast domain"
+blocker resolved by this correction, the decision stands: **do not build WoL.** Measured against
+the four safety constraints any wake mechanism would need to satisfy:
+
+| Constraint | Wake-on-LAN (magic packet) | Agent-armed RTC timer |
+|---|---|---|
+| Authenticated wake | **Fails by construction.** A magic packet is matched by NIC firmware against a byte pattern; there is no inbound authentication to check. Vendor "SecureOn" is a 6-byte plaintext field, not real auth. | **Solved by construction.** No inbound packet exists to spoof — an already-authenticated agent arms the timer locally, before it suspends. |
+| LAN-only / needs a collected MAC | Requires L2 adjacency and a correlated MAC (the ADR 0023 gap this very investigation ran into). | **Dissolved.** No L2 adjacency and no MAC collection needed; works over Tailscale. |
+| Battery / physical safety | Not addressed by the mechanism itself. | **Partly free** — OS power policy (confirmed for Windows) already disables wake timers on battery by default, which aligns with the safety requirement rather than fighting it. |
+| Per-device opt-in | Requires enforcement elsewhere (the mechanism itself has no opt-in concept). | **Unchanged, still required, and easier to honour** — an excluded device simply never arms a timer. |
+
+The one thing WoL can do that an armed timer cannot is **wake right now, on command** — and
+that is precisely the case argued unnecessary in §2, and the case that carries all of the
+authentication risk in the table above. Additional honest limits of the timer approach, recorded
+so they aren't rediscovered later as surprises: it requires the agent to have been running
+*before* the device suspended (true for exactly the population an update rollout would target);
+the wake time has to be chosen in advance, so it cannot serve an on-demand emergency case; and
+RTC wake generally does not work from a full shutdown (ACPI S5), only from sleep/standby.
+Mechanisms, for whoever picks this up later: Windows Task Scheduler's "wake the computer to run
+this task" / `powercfg`, Linux `rtcwake` or systemd `WakeSystem=true`, macOS `pmset schedule`.
+
+## 6. Prerequisites before any wake mechanism is buildable
+
+- **The agent must report its power source.** No battery/AC-state column exists anywhere in the
+  schema today (`gpu_power_watts` is GPU power draw, not battery/AC state, confirmed by
+  direct schema inspection) — the battery-safety constraint above is currently
+  unimplementable for lack of this one field.
+- **The agent-update gap itself is the prerequisite underneath every item here.** The empty
+  `agent_device_macs` table (§5, the ADR 0023 correlation) is the same problem wearing a
+  different hat: the correlation code is correct and has simply never reached the one device
+  old enough to need it, because that device has never been updated. Closing the agent-update
+  gap this whole roadmap item is about is also what would let ADR 0023's own correlation work
+  the way it was designed to.
+- **Pattern-aware staggering (§3 item 3) needs more than one device with real history** before
+  its premise can be tested rather than assumed — see §4.
+
+## 7. Not built here
+
+Per Rule 1, this document captures the decision; it changes no code. See §3 for the confirmed
+build order once implementation starts.
