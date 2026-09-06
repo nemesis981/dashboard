@@ -32,6 +32,24 @@ is narrowed by priority-on-checkin ordering, not eliminated by pre-waking either
 device earlier buys speed, not correctness; the correctness problem is starvation, and fairness
 is what closes it.
 
+**Amendment, 2026-09-06 later the same day — a shipped capability already narrows the residual
+gap above, with no wake mechanism at all.** `nemesis_agent/agent.py` (`8722521`, Window 3) now
+detects a suspend/resume as a wall-clock jump measured inside the poll loop's own sleep
+(deliberately wall-clock rather than monotonic: Linux's `CLOCK_MONOTONIC` excludes suspended
+time, so a monotonic check would still wait out the pre-suspend timer after waking, which is the
+exact bad case; wall-clock advances correctly on both Linux and Windows). Detection routes
+through the existing early-beat request path, so it inherits the standing rate limiter — a false
+positive (an NTP step) costs exactly one extra heartbeat, not a new failure mode. Independently
+verified: `test_resume_detect.py`, 21/21, mutation-proven (5/5), including an integration case
+that drives the real sleep function against injected clocks rather than a unit stand-in.
+
+Effect on this document's own reasoning: a resuming device now announces itself within roughly
+the resume-check slice rather than waiting out up to a full poll interval, so "update-on-checkin
+priority" (§3 item 2) gets a materially earlier trigger — the resume beat itself is the trigger.
+This makes the no-wake case in this section stronger, not weaker: the latency gap a wake
+mechanism would have existed to close was closed here with no wake mechanism at all. See §6 for
+the one caveat (capability, not yet coverage).
+
 ## 3. Confirmed build order
 
 1. **State model (online / suspended / offline / unreachable) + a retry queue that re-attempts
@@ -114,6 +132,21 @@ this task" / `powercfg`, Linux `rtcwake` or systemd `WakeSystem=true`, macOS `pm
   the way it was designed to.
 - **Pattern-aware staggering (§3 item 3) needs more than one device with real history** before
   its premise can be tested rather than assumed — see §4.
+- **The resume-detection capability (§2 amendment) is capability, not coverage.** Every
+  currently-enrolled device runs agent code that predates it and gains nothing from it until
+  reinstalled — the identical shape as the `agent_device_macs` gap two bullets up: correct code
+  that has not yet reached the fleet it would help.
+- **Any fairness/queue design assumes check-in work actually gets enqueued — that assumption
+  was false until this same afternoon.** `core_module/hw_monitor/hw_monitor.py` (`dcbf625`,
+  Window 3) fixed a self-deadlock where `enqueue_task` opened a second SQLite connection while
+  the heartbeat's own transaction held the writer lock, so every `attest_manifest`/
+  `attest_challenge` enqueue attempt failed silently behind a "never raises into the beat"
+  contract — three days, 58 occurrences, invisible because the failure logged to a sink nobody
+  was reading next to the one that looked healthy. Independently verified:
+  `test_enqueue_task_deadlock.py`, 17/17. Recorded here because it is load-bearing for this
+  whole roadmap item specifically: a fairness queue built on top of an enqueue path that quietly
+  drops work would look correct in the same way the deadlock itself looked correct for three
+  days — right up until someone checked whether a row actually landed.
 
 ## 7. Not built here
 
