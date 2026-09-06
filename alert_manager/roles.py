@@ -225,6 +225,19 @@ ROUTE_MINIMUMS = {
     "licensing_page":                 (_V, _A),
 
     # ── Read-only status and reporting ───────────────────────────────────────
+    # api_build: the stale-page banner's probe. (_V, _A) — the SAME shape as every
+    # sibling here, and both halves are load-bearing:
+    #   * SAFE = _V, not _U. The banner is injected into authenticated pages, and
+    #     `dashboard`/`settings_page`/`diagnostics_page` are all (_V, _A) — so a
+    #     viewonly session SEES those pages. Setting the read minimum to _U would
+    #     break the banner for exactly the role most likely to be left sitting idle
+    #     on a page, which is the population the feature exists for.
+    #   * UNSAFE = _A because the route is GET-only (no `methods=`), so the unsafe
+    #     minimum is unreachable and takes the strict default rather than inventing
+    #     a write that does not exist.
+    # It stays authenticated: deliberately NOT in _AUTH_EXEMPT (dashboard.py ~3302),
+    # since the running build helps match a host to a known vulnerability.
+    "api_build":                      (_V, _A),
     "api_stats":                      (_V, _A),
     "api_health_score":               (_V, _A),
     "api_header_status":              (_V, _A),

@@ -119,6 +119,27 @@ print("\n-- unknown endpoints fail CLOSED --")
 check("an unregistered endpoint needs admin",
       roles.required_role("totally_made_up") == A)
 check("viewonly cannot reach it", not roles.may(V, "totally_made_up"))
+
+# ── api_build: the stale-page banner's probe ─────────────────────────────────
+# ⛔ THE COMPLETENESS CHECK BELOW IS NOT ENOUGH ON ITS OWN. It only asserts that
+# SOME entry exists; `(_A, _A)` would satisfy it while leaving the banner broken
+# for every non-admin -- which is the exact bug that was just fixed, in a form the
+# registry check cannot see. So the INTENT is pinned separately here.
+# The banner is injected into authenticated pages, and dashboard/settings_page/
+# diagnostics_page are all (_V, _A) -- a viewonly session sees them, and a viewonly
+# session is the one most likely to be left sitting idle on a page, which is the
+# population this feature exists for.
+check("api_build is registered at all", "api_build" in roles.ROUTE_MINIMUMS)
+check("api_build readable by viewonly (the banner's real audience)",
+      roles.may(V, "api_build", "GET"))
+check("api_build readable by user", roles.may(U, "api_build", "GET"))
+check("api_build readable by admin", roles.may(A, "api_build", "GET"))
+check("api_build unsafe minimum stays admin (route is GET-only; invent no write)",
+      roles.ROUTE_MINIMUMS.get("api_build", (None, None))[1] == A)
+# CONTROL: the three assertions above must be capable of failing. If `may()` were
+# permissive for everything, they would pass while proving nothing.
+check("CONTROL: may() still denies viewonly on an admin-only endpoint",
+      not roles.may(V, "totally_made_up", "GET"))
 check("user cannot reach it", not roles.may(U, "totally_made_up"))
 check("admin CAN (or it is a dead route, not a gated one)",
       roles.may(A, "totally_made_up"))
