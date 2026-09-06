@@ -112,8 +112,38 @@ check("install.sh mentions .timer at all (code, not comment)",
 
 # ── 3. every unit file is actually deployed ──────────────────────────────────
 print("\n3. registry completeness -- every unit on disk is deployed")
-# A glob-based loop satisfies this without naming units; an explicit list must name them.
-glob_deploy = re.search(r'systemd/\*\.\{?service', src) or 'systemd"/*.' in src or "systemd/*." in src
+# ⛔ THIS CHECK WAS WRONG ON ITS FIRST WRITING AND A MUTATION CAUGHT IT. The original asked
+# "does a glob mentioning scripts/systemd appear anywhere in the file?" -- which the ENABLE
+# loops satisfy on their own. Repointing the COPY loop at a nonexistent path (so nothing is
+# ever installed into /etc/systemd/system) left the suite fully green. The check was answering
+# a weaker question than its label claimed, which is the exact shape the standing practice
+# names: assert the source identity, not merely that a plausible-looking value is present.
+#
+# The real question is whether a loop that GLOBS scripts/systemd also WRITES INTO
+# /etc/systemd/system. That is a structural relationship between a loop header and its body,
+# so it is checked structurally rather than by substring presence.
+def _deploying_loops(text):
+    """Loop headers whose body writes into /etc/systemd/system, paired with the header."""
+    lines = text.splitlines()
+    found = []
+    for i, l in enumerate(lines):
+        if not re.match(r"\s*for\s+\w+.*;\s*do\s*$", l):
+            continue
+        depth, body = 1, []
+        for nxt in lines[i + 1:]:
+            if re.match(r"\s*(for|while)\s+.*;\s*do\s*$", nxt):
+                depth += 1
+            elif re.match(r"\s*done\b", nxt):
+                depth -= 1
+                if depth == 0:
+                    break
+            body.append(nxt)
+        if any("/etc/systemd/system" in b for b in body):
+            found.append(l)
+    return found
+
+_deployers = _deploying_loops(src)
+glob_deploy = any("scripts/systemd" in h for h in _deployers)
 for u in services + timers:
     stem = u.rsplit(".", 1)[0]
     check("%s deployed (named or covered by glob)" % u,
