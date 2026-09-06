@@ -31,7 +31,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 85   # 84 -> 85: network_vlan_basics topic (2026-09-05)
+EXPECTED_CHECKS = 88   # 85 -> 88: capability-label title-casing fix (2026-09-06)
 _pass = _fail = 0
 
 
@@ -405,11 +405,14 @@ def test_every_quiz_is_listed_passed_or_not():
 
     # ⚠ Matched on the RENDERED form, not the raw capability id. A capability with no
     # quiz authored yet has title=None and falls back to `label` -- the id with
-    # underscores replaced by spaces. The first version of this check searched for the
-    # underscore form and reported "2 of 4 missing" against a page that listed all four
-    # correctly: a false failure caused by testing a string the page never emits.
+    # underscores replaced by spaces and title-cased (2026-09-06: was raw lowercase,
+    # which rendered inconsistently beside properly-titled quizzes). The first version
+    # of this check searched for the underscore form and reported "2 of 4 missing"
+    # against a page that listed all four correctly: a false failure caused by testing
+    # a string the page never emits. Compared case-insensitively so a future casing
+    # change to the label doesn't reintroduce that same false failure.
     def rendered(cap):
-        return cap in body or cap.replace("_", " ") in body
+        return cap in body or cap.replace("_", " ").lower() in body.lower()
 
     listed = [c for c in declared if rendered(c)]
     check("EVERY declared capability appears, regardless of pass state",
@@ -419,6 +422,23 @@ def test_every_quiz_is_listed_passed_or_not():
     check("...including ones with no quiz authored yet",
           rendered("firewall_change"),
           "an unauthored capability must still be discoverable")
+
+
+def test_an_unauthored_capability_renders_title_cased_not_raw_lowercase():
+    """A capability with no quiz yet falls back to `row['label']`, so a properly-
+    authored quiz's title ('Firewall Change') used to sit next to an unauthored
+    capability's raw id-with-underscores-swapped ('firewall change') on the same
+    page. Fixed 2026-09-06 (yesterday's cleanup-pass note)."""
+    rows = dashboard._training_rows(501)
+    row = next(r for r in rows if r["name"] == "firewall_change")
+    check("the label is title-cased", row["label"] == "Firewall Change",
+          "got %r" % row["label"])
+    check("...not the raw lowercase-with-spaces form",
+          row["label"] != "firewall change")
+
+    body = _get("/learn", 501).get_data(as_text=True)
+    check("the title-cased form is what actually renders",
+          "Firewall Change" in body, "not found in rendered page")
 
 
 def test_a_quiz_subsystem_failure_does_not_break_the_education_listing():
@@ -471,6 +491,7 @@ if __name__ == "__main__":
         test_the_training_route_survives_removal_from_the_nav,
         test_the_landing_page_lists_BOTH_kinds_and_labels_them_apart,
         test_every_quiz_is_listed_passed_or_not,
+        test_an_unauthored_capability_renders_title_cased_not_raw_lowercase,
         test_a_quiz_subsystem_failure_does_not_break_the_education_listing,
     ):
         print("\n%s" % fn.__name__)

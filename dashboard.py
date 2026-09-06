@@ -2551,7 +2551,10 @@ def _training_rows(user_id):
     for cap in sorted(_roles.CAPABILITY_ROUTES):
         row = {
             "name": cap,
-            "label": cap.replace("_", " "),
+            # Title-cased so a capability with no quiz authored yet (which falls
+            # back to this label, see `row["title"]` below) doesn't render in raw
+            # lowercase-with-underscores shape beside properly-titled quizzes.
+            "label": cap.replace("_", " ").title(),
             # DECLARED means the capability grants no endpoints yet. ADR 0026 D2
             # rule 4 requires this be VISIBLE and not merely true.
             "state": _roles.capability_state(cap),
