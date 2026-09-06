@@ -2727,7 +2727,7 @@ def task_age_basis(origin_queued_at, created_at):
 
 
 def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None,
-                 origin_queued_at=None):
+                 origin_queued_at=None, conn=None):
     """Queue one task for a device. Returns its task_id.
 
     Queuing is deliberately separate from signing: a row here is an intent, and
@@ -2738,21 +2738,40 @@ def enqueue_task(device_id, action, params=None, ttl_seconds=1800, actor=None,
     `origin_queued_at` carries the ORIGINAL queue time for work that arrived via
     an earlier queue. Pass it whenever this task is a re-expression of something
     already waiting, or the age of that wait is lost at the boundary.
+
+    ⛔ `conn` — PASS IT WHEN YOU ALREADY HOLD AN OPEN WRITE TRANSACTION.
+    SQLite allows a single writer, WAL included. Opening a second connection here
+    while the caller's transaction is still open cannot proceed: it blocks for the
+    whole `busy_timeout` and then raises `database is locked`. That is not
+    hypothetical -- it was live for three days (58 occurrences from 2026-09-03),
+    burning ~10s per heartbeat in two 5.005s stalls and queuing NOTHING, because
+    `_update_agent_device` calls the queue helpers ~100 lines before its commit.
+    The helpers caught the error and logged it to hw_monitor's FILE logger, so
+    nothing raised into the beat and nothing reached the journal.
+
+    ⛔ BORROWED MEANS BORROWED: when `conn` is given this neither commits nor
+    closes it. Committing would end the caller's transaction early -- for the
+    heartbeat that is ~100 lines of subsequent writes silently losing their
+    atomicity, which is a worse bug than the one being fixed and a much quieter
+    one. The row becomes durable when the CALLER commits.
     """
     import uuid
     task_id = str(uuid.uuid4())
-    conn = _db_connect()
+    borrowed = conn is not None
+    c = conn if borrowed else _db_connect()
     try:
-        conn.execute(
+        c.execute(
             "INSERT INTO scan_tasks (task_id, device_id, action, params_json, "
             "status, created_at, actor, origin_queued_at) "
             "VALUES (?,?,?,?,'pending',?,?,?)",
             (task_id, device_id, action, json.dumps(params or {}),
              datetime.now().isoformat(timespec="seconds"), actor,
              origin_queued_at))
-        conn.commit()
+        if not borrowed:
+            c.commit()
     finally:
-        conn.close()
+        if not borrowed:
+            c.close()
     return task_id
 
 
@@ -2833,7 +2852,7 @@ def enqueue_rotation(device_id, actor=None):
     return enqueue_task(device_id, server_keys.ROTATE_ACTION, {}, actor=actor)
 
 
-def enqueue_manifest(device_id, actor=None):
+def enqueue_manifest(device_id, actor=None, conn=None):
     """Queue a Tier 1 attestation manifest for one device. Returns task_id.
 
     Params are EMPTY on purpose. Like `enqueue_rotation` above, the payload is
@@ -2841,8 +2860,12 @@ def enqueue_manifest(device_id, actor=None):
     describes the agent build the server currently ships, and one frozen at
     queue time would be delivered stale after any agent update — reporting every
     updated device as build-skewed for no reason.
+
+    `conn` is passed straight through — see `enqueue_task`. The heartbeat caller
+    MUST supply it: without it this deadlocked against the heartbeat's own open
+    transaction and queued nothing for three days.
     """
-    return enqueue_task(device_id, "attest_manifest", {}, actor=actor)
+    return enqueue_task(device_id, "attest_manifest", {}, actor=actor, conn=conn)
 
 
 def ensure_manifest_queued(conn, device_id):
@@ -2872,7 +2895,8 @@ def ensure_manifest_queued(conn, device_id):
             "AND status IN ('pending','dispatched') LIMIT 1", (device_id,)).fetchone()
         if pending:
             return None
-        return enqueue_manifest(device_id, actor="system")
+        # conn passed through: this runs INSIDE the heartbeat's open transaction.
+        return enqueue_manifest(device_id, actor="system", conn=conn)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("could not queue manifest for %s: %s", device_id, exc)
         return None
@@ -2901,7 +2925,9 @@ def ensure_challenge_queued(conn, device_id):
             (device_id, _att.TIER2_CHALLENGE_ACTION)).fetchone()
         if pending:
             return None
-        return enqueue_task(device_id, _att.TIER2_CHALLENGE_ACTION, ttl_seconds=3600)
+        # conn passed through: this runs INSIDE the heartbeat's open transaction.
+        return enqueue_task(device_id, _att.TIER2_CHALLENGE_ACTION,
+                            ttl_seconds=3600, conn=conn)
     except Exception as exc:                                  # noqa: BLE001
         log.warning("could not queue challenge for %s: %s", device_id, exc)
         return None
