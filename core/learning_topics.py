@@ -389,6 +389,162 @@ _TOPICS = {
             },
         ],
     },
+    "server_outage_protection": {
+        "title": "If Your Nemesis Server Goes Down, What Still Protects You?",
+        "summary": "An honest answer for when your dashboard loses power, crashes, or "
+                   "gets taken offline: what keeps working on your own devices, what "
+                   "stops, and how you&#39;ll be able to tell.",
+        "sections": [
+            {
+                "heading": "The short answer",
+                "beginner": (
+                    "If the Nemesis server itself goes offline &mdash; power cut, "
+                    "hardware failure, network outage &mdash; the security software "
+                    "running on your own laptop or desktop does NOT simply switch off. "
+                    "Malware scanning keeps running using what it already has, and any "
+                    "local intrusion detection or behaviour monitoring you have turned "
+                    "on keeps running too. What stops is anything that needs the server "
+                    "to make a decision or tell you something &mdash; and, separately, "
+                    "anything that depends on the server for updates in the first "
+                    "place."),
+                "intermediate": (
+                    "The endpoint agent is deliberately designed to keep the detection "
+                    "it has running independently of the server: malware scanning "
+                    "always continues, and local Suricata intrusion detection or "
+                    "behavioural monitoring &mdash; where either is enabled &mdash; "
+                    "continue on whatever rules were most recently in place. What "
+                    "requires the server is anything needing a live decision: "
+                    "remediation commands, and getting a finding in front of an "
+                    "administrator."),
+                "pro": (
+                    "Detection and enforcement are architecturally decoupled from the "
+                    "control channel where they run at all. ClamAV/Defender scanning "
+                    "always runs; local Suricata IDS and Falco/Sysmon-based "
+                    "behavioural monitoring, both opt-in and off by default, run as "
+                    "independent local processes when enabled and do not depend on "
+                    "heartbeat success. Signed task dispatch (quarantine, isolate, "
+                    "firewall changes) is the only layer that structurally requires a "
+                    "completed round trip, since it arrives exclusively in a heartbeat "
+                    "response."),
+            },
+            {
+                "heading": "What keeps working while the server is down",
+                "beginner": (
+                    "Malware scanning still runs, using the virus definitions it "
+                    "already has. If you have local intrusion detection or behaviour "
+                    "monitoring turned on, those keep running too, using whatever "
+                    "rules they last had &mdash; they don&#39;t stop just because the "
+                    "dashboard is unreachable."),
+                "intermediate": (
+                    "Malware scanning (ClamAV or your OS&#39;s built-in scanner) keeps "
+                    "running on-demand and on reconnect. Local Suricata intrusion "
+                    "detection and behavioural monitoring, both optional and off by "
+                    "default, keep running unchanged wherever they&#39;re already "
+                    "enabled &mdash; reading their last-downloaded rules. None of "
+                    "these pause, restart, or degrade themselves because the dashboard "
+                    "is unreachable."),
+                "pro": (
+                    "A failed rule/signature fetch leaves the on-disk ruleset "
+                    "completely untouched &mdash; an engine that&#39;s enabled keeps "
+                    "running on the last verified copy indefinitely, with no expiry. "
+                    "Behavioural findings, where the module is enabled, are buffered "
+                    "locally and remain viewable in the agent&#39;s own window "
+                    "regardless of connectivity. Nothing in the detection path treats "
+                    "an unreachable server as a reason to stop what it was already "
+                    "doing."),
+            },
+            {
+                "heading": "What stops working",
+                "beginner": (
+                    "Two things are true about updates and alerts, and one of them "
+                    "isn&#39;t really about the outage at all. First: right now, "
+                    "endpoint virus definitions are only ever fetched once, when "
+                    "Nemesis is first installed on a device &mdash; they don&#39;t get "
+                    "refreshed automatically after that, outage or no outage. "
+                    "That&#39;s a real gap we&#39;re tracking, not something caused by "
+                    "the server being down. Second, and specific to an outage: if "
+                    "something IS found while the server is unreachable, nobody gets "
+                    "told automatically &mdash; the finding is recorded, but the alert "
+                    "that would normally reach an administrator has to wait for the "
+                    "connection to come back."),
+                "intermediate": (
+                    "Endpoint ClamAV signature updates aren&#39;t an outage problem "
+                    "&mdash; they don&#39;t happen at all after the initial install. "
+                    "The installer fetches definitions once; nothing re-runs that "
+                    "afterward, connected or not. What IS specific to an outage: "
+                    "remote response actions (quarantine, isolate, firewall changes) "
+                    "can&#39;t be issued, since they arrive only through the same "
+                    "connection, and a finding made while disconnected doesn&#39;t "
+                    "trigger a proactive desktop alert &mdash; it&#39;s recorded and "
+                    "reaches the dashboard once the connection returns, but nothing "
+                    "pops up in the meantime."),
+                "pro": (
+                    "Endpoint ClamAV signature freshness is not gated on connectivity "
+                    "at all: the installer runs freshclam once at install time and "
+                    "nothing schedules it again afterward &mdash; verified against the "
+                    "installer path, not assumed. Signed task dispatch is unavailable "
+                    "during an outage by construction (no channel to carry it). "
+                    "Desktop notification of a local finding is currently gated on a "
+                    "server-pushed action, so an offline finding does not produce an "
+                    "autonomous local alert. Both the notification gap and the missing "
+                    "recurring signature-update path are known, tracked gaps &mdash; "
+                    "see the note at the end of this article."),
+            },
+            {
+                "heading": "How you&#39;ll be able to tell something&#39;s wrong",
+                "beginner": (
+                    "Open the Nemesis Agent window on your device (usually a small icon "
+                    "in your system tray). It will tell you plainly if it can&#39;t "
+                    "reach the server, and it will now also show you the real, "
+                    "current health of your protection &mdash; not just whether a "
+                    "setting is switched on, but whether it&#39;s actually working "
+                    "right now. If the outage goes on for a while, that message gets "
+                    "more urgent rather than staying the same generic warning "
+                    "indefinitely."),
+                "intermediate": (
+                    "The agent window shows connectivity status honestly and "
+                    "immediately &mdash; the moment a check-in fails, it says so, with "
+                    "the real reason. It also now shows the live health of each "
+                    "detection engine (scanning, intrusion detection, behavioural "
+                    "monitoring), not just whether the feature is configured on. A "
+                    "brief outage and a prolonged one are shown differently, so a "
+                    "multi-day disconnection reads as more urgent than a five-minute "
+                    "blip."),
+                "pro": (
+                    "The agent&#39;s local status surface reports `last_checkin_ok_at` "
+                    "/ `last_checkin_error` directly, with no default-to-healthy path. "
+                    "As of this article, it additionally surfaces the per-engine "
+                    "capability inventory (available / degraded / absent, with reason) "
+                    "that was previously computed every heartbeat but only ever sent to "
+                    "the server &mdash; it is now visible locally too. Prolonged "
+                    "disconnection escalates the reported state rather than remaining "
+                    "an unchanging generic warning."),
+            },
+            {
+                "heading": "What we&#39;re still working on",
+                "beginner": (
+                    "The one honest gap left: if the server is down and something is "
+                    "found on your device, you won&#39;t get an automatic pop-up "
+                    "telling you right that moment &mdash; you&#39;d need to check the "
+                    "agent window yourself. We think an automatic alert is worth "
+                    "building, and it&#39;s on our list, but we&#39;d rather tell you "
+                    "plainly that it isn&#39;t there yet than leave you assuming it is."),
+                "intermediate": (
+                    "Autonomous local notification on a finding made while disconnected "
+                    "is a real, acknowledged gap, not an oversight we&#39;re unaware "
+                    "of. It&#39;s deliberately not rushed, because getting it wrong "
+                    "(spamming alerts, or alerting on the wrong things) is worse than "
+                    "the current honest silence. It&#39;s tracked as its own design "
+                    "item."),
+                "pro": (
+                    "Deferred by design, not by neglect: an autonomous local-alert "
+                    "trigger needs a debounce/severity policy that doesn&#39;t exist "
+                    "yet, and shipping it without one risks notification fatigue on a "
+                    "genuinely compromised host. Tracked as a standalone roadmap item "
+                    "rather than bundled into the visibility fixes above."),
+            },
+        ],
+    },
     "phishing_awareness": {
         "title": "Recognising Phishing",
         "summary": "Why phishing works on careful people, and what actually helps.",
