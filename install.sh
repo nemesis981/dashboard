@@ -1191,6 +1191,22 @@ install_clamav() {
     systemctl stop clamav-daemon 2>/dev/null || true
     freshclam || warn "freshclam update returned an error — definitions will update on the next scheduled run."
 
+    # ⛔ ENABLE THE UPDATER, don't just run it once. The one-shot above is the
+    # INITIAL population; clamav-freshclam.service is what keeps it current, and
+    # without it the warning above ("the next scheduled run") describes a run that
+    # never happens.
+    #
+    # Measured on the reference box 2026-09-06, which is why this is here: the
+    # service was `disabled`, last stopped 2026-07-29, daily.cld was 39 DAYS OLD,
+    # and every scan still reported success. Stale signatures do not fail loudly --
+    # a scan against an old database looks exactly like a clean scan against a
+    # current one. Same shape as the scripts/systemd timers that reached no user:
+    # the mechanism meant to keep something current was simply never wired.
+    systemctl enable clamav-freshclam 2>/dev/null \
+        && ok "Enabled clamav-freshclam (automatic signature updates)" \
+        || warn "Could not enable clamav-freshclam — signatures will NOT auto-update"
+    systemctl start clamav-freshclam 2>/dev/null || true
+
     # Must run BEFORE the daemon starts, or clamd comes up with the old config
     # and keeps staging into tmpfs until something restarts it.
     configure_memory_bounds

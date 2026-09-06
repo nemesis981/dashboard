@@ -40,7 +40,7 @@ INSTALL_SH = os.path.join(ROOT, "install.sh")
 # for: a check silently skipped by a short-circuit changes the RAN count without changing S/T.
 #   5 fixtures + 3 per timer + 1 classification + 2 reach + (S+T) deploy + 3 enable + 2 gaps
 def _expected(S, T):
-    return 5 + 3 * T + 1 + 2 + (S + T) + 3 + 2
+    return 5 + 3 * T + 1 + 2 + (S + T) + 3 + 3
 
 _pass = _fail = 0
 def check(label, cond, detail=""):
@@ -174,6 +174,19 @@ check("install.sh invokes scripts/deploy_drift_check.sh",
       "deploy_drift_check.sh" in src, "0 occurrences outside comments")
 check("malware-scan is in the deployed service list",
       "malware-scan" in src, "core_module/malware_scan/malware-scan.service has no deployer")
+
+# ⛔ RUNNING freshclam ONCE IS NOT KEEPING SIGNATURES CURRENT. install.sh called
+# `freshclam` at install time and warned that definitions "will update on the next
+# scheduled run" -- while never enabling the service that performs that run. Measured
+# on the reference box 2026-09-06: clamav-freshclam `disabled`, last stopped
+# 2026-07-29, daily.cld 39 days old, and every scan still reporting success. A
+# signature engine silently 39 days behind is the same failure shape as the timers
+# that reached no user: the thing meant to keep it current was never wired.
+_fresh_enable = [l for l in enable_lines if "clamav-freshclam" in l]
+check("install.sh ENABLES clamav-freshclam (not just runs freshclam once)",
+      bool(_fresh_enable),
+      "freshclam invoked %d time(s) but the updater service is never enabled"
+      % src.count("freshclam"))
 
 
 print("\n%d passed, %d failed" % (_pass, _fail))
