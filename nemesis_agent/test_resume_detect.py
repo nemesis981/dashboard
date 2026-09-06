@@ -35,7 +35,7 @@ sys.path.insert(0, HERE)
 
 import agent                                                  # noqa: E402
 
-EXPECTED_CHECKS = 21
+EXPECTED_CHECKS = 24
 _pass = _fail = 0
 
 
@@ -175,8 +175,14 @@ class _FakeWake:
         return False
 
 
-def _run_sleep(suspend_after_call=None, suspend_seconds=0.0, seconds=300.0):
-    """Drive the REAL `_interruptible_sleep` against injected clocks."""
+def _run_sleep(suspend_after_call=None, suspend_seconds=0.0, seconds=300.0,
+               realistic_last_beat=False):
+    """Drive the REAL `_interruptible_sleep` against injected clocks.
+
+    `realistic_last_beat` models production: the poll loop beats, sets
+    `_last_beat_at`, then immediately enters the sleep — so the floor is NOT
+    pre-satisfied and has to be earned by the slices actually elapsing.
+    """
     clock = _FakeClock()
     wake = _FakeWake(clock, suspend_after_call, suspend_seconds)
     saved = (agent.time, agent._wake, agent._running, agent._last_beat_at)
@@ -185,15 +191,36 @@ def _run_sleep(suspend_after_call=None, suspend_seconds=0.0, seconds=300.0):
         agent.time = clock
         agent._wake = wake
         agent._running = True
-        # Far enough in the past that POLL_INTERVAL_FLOOR is always satisfied —
-        # this test is about detection, not about the floor (covered above).
-        agent._last_beat_at = -1e6
+        agent._last_beat_at = (clock.mono if realistic_last_beat else -1e6)
         agent._interruptible_sleep(seconds)
     finally:
         agent.time, agent._wake, agent._running, agent._last_beat_at = saved
     reasons = list(agent._early_beat_reasons)
     agent._early_beat_reasons.clear()
     return wake, clock, reasons
+
+
+def test_the_FLOOR_does_not_delay_the_resume_beat():
+    """⛔ PINS A LATENCY CLAIM THAT WILL BE WRITTEN INTO DOCS. "A resuming device
+    checks in within ~60s" is only true if POLL_INTERVAL_FLOOR is already satisfied
+    when detection fires — otherwise the beat waits out the floor as well.
+
+    ⚠ The reason this needs a test rather than arithmetic: on Linux, monotonic does
+    NOT advance during suspend, so `_last_beat_at` can still look recent after hours
+    of wall-clock. What rescues it is that the SLICE itself advances monotonic by
+    RESUME_CHECK_SLICE_S, and that is larger than the floor. If someone ever tunes
+    the slice below the floor, this claim silently becomes false."""
+    print("\n[the floor must already be satisfied when a resume is detected]")
+    check("the slice exceeds the floor, so a completed slice earns the floor",
+          agent.RESUME_CHECK_SLICE_S > agent.POLL_INTERVAL_FLOOR,
+          "slice=%s floor=%s -- a resume beat would be delayed by the floor"
+          % (agent.RESUME_CHECK_SLICE_S, agent.POLL_INTERVAL_FLOOR))
+    # The production shape: beat, then sleep, then suspend during the first slice.
+    wake, clock, reasons = _run_sleep(suspend_after_call=1, suspend_seconds=10800.0,
+                                      realistic_last_beat=True)
+    check("...and with a REALISTIC last-beat it still returns after 1 slice",
+          len(wake.waited) == 1, "waited %r" % (wake.waited,))
+    check("...having recorded the resume", reasons == ["resume"], "reasons=%r" % reasons)
 
 
 def test_INTEGRATION_the_loop_actually_uses_the_detection():
@@ -237,7 +264,8 @@ if __name__ == "__main__":
                test_detection_goes_through_the_RATE_LIMITER_not_around_it,
                test_the_slice_cap_is_what_makes_detection_possible,
                test_INTEGRATION_the_loop_actually_uses_the_detection,
-               test_INTEGRATION_CONTROL_no_jump_waits_the_whole_interval):
+               test_INTEGRATION_CONTROL_no_jump_waits_the_whole_interval,
+               test_the_FLOOR_does_not_delay_the_resume_beat):
         fn()
     print("\n" + "=" * 70)
     ran = _pass + _fail
