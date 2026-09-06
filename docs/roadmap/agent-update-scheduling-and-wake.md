@@ -40,9 +40,13 @@ time, so a monotonic check would still wait out the pre-suspend timer after waki
 exact bad case; wall-clock advances correctly on both Linux and Windows). Detection routes
 through the existing early-beat request path, so it inherits the standing rate limiter — a false
 positive (an NTP step) costs exactly one extra heartbeat, not a new failure mode. Independently
-re-run: `test_resume_detect.py`, 24/24 (was 21; see the latency note below). The commit message
-additionally reports 5/5 mutations killed — not independently re-run by either reviewing window,
-noted rather than presented as jointly confirmed.
+re-run: `test_resume_detect.py`, 24/24 (was 21; see the latency note below). The original "5/5
+mutations killed" claim was commit-message-sourced and unrun by either reviewing window — now
+made reproducible rather than re-argued: `nemesis_agent/mutate_resume_detect.py` (`fe0f8b4`) is
+a one-command gate (mutates a private temp copy, never the shared checkout; checks its own
+baseline first; distinguishes a moved anchor and a no-op mutation from a real kill) that ADDS a
+sixth mutant targeting the exact tunable relationship in the latency note below, which the
+original five did not cover. Independently run: **all 6 mutants caught, exit 0.**
 
 **The latency claim is a relationship between two tunables, not a fact about either alone, and
 it is now pinned by a test rather than left to arithmetic.** The detection slice
