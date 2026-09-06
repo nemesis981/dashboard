@@ -40,14 +40,27 @@ time, so a monotonic check would still wait out the pre-suspend timer after waki
 exact bad case; wall-clock advances correctly on both Linux and Windows). Detection routes
 through the existing early-beat request path, so it inherits the standing rate limiter — a false
 positive (an NTP step) costs exactly one extra heartbeat, not a new failure mode. Independently
-verified: `test_resume_detect.py`, 21/21, mutation-proven (5/5), including an integration case
-that drives the real sleep function against injected clocks rather than a unit stand-in.
+re-run: `test_resume_detect.py`, 24/24 (was 21; see the latency note below). The commit message
+additionally reports 5/5 mutations killed — not independently re-run by either reviewing window,
+noted rather than presented as jointly confirmed.
 
-Effect on this document's own reasoning: a resuming device now announces itself within roughly
-the resume-check slice rather than waiting out up to a full poll interval, so "update-on-checkin
-priority" (§3 item 2) gets a materially earlier trigger — the resume beat itself is the trigger.
-This makes the no-wake case in this section stronger, not weaker: the latency gap a wake
-mechanism would have existed to close was closed here with no wake mechanism at all. See §6 for
+**The latency claim is a relationship between two tunables, not a fact about either alone, and
+it is now pinned by a test rather than left to arithmetic.** The detection slice
+(`RESUME_CHECK_SLICE_S`, 60s) has to exceed the early-beat rate limiter
+(`POLL_INTERVAL_FLOOR`, 15s) for the resume beat to fire promptly — on Linux, monotonic time
+does not advance during suspend, so `_last_beat_at` can still look recent after hours of
+wall-clock time, and the floor could in principle hold the beat back. `2bf05e5` (Window 3, same
+day) added the test that exercises this exact interaction with a realistic last-beat time rather
+than the sentinel the other integration cases use to factor the floor out deliberately — tune
+the slice below the floor and the timing claim below would silently go false with every other
+test still green. Independently re-run: 24/24.
+
+Effect on this document's own reasoning, worded to avoid hard-coding either tunable: a resuming
+device now announces itself within about a minute of waking, rather than waiting out up to the
+full 300-second poll interval, so "update-on-checkin priority" (§3 item 2) gets a materially
+earlier trigger — the resume beat itself is the trigger. This makes the no-wake case in this
+section stronger, not weaker: the latency gap a wake mechanism would have existed to close was
+closed here with no wake mechanism at all. See §6 for
 the one caveat (capability, not yet coverage).
 
 ## 3. Confirmed build order
