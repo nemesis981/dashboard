@@ -5,8 +5,9 @@
   Wake-on-LAN.** If proactive wake is ever wanted later, use agent-armed RTC wake timers, not
   magic packets. Investigation and reasoning: Window 1, 2026-09-06. Written up: Window 2.
   Full measurement provenance (including a corrected earlier analysis, retracted rather than
-  annotated): `~/work/nemesis-internal/handoff/2026-09-06-window1-handoff.md` (private mirror,
-  commit `082badb`).
+  annotated) lives in Window 1's private-repo handoff for 2026-09-06 — not cited by commit hash
+  here, since that repo has no GitHub remote by design and a hash into it would never resolve
+  for a public reader.
 
 ## 1. The reframe this decision rests on
 
@@ -33,7 +34,7 @@ device earlier buys speed, not correctness; the correctness problem is starvatio
 is what closes it.
 
 **Amendment, 2026-09-06 later the same day — a shipped capability already narrows the residual
-gap above, with no wake mechanism at all.** `nemesis_agent/agent.py` (`8722521`, Window 3) now
+gap above, with no wake mechanism at all.** `nemesis_agent/agent.py` (`18a2ac7`, Window 3) now
 detects a suspend/resume as a wall-clock jump measured inside the poll loop's own sleep
 (deliberately wall-clock rather than monotonic: Linux's `CLOCK_MONOTONIC` excludes suspended
 time, so a monotonic check would still wait out the pre-suspend timer after waking, which is the
@@ -42,7 +43,7 @@ through the existing early-beat request path, so it inherits the standing rate l
 positive (an NTP step) costs exactly one extra heartbeat, not a new failure mode. Independently
 re-run: `test_resume_detect.py`, 24/24 (was 21; see the latency note below). The original "5/5
 mutations killed" claim was commit-message-sourced and unrun by either reviewing window — now
-made reproducible rather than re-argued: `nemesis_agent/mutate_resume_detect.py` (`fe0f8b4`) is
+made reproducible rather than re-argued: `nemesis_agent/mutate_resume_detect.py` (`15362bb`) is
 a one-command gate (mutates a private temp copy, never the shared checkout; checks its own
 baseline first; distinguishes a moved anchor and a no-op mutation from a real kill) that ADDS a
 sixth mutant targeting the exact tunable relationship in the latency note below, which the
@@ -53,7 +54,7 @@ it is now pinned by a test rather than left to arithmetic.** The detection slice
 (`RESUME_CHECK_SLICE_S`, 60s) has to exceed the early-beat rate limiter
 (`POLL_INTERVAL_FLOOR`, 15s) for the resume beat to fire promptly — on Linux, monotonic time
 does not advance during suspend, so `_last_beat_at` can still look recent after hours of
-wall-clock time, and the floor could in principle hold the beat back. `2bf05e5` (Window 3, same
+wall-clock time, and the floor could in principle hold the beat back. `c6c3ae7` (Window 3, same
 day) added the test that exercises this exact interaction with a realistic last-beat time rather
 than the sentinel the other integration cases use to factor the floor out deliberately — tune
 the slice below the floor and the timing claim below would silently go false with every other
@@ -154,7 +155,7 @@ this task" / `powercfg`, Linux `rtcwake` or systemd `WakeSystem=true`, macOS `pm
   reinstalled — the identical shape as the `agent_device_macs` gap two bullets up: correct code
   that has not yet reached the fleet it would help.
 - **Any fairness/queue design assumes check-in work actually gets enqueued — that assumption
-  was false until this same afternoon.** `core_module/hw_monitor/hw_monitor.py` (`dcbf625`,
+  was false until this same afternoon.** `core_module/hw_monitor/hw_monitor.py` (`f99b540`,
   Window 3) fixed a self-deadlock where `enqueue_task` opened a second SQLite connection while
   the heartbeat's own transaction held the writer lock, so every `attest_manifest`/
   `attest_challenge` enqueue attempt failed silently behind a "never raises into the beat"
