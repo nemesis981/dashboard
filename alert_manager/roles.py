@@ -635,6 +635,7 @@ ROUTE_MINIMUMS = {
     "learn_admin_page":               (_A, _A),
     "api_learn_admin":                (_A, _A),
     "api_learn_topic_state":          (_A, _A),
+    "api_learn_topic_default":        (_A, _A),
     "api_learn_user_grant":           (_A, _A),
     "api_learn_defaults_preview":     (_A, _A),
     "api_learn_defaults_apply":       (_A, _A),

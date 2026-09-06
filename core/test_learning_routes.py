@@ -16,6 +16,7 @@
 Run: python3 core/test_learning_routes.py
 """
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -31,7 +32,15 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 88   # 85 -> 88: capability-label title-casing fix (2026-09-06)
+# ⛔ DERIVED, NOT A LITERAL -- assigned below, after `learning_topics` is imported.
+# One check (the `for slug in LT.all_slugs()` loop) runs PER TOPIC, so every
+# legitimate topic addition changes the total. A hardcoded number fires on correct
+# changes, and a check that cries wolf gets deleted. The formula still catches what
+# the convention exists for: a check skipped by a short-circuit alters the RAN count
+# without altering the topic count.
+#   104 fixed checks + one per topic  (was 82 before the state/default
+#   endpoint split; was the literal 88 at 6 topics before that)
+EXPECTED_CHECKS = None   # set immediately after the learning_topics import
 _pass = _fail = 0
 
 
@@ -59,13 +68,16 @@ except BaseException:          # dashboard sys.exit()s on config failure
 
 import learning as L                                              # noqa: E402
 import learning_topics as LT                                      # noqa: E402
+
+EXPECTED_CHECKS = 104 + len(LT.all_slugs())
 import roles as R                                                 # noqa: E402
 
 app = dashboard.app
 app.config["TESTING"] = True
 
 LEARN_ENDPOINTS = ("learn_page", "learn_topic", "api_learn_admin",
-                   "api_learn_topic_state", "api_learn_user_grant",
+                   "api_learn_topic_state", "api_learn_topic_default",
+                   "api_learn_user_grant",
                    "api_learn_defaults_preview", "api_learn_defaults_apply")
 
 
@@ -95,7 +107,8 @@ def test_no_learn_endpoint_is_auth_exempt():
 def test_admin_routes_are_admin_for_both_methods():
     """The GET exposes who has been granted what across every account, which is as
     sensitive as the POST that changes it."""
-    for ep in ("api_learn_admin", "api_learn_topic_state", "api_learn_user_grant",
+    for ep in ("api_learn_admin", "api_learn_topic_state",
+               "api_learn_topic_default", "api_learn_user_grant",
                "api_learn_defaults_preview", "api_learn_defaults_apply"):
         check("%s is admin/admin" % ep,
               R.ROUTE_MINIMUMS[ep] == (R.ROLE_ADMIN, R.ROLE_ADMIN),
@@ -296,6 +309,152 @@ def test_a_bad_state_is_refused_by_the_route_with_400():
               "got %s" % r2.status_code)
 
 
+# ── C. The state/default split ────────────────────────────────────────
+
+def _admin_client():
+    c = app.test_client()
+    with c.session_transaction() as s:
+        s["_user_id"] = "502"                   # admin
+        s["_fresh"] = True
+    return c
+
+
+def _strip_js_comments(text):
+    """Drop FULL-LINE `//` comments. Deliberately line-based, not a lexer.
+
+    Needed because the comment explaining this very fix contains the string the
+    assertion below searches for -- a raw-text search would match the prose
+    describing the defect and report the defect present.
+
+    ⚠ A character-level lexer was tried first and removed ZERO characters from this
+    template, twice. `esc()` contains the regex literal `/"/g`, whose double quote
+    opens a string state that never closes, so every later comment reads as string
+    content. Line-based stripping cannot be fooled by a regex or an unbalanced
+    quote, which is the whole reason for the downgrade.
+
+    Consequence, accepted: a trailing comment on a CODE line is not removed, so one
+    written to contain `cur.state` would fail the assertion below. That is fail-loud
+    and fine -- the failure names the real cause rather than passing silently.
+    """
+    return "\n".join(ln for ln in text.splitlines()
+                      if not ln.lstrip().startswith("//"))
+
+
+def test_the_default_toggle_cannot_clobber_the_ceiling():
+    """THE REGRESSION THIS SPLIT EXISTS FOR, asserted in both directions.
+
+    The old single endpoint took `state` and `in_default` together, so the
+    default-set checkbox had to send a state it did not want to change -- and the
+    only state it had was the page's CACHE. A stale cache therefore wrote an old
+    ceiling back over the live one. Nothing about that looked wrong: the value
+    written was always a legal state.
+    """
+    slug = LT.all_slugs()[0]
+    L.set_topic_state(slug, L.STATE_ADMIN_ONLY)
+    L.set_in_default(slug, False)
+    c = _admin_client()
+
+    r = c.post("/api/learn/topic/%s/default" % slug, json={"in_default": True})
+    check("the default toggle is accepted", r.status_code == 200,
+          "got %s" % r.status_code)
+    check("it set default membership", slug in L.default_topics())
+    check("THE CEILING IS UNTOUCHED BY A DEFAULT TOGGLE",
+          L.topic_state(slug) == L.STATE_ADMIN_ONLY,
+          "got %r" % L.topic_state(slug))
+
+    # The mirror image: changing the ceiling must not disturb the default set.
+    r2 = c.post("/api/learn/topic/%s/state" % slug, json={"state": "all_users"})
+    check("the state route still sets state", r2.status_code == 200,
+          "got %s" % r2.status_code)
+    check("...and it actually applied", L.topic_state(slug) == L.STATE_ALL_USERS)
+    check("THE DEFAULT MEMBERSHIP IS UNTOUCHED BY A STATE CHANGE",
+          slug in L.default_topics())
+
+
+def test_the_state_route_REFUSES_in_default_rather_than_ignoring_it():
+    """Ignoring it would leave a stale client's checkbox appearing to work.
+
+    A 400 is visible and tells the admin to reload; a silent ignore is the same
+    class of defect as the bug being fixed -- a legal-looking outcome that is not
+    what the caller asked for.
+    """
+    slug = LT.all_slugs()[0]
+    L.set_topic_state(slug, L.STATE_ADMIN_ONLY)
+    c = _admin_client()
+    r = c.post("/api/learn/topic/%s/state" % slug,
+               json={"state": "all_users", "in_default": True})
+    check("a state POST carrying in_default is refused", r.status_code == 400,
+          "got %s" % r.status_code)
+    check("AND THE STATE WAS NOT HALF-APPLIED",
+          L.topic_state(slug) == L.STATE_ADMIN_ONLY,
+          "got %r" % L.topic_state(slug))
+
+
+def test_the_default_route_requires_the_key_rather_than_defaulting_to_False():
+    """An absent key is not False. Defaulting would silently REMOVE the topic."""
+    slug = LT.all_slugs()[0]
+    L.set_in_default(slug, True)
+    c = _admin_client()
+
+    r = c.post("/api/learn/topic/%s/default" % slug, json={})
+    check("an absent in_default is refused", r.status_code == 400,
+          "got %s" % r.status_code)
+    check("AND THE TOPIC WAS NOT SILENTLY REMOVED", slug in L.default_topics())
+
+    # Liveness control: the assertion above is only meaningful if this route CAN
+    # remove a topic. Without this, a route that never removed anything would pass.
+    r2 = c.post("/api/learn/topic/%s/default" % slug, json={"in_default": False})
+    check("an EXPLICIT false does remove it",
+          r2.status_code == 200 and slug not in L.default_topics(),
+          "status=%s defaults=%r" % (r2.status_code, L.default_topics()))
+
+
+def test_the_admin_PAGE_posts_the_default_toggle_to_its_own_endpoint():
+    """THE WIRING, not the route -- the half a route test cannot reach.
+
+    Every assertion above passes with the template still posting the old combined
+    body to /state, because the routes would be correct and unused. This is the
+    check that dies when the client is repointed.
+
+    ⚠ THE STRIPPER IS RUN OVER THE SCRIPT REGION ONLY, AND IS MADE TO PROVE IT
+    WORKED ON *THIS FILE*. Run over the whole template it removed ZERO characters:
+    a single unbalanced apostrophe in the HTML prose above <script> opens a quote
+    state that never closes, so every later comment reads as string content. Both
+    synthetic self-tests passed throughout -- a stripper can be correct on invented
+    input and a complete no-op on the real thing, and a no-op here would make the
+    "no cached state" assertion below pass for entirely the wrong reason.
+    """
+    path = os.path.join(_REPO, "templates", "learn_admin.html")
+    with open(path) as fh:
+        raw = fh.read()
+
+    check("the comment stripper removes a full-line comment",
+          _strip_js_comments("a = 1;\n  // cur.state\nb = 2;") == "a = 1;\nb = 2;",
+          "got %r" % _strip_js_comments("a = 1;\n  // cur.state\nb = 2;"))
+    check("...and leaves a code line carrying // in a string alone",
+          _strip_js_comments("var u = '//x';") == "var u = '//x';")
+
+    lo, hi = raw.index("<script>"), raw.rindex("</script>")
+    region = raw[lo:hi]
+    code = _strip_js_comments(region)
+
+    # Premise, proven on the REAL input rather than assumed from the two above.
+    check("the stripper removed something from the real script region",
+          len(code) < len(region),
+          "removed %d chars" % (len(region) - len(code)))
+    check("...specifically, the toggle's own explanatory comment is gone",
+          "Its OWN endpoint" in region and "Its OWN endpoint" not in code)
+
+    check("the checkbox posts to the default endpoint",
+          "/default'" in code, "no /default post found in stripped script")
+    check("NO CACHED STATE IS READ FOR THE TOGGLE",
+          "cur.state" not in code, "template still reads a cached state")
+    check("no payload sends state and in_default together",
+          re.search(r"\{[^{}]*\bstate\s*:[^{}]*in_default", code) is None)
+
+
+
+
 def test_the_warning_honours_is_active_not_just_role():
     """The ONLY configuration where a correct is_active filter and a missing one differ.
 
@@ -486,6 +645,10 @@ if __name__ == "__main__":
         test_the_all_admin_case_is_stated_rather_than_silent,
         test_preview_endpoint_writes_nothing_and_apply_is_additive,
         test_a_bad_state_is_refused_by_the_route_with_400,
+        test_the_default_toggle_cannot_clobber_the_ceiling,
+        test_the_state_route_REFUSES_in_default_rather_than_ignoring_it,
+        test_the_default_route_requires_the_key_rather_than_defaulting_to_False,
+        test_the_admin_PAGE_posts_the_default_toggle_to_its_own_endpoint,
         test_the_warning_honours_is_active_not_just_role,
         test_the_warning_is_absent_when_an_active_non_admin_exists,
         test_the_training_route_survives_removal_from_the_nav,

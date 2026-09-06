@@ -2930,12 +2930,24 @@ def api_learn_admin():
 @app.route("/api/learn/topic/<slug>/state", methods=["POST"])
 @login_required
 def api_learn_topic_state(slug):
-    """Set a topic's three-state ceiling, and optionally its default membership."""
+    """Set a topic's three-state ceiling. STATE ONLY -- see the sibling below.
+
+    It used to accept `in_default` in the same body, which forced the default-set
+    checkbox to send a state it did not want to change. The client had no state to
+    send but its own CACHE, so toggling the checkbox wrote a possibly-stale ceiling
+    back over the live one -- a lost update, and silent, because the value written
+    was a legal one. An `in_default` here is now REFUSED rather than ignored: a stale
+    client that still sends one gets a visible 400, where ignoring it would leave the
+    checkbox appearing to work while changing nothing.
+    """
     from core import learning, learning_topics
 
     if not learning_topics.exists(slug):
         return jsonify({"ok": False, "error": "no such topic"}), 404
     data = request.get_json(silent=True) or request.form or {}
+    if "in_default" in data:
+        return jsonify({"ok": False, "error":
+                        "in_default is set via /api/learn/topic/<slug>/default"}), 400
     state = data.get("state")
     try:
         learning.set_topic_state(slug, state, actor=_actor())
@@ -2943,12 +2955,37 @@ def api_learn_topic_state(slug):
         # Refused at the boundary rather than stored and normalised on read.
         return jsonify({"ok": False, "error": str(e)}), 400
 
-    if "in_default" in data:
-        raw = data.get("in_default")
-        learning.set_in_default(slug, raw in (True, 1, "1", "true", "on"),
-                                actor=_actor())
     _audit(action="learn_topic_state", rule_id=slug)
     return jsonify({"ok": True, "slug": slug, "state": learning.topic_state(slug)})
+
+
+@app.route("/api/learn/topic/<slug>/default", methods=["POST"])
+@login_required
+def api_learn_topic_default(slug):
+    """Set a topic's membership of the new-trainee default set. DEFAULT ONLY.
+
+    A separate endpoint rather than an optional key on the state route above, for the
+    same reason `preview` and `apply` are two endpoints rather than one with a
+    `dry_run` flag: neither call can silently perform the other's job by omission.
+    The ceiling is untouched here -- a caller changing the default set has no opinion
+    about visibility and must not be made to state one.
+    """
+    from core import learning, learning_topics
+
+    if not learning_topics.exists(slug):
+        return jsonify({"ok": False, "error": "no such topic"}), 404
+    data = request.get_json(silent=True) or request.form or {}
+    if "in_default" not in data:
+        # Absent is not False. A body that forgot the key would otherwise silently
+        # REMOVE the topic from the default set.
+        return jsonify({"ok": False, "error": "in_default is required"}), 400
+    raw = data.get("in_default")
+    learning.set_in_default(slug, raw in (True, 1, "1", "true", "on"),
+                            actor=_actor())
+    _audit(action="learn_topic_default", rule_id=slug)
+    return jsonify({"ok": True, "slug": slug,
+                    "in_default": slug in set(learning.default_topics()),
+                    "state": learning.topic_state(slug)})
 
 
 @app.route("/api/learn/user/<int:uid>/grant", methods=["POST"])

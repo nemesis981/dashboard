@@ -187,10 +187,15 @@
       function (el) {
         el.addEventListener('change', function () {
           var slug = el.dataset.slug;
-          var cur = DATA.topics.filter(function (t) { return t.slug === slug; })[0];
-          post('/api/learn/topic/' + encodeURIComponent(slug) + '/state',
-               {state: cur.state, in_default: el.checked})
-            .then(function () { invalidatePreview(); load(); });
+          // Its OWN endpoint, and no cached state read. Sending {state: cur.state}
+          // here wrote a stale ceiling back over the live one whenever DATA was
+          // behind -- silent, because a stale state is still a legal state.
+          post('/api/learn/topic/' + encodeURIComponent(slug) + '/default',
+               {in_default: el.checked})
+            .then(function (r) {
+              if (r && !r.ok) { alertish(r.error); }
+              invalidatePreview(); load();
+            });
         });
       });
   }
