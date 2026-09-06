@@ -3048,14 +3048,18 @@ def api_learn_custom_save():
     from core import learning_custom as lc
     actor, role = _custom_actor()
     d = request.get_json(silent=True) or request.form or {}
+    target_slug = (d.get("slug") or "").strip()
     try:
-        slug = lc.save_draft(slug=(d.get("slug") or "").strip(),
+        slug = lc.save_draft(slug=target_slug,
                              title=d.get("title") or "",
                              summary=d.get("summary") or "",
                              body=d.get("body") or "",
                              actor=actor, role=role)
     except lc.PermissionDenied as e:
-        _audit(action="learn_custom_save_denied")
+        # FINDING 3 (route-security-audit-learning-custom-2026-09-05.md): the delete
+        # path's denial record names its target; this one didn't. "Someone was denied
+        # on THIS document" is the signal a reviewer wants -- "someone was denied" is not.
+        _audit(action="learn_custom_save_denied", rule_id=target_slug)
         return jsonify({"ok": False, "error": str(e)}), 403
     except lc.CustomError as e:
         return jsonify({"ok": False, "error": str(e)}), 400

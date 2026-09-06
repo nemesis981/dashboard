@@ -36,7 +36,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 125
+EXPECTED_CHECKS = 126
 _pass = _fail = 0
 
 
@@ -547,6 +547,18 @@ def test_a_REFUSED_save_notifies_nobody():
         check("overwriting someone else's submission is refused",
               denied.status_code == 403, "got %s" % denied.status_code)
         check("...and notifies nobody", len(spy.calls) == 0)
+
+        # FINDING 3 (route-security-audit-learning-custom-2026-09-05.md): the delete
+        # path's denial record names its target; save's didn't. "Someone was denied on
+        # THIS document" is what a reviewer wants, not just "someone was denied".
+        conn = sqlite3.connect(os.environ["NEMESIS_DB_PATH"])
+        row = conn.execute(
+            "SELECT rule_id FROM audit_log WHERE action='learn_custom_save_denied' "
+            "ORDER BY ts DESC LIMIT 1").fetchone()
+        conn.close()
+        check("the denial record names the targeted slug",
+              row is not None and row[0] == "custom-notify-owned",
+              "got %r" % (row,))
 
 
 def test_reverting_a_PUBLISHED_topic_to_draft_does_not_renotify():
