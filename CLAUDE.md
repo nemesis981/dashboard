@@ -1507,6 +1507,70 @@ function's whole reason to exist is that it's wired into something real (a confi
 live producer's return shape, a production file path), a mutation that targets only the
 in-file logic and never the wiring is not yet proof the wiring works.
 
+### A ratio between two constants needs its own mutation when the constants sit across a review boundary (standing practice, added 2026-09-06)
+
+**When two constants must stay in a particular relationship to each other, and no single file
+or reviewer sees both, mutate the RATIO — not just each constant in isolation.** Each constant
+can be independently reasonable, each can pass review on its own, and the invariant that
+actually matters — the relationship between them — has no test and no owner.
+
+**Why this is a distinct case from "mutate the wiring" above, not a restatement of it.** That
+rule is about a function tested against an invented stand-in instead of its real producer. This
+one is about two values that are each individually real and individually correct, where the
+defect lives only in arithmetic between them. A reviewer checking either constant alone —
+because that is the only one in the file or subsystem they own — has no way to notice; the
+value in front of them is fine.
+
+**The criterion that makes this rule useful rather than unbounded (Window 3's sharpening, and
+the reason it belongs in the write-up): the danger is specific to constants separated by a
+REVIEW BOUNDARY — a file, a repo half, a subsystem — where no single reviewer crosses it.**
+"Two related constants exist somewhere in the codebase" is not by itself a finding; nearly
+every pair of tuned numbers is "related" if you squint. The boundary condition is what turns an
+unbounded search into a predictive one: look specifically at pairs where one lives in
+server-side review territory and the other in agent/endpoint territory, or in config versus
+call-site structure, or in one subsystem versus another — because that is where a ratio can
+drift for months with both sides looking correct.
+
+**A rule that only ever finds things isn't demonstrating it's well-calibrated — this one
+correctly excludes, and that exclusion is as important as the confirmed instances.** Investigated
+2026-09-06 as a candidate class of four; two survived scrutiny, one was withdrawn outright, one
+was downgraded, and both negative outcomes were themselves due to checking rather than assuming:
+- **Confirmed — `busy_timeout` vs. the heartbeat transaction duration.** A live production bug,
+  not a latent one: opening a second database connection while a heartbeat's own transaction
+  held the write lock self-deadlocked on every beat for three days, invisible because the
+  failure was caught and logged to a sink nobody was reading. Fixed by passing the held
+  connection through rather than opening a second one. The two sides of this ratio are
+  connection-pool configuration and call-site structure — different concerns, no shared
+  reviewer.
+- **Confirmed — a challenge-nonce lifetime vs. an agent poll interval, in the attestation path.**
+  Latent, not live: verified against real code, with the exploitable path already closed by an
+  existing control on the other axis, so this is a described-but-unresolved edge case rather
+  than a fix owed. Full detail kept in the private mirror per Rule 10, since publishing the
+  specific mechanism here would be exactly the disclosure that rule exists to gate — the fact
+  worth keeping public is the *shape* of the finding, not its exploitable specifics. The two
+  sides of this ratio are server-side and agent-side code, in different repositories' review
+  paths, which is precisely the boundary condition above.
+- **Withdrawn — a scan-size threshold that looked like a candidate pair and was not one.**
+  Checked against live code before including it: it is a single constant compared against a
+  runtime value at three call sites, not two constants whose ratio carries a property. Pattern-
+  matching on "this looks like a threshold" without checking is the same failure this whole
+  practice exists to prevent, applied to the practice's own candidate list — caught before it
+  shipped as a fourth instance that wasn't one.
+- **Downgraded — a systemd timer's randomized-delay setting vs. its own interval.** Both values
+  live in the same unit file, so one reviewer sees both at once — it fails the review-boundary
+  criterion by construction, regardless of whether the ratio itself is currently safe (it is,
+  measured, by a wide margin). This is the instance that proves the criterion does real work:
+  without it, every tuned pair of numbers in the codebase would qualify, and a rule that
+  includes everything predicts nothing.
+
+**The check: for a new constant that must stay in some relationship to another, name the other
+constant, name who reviews each side, and ask whether a single reviewer ever sees both.** If not,
+a mutation that changes ONE constant to another individually-legal value — leaving it, in
+isolation, looking like an ordinary tuning change — must be required to die. A test that pins
+both constants to their current values is not the same check and will not catch a drift that
+moves both sides of the ratio together, which is the property that makes it a ratio-class defect
+rather than an ordinary regression.
+
 ### A roadmap item picked up for build needs its dependency claims verified against code, not just its build status (standing practice, added 2026-09-02)
 
 **The existing roadmap-audit discipline — classify against code and git log, never against a
