@@ -216,6 +216,45 @@ def request_early_beat(reason: str) -> bool:
     return (time.monotonic() - _last_beat_at) >= POLL_INTERVAL_FLOOR
 
 
+# ── Resume detection ─────────────────────────────────────────────────────────
+# A suspend/resume leaves the agent RUNNING AND UNVERIFIED for up to a full poll
+# interval: the process survives the suspend, the scheduled task is `/SC ONLOGON`
+# so a resume re-triggers nothing, and on waking the agent simply carries on
+# waiting out a timer that started before the machine went to sleep. That window
+# — network back, user active, no check-in, no attestation — is the only part of
+# a suspend that is genuinely exposed. During the suspend itself nothing on the
+# device executes, so "unmonitored" there is not "unprotected".
+#
+# ⛔ WALL-CLOCK, NOT monotonic, AND THE REASON IS PLATFORM DIVERGENCE.
+# `_interruptible_sleep`'s deadline is monotonic, whose behaviour across a
+# suspend differs by OS: Linux CLOCK_MONOTONIC excludes suspended time (so the
+# agent waits out the whole remainder AFTER waking — the bad case), while
+# Windows GetTickCount64 includes it. Wall-clock advances across a suspend on
+# both, so comparing elapsed wall-clock against the wait we actually asked for
+# detects a resume identically on either platform, with no OS power-event hook,
+# no second scheduled task, and no installer change.
+#
+# Detection is a HEURISTIC and is treated as one. An NTP step forward or a
+# severely overloaded machine produces the same signature, and that is
+# acceptable because the cost of being wrong is one extra heartbeat — bounded,
+# because detection goes THROUGH `request_early_beat` and is therefore subject
+# to the same POLL_INTERVAL_FLOOR rate limit as every other early beat. It
+# deliberately does not shortcut the wait itself; adding a second path to "beat
+# now" would be a second thing to keep in sync with the floor.
+RESUME_JUMP_TOLERANCE_S = 60.0   # excess wall-clock before a wait counts as a resume
+RESUME_CHECK_SLICE_S = 60.0      # longest single wait, so a resume is noticed promptly
+
+
+def _resume_detected(intended, wall_before, wall_after):
+    """True when far more wall-clock passed than the wait asked for.
+
+    A backwards step (negative elapsed) is a clock correction, not a resume, and
+    returns False — falling out of the comparison naturally rather than by a
+    special case.
+    """
+    return (wall_after - wall_before) - intended > RESUME_JUMP_TOLERANCE_S
+
+
 def _take_early_reasons():
     """Drain the reason list. Empty means this beat was NOT event-triggered."""
     with _early_beat_lock:
@@ -2258,6 +2297,10 @@ def _interruptible_sleep(seconds):
     3. **Shutdown is immediate.** `_shutdown` sets `_wake`, and `_running` is
        re-checked on every pass. Previously this burned a 1-second wakeup
        forever just to notice a flag; the Event does the same job for free.
+    4. **A resume is noticed.** Each wait is capped at RESUME_CHECK_SLICE_S so
+       that a suspend spanning the interval surfaces within about a minute of
+       waking rather than whenever the original deadline happened to fall. See
+       the RESUME_* constants above for why this is measured in wall-clock.
     """
     deadline = time.monotonic() + max(0.0, float(seconds))
     while _running:
@@ -2271,8 +2314,20 @@ def _interruptible_sleep(seconds):
             wait_for = min(floor_until, deadline) - now
         else:
             wait_for = deadline - now
+        # Cap the slice so the wall-clock comparison below runs regularly. A
+        # single wait spanning the whole interval would report a resume only
+        # once that interval had already elapsed — which is the exposure this
+        # exists to shorten, not something to detect after the fact.
+        wait_for = max(0.0, min(wait_for, RESUME_CHECK_SLICE_S))
         _wake.clear()
-        _wake.wait(max(0.0, wait_for))
+        wall_before = time.time()
+        _wake.wait(wait_for)
+        if _resume_detected(wait_for, wall_before, time.time()):
+            # Route through the ordinary early-beat path: the floor still
+            # decides when the beat actually happens, and the reason travels
+            # with it. Best-effort by construction — if the beat then fails,
+            # the next scheduled one is unaffected.
+            request_early_beat("resume")
 
 
 # ── Command listener on localhost:5002 ───────────────────────────────────────
