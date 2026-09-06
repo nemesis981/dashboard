@@ -1471,6 +1471,42 @@ have a test that exercises it, not just one that could?**
 **Grep for this shape in every retro/review pass**, alongside the other three above. Four
 standing checks now — see the tally at the end of the SHAPE section above for the full set.
 
+### A mutation must target the WIRING, not only the logic (standing practice, added 2026-09-06)
+
+**When a function is wired into production config or a production call path, at least one
+mutation must target THE WIRING, and be required to die.** Repoint the real source, drop the
+real key, swap the real path — not only the helper it calls.
+
+**Why a mutation and not a checklist item.** The lesson itself is already documented — "a
+branch test proves the branch, not the predicate,"
+`modules/diagnostics/test_watcher_vpn_aware.py`, August 2026 — and it recurred TWICE on
+2026-09-06, in code written specifically to guard against it. A checklist is consulted at the
+moment confidence is highest, which is exactly when this trap strikes — both instances below
+shipped behind a fully green suite and clean mutation runs. A surviving mutation is an
+automatic alarm and costs nothing extra, since mutation testing is already standard practice
+here. Same reasoning as the standing "when both are available, take the mechanism that does
+not depend on vigilance" rule elsewhere in this file, applied to test design instead of git
+hygiene.
+
+**Both instances, so the shape is recognisable — it is only obvious in aggregate:**
+- `engine_problems()` (`2907aca`) — the test fixture was an invented LIST of dicts; the real
+  producer (`engine_inventory.inventory()`) returns a DICT keyed by name, documented three
+  lines into a file already open that same session. The function returned `[]` for every real
+  payload while passing **125 checks and four mutations**. Caught by Window 2 independently
+  re-driving the function against the real producer's live output rather than trusting the
+  test count.
+- The ClamAV freshness probe (`2646c82`) — tests proved "probe `daily.cld`, not `main.cvd`"
+  against a hand-built TEMP directory, so a mutation repointing the real `default_sources()`
+  at `main.cvd` survived every one of them.
+
+**The tell in both: the suite was green and the mutations passed.** Nothing about the output
+looked wrong, because the tests were correct about a world that does not exist.
+
+**Grep for this shape in every retro/review pass**, alongside the checks above. Where a
+function's whole reason to exist is that it's wired into something real (a config default, a
+live producer's return shape, a production file path), a mutation that targets only the
+in-file logic and never the wiring is not yet proof the wiring works.
+
 ### A roadmap item picked up for build needs its dependency claims verified against code, not just its build status (standing practice, added 2026-09-02)
 
 **The existing roadmap-audit discipline — classify against code and git log, never against a
