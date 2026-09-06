@@ -1537,10 +1537,21 @@ deploy_services() {
     #
     # Ordered first because the loop below starts services in list order and
     # every other peer depends on this one being up to reach the firewall.
+    #
+    # malware-scan ADDED 2026-09-06. Its unit shipped complete and hardened in
+    # 72a7ed0 -- CAP_DAC_READ_SEARCH, the deliberate PrivateTmp=no, the whole
+    # privilege boundary -- and was then in NO deploy list, so the appliance
+    # self-scan service ran on no install anywhere, including this box. It is a
+    # long-running daemon with its OWN internal schedule (malware_scan.py's gate
+    # poll, the scheduler-aware seam ADR 0004 asks for), so it needs NO timer:
+    # it belongs here with the other daemons, not in the scripts/systemd/ loop
+    # below. PUNCHLIST already carried this as a known gap ("install.sh does not
+    # create the new service") rather than it being an intentional on-demand
+    # design -- confirmed before wiring it, not assumed.
     local svc_names=("nemesis-fwd" \
                      "dashboard" "watchdog" "hw-monitor" "alert-watcher" \
                      "device-scanner" "malware-canary" "diagnostics-watcher" \
-                     "vpn-dns-guard")
+                     "vpn-dns-guard" "malware-scan")
     local deployed=0
 
     for svc in "${svc_names[@]}"; do
@@ -1578,6 +1589,38 @@ deploy_services() {
         ok "Deployed /etc/systemd/system/${svc}.service (from ${src#$DASHBOARD_DIR/})"
         deployed=$((deployed + 1))
     done
+
+    # ── scheduled / maintenance units from scripts/systemd/ ───────────────────
+    #
+    # Deployed by GLOB rather than a hardcoded list, for the same reason svc_dirs
+    # globs core_module/*/: adding a timer should not also require an install.sh
+    # edit, because the edit is what gets forgotten.
+    #
+    # ⛔ UNTIL 2026-09-06 THIS DIRECTORY HAD NO DEPLOYER AT ALL. The string
+    # ".timer" did not appear in this file once. nemesis-cert-renew,
+    # nemesis-oplog-coalesce, nemesis-fw-guard-boot and
+    # nemesis-top-processes-archive existed, were correct, were unit-tested, and
+    # reached NO install anywhere -- every one on this box was hand-installed.
+    # The retention timers are the load-bearing case: without them the data
+    # windows those jobs exist to hold are never enforced on a user's appliance,
+    # and nothing fails loudly, because an archival job that never runs looks
+    # exactly like one with nothing to do.
+    local sched_deployed=0
+    local u base
+    for u in "$DASHBOARD_DIR"/scripts/systemd/*.service "$DASHBOARD_DIR"/scripts/systemd/*.timer; do
+        # An unmatched glob expands to the literal pattern rather than nothing,
+        # so this guard is load-bearing, not defensive decoration.
+        [[ -f "$u" ]] || continue
+        base="$(basename "$u")"
+        if [[ -f "/etc/systemd/system/$base" ]]; then
+            install -d -m 0755 "$UNIT_BACKUP_DIR"
+            cp -a "/etc/systemd/system/$base" "$UNIT_BACKUP_DIR/"
+        fi
+        install -m 0644 "$u" "/etc/systemd/system/$base"
+        ok "Deployed /etc/systemd/system/$base (from scripts/systemd/)"
+        sched_deployed=$((sched_deployed + 1))
+    done
+    [[ $sched_deployed -gt 0 ]] && ok "Deployed $sched_deployed scheduled/maintenance unit(s)"
 
     if [[ -d "$UNIT_BACKUP_DIR" ]]; then
         ok "Previous unit files backed up to $UNIT_BACKUP_DIR"
@@ -1693,6 +1736,79 @@ PYEOF
             warn "Could not start $svc — check: sudo journalctl -u $svc -n 20"
         fi
     done
+
+    # ── enable the SCHEDULED units ────────────────────────────────────────────
+    #
+    # ⛔ THE TIMER IS ENABLED; THE SERVICE IT DRIVES IS NOT. Two distinct traps,
+    # and the second is the one that looks fine:
+    #
+    #  * nemesis-oplog-coalesce.service and nemesis-top-processes-archive.service
+    #    carry NO [Install] section. `systemctl enable` on a static unit FAILS.
+    #  * nemesis-cert-renew.service DOES carry [Install] -- and must STILL not be
+    #    enabled, because enabling it runs the renewal at every boot instead of on
+    #    its schedule.
+    #
+    # ⇒ "has [Install]" is NOT the test for "should be enabled". The test is
+    # whether a sibling <name>.timer exists. Live state on the reference box is
+    # the shape being reproduced here: cert-renew.service disabled,
+    # cert-renew.timer enabled. scripts/test_install_unit_deployment.py asserts
+    # that no timer-driven service is ever named on a `systemctl enable` line.
+    local t tb
+    for t in "$DASHBOARD_DIR"/scripts/systemd/*.timer; do
+        [[ -f "$t" ]] || continue
+        tb="$(basename "$t")"
+        if systemctl enable "$tb" 2>/dev/null; then
+            ok "Enabled $tb"
+        else
+            warn "Could not enable $tb"
+        fi
+        if systemctl start "$tb" 2>/dev/null; then
+            ok "Started $tb"
+        else
+            warn "Could not start $tb — check: sudo journalctl -u $tb -n 20"
+        fi
+    done
+
+    # Standalone services from that directory: [Install] present AND no sibling
+    # timer. Today that is nemesis-fw-guard-boot alone. Starting it here is safe
+    # BY THE UNIT'S OWN DESIGN, not by assumption: it reads NEMESIS_FW_GUARD and
+    # is an explicit no-op when that is unset, so installing it does not by itself
+    # change network behaviour on a box whose operator has not opted in.
+    local sfile sb
+    for sfile in "$DASHBOARD_DIR"/scripts/systemd/*.service; do
+        [[ -f "$sfile" ]] || continue
+        [[ -f "${sfile%.service}.timer" ]] && continue
+        grep -q '^\[Install\]' "$sfile" || continue
+        sb="$(basename "$sfile")"
+        if systemctl enable "$sb" 2>/dev/null; then
+            ok "Enabled $sb"
+        else
+            warn "Could not enable $sb"
+        fi
+        if systemctl start "$sb" 2>/dev/null; then
+            ok "Started $sb"
+        else
+            warn "Could not start $sb — check: sudo journalctl -u $sb -n 20"
+        fi
+    done
+
+    # ── netfilter drift check: REUSE its deployer, do not duplicate it ────────
+    #
+    # scripts/deploy_drift_check.sh generates both units from heredocs AND installs
+    # the checker plus its own verifier to /usr/local/lib/nemesis-drift with modes
+    # (0500 root:root) that a plain unit copy could not reproduce. Invoking it keeps
+    # ONE definition of that deployment; copying its units into scripts/systemd/
+    # would create a second that silently drifts from the script.
+    if [[ -x "$DASHBOARD_DIR/scripts/deploy_drift_check.sh" ]]; then
+        if "$DASHBOARD_DIR/scripts/deploy_drift_check.sh" >/dev/null 2>&1; then
+            ok "Deployed nemesis-drift-check (service + timer)"
+        else
+            warn "deploy_drift_check.sh failed — the netfilter drift check is NOT installed."
+            warn "  Run manually: sudo $DASHBOARD_DIR/scripts/deploy_drift_check.sh"
+        fi
+    else
+        warn "scripts/deploy_drift_check.sh missing or not executable — drift check not installed"
+    fi
 }
 
 ###############################################################################
