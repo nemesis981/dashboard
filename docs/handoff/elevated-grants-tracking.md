@@ -94,10 +94,10 @@ once that tool's current use is done — not urgent, but genuinely open, not for
 Operator's own product-operation groups (DB access, firewall chokepoint). Confirmed live
 2026-09-02. Not a revocation candidate — this is the intended operator access model, not
 an incidentally-granted elevated permission. `nemesis-fw` group lists `nemesis-alertw`,
-`nemesis-dash` as members alongside `paul`, consistent with the firewall chokepoint needing
+`nemesis-dash` as members alongside `<user>`, consistent with the firewall chokepoint needing
 write access from those services — carried forward, unchanged in kind since 08-31's note.
 **New this check (2026-09-02):** `nemesis-fw` now ALSO lists `nemesis-vpndns`
-(`getent group nemesis-fw` → `nemesis-fw:x:971:paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`)
+(`getent group nemesis-fw` → `nemesis-fw:x:971:<user>,nemesis-alertw,nemesis-dash,nemesis-vpndns`)
 — a service account, not operator-elevated access. Plausible cause: today's shipped
 MagicDNS/killswitch DNS-guard work (HANDOFF.md §4, `05d27c9`/`d0d4fb2`) needing firewall
 write access for the killswitch path — **not verified against the code, flagged as
@@ -143,9 +143,9 @@ e.g. `suricata`).
   does NOT hold — verified against live code before filing, corrected here rather than
   carried forward as stated.** The rationale offered was "watchdog's own crash-recovery
   capability currently can't cleanly restart dashboard the way it can the other 8 services."
-  That's wrong on the mechanism: a `paul` sudoers entry cannot affect what `watchdog` can do,
-  because `watchdog` never runs as `paul` and never goes through sudo at all.
-  - `systemctl show watchdog -p User --value` → `nemesis-watchdog`, not `root`, not `paul`.
+  That's wrong on the mechanism: a `<user>` sudoers entry cannot affect what `watchdog` can do,
+  because `watchdog` never runs as `<user>` and never goes through sudo at all.
+  - `systemctl show watchdog -p User --value` → `nemesis-watchdog`, not `root`, not `<user>`.
   - `core_module/watchdog/watchdog.py:109` `restart_service()` calls
     `subprocess.run(["systemctl", "restart", service])` directly — `grep -c sudo` on the
     file returns `0`. Whatever authorizes `nemesis-watchdog` to restart other services is
@@ -157,7 +157,7 @@ e.g. `suricata`).
     listed `dashboard.service` in its `allowed` array since 2026-07-27, predating this
     session entirely (confirmed by Window 2 diffing `d3a0c55~1` against `d3a0c55` — the
     array's `dashboard.service` entry is unchanged context, not part of the diff). Watchdog's
-    polkit authority over dashboard was never absent, so a `paul` sudoers grant could not
+    polkit authority over dashboard was never absent, so a `<user>` sudoers grant could not
     have restored a capability that was already there. The `restart` grant remains worth
     adding as **operator convenience only** (saves the `stop && start` dance) — that framing
     was already correct, only the crash-recovery justification is retracted.
@@ -269,7 +269,7 @@ rule), needs a session with root access to actually `ls` it.
   right, requires a password, not a passwordless broad grant; consistent with "confirmed
   clean" every prior session, noted explicitly here since it's easy to misread that line at a
   glance. `getent group pihole/nemesis-db/nemesis-fw`: `nemesis-fw` membership unchanged from
-  09-02 (`paul,nemesis-alertw,nemesis-dash,nemesis-vpndns` — the `nemesis-vpndns` addition
+  09-02 (`<user>,nemesis-alertw,nemesis-dash,nemesis-vpndns` — the `nemesis-vpndns` addition
   recorded yesterday is stable, not new today). `pihole` group membership still open,
   unchanged. Polkit rules still unreadable from this session's privilege level (6th
   consecutive session). Gateway-VM entry not re-checked (production-box scope, open question
@@ -292,9 +292,20 @@ rule), needs a session with root access to actually `ls` it.
   week. `dashboard` verb set unchanged — still `tee`/`chmod`/`reset-failed`/`start`/`stop`,
   still NO `restart` grant, so the 09-04 operator-approved add has **not yet been made** (open,
   same as recorded). `getent group pihole/nemesis-db/nemesis-fw/nemesis`: `nemesis-fw`
-  unchanged (`paul,nemesis-alertw,nemesis-dash,nemesis-vpndns`), `pihole` membership still
+  unchanged (`<user>,nemesis-alertw,nemesis-dash,nemesis-vpndns`), `pihole` membership still
   open, unchanged. `tcpdump` file capability re-verified via `getcap` this session (last
   checked 09-02): unchanged, `cap_net_admin,cap_net_raw=eip`, still active Tier 2 use. Polkit
   rules still unreadable at this session's privilege level (**8th consecutive session** —
   genuinely needs a root session, not another re-flag). Gateway-VM entry not re-checked
   (production-box scope, open question unresolved).
+- **2026-09-06** (Window 2, Morning Status). Production box re-checked live: `sudo -n -l`
+  shows 70 NOPASSWD entries — same count as every prior session this week, no line-by-line
+  diff run. `dashboard` verb set unchanged: still `tee`/`chmod`/`reset-failed`/`start`/`stop`,
+  still no `restart` — the 09-04 operator-approved add remains **not yet made** (2nd session
+  carried open). `getent group pihole/nemesis-db/nemesis-fw`: all three unchanged
+  (`pihole:<user>`, `nemesis-db:<user>`, `nemesis-fw:<user>,nemesis-alertw,nemesis-dash,
+  nemesis-vpndns`). `pihole` membership still open, unchanged, no new decision. `tcpdump`
+  file capability re-verified via `getcap`: unchanged, `cap_net_admin,cap_net_raw=eip`, still
+  active Tier 2 use. Polkit rules still unreadable at this session's privilege level (**9th
+  consecutive session** — the root-access gap named on 09-04 has still not been scheduled).
+  Gateway-VM entry not re-checked (production-box scope, open question unresolved).

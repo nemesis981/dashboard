@@ -6532,3 +6532,36 @@ guess. Fix is adding one `ROUTE_MINIMUMS['api_usb_events']` entry once that judg
 **Worth fixing soon regardless of urgency**: this suite reads red for everyone who runs it in
 the meantime, which is exactly the condition that lets a real regression hide next to a known
 false one.
+
+### [LOW] Recurring real-username leak in `docs/handoff/elevated-grants-tracking.md`, fixed forward twice, history not scrubbed (found 2026-09-06, Window 2)
+The operator's literal production-box username ("`<user>`"'s real value) appeared 8 times in
+this file on `origin/main` — despite the file carrying its own explicit Rule 8 note (line 108)
+declaring it uses a placeholder. Not a first occurrence: `c4fba99` ("Rule-8 fix — placeholder
+the real username in 946c7e5's entry") already fixed one instance on 2026-09-04. It recurred in
+the 09-02 and 09-05 entries anyway, and a third recurrence was caught and fixed pre-commit in
+this same session's own 09-06 draft before it ever reached the working tree as a commit.
+
+**Fixed forward this session** (see the commit sanitizing this file, 2026-09-06): all 8 live
+instances plus the near-miss ninth replaced with `<user>`, matching the file's established
+convention. **Not fixed: the leak still exists in already-published git history** — `946c7e5`
+and whichever commits carry the 09-02/09-05 entries still contain the literal username on
+GitHub. A fix-forward commit does not remove it from history; only a rewrite (BFG or
+`git filter-repo`) does, and that requires a force-push plus every window re-cloning
+afterward — disruptive enough that it should be scheduled, not done unilaterally mid-session.
+
+**Severity judgment (operator-confirmed):** LOW — a first name, not a credential, and the box
+is not identified by it alone. Recorded so it isn't silently accepted as permanent rather than
+because it's urgent.
+
+**Open items:**
+1. **History scrub** — BFG or `git filter-repo` pass to remove the leaked username from every
+   affected commit, coordinated with all windows re-cloning simultaneously afterward (a
+   rewritten history invalidates every existing local clone's ancestry).
+2. **Structural prevention, not just vigilance** — the file's own inline Rule 8 note sitting
+   directly beside the leak did not stop it recurring twice. Worth considering a pre-commit
+   check (or a leak-scan step folded into the Morning Status / closeout discipline already
+   named in CLAUDE.md Rule 8) that greps new `docs/handoff/` content for the specific known
+   username pattern before it can be committed at all, rather than relying on a human noticing
+   during an unrelated review pass — the same "make correct behavior the only reachable
+   outcome, not a thing to remember" reasoning this file's own §"Why this file exists" already
+   applies to a different recurring-loss problem.
