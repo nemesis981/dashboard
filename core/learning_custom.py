@@ -154,8 +154,14 @@ def validate_slug(slug):
     that broke that convention fails loudly here rather than silently shadowing.
     """
     if not isinstance(slug, str) or not _SLUG_RE.match(slug):
+        # Human-readable, not the compiled pattern -- a raw regex in a 400 body is not
+        # an acceptable answer to "why was this refused". The submission form now
+        # derives and prepends the prefix itself, so a caller hitting this is either a
+        # direct API user or the one edge case the form leaves editable; either way
+        # they get an instruction, not a character class.
         raise CustomError(
-            "slug must match %s and be url-safe; got %r" % (_SLUG_RE.pattern, slug))
+            "slug must start with %r followed by 1-56 lowercase letters, numbers or "
+            "hyphens (starting with a letter or number); got %r" % (SLUG_PREFIX, slug))
     try:
         import learning_topics as _lt
         if slug in _lt.all_slugs():

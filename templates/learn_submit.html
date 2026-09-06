@@ -55,8 +55,17 @@
     <p class="sub" id="cap-remaining">{{ used }} of {{ cap }} pending submissions used.</p>
   {% endif %}
 
-  <label for="f-slug">Address (lowercase, letters/numbers/hyphens)</label>
-  <input id="f-slug" placeholder="custom-onboarding-notes">
+  <label for="f-slug">Address</label>
+  <div style="display:flex;max-width:70ch">
+    <span style="background:#141414;border:1px solid #444;border-right:none;
+                 border-radius:4px 0 0 4px;padding:8px;color:#888;white-space:nowrap;
+                 font-size:0.95em">custom-</span>
+    <input id="f-slug" placeholder="onboarding-notes"
+           style="border-radius:0 4px 4px 0;flex:1;min-width:0">
+  </div>
+  <p class="sub" style="font-size:0.8em;margin:4px 0 0">
+    Filled in from the title automatically — edit it only if you want a different one.
+  </p>
   <label for="f-title">Title</label>
   <input id="f-title" placeholder="Onboarding notes">
   <label for="f-summary">One-line summary</label>
@@ -100,10 +109,26 @@
            .then(function (r) { return r.json().then(function (j) {
              return {status: r.status, body: j}; }); });
   }
+  // Matches the server's _SLUG_RE shape (minus the fixed prefix, which this template
+  // supplies): lowercase, alnum-or-hyphen, capped so the prefixed total stays valid.
+  // Kept lenient on input and strict on output -- a user can type anything, the field
+  // just never SHOWS them the internal convention or a raw regex.
+  function slugSuffix(s) {
+    var v = String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-+|-+$/g, '');
+    return v.slice(0, 56).replace(/-+$/g, '');
+  }
+  var titleEl = document.getElementById('f-title');
+  var slugEl = document.getElementById('f-slug');
+  var slugTouched = false;
+  slugEl.addEventListener('input', function () { slugTouched = true; });
+  titleEl.addEventListener('input', function () {
+    if (!slugTouched) { slugEl.value = slugSuffix(titleEl.value); }
+  });
   var out = document.getElementById('result');
   document.getElementById('btn-submit').addEventListener('click', function () {
     post('/api/learn/custom/save', {
-      slug: document.getElementById('f-slug').value.trim(),
+      slug: 'custom-' + slugSuffix(slugEl.value),
       title: document.getElementById('f-title').value,
       summary: document.getElementById('f-summary').value,
       body: document.getElementById('f-body').value

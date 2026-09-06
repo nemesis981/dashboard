@@ -36,7 +36,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"),
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-EXPECTED_CHECKS = 123
+EXPECTED_CHECKS = 125
 _pass = _fail = 0
 
 
@@ -593,6 +593,13 @@ def test_save_refuses_a_bad_slug_with_400_not_500():
               {"slug": "not-prefixed", "title": "t", "summary": "s", "body": "b"})
     check("a non-namespaced slug is refused at the boundary", r.status_code == 400,
           "got %s" % r.status_code)
+    # ⛔ The form now derives the slug itself, so a caller landing here is either a
+    # direct API user or the one edge case the form leaves editable. Either way the
+    # 400 body must read as an instruction, not a compiled regex.
+    err = (r.get_json() or {}).get("error") or ""
+    check("the error names the required prefix", "custom-" in err, "got %r" % err)
+    check("...and carries no regex metacharacters",
+          not any(c in err for c in "^$\\[]{}"), "got %r" % err)
 
 
 if __name__ == "__main__":

@@ -35,7 +35,7 @@ for _p in (_REPO, os.path.join(_REPO, "alert_manager"), os.path.join(_REPO, "cor
 import learning_custom as C                                        # noqa: E402
 import learning as L                                               # noqa: E402
 
-EXPECTED_CHECKS = 119
+EXPECTED_CHECKS = 122
 _pass = _fail = 0
 
 
@@ -114,6 +114,29 @@ def test_slug_charset_is_url_safe():
     db = fresh_db()
     for bad in ("custom-a/b", "custom-a b", "custom-<x>", "custom-" + "a" * 100, ""):
         check("refuses %r" % bad[:24], raises(C.CustomError, lambda b=bad: mk(db, slug=b)))
+
+
+def _customerror_text(fn):
+    """The message of the CustomError `fn` raises, or None. Never a variable number of
+    checks depending on outcome -- a failure here must still leave every assertion
+    below reachable and reportable, not skipped."""
+    try:
+        fn()
+        return None
+    except C.CustomError as e:
+        return str(e)
+    except Exception:
+        return None
+
+
+def test_the_bad_slug_message_is_a_HUMAN_instruction_not_a_compiled_regex():
+    """A raw `_SLUG_RE.pattern` in the message used to leak `^`, `\\-`, `{0,55}` etc.
+    straight into a 400 body the template prints verbatim -- fixed 2026-09-06."""
+    msg = _customerror_text(lambda: C.validate_slug("not-namespaced")) or ""
+    check("validate_slug raised CustomError", msg != "", "got %r" % msg)
+    check("names the required prefix", C.SLUG_PREFIX in msg, "got %r" % msg)
+    check("carries no regex metacharacters",
+          not any(ch in msg for ch in "^$\\[]{}"), "got %r" % msg)
 
 
 # ── B. The state machine ─────────────────────────────────────────────────────
@@ -729,6 +752,7 @@ if __name__ == "__main__":
     for fn in (
         test_custom_slugs_are_namespaced_and_cannot_impersonate_a_builtin,
         test_slug_charset_is_url_safe,
+        test_the_bad_slug_message_is_a_HUMAN_instruction_not_a_compiled_regex,
         test_new_content_starts_as_a_draft,
         test_publish_records_who_approved_and_when,
         test_EDITING_A_PUBLISHED_TOPIC_REVERTS_IT_TO_DRAFT,
