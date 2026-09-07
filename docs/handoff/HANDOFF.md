@@ -11,33 +11,27 @@
 
 ## 1. Push status — READ THIS FIRST
 
-**Public repo (`origin/main`): at `19d5d658328950c7af678ec3539a492ab13d25b2`.** A huge amount
+**Public repo (`origin/main`): at `c2119810a0034f738209439bcd2d59b36a95eae0`.** A huge amount
 landed today across many small, verified pushes — see §2 for the mechanism that made this
-necessary and §3 for what's still genuinely missing.
+necessary.
 
-**⛔ Known gap, found late tonight, not yet closed: three commits describing a real, already-
-built feature never reached the public repo.**
-- `0b18d8e` — local engine-health visibility in the agent GUI (the fix for "Intrusion
-  detection: ON ✓" showing even when the underlying engine is dead).
-- `2907aca` — the bug-fix for `0b18d8e`'s own `engine_problems()` (a dict/list type mismatch
-  that made it detect nothing against real data; independently caught and re-verified this
-  session).
-- `84b89af` — the entire "If Your Nemesis Server Goes Down" Learning Center article
-  (`server_outage_protection` topic).
-
-**Verified fresh, right before writing this:** none of the three are ancestors of
-`origin/main`. `origin/main`'s `nemesis_agent/agent_gui_core.py` has zero references to
-`engine_problems`/`engine_inventory`; `origin/main`'s `core/learning_topics.py` has 6 topics,
-not 7. This is not a hash-remapping situation like the ones fixed tonight (§2) — the content
-genuinely never landed under any hash. All three are still present and intact in this local
-checkout (`625a9c1`'s ancestry), so nothing is at risk of loss — they just need the same
-review-and-isolated-push treatment as everything else tonight.
-
-**This is the #1 priority for the next session that touches the public repo.** Do NOT assume
-it's covered by anything else in this file. Suggested approach: same as tonight's other
-pushes — review (Rule 8 scan, re-run `nemesis_agent/test_agent_gui_core.py` and
-`core/test_learning_routes.py`/`core/test_learning.py` live), then isolate onto the current
-`origin/main` tip in a fresh worktree (see §2) and push.
+**✅ Resolved before closeout — no longer an open gap.** Earlier tonight, three commits
+describing a real, already-built feature (local engine-health visibility in the agent GUI, its
+`engine_problems()` bug-fix, and the entire "If Your Nemesis Server Goes Down" Learning Center
+article) were found to have never reached `origin/main` despite being reviewed and fixed
+earlier in the session. Pushed as part of tonight's closeout (isolated-worktree method, same as
+everything else — see §2), with one merge conflict in each of `nemesis_agent/agent.py` (a
+context-anchor conflict against a not-yet-pushed sibling commit's function, correctly resolved
+by excluding that unrelated function) and `core/test_learning_routes.py` (the `EXPECTED_CHECKS`
+derivation's fixed-count comment, resolved by keeping the higher, more current value). **Verified
+live against `origin/main` itself, not just the push output:** `agent_gui_core.py` there now
+contains `engine_problems`/`engine_inventory` references; `learning_topics.py` there now has 7
+topics including `server_outage_protection`. Full test re-run in the isolated worktree before
+pushing: `core/test_learning_routes.py` 114/114, `nemesis_agent/test_agent_gui_core.py` 132/132,
+`test_resume_detect.py` 24/24, the mutation gate 6/6, and a live `engine_problems()`
+reproduction against real `engine_inventory.inventory()` output. Nothing outstanding from
+today's public-repo work as of this writing — re-verify with a fresh `git fetch` regardless,
+per §2's own caution about how fast this state can move.
 
 **Private repo (`~/work/nemesis-internal`): `local` and `usb` remotes both at `58c92ff`,
 confirmed same HEAD.** Fully current as of tonight's push — no known gap there.
@@ -128,15 +122,16 @@ diagnostics-watcher vpn-dns-guard` at next session start per standing Morning St
   additivity-canary hardening) plus the `api_build` RBAC fix, found and fixed same session.
 - **A full agent offline-resilience audit** — what protects a device with no server reachable.
   Private technical audit: `~/work/nemesis-internal/audits/agent-offline-resilience-audit-
-  2026-09-06.md`. Found and fixed (pending push, see §1): local engine-health visibility, a
-  checkin-staleness escalation policy. Split out and tracked separately (not built):
-  autonomous local notification on a finding (`docs/roadmap/agent-offline-notification.md`).
+  2026-09-06.md`. Found, fixed, and pushed (`c211981`'s ancestry, §1): local engine-health
+  visibility, a checkin-staleness escalation policy. Split out and tracked separately (not
+  built): autonomous local notification on a finding
+  (`docs/roadmap/agent-offline-notification.md`).
 - **The Learning Center `server_outage_protection` article** — public-facing, honest
   explanation of the above, three rounds of factual correction with Window 1/3 before landing
   (Suricata/behavioral default OFF, corrected; the ClamAV-never-updates-after-install finding,
   corrected and sharpened). Visibility resolved: `all_users` + entitlement for the current
-  user population, verified live against the DB and `learning.visible_topics()` — **pending
-  push, see §1.**
+  user population, verified live against the DB and `learning.visible_topics()`. Pushed and
+  confirmed live on `origin/main` (§1).
 - **Agent-update scheduling design decision captured**:
   `docs/roadmap/agent-update-scheduling-and-wake.md` — build state-awareness + fairness queue,
   do NOT build Wake-on-LAN, agent-armed RTC timers if wake is ever wanted later. Amended twice
@@ -161,18 +156,16 @@ diagnostics-watcher vpn-dns-guard` at next session start per standing Morning St
 
 ## 6. Precise next steps for a fresh session reading this cold
 
-1. **Close the §1 gap first** — review and push `0b18d8e`/`2907aca`/`84b89af` (or their content,
-   however it's isolated) to `origin/main`. This is real, already-built, already-reviewed-once
-   work that simply never got pushed; treat it as the top priority, not a "nice to have."
-2. **Do not attempt the divergence reconciliation (§2) without first confirming with every
+1. **Do not attempt the divergence reconciliation (§2) without first confirming with every
    active window that nothing is mid-edit.** It's real work, not urgent tonight, and risks real
-   loss if rushed.
-3. **Re-verify current push state before trusting anything in this file** — re-run
+   loss if rushed. This is the only structurally-owed task left from tonight.
+2. **Re-verify current push state before trusting anything in this file** — re-run
    `git fetch origin && git log --oneline origin/main..HEAD` and the private-repo equivalent;
-   this file describes state as of closeout, and other windows may have pushed or committed
-   since.
-4. **Re-check elevated grants and service status** per standing Morning Status practice — not
+   this file describes state as of closeout (`origin/main` at `c211981`), and other windows may
+   have pushed or committed since.
+3. **Re-check elevated grants and service status** per standing Morning Status practice — not
    done as part of this closeout write-up specifically, since this was an operator-requested
    mid-session handoff rather than the standing nightly one.
-5. Nothing else is currently blocked or waiting on a decision — the two open Rule 10/visibility
-   questions from earlier tonight are both resolved (§5).
+4. Nothing else is currently blocked or waiting on a decision — the Rule 10/visibility questions
+   from earlier tonight are resolved (§5), and the public-repo content gap that was open earlier
+   in the evening is closed (§1).
